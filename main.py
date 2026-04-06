@@ -1,5 +1,12 @@
 """
 산적 주식 시뮬레이터 — 엔트리포인트
+
+사용법:
+  python main.py              # TUI 터미널 실행
+  python main.py briefing     # 브리핑 생성 → Notion + 텔레그램
+  python main.py chatbot      # 텔레그램 챗봇 시작
+  python main.py price        # Notion 주가 업데이트
+  python main.py ask "질문"   # AI에게 질문
 """
 
 import os
@@ -15,12 +22,133 @@ if env_path.exists():
             key, _, value = line.partition("=")
             os.environ.setdefault(key.strip(), value.strip())
 
-from terminal.app import StockSimulatorApp
+
+def cmd_tui() -> None:
+    """Textual TUI 실행."""
+    from terminal.app import StockSimulatorApp
+
+    app = StockSimulatorApp()
+    app.run()
+
+
+def cmd_briefing() -> None:
+    """브리핑 생성 → Notion 저장 → 텔레그램 전송."""
+    from core.market import fetch_market
+    from core.analyzer import analyze
+    from core.notion import save_to_notion
+    from core.telegram import send_briefing_telegram
+
+    briefing_type = os.environ.get("BRIEFING_TYPE", "MANUAL")
+
+    print(f"\n{'='*56}")
+    print(f"  산적 주식 시뮬레이터 — 브리핑")
+    print(f"  유형: {briefing_type}")
+    print(f"{'='*56}\n")
+
+    print("[1/3] 시장 데이터 수집...")
+    snapshot = fetch_market()
+    print(f"  포트폴리오 {len(snapshot.stocks)}종목 수집 완료")
+
+    print("[2/3] AI 분석 생성...")
+    result = analyze(snapshot)
+    print(f"  제목: {result.title}")
+    print(f"  판단: {result.advisor_verdict}")
+
+    print("[3/3] Notion 저장...")
+    try:
+        page_id = save_to_notion(result, snapshot, briefing_type)
+        page_url = f"https://notion.so/{page_id.replace('-', '')}"
+        print(f"  Notion: {page_url}")
+
+        print("텔레그램 전송...")
+        sent = send_briefing_telegram(result, page_id, briefing_type)
+        if sent:
+            print("  텔레그램 전송 완료")
+        else:
+            print("  텔레그램 전송 실패 또는 설정 없음")
+    except Exception as e:
+        print(f"  Notion 저장 실패: {e}")
+        # Notion 없이도 텔레그램 전송 시도
+        send_briefing_telegram(result, "", briefing_type)
+
+    print(f"\n{'='*56}")
+    print("  브리핑 완료!")
+    print(f"{'='*56}\n")
+
+
+def cmd_chatbot() -> None:
+    """텔레그램 챗봇 시작."""
+    from core.telegram import run_chatbot
+
+    print("산적주식비서 텔레그램 챗봇 시작...")
+    run_chatbot()
+
+
+def cmd_price() -> None:
+    """Notion 주가 업데이트."""
+    from core.price_updater import update_all_prices
+
+    count = update_all_prices()
+    print(f"주가 업데이트 완료: {count}종목")
+
+
+def cmd_ask(question: str) -> None:
+    """AI에게 질문."""
+    from core.market import fetch_market
+    from core.analyzer import ask_ai
+
+    print("시장 데이터 수집 중...")
+    snapshot = fetch_market()
+    print(f"AI 분석 중...\n")
+    answer = ask_ai(question, snapshot)
+    print(answer)
+
+
+COMMANDS = {
+    "briefing": cmd_briefing,
+    "chatbot": cmd_chatbot,
+    "price": cmd_price,
+}
+
+USAGE = """산적 주식 시뮬레이터
+
+사용법:
+  python main.py              TUI 터미널 실행
+  python main.py briefing     브리핑 생성 (Notion + 텔레그램)
+  python main.py chatbot      텔레그램 챗봇 시작
+  python main.py price        Notion 주가 업데이트
+  python main.py ask "질문"   AI에게 질문
+  python main.py help         이 도움말
+"""
 
 
 def main() -> None:
-    app = StockSimulatorApp()
-    app.run()
+    args = sys.argv[1:]
+
+    if not args:
+        cmd_tui()
+        return
+
+    command = args[0].lower()
+
+    if command == "help" or command == "--help" or command == "-h":
+        print(USAGE)
+        return
+
+    if command == "ask":
+        if len(args) < 2:
+            print("사용법: python main.py ask \"질문\"")
+            sys.exit(1)
+        cmd_ask(" ".join(args[1:]))
+        return
+
+    handler = COMMANDS.get(command)
+    if handler is None:
+        print(f"알 수 없는 명령: {command}")
+        print(USAGE)
+        sys.exit(1)
+
+    handler()
 
 
 if __name__ == "__main__":
