@@ -269,6 +269,17 @@ def synthesize(
     else:
         market_focus = ""
 
+    # 보유 포지션 정보
+    from config.settings import DEFAULT_CASH, HOLDINGS
+    holdings_text = "\n".join(
+        f"  {tk}: {info.get('shares', 0)}주 "
+        f"(매수 ${info.get('avg_cost_usd', 0):.0f})"
+        f"{' [RIA 적격 ' + str(info.get('ria_eligible', 0)) + '주]' if info.get('ria_eligible', 0) > 0 else ''}"
+        if 'avg_cost_usd' in info else
+        f"  {tk}: {info.get('shares', 0)}주 (매수 ₩{info.get('avg_cost_krw', 0):,.0f})"
+        for tk, info in HOLDINGS.items()
+    )
+
     system = f"""당신은 최고 투자 전략가(CIO)입니다. 4명의 분석가 의견을 종합하여 최종 전략을 결정합니다.
 
 규칙:
@@ -276,7 +287,20 @@ def synthesize(
 ② 리스크 경고가 중복되면 심각하게 반영
 ③ 분석가 간 의견 충돌이 있으면 명시
 ④ 아부 금지. 데이터 기반 직언.
-⑤ 모든 수치는 구체적으로 (%, 가격){market_focus}"""
+⑤ 모든 수치는 구체적으로 (%, 가격)
+
+━━━ 실제 보유 포지션 ━━━
+{holdings_text}
+예수금: ₩{DEFAULT_CASH:,.0f}
+
+━━━ 계좌 규칙 (반드시 준수) ━━━
+- 모든 매수/매도 신호에 계좌 태그 필수: [일반], [ISA], [RIA], [연금저축], [IRP]
+- [ISA]: 국내주식 + 국내상장 ETF만 매수 가능. 해외 개별주식 불가.
+- [RIA]: 매도 전용. NVDA/GOOGL만 적격 (2025.12.23 이전 매수분). 5/31까지 100% 양도세 면제.
+- [일반]: 5/31 전까지 해외주식 신규 매수 금지 (RIA 한도 차감). 국내주식은 ISA 우선.
+- [연금저축/IRP]: 2026년 납입 완료. 리밸런싱만.
+- 전문 용어 사용 시 괄호로 쉬운 설명 병기 (예: RSI(과매도 지표) 35)
+- 한눈에 알아보기 쉽게. 표 적극 활용. 결론 먼저.{market_focus}"""
 
     prompt = f"""{market_context}
 
@@ -303,6 +327,7 @@ def synthesize(
   "strategy_buy": [
     {{
       "ticker": "코드", "name": "종목명",
+      "account": "[ISA]|[일반]|[RIA]",
       "urgency": "🔥강력|⚡적극|✅일반",
       "current_price": "현재가",
       "entry_price": "진입가 범위",
@@ -318,6 +343,7 @@ def synthesize(
   "strategy_sell": [
     {{
       "ticker": "코드", "name": "종목명",
+      "account": "[일반]|[RIA]",
       "urgency": "🔴즉시|🟠주의|🟡모니터링",
       "current_price": "현재가",
       "shares": "추천 매도 수량",
@@ -340,6 +366,12 @@ def synthesize(
     {{"label": "시나리오", "condition": "조건", "action": "액션", "amount": "금액"}}
   ],
   "next_action": "다음 액션",
+  "account_strategy": {{
+    "ISA": "국내 ETF/주식 매수 전략 또는 대기 사유",
+    "RIA": "NVDA/GOOGL 매도 판단 (5/31 데드라인)",
+    "일반": "해외주식 전략 (5/31 전 매수 금지 명시)",
+    "연금_IRP": "리밸런싱 사항 또는 변동 없음"
+  }},
   "persona_summary": {{
     "가치투자자": "한줄 요약",
     "성장투자자": "한줄 요약",
