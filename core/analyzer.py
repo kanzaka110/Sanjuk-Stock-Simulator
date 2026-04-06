@@ -201,17 +201,10 @@ def analyze(snapshot: MarketSnapshot) -> BriefingResult:
     )
 
 
-def ask_ai(question: str, snapshot: MarketSnapshot) -> str:
-    """자연어 질문에 대해 AI가 시장 데이터 기반으로 답변.
-
-    예: "한화에어로스페이스 팔때 됐나?"
-    """
-    if not CLAUDE_API_KEY:
-        raise ValueError("CLAUDE_API_KEY 환경변수가 설정되지 않았습니다.")
-
+def _build_market_context(snapshot: MarketSnapshot) -> str:
+    """시장 데이터를 텍스트로 변환 (ask_ai / REPL 공용)."""
     now = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
 
-    # 포트폴리오 현황 텍스트
     stk_lines = []
     for tk, q in snapshot.stocks.items():
         stk_lines.append(
@@ -219,7 +212,7 @@ def ask_ai(question: str, snapshot: MarketSnapshot) -> str:
             f"({q.pct:+.2f}%) H:{fmt_price(tk, q.high)} L:{fmt_price(tk, q.low)}"
         )
 
-    context = f"""현재 시각: {now}
+    return f"""현재 시각: {now}
 
 포트폴리오 현황:
 {chr(10).join(stk_lines)}
@@ -231,20 +224,44 @@ def ask_ai(question: str, snapshot: MarketSnapshot) -> str:
 {chr(10).join(f'  {nm}: {q.price:,.2f} ({q.pct:+.2f}%)' for nm, q in snapshot.macro.items())}
 """
 
+
+ASK_SYSTEM_PROMPT = """당신은 '전략 주식 파트너'. 반말로 대화. 리스크 먼저, 수치 기반.
+아부 금지. 모르면 솔직히 모른다고 해.
+매수/매도 추천 시: 진입가, 목표가, 손절가 포함.
+간결하게 답변. 리포트 형식 금지."""
+
+
+def ask_ai(
+    question: str,
+    snapshot: MarketSnapshot,
+    history: list[dict] | None = None,
+) -> str:
+    """자연어 질문에 대해 AI가 시장 데이터 기반으로 답변.
+
+    Args:
+        question: 사용자 질문
+        snapshot: 시장 데이터 스냅샷
+        history: 이전 대화 히스토리 [{"role": "user"/"assistant", "content": "..."}]
+                 None이면 단발성 질문으로 처리
+
+    예: "한화에어로스페이스 팔때 됐나?"
+    """
+    if not CLAUDE_API_KEY:
+        raise ValueError("CLAUDE_API_KEY 환경변수가 설정되지 않았습니다.")
+
+    context = _build_market_context(snapshot)
+    system = f"{ASK_SYSTEM_PROMPT}\n\n{context}"
+
+    messages: list[dict] = []
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": question})
+
     client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=4000,
-        messages=[
-            {
-                "role": "user",
-                "content": f"""당신은 '전략 주식 파트너'. 반말로 대화. 리스크 먼저, 수치 기반.
-아부 금지. 모르면 솔직히 모른다고 해.
-
-{context}
-
-사용자 질문: {question}""",
-            }
-        ],
+        system=system,
+        messages=messages,
     )
     return response.content[0].text.strip()

@@ -17,7 +17,10 @@ Sanjuk-Stock-Simulator/
 │   ├── notion.py          # Notion 브리핑 저장 (블록 빌더 + 페이지 생성)
 │   ├── telegram.py        # 텔레그램 알림 + 챗봇 (Gemini)
 │   ├── price_updater.py   # Notion 주가 자동 업데이트
+│   ├── chat_repl.py       # 대화형 CLI REPL (멀티턴 전략 논의)
 │   └── models.py          # 데이터 모델 (frozen dataclass)
+├── api/                   # API 서버 (자동화용)
+│   └── server.py          # FastAPI 브리핑 엔드포인트
 ├── terminal/              # 터미널 UI (Textual TUI)
 │   ├── app.py             # 메인 TUI 앱
 │   └── screens/           # 화면 모듈
@@ -59,6 +62,8 @@ Sanjuk-Stock-Simulator/
 4. **매매 시뮬레이션 [t]** — 가상 매수/매도, 수익률 추적
 5. **AI 질의 [q]** — 자연어 질문 ("한화에어로스페이스 팔때 됐나?")
 6. **서비스 관리 [s]** — 텔레그램 챗봇 시작, Notion 주가 업데이트
+7. **대화형 CLI [chat]** — 멀티턴 전략 논의 (대화 맥락 유지)
+8. **API 서버 [server]** — 외부에서 브리핑 트리거 (POST /api/briefing)
 
 ## 환경변수
 
@@ -72,6 +77,8 @@ NOTION_DATABASE_ID=   # Notion 주가 DB ID
 TELEGRAM_BOT_TOKEN=   # 텔레그램 봇 토큰
 TELEGRAM_CHAT_ID=     # 텔레그램 채팅 ID
 BRIEFING_TYPE=MANUAL  # 브리핑 유형
+API_SECRET_KEY=       # API 서버 인증키 (비어있으면 인증 비활성화)
+API_PORT=8000         # API 서버 포트
 ```
 
 ## GCP 관리

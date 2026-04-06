@@ -104,9 +104,29 @@ def cmd_ask(question: str) -> None:
     print(answer)
 
 
+def cmd_chat() -> None:
+    """대화형 CLI REPL 시작."""
+    from core.chat_repl import run_repl
+
+    run_repl()
+
+
+def cmd_server() -> None:
+    """API 서버 시작."""
+    import uvicorn
+
+    from api.server import app
+    from config.settings import API_PORT
+
+    print(f"산적 주식 시뮬레이터 API 서버 시작 (포트 {API_PORT})...")
+    uvicorn.run(app, host="0.0.0.0", port=API_PORT)
+
+
 COMMANDS = {
     "briefing": cmd_briefing,
     "chatbot": cmd_chatbot,
+    "chat": cmd_chat,
+    "server": cmd_server,
     "price": cmd_price,
 }
 
@@ -114,10 +134,12 @@ USAGE = """산적 주식 시뮬레이터
 
 사용법:
   python main.py              TUI 터미널 실행
+  python main.py chat         대화형 분석 (멀티턴 전략 논의)
   python main.py briefing     브리핑 생성 (Notion + 텔레그램)
+  python main.py server       API 서버 시작 (자동화용)
   python main.py chatbot      텔레그램 챗봇 시작
   python main.py price        Notion 주가 업데이트
-  python main.py ask "질문"   AI에게 질문
+  python main.py ask "질문"   AI에게 단발 질문
   python main.py help         이 도움말
 """
 
