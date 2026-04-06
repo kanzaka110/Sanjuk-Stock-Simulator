@@ -4,9 +4,8 @@
 사용법:
   python main.py              # TUI 터미널 실행
   python main.py briefing     # 브리핑 생성 → Notion + 텔레그램
-  python main.py chatbot      # 텔레그램 챗봇 시작
+  python main.py server       # API 서버 시작 (자동화용)
   python main.py price        # Notion 주가 업데이트
-  python main.py ask "질문"   # AI에게 질문
 """
 
 import os
@@ -49,10 +48,14 @@ def cmd_briefing() -> None:
     snapshot = fetch_market()
     print(f"  포트폴리오 {len(snapshot.stocks)}종목 수집 완료")
 
-    print("[2/3] AI 분석 생성...")
+    print("[2/3] AI 멀티 에이전트 분석...")
     result = analyze(snapshot)
     print(f"  제목: {result.title}")
     print(f"  판단: {result.advisor_verdict}")
+    persona_summary = result.raw_json.get("persona_summary", {})
+    if persona_summary:
+        for name, summary in persona_summary.items():
+            print(f"  [{name}] {summary}")
 
     print("[3/3] Notion 저장...")
     try:
@@ -76,39 +79,12 @@ def cmd_briefing() -> None:
     print(f"{'='*56}\n")
 
 
-def cmd_chatbot() -> None:
-    """텔레그램 챗봇 시작."""
-    from core.telegram import run_chatbot
-
-    print("산적주식비서 텔레그램 챗봇 시작...")
-    run_chatbot()
-
-
 def cmd_price() -> None:
     """Notion 주가 업데이트."""
     from core.price_updater import update_all_prices
 
     count = update_all_prices()
     print(f"주가 업데이트 완료: {count}종목")
-
-
-def cmd_ask(question: str) -> None:
-    """AI에게 질문."""
-    from core.market import fetch_market
-    from core.analyzer import ask_ai
-
-    print("시장 데이터 수집 중...")
-    snapshot = fetch_market()
-    print(f"AI 분석 중...\n")
-    answer = ask_ai(question, snapshot)
-    print(answer)
-
-
-def cmd_chat() -> None:
-    """대화형 CLI REPL 시작."""
-    from core.chat_repl import run_repl
-
-    run_repl()
 
 
 def cmd_server() -> None:
@@ -124,8 +100,6 @@ def cmd_server() -> None:
 
 COMMANDS = {
     "briefing": cmd_briefing,
-    "chatbot": cmd_chatbot,
-    "chat": cmd_chat,
     "server": cmd_server,
     "price": cmd_price,
 }
@@ -134,12 +108,9 @@ USAGE = """산적 주식 시뮬레이터
 
 사용법:
   python main.py              TUI 터미널 실행
-  python main.py chat         대화형 분석 (멀티턴 전략 논의)
-  python main.py briefing     브리핑 생성 (Notion + 텔레그램)
+  python main.py briefing     브리핑 생성 (Notion + 텔레그램 알림)
   python main.py server       API 서버 시작 (자동화용)
-  python main.py chatbot      텔레그램 챗봇 시작
   python main.py price        Notion 주가 업데이트
-  python main.py ask "질문"   AI에게 단발 질문
   python main.py help         이 도움말
 """
 
@@ -153,15 +124,8 @@ def main() -> None:
 
     command = args[0].lower()
 
-    if command == "help" or command == "--help" or command == "-h":
+    if command in ("help", "--help", "-h"):
         print(USAGE)
-        return
-
-    if command == "ask":
-        if len(args) < 2:
-            print("사용법: python main.py ask \"질문\"")
-            sys.exit(1)
-        cmd_ask(" ".join(args[1:]))
         return
 
     handler = COMMANDS.get(command)
