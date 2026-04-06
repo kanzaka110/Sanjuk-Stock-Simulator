@@ -17,7 +17,7 @@ from datetime import datetime
 
 import anthropic
 
-from config.settings import CLAUDE_API_KEY, KST, PORTFOLIO
+from config.settings import CLAUDE_API_KEY, KST, PORTFOLIO, get_market_config
 from core.market import fmt_change, fmt_price
 from core.models import BriefingResult, MarketSnapshot, Signal
 from core.news import gather_news
@@ -161,8 +161,12 @@ def _build_briefing_result(data: dict) -> BriefingResult:
     )
 
 
-def analyze(snapshot: MarketSnapshot) -> BriefingResult:
+def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> BriefingResult:
     """멀티 에이전트 파이프라인으로 시장 분석.
+
+    Args:
+        snapshot: 시장 데이터 스냅샷
+        briefing_type: KR_BEFORE(한국 중심), US_BEFORE(미국 중심), MANUAL(전체)
 
     파이프라인:
        1) Gemini → 뉴스 수집
@@ -183,6 +187,8 @@ def analyze(snapshot: MarketSnapshot) -> BriefingResult:
     """
     if not CLAUDE_API_KEY:
         raise ValueError("CLAUDE_API_KEY 환경변수가 설정되지 않았습니다.")
+
+    portfolio, _, _ = get_market_config(briefing_type)
 
     from core.backtest import (
         backtest_all_strategies,
@@ -207,9 +213,9 @@ def analyze(snapshot: MarketSnapshot) -> BriefingResult:
     from core.risk import generate_risk_report, risk_report_to_text
     from core.sentiment import analyze_sentiment
 
-    # 1단계: Gemini로 뉴스 수집
-    log.info("[1/11] 뉴스 수집 중...")
-    gathered_news = gather_news()
+    # 1단계: Gemini로 뉴스 수집 (시장별 초점)
+    log.info("[1/11] 뉴스 수집 중... (유형: %s)", briefing_type)
+    gathered_news = gather_news(briefing_type)
 
     # 2단계: 시장 레짐 감지 (로컬)
     log.info("[2/11] 시장 레짐 감지 중...")
@@ -219,12 +225,12 @@ def analyze(snapshot: MarketSnapshot) -> BriefingResult:
 
     # 3단계: 기술 지표 계산 (로컬)
     log.info("[3/11] 기술 지표 계산 중...")
-    indicators = calculate_all(PORTFOLIO)
+    indicators = calculate_all(portfolio)
     indicators_text = indicators_to_text(indicators)
 
     # 4단계: 감성 분석 (Gemini Flash)
     log.info("[4/11] 감성 분석 중...")
-    stock_names = list(PORTFOLIO.values())
+    stock_names = list(portfolio.values())
     sentiment = analyze_sentiment(gathered_news, stock_names)
     sentiment_text = sentiment.to_text()
 
@@ -236,7 +242,7 @@ def analyze(snapshot: MarketSnapshot) -> BriefingResult:
     recent_preds = get_recent_predictions(20)
     recent_outcomes = [p.outcome for p in recent_preds if p.outcome]
     risk_report = generate_risk_report(
-        PORTFOLIO, DEFAULT_CASH,
+        portfolio, DEFAULT_CASH,
         memory_stats=memory_stats,
         recent_outcomes=recent_outcomes,
     )
@@ -248,17 +254,22 @@ def analyze(snapshot: MarketSnapshot) -> BriefingResult:
     # 6단계: 백테스트 (기본 + 레짐별 + 최적화, 로컬)
     log.info("[6/11] 백테스트 검증 중 (레짐별 + 파라미터 최적화)...")
     backtest_results = []
-    key_tickers = ["NVDA", "005930.KS", "012450.KS", "MU"]
+    if briefing_type == "KR_BEFORE":
+        key_tickers = ["005930.KS", "012450.KS"]
+    elif briefing_type == "US_BEFORE":
+        key_tickers = ["NVDA", "MU", "GOOGL", "LMT"]
+    else:
+        key_tickers = ["NVDA", "005930.KS", "012450.KS", "MU"]
     for tk in key_tickers:
-        if tk in PORTFOLIO:
-            bt = backtest_all_strategies(tk, PORTFOLIO[tk], "1y")
+        if tk in portfolio:
+            bt = backtest_all_strategies(tk, portfolio[tk], "1y")
             backtest_results.extend(bt)
             # 레짐별 전략
-            regime_bt = backtest_regime_aware(tk, PORTFOLIO[tk], "1y", regime.regime)
+            regime_bt = backtest_regime_aware(tk, portfolio[tk], "1y", regime.regime)
             if regime_bt:
                 backtest_results.append(regime_bt)
             # 최적 파라미터
-            opt = optimize_rsi_params(tk, PORTFOLIO[tk], "1y")
+            opt = optimize_rsi_params(tk, portfolio[tk], "1y")
             if opt:
                 backtest_results.append(opt)
     backtest_text = backtest_to_text(backtest_results)
@@ -266,7 +277,7 @@ def analyze(snapshot: MarketSnapshot) -> BriefingResult:
     # 7단계: 재무 데이터 (yfinance)
     log.info("[7/13] 재무 데이터 수집 중 (PER/EPS/매출/실적일정)...")
     from core.fundamentals import fetch_all_fundamentals, fundamentals_to_text
-    fund_data = fetch_all_fundamentals(PORTFOLIO)
+    fund_data = fetch_all_fundamentals(portfolio)
     fundamentals_text = fundamentals_to_text(fund_data)
     # 실적 임박 경고
     upcoming = [d for d in fund_data if 0 <= d.days_to_earnings <= 7]
@@ -274,11 +285,15 @@ def analyze(snapshot: MarketSnapshot) -> BriefingResult:
         for d in upcoming:
             log.warning(f"  !! {d.name} 실적 발표 {d.days_to_earnings}일 후 ({d.earnings_date})")
 
-    # 8단계: 한국 시장 심층 (KRX)
-    log.info("[8/13] 한국 시장 데이터 조회 중...")
-    flows = fetch_institutional_flow()
-    fundamentals = fetch_fundamentals()
-    kr_text = kr_market_to_text(flows, fundamentals)
+    # 8단계: 한국 시장 심층 (KRX) — 미국장 브리핑에서는 스킵
+    kr_text = ""
+    if briefing_type != "US_BEFORE":
+        log.info("[8/13] 한국 시장 데이터 조회 중...")
+        flows = fetch_institutional_flow()
+        fundamentals = fetch_fundamentals()
+        kr_text = kr_market_to_text(flows, fundamentals)
+    else:
+        log.info("[8/13] 한국 시장 데이터 스킵 (미국장 브리핑)")
 
     # 8단계: AI 메모리 — 미결 추천 평가 + 과거 기록 조회
     log.info("[8/13] AI 메모리 조회 중...")
@@ -290,7 +305,7 @@ def analyze(snapshot: MarketSnapshot) -> BriefingResult:
 
     # 9단계: 멀티모달 차트 분석 (Gemini Vision)
     log.info("[10/13] 차트 패턴 분석 중 (AI Vision)...")
-    chart_analyses = analyze_key_charts(PORTFOLIO, max_charts=4)
+    chart_analyses = analyze_key_charts(portfolio, max_charts=4)
     chart_text = chart_analyses_to_text(chart_analyses)
     if chart_analyses:
         log.info(f"  {len(chart_analyses)}종목 차트 분석 완료")
@@ -299,7 +314,7 @@ def analyze(snapshot: MarketSnapshot) -> BriefingResult:
     log.info("[11/13] 매매 제약 조건 계산 중...")
     from core.portfolio import compute_allowed_actions, constraints_to_text
     constraints = compute_allowed_actions(current_prices)
-    constraints_text = constraints_to_text(constraints, PORTFOLIO)
+    constraints_text = constraints_to_text(constraints, portfolio)
 
     # 11단계: 통합 컨텍스트 → 4개 페르소나 병렬 분석 (Haiku)
     log.info("[12/13] 4개 페르소나 분석 중 (병렬)...")
@@ -329,7 +344,7 @@ def analyze(snapshot: MarketSnapshot) -> BriefingResult:
 
     # 12단계: 종합 판단 (Sonnet)
     log.info("[13/13] 종합 판단 생성 중...")
-    raw_text = synthesize(persona_results, market_context)
+    raw_text = synthesize(persona_results, market_context, briefing_type)
 
     data = _parse_json(raw_text)
 

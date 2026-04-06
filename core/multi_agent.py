@@ -239,6 +239,7 @@ def _build_debate_context(results: list[PersonaAnalysis]) -> str:
 def synthesize(
     persona_results: list[PersonaAnalysis],
     market_context: str,
+    briefing_type: str = "MANUAL",
 ) -> str:
     """4개 페르소나 분석을 종합하여 최종 전략 JSON 생성 (Sonnet)."""
     # 페르소나 결과 텍스트화
@@ -254,14 +255,28 @@ def synthesize(
 
     client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 
-    system = """당신은 최고 투자 전략가(CIO)입니다. 4명의 분석가 의견을 종합하여 최종 전략을 결정합니다.
+    # 시장 초점 지시
+    if briefing_type == "KR_BEFORE":
+        market_focus = """
+⑥ 이 브리핑은 【한국 시장 중심】입니다. 한국 종목(삼성전자, 한화에어로스페이스, 국내 ETF 등)에 초점을 맞추세요.
+⑦ 코스피/코스닥 동향, 외국인/기관 수급, 원달러 환율이 핵심입니다.
+⑧ 미국 시장은 한국장에 미치는 영향 관점에서만 간략히 언급하세요."""
+    elif briefing_type == "US_BEFORE":
+        market_focus = """
+⑥ 이 브리핑은 【미국 시장 중심】입니다. 미국 종목(NVDA, GOOGL, MU, LMT)에 초점을 맞추세요.
+⑦ S&P500/나스닥/다우 동향, Fed 정책, VIX, 미국 국채 금리가 핵심입니다.
+⑧ 한국 시장은 미국장에 미치는 영향 관점에서만 간략히 언급하세요."""
+    else:
+        market_focus = ""
+
+    system = f"""당신은 최고 투자 전략가(CIO)입니다. 4명의 분석가 의견을 종합하여 최종 전략을 결정합니다.
 
 규칙:
 ① 다수결이 아닌 논리적 종합 판단 — 확신도가 높은 분석가의 의견에 가중치
 ② 리스크 경고가 중복되면 심각하게 반영
 ③ 분석가 간 의견 충돌이 있으면 명시
 ④ 아부 금지. 데이터 기반 직언.
-⑤ 모든 수치는 구체적으로 (%, 가격)"""
+⑤ 모든 수치는 구체적으로 (%, 가격){market_focus}"""
 
     prompt = f"""{market_context}
 

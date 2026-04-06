@@ -71,5 +71,47 @@ MACRO: dict[str, str] = {
 API_SECRET_KEY: str = os.environ.get("API_SECRET_KEY", "")
 API_PORT: int = int(os.environ.get("API_PORT", "8000"))
 
+# ─── 시장별 포트폴리오 분리 ────────────────────────────
+KR_PORTFOLIO: dict[str, str] = {
+    tk: nm for tk, nm in PORTFOLIO.items() if ".KS" in tk
+}
+US_PORTFOLIO: dict[str, str] = {
+    tk: nm for tk, nm in PORTFOLIO.items() if ".KS" not in tk
+}
+
+KR_INDICES: dict[str, str] = {
+    "^KS11": "KOSPI",
+    "^KQ11": "KOSDAQ",
+}
+US_INDICES: dict[str, str] = {
+    "^GSPC": "S&P500",
+    "^IXIC": "NASDAQ",
+    "^DJI": "DOW",
+}
+
+
+def get_market_config(briefing_type: str) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+    """briefing_type에 따라 (portfolio, indices, macro) 반환.
+
+    KR_BEFORE: 한국 종목 + 한국 지수 중심 (미국 지수는 참고용 포함)
+    US_BEFORE: 미국 종목 + 미국 지수 중심 (한국 지수는 참고용 포함)
+    기타(MANUAL): 전체 포트폴리오
+    """
+    if briefing_type == "KR_BEFORE":
+        return KR_PORTFOLIO, {**KR_INDICES, **US_INDICES}, MACRO
+    if briefing_type == "US_BEFORE":
+        return US_PORTFOLIO, {**US_INDICES, **KR_INDICES}, MACRO
+    return PORTFOLIO, INDICES, MACRO
+
+
 # ─── 예수금 (시뮬레이션 초기값) ─────────────────────
-DEFAULT_CASH: float = 4_795_171.0
+# 실제 보유 수량 (삼성증권 거래내역 기준, 2026-04-06)
+HOLDINGS: dict[str, dict] = {
+    "NVDA": {"shares": 46, "avg_cost_usd": 128.0, "ria_eligible": 46},
+    "GOOGL": {"shares": 9, "avg_cost_usd": 324.0, "ria_eligible": 9},
+    "MU": {"shares": 11, "avg_cost_usd": 408.82, "ria_eligible": 0},
+    "LMT": {"shares": 1, "avg_cost_usd": 639.0, "ria_eligible": 0},
+    "012450.KS": {"shares": 2, "avg_cost_krw": 1_314_500},
+}
+
+DEFAULT_CASH: float = 3_539_839.0

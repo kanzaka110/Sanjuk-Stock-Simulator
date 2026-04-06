@@ -52,11 +52,11 @@ def cmd_briefing() -> None:
     print(f"{'='*56}\n")
 
     print("[1/3] 시장 데이터 수집...")
-    snapshot = fetch_market()
+    snapshot = fetch_market(briefing_type)
     print(f"  포트폴리오 {len(snapshot.stocks)}종목 수집 완료")
 
     print("[2/3] AI 멀티 에이전트 분석...")
-    result = analyze(snapshot)
+    result = analyze(snapshot, briefing_type)
     print(f"  제목: {result.title}")
     print(f"  판단: {result.advisor_verdict}")
     persona_summary = result.raw_json.get("persona_summary", {})

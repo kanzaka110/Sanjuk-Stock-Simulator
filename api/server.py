@@ -86,8 +86,8 @@ def _run_briefing(briefing_type: str) -> BriefingResponse:
     from core.telegram import send_briefing_telegram
 
     try:
-        snapshot = fetch_market()
-        result = analyze(snapshot)
+        snapshot = fetch_market(briefing_type)
+        result = analyze(snapshot, briefing_type)
 
         notion_url = ""
         page_id = ""

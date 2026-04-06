@@ -65,16 +65,53 @@ def signal_badge(signal: str) -> str:
 
 
 # ─── 데이터 수집 ────────────────────────────────────
-def _get_quote(ticker: str) -> Quote | None:
-    """단일 티커 시세 조회."""
+def _get_quote_realtime(ticker: str) -> Quote | None:
+    """장중 1분봉으로 실시간에 가까운 시세 조회. 실패 시 일봉 폴백."""
+    try:
+        t = yf.Ticker(ticker)
+        name = PORTFOLIO.get(ticker, INDICES.get(ticker, MACRO.get(ticker, ticker)))
+
+        # 1분봉 시도 (장중일 때 최신 가격 제공)
+        intra = t.history(period="1d", interval="1m")
+        if len(intra) >= 2:
+            c = float(intra["Close"].iloc[-1])
+            day_high = round(float(intra["High"].max()), 2)
+            day_low = round(float(intra["Low"].min()), 2)
+
+            # 전일 종가: 일봉에서 가져옴
+            daily = t.history(period="5d")
+            if len(daily) >= 2:
+                prev_close = float(daily["Close"].iloc[-2])
+            else:
+                prev_close = float(intra["Open"].iloc[0])
+
+            return Quote(
+                ticker=ticker,
+                name=name,
+                price=round(c, 2),
+                change=round(c - prev_close, 2),
+                pct=round((c - prev_close) / prev_close * 100, 2),
+                high=day_high,
+                low=day_low,
+            )
+
+        # 1분봉 데이터 없음 (장 마감) → 일봉 폴백
+        return _get_quote_daily(ticker)
+    except Exception:
+        return _get_quote_daily(ticker)
+
+
+def _get_quote_daily(ticker: str) -> Quote | None:
+    """일봉 기반 시세 조회 (폴백용)."""
     try:
         h = yf.Ticker(ticker).history(period="5d")
+        name = PORTFOLIO.get(ticker, INDICES.get(ticker, MACRO.get(ticker, ticker)))
         if len(h) >= 2:
             c = float(h["Close"].iloc[-1])
             p = float(h["Close"].iloc[-2])
             return Quote(
                 ticker=ticker,
-                name=PORTFOLIO.get(ticker, INDICES.get(ticker, MACRO.get(ticker, ticker))),
+                name=name,
                 price=round(c, 2),
                 change=round(c - p, 2),
                 pct=round((c - p) / p * 100, 2),
@@ -85,7 +122,7 @@ def _get_quote(ticker: str) -> Quote | None:
             c = float(h["Close"].iloc[-1])
             return Quote(
                 ticker=ticker,
-                name=PORTFOLIO.get(ticker, ticker),
+                name=name,
                 price=c,
                 high=c,
                 low=c,
@@ -109,37 +146,44 @@ def _get_ticker_news(ticker: str, n: int = 3) -> list[str]:
         return []
 
 
-def fetch_market() -> MarketSnapshot:
-    """전체 시장 데이터 수집 — 포트폴리오 + 지수 + 매크로 + 뉴스."""
+def fetch_market(briefing_type: str = "MANUAL") -> MarketSnapshot:
+    """시장 데이터 수집 — briefing_type에 따라 시장별 필터링.
+
+    Args:
+        briefing_type: KR_BEFORE(한국 중심), US_BEFORE(미국 중심), MANUAL(전체)
+    """
+    from datetime import datetime
+
+    from config.settings import KST, get_market_config
+
+    portfolio, indices_cfg, macro_cfg = get_market_config(briefing_type)
+
     stocks: dict[str, Quote] = {}
-    for tk in PORTFOLIO:
-        q = _get_quote(tk)
+    for tk in portfolio:
+        q = _get_quote_realtime(tk)
         if q is not None:
             stocks[tk] = q
         time.sleep(0.12)
 
     indices: dict[str, Quote] = {}
-    for tk, nm in INDICES.items():
-        q = _get_quote(tk)
+    for tk, nm in indices_cfg.items():
+        q = _get_quote_realtime(tk)
         if q is not None:
             indices[nm] = q
 
     macro: dict[str, Quote] = {}
-    for tk, nm in MACRO.items():
-        q = _get_quote(tk)
+    for tk, nm in macro_cfg.items():
+        q = _get_quote_realtime(tk)
         if q is not None:
             macro[nm] = q
 
+    # 뉴스: 현재 포트폴리오 종목만
     news: dict[str, list[str]] = {}
-    for tk in ["NVDA", "GOOGL", "MU", "LMT", "005930.KS", "012450.KS"]:
+    for tk in portfolio:
         h = _get_ticker_news(tk, 3)
         if h:
-            news[PORTFOLIO.get(tk, tk)] = h
+            news[portfolio.get(tk, tk)] = h
         time.sleep(0.15)
-
-    from datetime import datetime
-
-    from config.settings import KST
 
     return MarketSnapshot(
         stocks=stocks,
