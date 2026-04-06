@@ -7,7 +7,7 @@ Sanjuk-Notion-Telegram-Bot/Stock_bot의 모든 기능을 통합한 독립 프로
 
 ## 구조
 
-```
+```text
 Sanjuk-Stock-Simulator/
 ├── core/                  # 핵심 비즈니스 로직
 │   ├── market.py          # yfinance 데이터 수집 (지수, 매크로, 종목)
@@ -48,7 +48,7 @@ Sanjuk-Stock-Simulator/
 
 ## AI 모델 사용
 
-```
+```text
 정보 수집: Gemini 2.5 Pro + Google Search (실시간 뉴스)
 분석/전략: Claude Sonnet 4.6 (매수/매도 신호, 전략 생성)
 챗봇 대화: Gemini 2.5 Flash (텔레그램 대화)
@@ -67,7 +67,7 @@ Sanjuk-Stock-Simulator/
 
 ## 환경변수
 
-```
+```bash
 GEMINI_API_KEY=       # Gemini 2.5 Pro/Flash (뉴스 수집 + 챗봇)
 CLAUDE_API_KEY=       # Claude Sonnet 4.6 (분석)
 NOTION_API_KEY=       # Notion 브리핑 저장
