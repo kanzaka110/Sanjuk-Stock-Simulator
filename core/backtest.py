@@ -37,6 +37,12 @@ class BacktestResult:
     max_drawdown_pct: float  # 최대 낙폭 (%)
     sharpe_ratio: float  # 샤프 비율 (연환산)
     profit_factor: float  # 수익 팩터 (총이익/총손실)
+    # 확장 지표
+    sortino_ratio: float = 0.0
+    calmar_ratio: float = 0.0
+    cvar_95: float = 0.0  # 최악 5% 평균 손실
+    max_underwater_days: int = 0
+    optimized_params: dict = field(default_factory=dict)
 
 
 def backtest_rsi(
@@ -215,17 +221,11 @@ def _simulate_from_signals(
     total_losses = abs(sum(losses)) if losses else 0.001
     profit_factor = total_gains / total_losses
 
-    # 최대 낙폭
-    peak = close.cummax()
-    drawdown = (close - peak) / peak * 100
-    max_dd = float(drawdown.min())
+    # 확장 지표
+    from core.metrics import compute_all_metrics
 
-    # 샤프 비율 (연환산)
     daily_returns = close.pct_change().dropna()
-    if len(daily_returns) > 1 and daily_returns.std() > 0:
-        sharpe = float(daily_returns.mean() / daily_returns.std() * (252 ** 0.5))
-    else:
-        sharpe = 0.0
+    metrics = compute_all_metrics(daily_returns)
 
     return BacktestResult(
         ticker=ticker,
@@ -237,9 +237,13 @@ def _simulate_from_signals(
         excess_return_pct=round(total_return - bnh, 2),
         win_rate_pct=round(win_rate, 1),
         total_trades=len(trades),
-        max_drawdown_pct=round(max_dd, 2),
-        sharpe_ratio=round(sharpe, 2),
+        max_drawdown_pct=metrics.get("max_drawdown_pct", 0),
+        sharpe_ratio=metrics.get("sharpe_ratio", 0),
         profit_factor=round(profit_factor, 2),
+        sortino_ratio=metrics.get("sortino_ratio", 0),
+        calmar_ratio=metrics.get("calmar_ratio", 0),
+        cvar_95=metrics.get("cvar_95", 0),
+        max_underwater_days=metrics.get("max_underwater_days", 0),
     )
 
 
@@ -260,6 +264,64 @@ def backtest_all_strategies(
     return results
 
 
+def optimize_rsi_params(
+    ticker: str, name: str = "", period: str = "1y",
+    buy_range: tuple[int, ...] = (20, 25, 30, 35),
+    sell_range: tuple[int, ...] = (65, 70, 75, 80),
+) -> BacktestResult | None:
+    """RSI 파라미터 최적화 — 그리드 탐색으로 최적 매수/매도 임계치 발견."""
+    best: BacktestResult | None = None
+
+    for buy_th in buy_range:
+        for sell_th in sell_range:
+            if buy_th >= sell_th:
+                continue
+            r = backtest_rsi(ticker, name, period, float(buy_th), float(sell_th))
+            if r is None:
+                continue
+            if best is None or r.sharpe_ratio > best.sharpe_ratio:
+                from dataclasses import replace
+                best = replace(
+                    r,
+                    strategy=f"RSI최적({buy_th}/{sell_th})",
+                    optimized_params={"rsi_buy": buy_th, "rsi_sell": sell_th},
+                )
+    return best
+
+
+def backtest_regime_aware(
+    ticker: str,
+    name: str = "",
+    period: str = "1y",
+    regime: str = "횡보장",
+) -> BacktestResult | None:
+    """레짐에 따라 다른 파라미터로 RSI 백테스트.
+
+    강세장: 40/80 (추세 따라 늦게 팔기)
+    약세장: 20/60 (보수적 진입, 빨리 탈출)
+    횡보장: 30/70 (기본)
+    위기: 15/50 (극보수적)
+    """
+    params = {
+        "강세장": (40, 80),
+        "약세장": (20, 60),
+        "횡보장": (30, 70),
+        "위기": (15, 50),
+    }
+    buy_th, sell_th = params.get(regime, (30, 70))
+
+    r = backtest_rsi(ticker, name, period, float(buy_th), float(sell_th))
+    if r is None:
+        return None
+
+    from dataclasses import replace
+    return replace(
+        r,
+        strategy=f"RSI레짐({regime}:{buy_th}/{sell_th})",
+        optimized_params={"regime": regime, "rsi_buy": buy_th, "rsi_sell": sell_th},
+    )
+
+
 def backtest_to_text(results: list[BacktestResult]) -> str:
     """백테스트 결과를 텍스트로 변환."""
     if not results:
@@ -267,12 +329,12 @@ def backtest_to_text(results: list[BacktestResult]) -> str:
 
     lines = ["【백테스트 결과】"]
     for r in results:
-        excess = f"{r.excess_return_pct:+.1f}%"
         lines.append(
             f"  {r.name} [{r.strategy}] {r.period}: "
             f"수익 {r.total_return_pct:+.1f}% vs B&H {r.buy_hold_return_pct:+.1f}% "
-            f"(초과 {excess}) | 승률 {r.win_rate_pct:.0f}% | "
+            f"(초과 {r.excess_return_pct:+.1f}%) | 승률 {r.win_rate_pct:.0f}% | "
             f"거래 {r.total_trades}회 | MDD {r.max_drawdown_pct:.1f}% | "
-            f"샤프 {r.sharpe_ratio:.2f}"
+            f"Sharpe {r.sharpe_ratio:.2f} | Sortino {r.sortino_ratio:.2f} | "
+            f"CVaR(5%) {r.cvar_95*100:.1f}% | 수중 {r.max_underwater_days}일"
         )
     return "\n".join(lines)

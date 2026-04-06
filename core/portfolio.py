@@ -146,3 +146,86 @@ def execute_sell(
 def get_trade_history(limit: int = 20) -> list[TradeRecord]:
     """최근 매매 기록 조회."""
     return get_trades(limit)
+
+
+# ═══════════════════════════════════════════════════════
+# 실현 가능 매매 사전 필터링
+# ═══════════════════════════════════════════════════════
+def compute_allowed_actions(
+    current_prices: dict[str, float],
+) -> dict[str, dict]:
+    """종목별 실현 가능한 매매 액션 계산.
+
+    AI 종합 판단에 전달하여 불가능한 추천을 사전 차단.
+
+    Returns:
+        {ticker: {
+            "can_buy": bool,
+            "max_buy_shares": int,
+            "max_buy_value": float,
+            "can_sell": bool,
+            "held_shares": int,
+            "held_avg_price": float,
+            "unrealized_pnl_pct": float,
+        }}
+    """
+    cash, positions = get_portfolio_summary()
+    held_map = {p.ticker: p for p in positions}
+
+    result: dict[str, dict] = {}
+    for ticker, price in current_prices.items():
+        if price <= 0:
+            continue
+
+        pos = held_map.get(ticker)
+        held_shares = pos.shares if pos else 0
+        avg_price = pos.avg_price if pos else 0
+        unrealized = ((price - avg_price) / avg_price * 100) if avg_price > 0 else 0
+
+        max_buy_shares = int(cash / price) if price > 0 else 0
+
+        result[ticker] = {
+            "can_buy": max_buy_shares > 0,
+            "max_buy_shares": max_buy_shares,
+            "max_buy_value": round(cash, 0),
+            "can_sell": held_shares > 0,
+            "held_shares": held_shares,
+            "held_avg_price": round(avg_price, 2),
+            "unrealized_pnl_pct": round(unrealized, 2),
+        }
+
+    result["_cash"] = {"available": round(cash, 0)}
+    return result
+
+
+def constraints_to_text(
+    constraints: dict[str, dict],
+    ticker_names: dict[str, str],
+) -> str:
+    """매매 제약을 텍스트로 변환 (프롬프트 삽입용)."""
+    cash = constraints.get("_cash", {}).get("available", 0)
+    lines = [f"【매매 제약 조건】 예수금: ₩{cash:,.0f}"]
+
+    for tk, info in constraints.items():
+        if tk == "_cash":
+            continue
+        name = ticker_names.get(tk, tk)
+        parts = [name]
+
+        if info.get("can_sell"):
+            parts.append(
+                f"보유 {info['held_shares']}주 "
+                f"(평단 {info['held_avg_price']:,.0f}, "
+                f"수익 {info['unrealized_pnl_pct']:+.1f}%)"
+            )
+        else:
+            parts.append("미보유")
+
+        if info.get("can_buy"):
+            parts.append(f"최대 매수 {info['max_buy_shares']}주 가능")
+        else:
+            parts.append("매수 불가 (예수금 부족)")
+
+        lines.append(f"  {' | '.join(parts)}")
+
+    return "\n".join(lines)

@@ -180,7 +180,12 @@ def analyze(snapshot: MarketSnapshot) -> BriefingResult:
     if not CLAUDE_API_KEY:
         raise ValueError("CLAUDE_API_KEY 환경변수가 설정되지 않았습니다.")
 
-    from core.backtest import backtest_all_strategies, backtest_to_text
+    from core.backtest import (
+        backtest_all_strategies,
+        backtest_regime_aware,
+        backtest_to_text,
+        optimize_rsi_params,
+    )
     from core.chart_vision import analyze_key_charts, chart_analyses_to_text
     from core.indicators import calculate_all, indicators_to_text
     from core.kr_market import (
@@ -219,21 +224,39 @@ def analyze(snapshot: MarketSnapshot) -> BriefingResult:
     sentiment = analyze_sentiment(gathered_news, stock_names)
     sentiment_text = sentiment.to_text()
 
-    # 5단계: 리스크 분석 (로컬)
-    log.info("[5/11] 리스크 분석 중 (ATR/상관관계/낙폭)...")
+    # 5단계: 리스크 분석 (변동성+상관관계+서킷브레이커, 로컬)
+    log.info("[5/11] 리스크 분석 중 (변동성+상관관계+서킷브레이커)...")
     from config.settings import DEFAULT_CASH
-    risk_report = generate_risk_report(PORTFOLIO, DEFAULT_CASH)
+    from core.memory import get_accuracy_summary, get_recent_predictions
+    memory_stats = get_accuracy_summary()
+    recent_preds = get_recent_predictions(20)
+    recent_outcomes = [p.outcome for p in recent_preds if p.outcome]
+    risk_report = generate_risk_report(
+        PORTFOLIO, DEFAULT_CASH,
+        memory_stats=memory_stats,
+        recent_outcomes=recent_outcomes,
+    )
     risk_text = risk_report_to_text(risk_report)
     log.info(f"  전체 리스크: {risk_report.overall_risk}")
+    if risk_report.circuit_breaker.is_locked:
+        log.warning(f"  🚨 서킷 브레이커: {risk_report.circuit_breaker.reason}")
 
-    # 6단계: 백테스트 (로컬, 주요 종목만)
-    log.info("[6/11] 백테스트 검증 중...")
+    # 6단계: 백테스트 (기본 + 레짐별 + 최적화, 로컬)
+    log.info("[6/11] 백테스트 검증 중 (레짐별 + 파라미터 최적화)...")
     backtest_results = []
     key_tickers = ["NVDA", "005930.KS", "012450.KS", "MU"]
     for tk in key_tickers:
         if tk in PORTFOLIO:
             bt = backtest_all_strategies(tk, PORTFOLIO[tk], "1y")
             backtest_results.extend(bt)
+            # 레짐별 전략
+            regime_bt = backtest_regime_aware(tk, PORTFOLIO[tk], "1y", regime.regime)
+            if regime_bt:
+                backtest_results.append(regime_bt)
+            # 최적 파라미터
+            opt = optimize_rsi_params(tk, PORTFOLIO[tk], "1y")
+            if opt:
+                backtest_results.append(opt)
     backtest_text = backtest_to_text(backtest_results)
 
     # 7단계: 한국 시장 심층 (KRX)
@@ -257,10 +280,16 @@ def analyze(snapshot: MarketSnapshot) -> BriefingResult:
     if chart_analyses:
         log.info(f"  {len(chart_analyses)}종목 차트 분석 완료")
 
-    # 10단계: 통합 컨텍스트 → 4개 페르소나 병렬 분석 (Haiku)
-    log.info("[10/11] 4개 페르소나 분석 중 (병렬)...")
+    # 10단계: 매매 제약 조건 계산
+    log.info("[10/11] 매매 제약 조건 계산 중...")
+    from core.portfolio import compute_allowed_actions, constraints_to_text
+    constraints = compute_allowed_actions(current_prices)
+    constraints_text = constraints_to_text(constraints, PORTFOLIO)
 
-    # 레짐 + 메모리 + 차트를 추가 컨텍스트로 삽입
+    # 11단계: 통합 컨텍스트 → 4개 페르소나 병렬 분석 (Haiku)
+    log.info("[11/12] 4개 페르소나 분석 중 (병렬)...")
+
+    # 추가 컨텍스트
     extra_context = ""
     if regime_text:
         extra_context += f"\n\n━━━ 시장 레짐 ━━━\n{regime_text}"
@@ -268,6 +297,7 @@ def analyze(snapshot: MarketSnapshot) -> BriefingResult:
         extra_context += f"\n\n━━━ AI 메모리 (과거 추천 정확도) ━━━\n{mem_text}"
     if chart_text:
         extra_context += f"\n\n━━━ 차트 패턴 (AI Vision) ━━━\n{chart_text}"
+    extra_context += f"\n\n━━━ 매매 제약 (반드시 준수) ━━━\n{constraints_text}"
 
     market_context = _build_full_context(
         snapshot, gathered_news,
@@ -281,8 +311,8 @@ def analyze(snapshot: MarketSnapshot) -> BriefingResult:
     for pa in persona_results:
         log.info(f"  {pa.persona}: {pa.verdict} (확신도 {pa.confidence}%)")
 
-    # 11단계: 종합 판단 (Sonnet)
-    log.info("[11/11] 종합 판단 생성 중...")
+    # 12단계: 종합 판단 (Sonnet)
+    log.info("[12/12] 종합 판단 생성 중...")
     raw_text = synthesize(persona_results, market_context)
 
     data = _parse_json(raw_text)
