@@ -8,7 +8,8 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Label, Static
-from textual.worker import Worker, work
+from textual import work
+from textual.worker import Worker
 
 from config.settings import KRW_TICKERS
 from core.market import fetch_market, fmt_price, pct_bar

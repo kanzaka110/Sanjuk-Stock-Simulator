@@ -8,7 +8,8 @@ from textual.app import ComposeResult
 from textual.containers import VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Input, Label, Static
-from textual.worker import Worker, work
+from textual import work
+from textual.worker import Worker
 
 from core.analyzer import ask_ai
 from core.market import fetch_market

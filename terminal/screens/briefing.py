@@ -16,7 +16,8 @@ from textual.widgets import (
     Select,
     Static,
 )
-from textual.worker import Worker, work
+from textual import work
+from textual.worker import Worker
 
 from core.analyzer import analyze
 from core.market import fetch_market, signal_badge

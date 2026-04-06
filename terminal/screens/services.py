@@ -8,7 +8,8 @@ from textual.app import ComposeResult
 from textual.containers import VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Label, Static
-from textual.worker import Worker, work
+from textual import work
+from textual.worker import Worker
 
 
 class ServicesScreen(Screen):
