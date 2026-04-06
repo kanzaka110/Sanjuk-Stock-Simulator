@@ -8,9 +8,16 @@
   python main.py price        # Notion 주가 업데이트
 """
 
+import io
 import os
 import sys
 from pathlib import Path
+
+# Windows CP949 깨짐 방지 — stdout/stderr UTF-8 강제
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 # .env 로드
 env_path = Path(__file__).parent / ".env"
