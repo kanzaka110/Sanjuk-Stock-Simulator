@@ -104,17 +104,36 @@ def get_market_config(briefing_type: str) -> tuple[dict[str, str], dict[str, str
     return PORTFOLIO, INDICES, MACRO
 
 
-# ─── 예수금 (시뮬레이션 초기값) ─────────────────────
-# 실제 보유 수량 (삼성증권 실데이터 기준, 2026-04-07)
+# ─── 실제 보유 수량 (삼성증권 실데이터 기준, 2026-04-07) ─────
 # [일반] 종합계좌
-HOLDINGS: dict[str, dict] = {
-    "005930.KS": {"shares": 90, "avg_cost_krw": 60_425, "account": "일반"},
-    "NVDA": {"shares": 46, "avg_cost_usd": 132.9104, "ria_eligible": 46, "account": "일반"},
-    "360750.KS": {"shares": 343, "avg_cost_krw": 24_800, "account": "일반"},
-    "MU": {"shares": 11, "avg_cost_usd": 408.8181, "ria_eligible": 0, "account": "일반"},
-    "GOOGL": {"shares": 9, "avg_cost_usd": 318.03, "ria_eligible": 9, "account": "일반"},
-    "012450.KS": {"shares": 2, "avg_cost_krw": 1_314_500, "account": "일반"},
-    "LMT": {"shares": 1, "avg_cost_usd": 639.0, "ria_eligible": 0, "account": "일반"},
+HOLDINGS_GENERAL: dict[str, dict] = {
+    "005930.KS": {"shares": 90, "avg_cost_krw": 60_425},
+    "NVDA": {"shares": 46, "avg_cost_usd": 132.9104, "ria_eligible": 46},
+    "360750.KS": {"shares": 343, "avg_cost_krw": 24_800},
+    "MU": {"shares": 11, "avg_cost_usd": 408.8181, "ria_eligible": 0},
+    "GOOGL": {"shares": 9, "avg_cost_usd": 318.03, "ria_eligible": 9},
+    "012450.KS": {"shares": 2, "avg_cost_krw": 1_314_500},
+    "LMT": {"shares": 1, "avg_cost_usd": 639.0, "ria_eligible": 0},
 }
 
+# [IRP] 퇴직연금
+HOLDINGS_IRP: dict[str, dict] = {
+    "133690.KS": {"shares": 30, "avg_cost_krw": 111_077},   # TIGER 미국나스닥100
+    "360750.KS": {"shares": 118, "avg_cost_krw": 16_838},   # TIGER 미국S&P500
+    "329200.KS": {"shares": 70, "avg_cost_krw": 4_600},     # TIGER 리츠부동산인프라
+    "192090.KS": {"shares": 25, "avg_cost_krw": 13_130},    # TIGER 차이나CSI300
+}
+IRP_CASH: float = 2_780.0
+IRP_DEFAULT_OPTION: float = 4_784_915.0  # 디폴트옵션 안정투자형
+
+# [연금저축] CMA
+HOLDINGS_PENSION: dict[str, dict] = {
+    "133690.KS": {"shares": 69, "avg_cost_krw": 102_974},   # TIGER 미국나스닥100
+    "360750.KS": {"shares": 310, "avg_cost_krw": 18_214},   # TIGER 미국S&P500
+    "251350.KS": {"shares": 20, "avg_cost_krw": 37_145},    # KODEX MSCI선진국
+    "161510.KS": {"shares": 20, "avg_cost_krw": 26_180},    # PLUS 고배당주
+}
+PENSION_MMF: float = 6_880_513.0  # MMF 잔고
+
+# ─── 예수금 ────────────────────────────────────────
 DEFAULT_CASH: float = 3_539_839.0

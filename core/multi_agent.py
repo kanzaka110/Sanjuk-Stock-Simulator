@@ -269,16 +269,37 @@ def synthesize(
     else:
         market_focus = ""
 
-    # 보유 포지션 정보
-    from config.settings import DEFAULT_CASH, HOLDINGS
-    holdings_text = "\n".join(
-        f"  {tk}: {info.get('shares', 0)}주 "
-        f"(매수 ${info.get('avg_cost_usd', 0):.0f})"
-        f"{' [RIA 적격 ' + str(info.get('ria_eligible', 0)) + '주]' if info.get('ria_eligible', 0) > 0 else ''}"
-        if 'avg_cost_usd' in info else
-        f"  {tk}: {info.get('shares', 0)}주 (매수 ₩{info.get('avg_cost_krw', 0):,.0f})"
-        for tk, info in HOLDINGS.items()
+    # 보유 포지션 정보 (계좌별)
+    from config.settings import (
+        DEFAULT_CASH,
+        HOLDINGS_GENERAL,
+        HOLDINGS_IRP,
+        HOLDINGS_PENSION,
+        IRP_CASH,
+        IRP_DEFAULT_OPTION,
+        PENSION_MMF,
     )
+
+    def _fmt_holding(tk: str, info: dict) -> str:
+        shares = info.get("shares", 0)
+        ria = info.get("ria_eligible", 0)
+        ria_tag = f" [RIA 적격 {ria}주]" if ria > 0 else ""
+        if "avg_cost_usd" in info:
+            return f"  {tk}: {shares}주 (매수 ${info['avg_cost_usd']:.2f}){ria_tag}"
+        return f"  {tk}: {shares}주 (매수 ₩{info.get('avg_cost_krw', 0):,.0f})"
+
+    general_lines = [_fmt_holding(tk, info) for tk, info in HOLDINGS_GENERAL.items()]
+    irp_lines = [_fmt_holding(tk, info) for tk, info in HOLDINGS_IRP.items()]
+    pension_lines = [_fmt_holding(tk, info) for tk, info in HOLDINGS_PENSION.items()]
+
+    holdings_text = f"""[일반] 종합계좌 (예수금 ₩{DEFAULT_CASH:,.0f})
+{chr(10).join(general_lines)}
+
+[IRP] 퇴직연금 (현금 ₩{IRP_CASH:,.0f} + 디폴트옵션 ₩{IRP_DEFAULT_OPTION:,.0f})
+{chr(10).join(irp_lines)}
+
+[연금저축] CMA (MMF ₩{PENSION_MMF:,.0f})
+{chr(10).join(pension_lines)}"""
 
     system = f"""당신은 최고 투자 전략가(CIO)입니다. 4명의 분석가 의견을 종합하여 최종 전략을 결정합니다.
 
