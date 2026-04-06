@@ -78,25 +78,55 @@ PERSONAS: dict[str, str] = {
 # ═══════════════════════════════════════════════════════
 # 개별 페르소나 분석
 # ═══════════════════════════════════════════════════════
+# Claude tool_use로 구조화된 출력 강제
+_ANALYSIS_TOOL = {
+    "name": "submit_analysis",
+    "description": "투자 분석 결과를 구조화된 형태로 제출합니다.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "verdict": {
+                "type": "string",
+                "enum": ["매수", "매도", "홀딩", "관망"],
+                "description": "투자 판단",
+            },
+            "confidence": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "확신도 (0-100)",
+            },
+            "reasoning": {
+                "type": "string",
+                "description": "핵심 판단 근거 (200자 이내)",
+            },
+            "key_factors": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "핵심 요인 3개",
+            },
+            "risk_warning": {
+                "type": "string",
+                "description": "주요 리스크 (100자 이내)",
+            },
+        },
+        "required": ["verdict", "confidence", "reasoning", "key_factors", "risk_warning"],
+    },
+}
+
+
 def _run_persona(
     persona_name: str,
     persona_prompt: str,
     market_context: str,
 ) -> PersonaAnalysis:
-    """단일 페르소나 분석 실행 (Haiku)."""
+    """단일 페르소나 분석 실행 (Haiku, tool_use 구조화)."""
     client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 
     system = f"""당신은 '{persona_name}' 관점의 투자 분석가입니다.
 {persona_prompt}
 
-반드시 아래 JSON 형식으로만 응답하세요 (코드블록 없이):
-{{
-  "verdict": "매수|매도|홀딩|관망",
-  "confidence": 0-100,
-  "reasoning": "핵심 판단 근거 (200자 이내)",
-  "key_factors": ["핵심 요인 1", "핵심 요인 2", "핵심 요인 3"],
-  "risk_warning": "주요 리스크 (100자 이내)"
-}}"""
+시장 데이터를 분석한 후 반드시 submit_analysis 도구를 호출하여 결과를 제출하세요."""
 
     try:
         response = client.messages.create(
@@ -104,20 +134,19 @@ def _run_persona(
             max_tokens=1000,
             system=system,
             messages=[{"role": "user", "content": market_context}],
+            tools=[_ANALYSIS_TOOL],
+            tool_choice={"type": "tool", "name": "submit_analysis"},
         )
-        raw = response.content[0].text.strip()
 
+        # tool_use 블록에서 구조화된 데이터 추출
         data: dict = {}
-        if "```" in raw:
-            for part in raw.split("```"):
-                part = part.strip().lstrip("json").strip()
-                try:
-                    data = json.loads(part)
-                    break
-                except json.JSONDecodeError:
-                    continue
+        for block in response.content:
+            if block.type == "tool_use" and block.name == "submit_analysis":
+                data = block.input
+                break
+
         if not data:
-            data = json.loads(raw)
+            raise ValueError("tool_use 응답 없음")
 
         return PersonaAnalysis(
             persona=persona_name,
@@ -138,16 +167,16 @@ def _run_persona(
 
 
 def run_all_personas(market_context: str) -> list[PersonaAnalysis]:
-    """4개 페르소나를 병렬 실행.
+    """4개 페르소나를 병렬 실행 + 의견 충돌 시 반론 라운드.
 
-    Args:
-        market_context: 시장 데이터 + 뉴스 + 기술지표 + 감성 텍스트
+    1라운드: 4명 독립 분석 (병렬)
+    2라운드: 의견 충돌 감지 시 반론 (병렬) -- 다른 페르소나의 판단을 보고 재판단
 
     Returns:
-        PersonaAnalysis 리스트 (4개)
+        PersonaAnalysis 리스트 (반론 라운드 후 최종 판단)
     """
+    # 1라운드: 독립 분석
     results: list[PersonaAnalysis] = []
-
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {
             executor.submit(_run_persona, name, prompt, market_context): name
@@ -156,7 +185,52 @@ def run_all_personas(market_context: str) -> list[PersonaAnalysis]:
         for future in as_completed(futures):
             results.append(future.result())
 
-    return results
+    # 충돌 감지: 매수 vs 매도 의견이 동시에 존재하면 반론 라운드
+    verdicts = {r.verdict for r in results if r.confidence > 0}
+    has_buy = "매수" in verdicts
+    has_sell = "매도" in verdicts
+    high_conf_spread = max((r.confidence for r in results), default=0) - min(
+        (r.confidence for r in results if r.confidence > 0), default=0
+    )
+
+    if not (has_buy and has_sell) and high_conf_spread < 30:
+        return results  # 충돌 없음 -- 반론 불필요
+
+    log.info("  의견 충돌 감지 -- 반론 라운드 시작")
+
+    # 2라운드: 다른 페르소나의 판단을 보고 재판단
+    debate_context = _build_debate_context(results)
+    augmented_context = f"{market_context}\n\n{debate_context}"
+
+    round2: list[PersonaAnalysis] = []
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {
+            executor.submit(
+                _run_persona, name, prompt, augmented_context
+            ): name
+            for name, prompt in PERSONAS.items()
+        }
+        for future in as_completed(futures):
+            round2.append(future.result())
+
+    return round2
+
+
+def _build_debate_context(results: list[PersonaAnalysis]) -> str:
+    """반론 라운드용 컨텍스트 -- 다른 분석가들의 의견 요약."""
+    lines = [
+        "━━━ 다른 분석가들의 의견 (1라운드 결과) ━━━",
+        "아래 의견을 검토하고, 동의하거나 반론하세요.",
+        "약한 논리가 있으면 지적하고, 자신의 판단을 수정하거나 더 강하게 유지하세요.",
+        "",
+    ]
+    for r in results:
+        factors = ", ".join(r.key_factors) if r.key_factors else "-"
+        lines.append(
+            f"[{r.persona}] {r.verdict} (확신도 {r.confidence}%): "
+            f"{r.reasoning} | 리스크: {r.risk_warning}"
+        )
+    return "\n".join(lines)
 
 
 # ═══════════════════════════════════════════════════════

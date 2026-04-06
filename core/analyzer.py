@@ -33,6 +33,7 @@ def _build_full_context(
     risk_text: str = "",
     backtest_text: str = "",
     kr_market_text: str = "",
+    fundamentals_text: str = "",
 ) -> str:
     """멀티 에이전트에 전달할 통합 시장 컨텍스트 생성."""
     now = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
@@ -87,6 +88,9 @@ def _build_full_context(
 
     if kr_market_text:
         context += f"\n\n━━━ 한국 시장 심층 (기관/외국인/펀더멘털) ━━━\n{kr_market_text}"
+
+    if fundamentals_text:
+        context += f"\n\n━━━ 재무 데이터 (PER/EPS/매출/실적일정) ━━━\n{fundamentals_text}"
 
     return context
 
@@ -259,14 +263,25 @@ def analyze(snapshot: MarketSnapshot) -> BriefingResult:
                 backtest_results.append(opt)
     backtest_text = backtest_to_text(backtest_results)
 
-    # 7단계: 한국 시장 심층 (KRX)
-    log.info("[7/11] 한국 시장 데이터 조회 중...")
+    # 7단계: 재무 데이터 (yfinance)
+    log.info("[7/13] 재무 데이터 수집 중 (PER/EPS/매출/실적일정)...")
+    from core.fundamentals import fetch_all_fundamentals, fundamentals_to_text
+    fund_data = fetch_all_fundamentals(PORTFOLIO)
+    fundamentals_text = fundamentals_to_text(fund_data)
+    # 실적 임박 경고
+    upcoming = [d for d in fund_data if 0 <= d.days_to_earnings <= 7]
+    if upcoming:
+        for d in upcoming:
+            log.warning(f"  !! {d.name} 실적 발표 {d.days_to_earnings}일 후 ({d.earnings_date})")
+
+    # 8단계: 한국 시장 심층 (KRX)
+    log.info("[8/13] 한국 시장 데이터 조회 중...")
     flows = fetch_institutional_flow()
     fundamentals = fetch_fundamentals()
     kr_text = kr_market_to_text(flows, fundamentals)
 
     # 8단계: AI 메모리 — 미결 추천 평가 + 과거 기록 조회
-    log.info("[8/11] AI 메모리 조회 중...")
+    log.info("[8/13] AI 메모리 조회 중...")
     current_prices = {tk: q.price for tk, q in snapshot.stocks.items()}
     closed = evaluate_open_predictions(current_prices)
     if closed > 0:
@@ -274,20 +289,20 @@ def analyze(snapshot: MarketSnapshot) -> BriefingResult:
     mem_text = memory_to_text()
 
     # 9단계: 멀티모달 차트 분석 (Gemini Vision)
-    log.info("[9/11] 차트 패턴 분석 중 (AI Vision)...")
+    log.info("[10/13] 차트 패턴 분석 중 (AI Vision)...")
     chart_analyses = analyze_key_charts(PORTFOLIO, max_charts=4)
     chart_text = chart_analyses_to_text(chart_analyses)
     if chart_analyses:
         log.info(f"  {len(chart_analyses)}종목 차트 분석 완료")
 
     # 10단계: 매매 제약 조건 계산
-    log.info("[10/11] 매매 제약 조건 계산 중...")
+    log.info("[11/13] 매매 제약 조건 계산 중...")
     from core.portfolio import compute_allowed_actions, constraints_to_text
     constraints = compute_allowed_actions(current_prices)
     constraints_text = constraints_to_text(constraints, PORTFOLIO)
 
     # 11단계: 통합 컨텍스트 → 4개 페르소나 병렬 분석 (Haiku)
-    log.info("[11/12] 4개 페르소나 분석 중 (병렬)...")
+    log.info("[12/13] 4개 페르소나 분석 중 (병렬)...")
 
     # 추가 컨텍스트
     extra_context = ""
@@ -303,6 +318,7 @@ def analyze(snapshot: MarketSnapshot) -> BriefingResult:
         snapshot, gathered_news,
         indicators_text, sentiment_text,
         risk_text, backtest_text, kr_text,
+        fundamentals_text,
     )
     market_context += extra_context
 
@@ -312,7 +328,7 @@ def analyze(snapshot: MarketSnapshot) -> BriefingResult:
         log.info(f"  {pa.persona}: {pa.verdict} (확신도 {pa.confidence}%)")
 
     # 12단계: 종합 판단 (Sonnet)
-    log.info("[12/12] 종합 판단 생성 중...")
+    log.info("[13/13] 종합 판단 생성 중...")
     raw_text = synthesize(persona_results, market_context)
 
     data = _parse_json(raw_text)

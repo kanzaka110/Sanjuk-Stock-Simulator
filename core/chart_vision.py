@@ -153,25 +153,42 @@ def analyze_chart_with_vision(
 
         image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/png")
 
-        prompt = f"""이 차트는 {name}({ticker})의 {period} 캔들차트입니다.
-이동평균(SMA20, SMA50)과 볼린저밴드가 표시되어 있습니다.
+        chart_schema = {
+            "type": "object",
+            "properties": {
+                "patterns": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "support_levels": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                },
+                "resistance_levels": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                },
+                "trend_description": {"type": "string"},
+                "action_suggestion": {"type": "string"},
+                "confidence": {"type": "integer"},
+            },
+            "required": [
+                "patterns", "support_levels", "resistance_levels",
+                "trend_description", "action_suggestion", "confidence",
+            ],
+        }
 
-다음을 분석하여 JSON으로 반환하세요 (코드블록 없이):
-{{
-  "patterns": ["발견된 차트 패턴 목록 (더블탑, 헤드앤숄더, 컵앤핸들, 삼각형, 깃발 등)"],
-  "support_levels": [주요 지지선 가격들],
-  "resistance_levels": [주요 저항선 가격들],
-  "trend_description": "현재 추세와 흐름 설명 (50자 이내)",
-  "action_suggestion": "매매 제안 (50자 이내)",
-  "confidence": 0-100
-}}"""
+        prompt = f"""이 차트는 {name}({ticker})의 {period} 캔들차트다.
+SMA20, SMA50 이동평균과 볼린저밴드가 표시되어 있다.
+차트 패턴, 지지선/저항선, 추세, 매매 제안을 분석해줘."""
 
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=[prompt, image_part],
             config=types.GenerateContentConfig(
-                max_output_tokens=1000,
+                max_output_tokens=2000,
                 response_mime_type="application/json",
+                response_schema=chart_schema,
             ),
         )
 
@@ -179,17 +196,7 @@ def analyze_chart_with_vision(
         if not raw:
             return None
 
-        data: dict = {}
-        if "```" in raw:
-            for part in raw.split("```"):
-                part = part.strip().lstrip("json").strip()
-                try:
-                    data = json.loads(part)
-                    break
-                except json.JSONDecodeError:
-                    continue
-        if not data:
-            data = json.loads(raw)
+        data = json.loads(raw)
 
         return ChartAnalysis(
             ticker=ticker,

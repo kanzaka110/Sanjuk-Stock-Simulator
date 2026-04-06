@@ -1,8 +1,8 @@
 """
-감성 분석 — 뉴스 텍스트를 수치 점수로 변환
+감성 분석 -- 뉴스 텍스트를 수치 점수로 변환
 
-Gemini를 활용하여 뉴스 헤드라인/본문의 감성을
--100(극도 부정) ~ +100(극도 긍정) 점수로 변환한다.
+Gemini response_schema로 구조화된 JSON 출력을 강제하여
+파싱 실패를 방지한다.
 """
 
 from __future__ import annotations
@@ -18,6 +18,34 @@ from config.settings import GEMINI_API_KEY
 
 log = logging.getLogger(__name__)
 
+# Gemini response_schema 정의
+_SENTIMENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "overall": {
+            "type": "object",
+            "properties": {
+                "score": {"type": "integer"},
+                "summary": {"type": "string"},
+            },
+            "required": ["score", "summary"],
+        },
+        "stocks": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "score": {"type": "integer"},
+                    "summary": {"type": "string"},
+                },
+                "required": ["name", "score", "summary"],
+            },
+        },
+    },
+    "required": ["overall", "stocks"],
+}
+
 
 @dataclass(frozen=True)
 class SentimentScore:
@@ -25,9 +53,9 @@ class SentimentScore:
 
     ticker: str
     name: str
-    score: int = 0  # -100 ~ +100
-    label: str = "중립"  # 극도부정/부정/약부정/중립/약긍정/긍정/극도긍정
-    summary: str = ""  # 핵심 감성 요약 (1줄)
+    score: int = 0
+    label: str = "중립"
+    summary: str = ""
 
 
 @dataclass(frozen=True)
@@ -37,15 +65,15 @@ class MarketSentiment:
     overall_score: int = 0
     overall_label: str = "중립"
     stock_scores: tuple[SentimentScore, ...] = ()
-    fear_greed: str = "중립"  # 공포/불안/중립/탐욕/극도탐욕
+    fear_greed: str = "중립"
 
     def to_text(self) -> str:
         lines = [
-            f"【감성 분석】",
+            "【감성 분석】",
             f"  시장 전체: {self.overall_score:+d} [{self.overall_label}] | 공포탐욕: {self.fear_greed}",
         ]
         for s in self.stock_scores:
-            lines.append(f"  {s.name}: {s.score:+d} [{s.label}] — {s.summary}")
+            lines.append(f"  {s.name}: {s.score:+d} [{s.label}] -- {s.summary}")
         return "\n".join(lines)
 
 
@@ -83,32 +111,19 @@ def analyze_sentiment(
 ) -> MarketSentiment:
     """뉴스 텍스트에서 감성 점수 추출.
 
-    Args:
-        news_text: Gemini가 수집한 뉴스 전체 텍스트
-        stock_names: 종목명 리스트 (감성을 추출할 대상)
-
-    Returns:
-        MarketSentiment (실패 시 기본값 반환)
+    response_schema로 구조화된 JSON 출력을 강제한다.
     """
     if not GEMINI_API_KEY:
         return MarketSentiment()
 
     stocks_str = ", ".join(stock_names)
-    prompt = f"""다음 뉴스/분석 텍스트를 읽고 감성 점수를 JSON으로 반환해.
+    prompt = f"""다음 뉴스를 읽고 감성 점수를 매겨줘.
+점수: -100(극도 부정) ~ +100(극도 긍정).
+overall은 시장 전체, stocks는 개별 종목별 감성.
 
-점수 범위: -100(극도 부정) ~ +100(극도 긍정)
+분석 대상: {stocks_str}
 
-출력 형식 (순수 JSON, 코드블록 없이):
-{{
-  "overall": {{"score": 0, "summary": "시장 전체 한줄 요약"}},
-  "stocks": [
-    {{"name": "종목명", "score": 0, "summary": "해당 종목 감성 한줄 요약"}}
-  ]
-}}
-
-분석 대상 종목: {stocks_str}
-
-뉴스 텍스트:
+뉴스:
 {news_text[:8000]}"""
 
     try:
@@ -117,8 +132,9 @@ def analyze_sentiment(
             model="gemini-2.5-flash",
             contents=prompt,
             config=types.GenerateContentConfig(
-                max_output_tokens=2000,
+                max_output_tokens=4000,
                 response_mime_type="application/json",
+                response_schema=_SENTIMENT_SCHEMA,
             ),
         )
         raw = response.text.strip() if response.text else ""
@@ -126,18 +142,7 @@ def analyze_sentiment(
             log.warning("감성 분석: 빈 응답")
             return MarketSentiment()
 
-        # JSON 파싱
-        data: dict = {}
-        if "```" in raw:
-            for part in raw.split("```"):
-                part = part.strip().lstrip("json").strip()
-                try:
-                    data = json.loads(part)
-                    break
-                except json.JSONDecodeError:
-                    continue
-        if not data:
-            data = json.loads(raw)
+        data = json.loads(raw)
 
         overall = data.get("overall", {})
         overall_score = int(overall.get("score", 0))
