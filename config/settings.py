@@ -105,13 +105,16 @@ def get_market_config(briefing_type: str) -> tuple[dict[str, str], dict[str, str
 
 
 # ─── 예수금 (시뮬레이션 초기값) ─────────────────────
-# 실제 보유 수량 (삼성증권 거래내역 기준, 2026-04-06)
+# 실제 보유 수량 (삼성증권 실데이터 기준, 2026-04-07)
+# [일반] 종합계좌
 HOLDINGS: dict[str, dict] = {
-    "NVDA": {"shares": 46, "avg_cost_usd": 128.0, "ria_eligible": 46},
-    "GOOGL": {"shares": 9, "avg_cost_usd": 324.0, "ria_eligible": 9},
-    "MU": {"shares": 11, "avg_cost_usd": 408.82, "ria_eligible": 0},
-    "LMT": {"shares": 1, "avg_cost_usd": 639.0, "ria_eligible": 0},
-    "012450.KS": {"shares": 2, "avg_cost_krw": 1_314_500},
+    "005930.KS": {"shares": 90, "avg_cost_krw": 60_425, "account": "일반"},
+    "NVDA": {"shares": 46, "avg_cost_usd": 132.9104, "ria_eligible": 46, "account": "일반"},
+    "360750.KS": {"shares": 343, "avg_cost_krw": 24_800, "account": "일반"},
+    "MU": {"shares": 11, "avg_cost_usd": 408.8181, "ria_eligible": 0, "account": "일반"},
+    "GOOGL": {"shares": 9, "avg_cost_usd": 318.03, "ria_eligible": 9, "account": "일반"},
+    "012450.KS": {"shares": 2, "avg_cost_krw": 1_314_500, "account": "일반"},
+    "LMT": {"shares": 1, "avg_cost_usd": 639.0, "ria_eligible": 0, "account": "일반"},
 }
 
 DEFAULT_CASH: float = 3_539_839.0
