@@ -19,6 +19,16 @@ CLAUDE_API_KEY: str = os.environ.get(
     "CLAUDE_API_KEY", os.environ.get("ANTHROPIC_API_KEY", "")
 )
 
+# ─── Notion API ─────────────────────────────────────
+NOTION_API_KEY: str = os.environ.get("NOTION_API_KEY", "")
+NOTION_DB_ID: str = os.environ.get("NOTION_DB_ID", "")
+NOTION_TOKEN: str = os.environ.get("NOTION_TOKEN", NOTION_API_KEY)
+NOTION_DATABASE_ID: str = os.environ.get("NOTION_DATABASE_ID", NOTION_DB_ID)
+
+# ─── 텔레그램 ──────────────────────────────────────
+TELEGRAM_BOT_TOKEN: str = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID: str = os.environ.get("TELEGRAM_CHAT_ID", "")
+
 # ─── 포트폴리오 ─────────────────────────────────────
 PORTFOLIO: dict[str, str] = {
     "005930.KS": "삼성전자",

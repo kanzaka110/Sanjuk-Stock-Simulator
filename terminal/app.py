@@ -12,6 +12,8 @@ from terminal.screens.dashboard import DashboardScreen
 from terminal.screens.analysis import AnalysisScreen
 from terminal.screens.trade import TradeScreen
 from terminal.screens.ask import AskScreen
+from terminal.screens.briefing import BriefingScreen
+from terminal.screens.services import ServicesScreen
 
 
 class StockSimulatorApp(App):
@@ -26,6 +28,8 @@ class StockSimulatorApp(App):
         Binding("a", "switch_screen('analysis')", "AI 분석", show=True),
         Binding("t", "switch_screen('trade')", "매매", show=True),
         Binding("q", "switch_screen('ask')", "AI 질의", show=True),
+        Binding("b", "switch_screen('briefing')", "브리핑", show=True),
+        Binding("s", "switch_screen('services')", "서비스", show=True),
         Binding("ctrl+c", "quit", "종료", show=True),
     ]
 
@@ -34,6 +38,8 @@ class StockSimulatorApp(App):
         "analysis": AnalysisScreen,
         "trade": TradeScreen,
         "ask": AskScreen,
+        "briefing": BriefingScreen,
+        "services": ServicesScreen,
     }
 
     DEFAULT_CSS = """

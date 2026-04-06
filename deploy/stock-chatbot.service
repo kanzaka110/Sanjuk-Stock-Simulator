@@ -1,0 +1,15 @@
+[Unit]
+Description=Sanjuk Stock Chatbot (Telegram)
+After=network.target
+
+[Service]
+Type=simple
+User=kanzaka110
+WorkingDirectory=/home/kanzaka110/Sanjuk-Stock-Simulator
+EnvironmentFile=/home/kanzaka110/Sanjuk-Stock-Simulator/.env
+ExecStart=/home/kanzaka110/Sanjuk-Stock-Simulator/venv/bin/python -c "from core.telegram import run_chatbot; run_chatbot()"
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
