@@ -120,17 +120,53 @@ def _section_market_overview(snapshot: MarketSnapshot) -> list[dict]:
 
 
 def _section_market_summary(result: BriefingResult) -> list[dict]:
+    raw = result.raw_json
     blocks = [H2("📋  시장 요약", "blue_background")]
-    for line in result.market_summary.split("\n"):
-        line = line.strip()
-        if not line:
-            continue
-        if line.startswith("- ") or line.startswith("* "):
-            blocks.append(BUL(line[2:]))
+
+    # 시장 상태 뱃지
+    status = result.market_status
+    status_map = {
+        "상승": ("green_background", "📈"),
+        "하락": ("red_background", "📉"),
+        "보합": ("gray_background", "➖"),
+        "혼조": ("orange_background", "🔀"),
+    }
+    bg, icon = status_map.get(status, ("gray_background", "📊"))
+    blocks.append(CALLOUT(f"시장 상황: {status}   |   투자 결정: {result.investment_decision}", icon, bg))
+    blocks.append(P(""))  # 여백
+
+    # 본문을 문단 단위로 묶기
+    paragraphs = _split_into_paragraphs(result.market_summary)
+    for para in paragraphs:
+        if para.startswith("- ") or para.startswith("* "):
+            blocks.append(BUL(para[2:]))
         else:
-            blocks.append(P(line))
+            blocks.append(P(para))
+
+    # 합의점 / 불일치 (JSON에 있지만 기존에 미렌더링)
+    consensus = raw.get("consensus", "")
+    dissent = raw.get("dissent", "")
+    if consensus or dissent:
+        blocks.append(P(""))  # 여백
+        blocks.append(H2("🤝  분석가 합의 vs 불일치", "gray_background"))
+        if consensus:
+            blocks.append(CALLOUT(f"합의\n{consensus}", "✅", "green_background"))
+        if dissent:
+            blocks.append(CALLOUT(f"불일치\n{dissent}", "⚔️", "orange_background"))
+
     blocks.append(DIV())
     return blocks
+
+
+def _split_into_paragraphs(text: str) -> list[str]:
+    """긴 텍스트를 문단 단위로 분리. 연속된 빈 줄은 하나로."""
+    lines = text.split("\n")
+    result: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped:
+            result.append(stripped)
+    return result
 
 
 def _section_portfolio(result: BriefingResult, snapshot: MarketSnapshot) -> list[dict]:
@@ -163,30 +199,41 @@ def _section_strategy(result: BriefingResult) -> list[dict]:
     blocks = [H1("🎯  매수 / 매도 전략", "red_background")]
     if result.strategy_summary:
         blocks.append(CALLOUT(result.strategy_summary, "⚡", "yellow_background"))
-    blocks.append(DIV())
+    blocks.append(P(""))  # 여백
 
     # 매수
     if result.buy_signals:
         blocks.append(H2("🟢  매수 액션", "green_background"))
-        buy_rows: list[list[str]] = [["종목", "긴급도", "진입가", "목표가", "손절가", "수량"]]
+        buy_rows: list[list[str]] = [["종목", "계좌", "긴급도", "진입가", "목표가", "손절가", "수량"]]
         for sig in result.buy_signals:
+            # raw_json에서 account 태그 가져오기
+            raw_buy = result.raw_json.get("strategy_buy", [])
+            matching = next((r for r in raw_buy if r.get("ticker") == sig.ticker), {})
+            account = matching.get("account", "")
             buy_rows.append([
-                f"{sig.name} ({sig.ticker})", urgency_badge(sig.urgency),
+                f"{sig.name} ({sig.ticker})", account, urgency_badge(sig.urgency),
                 sig.entry_price, sig.target_price, sig.stop_loss, sig.shares,
             ])
         blocks.append(TABLE(buy_rows))
+        blocks.append(P(""))  # 여백
 
         for sig in result.buy_signals:
             detail: list[dict] = []
             if sig.timing:
-                detail.append(CALLOUT(f"⏰  진입 타이밍\n{sig.timing}", "⏰", "blue_background"))
+                detail.append(CALLOUT(f"진입 타이밍: {sig.timing}", "⏰", "blue_background"))
             if sig.split_plan:
-                detail.append(CALLOUT(f"📐  분할 매수 계획\n{sig.split_plan}", "📐", "purple_background"))
+                detail.append(CALLOUT(f"분할 매수 계획: {sig.split_plan}", "📐", "purple_background"))
             if sig.reason:
-                detail.append(P("📌  매수 근거", bold=True))
+                detail.append(P("매수 근거", bold=True))
                 for line in sig.reason.split("\n"):
                     if line.strip():
                         detail.append(BUL(line.strip()))
+            # risk_note 표시
+            raw_buy = result.raw_json.get("strategy_buy", [])
+            matching = next((r for r in raw_buy if r.get("ticker") == sig.ticker), {})
+            risk_note = matching.get("risk_note", "")
+            if risk_note:
+                detail.append(CALLOUT(f"리스크: {risk_note}", "⚠️", "red_background"))
             if detail:
                 blocks.append(TOGGLE(f"▸  {sig.name} ({sig.ticker}) 상세 전략", detail, "green"))
         blocks.append(DIV())
@@ -194,26 +241,35 @@ def _section_strategy(result: BriefingResult) -> list[dict]:
     # 매도
     if result.sell_signals:
         blocks.append(H2("🔴  매도 / 주의 종목", "red_background"))
-        sell_rows: list[list[str]] = [["종목", "긴급도", "현재가", "익절가", "손절가", "근거"]]
+        sell_rows: list[list[str]] = [["종목", "계좌", "긴급도", "현재가", "익절가", "손절가", "수량"]]
         for sig in result.sell_signals:
+            raw_sell = result.raw_json.get("strategy_sell", [])
+            matching = next((r for r in raw_sell if r.get("ticker") == sig.ticker), {})
+            account = matching.get("account", "")
+            shares = matching.get("shares", "")
             sell_rows.append([
-                f"{sig.name} ({sig.ticker})", urgency_badge(sig.urgency),
-                sig.entry_price, sig.target_price, sig.stop_loss,
-                sig.reason[:60],
+                f"{sig.name} ({sig.ticker})", account, urgency_badge(sig.urgency),
+                sig.entry_price, sig.target_price, sig.stop_loss, shares,
             ])
         blocks.append(TABLE(sell_rows))
+        blocks.append(P(""))  # 여백
 
         for sig in result.sell_signals:
             detail = []
             if sig.timing:
-                detail.append(CALLOUT(f"⏰  매도 타이밍\n{sig.timing}", "⏰", "orange_background"))
+                detail.append(CALLOUT(f"매도 타이밍: {sig.timing}", "⏰", "orange_background"))
             if sig.reason:
-                detail.append(P("📌  매도 근거", bold=True))
+                detail.append(P("매도 근거", bold=True))
                 for line in sig.reason.split("\n"):
                     if line.strip():
                         detail.append(BUL(line.strip()))
             if detail:
                 blocks.append(TOGGLE(f"▸  {sig.name} ({sig.ticker}) 매도 상세", detail, "red"))
+        blocks.append(DIV())
+
+    # 매수도 매도도 없으면
+    if not result.buy_signals and not result.sell_signals:
+        blocks.append(CALLOUT("현재 매수/매도 신호 없음 — 관망 유지", "⏸️", "gray_background"))
         blocks.append(DIV())
 
     return blocks
@@ -237,9 +293,42 @@ def _section_advisor(result: BriefingResult) -> list[dict]:
     blocks = [H1(f"💬  AI 솔직한 조언 — {verdict}", bg)]
     if oneliner:
         blocks.append(CALLOUT(oneliner, emoji, bg))
+    blocks.append(P(""))  # 여백
+
+    # 종합 결론을 먼저 (결론 먼저 원칙)
+    if conclusion:
+        blocks.append(H2("📝  종합 결론", "yellow_background"))
+        # 결론이 긴 경우 첫 문장만 Callout, 나머지는 본문
+        conclusion_lines = [l.strip() for l in conclusion.split("\n") if l.strip()]
+        if conclusion_lines:
+            blocks.append(CALLOUT(conclusion_lines[0], "💡", "yellow_background"))
+            for line in conclusion_lines[1:]:
+                if line.startswith("- ") or line.startswith("* "):
+                    blocks.append(BUL(line[2:]))
+                else:
+                    blocks.append(P(line))
+        blocks.append(P(""))  # 여백
 
     # raw_json에서 추가 데이터 사용
     raw = result.raw_json
+
+    # 리스크 vs 기회 (2컬럼 느낌 — 각각 별도 블록)
+    risks = raw.get("advisor_risks", [])
+    opps = raw.get("advisor_opportunities", [])
+    if risks or opps:
+        blocks.append(H2("⚖️  리스크 vs 기회", "gray_background"))
+        if risks:
+            blocks.append(P("⚠️  리스크 요인", bold=True))
+            for r in risks:
+                blocks.append(BUL(r))
+            blocks.append(P(""))  # 여백
+        if opps:
+            blocks.append(P("💡  기회 요인", bold=True))
+            for o in opps:
+                blocks.append(BUL(o))
+        blocks.append(DIV())
+
+    # 매수 조건 체크리스트
     checklist = raw.get("advisor_checklist", [])
     if checklist:
         blocks.append(H2("✅  매수 조건 체크리스트", "gray_background"))
@@ -253,18 +342,9 @@ def _section_advisor(result: BriefingResult) -> list[dict]:
                 item.get("detail", ""),
             ])
         blocks.append(TABLE(ck_rows))
-        blocks.append(DIV())
+        blocks.append(P(""))  # 여백
 
-    risks = raw.get("advisor_risks", [])
-    opps = raw.get("advisor_opportunities", [])
-    if risks or opps:
-        blocks.append(H2("⚖️  리스크 vs 기회", "gray_background"))
-        if risks:
-            blocks.append(CALLOUT("리스크\n" + "\n".join(f"• {r}" for r in risks), "⚠️", "red_background"))
-        if opps:
-            blocks.append(CALLOUT("기회\n" + "\n".join(f"• {o}" for o in opps), "💡", "green_background"))
-        blocks.append(DIV())
-
+    # 시나리오별 액션 플랜
     scenarios = raw.get("advisor_scenarios", [])
     if scenarios:
         blocks.append(H2("📅  시나리오별 액션 플랜", "blue_background"))
@@ -273,20 +353,69 @@ def _section_advisor(result: BriefingResult) -> list[dict]:
             sc_rows.append([sc.get("label", ""), sc.get("condition", ""),
                             sc.get("action", ""), sc.get("amount", "")])
         blocks.append(TABLE(sc_rows))
-        blocks.append(DIV())
 
-    if conclusion:
-        blocks.append(H2("📝  종합 결론 (직언)", "yellow_background"))
-        for line in conclusion.split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith("- ") or line.startswith("* "):
-                blocks.append(BUL(line[2:]))
-            else:
-                blocks.append(P(line))
-        blocks.append(DIV())
+    blocks.append(DIV())
+    return blocks
 
+
+def _section_account_strategy(result: BriefingResult) -> list[dict]:
+    """계좌별 전략 섹션 (기존에 미렌더링)."""
+    raw = result.raw_json
+    acct = raw.get("account_strategy", {})
+    if not acct:
+        return []
+
+    blocks = [H1("🏦  계좌별 전략", "purple_background")]
+
+    acct_config = [
+        ("ISA", "🟦", "blue_background", "국내주식/ETF 전용"),
+        ("RIA", "🟧", "orange_background", "NVDA/GOOGL 매도 전용 (5/31)"),
+        ("일반", "⬜", "gray_background", "종합 계좌"),
+        ("연금_IRP", "🟪", "purple_background", "리밸런싱 전용"),
+    ]
+
+    for key, icon, bg, desc in acct_config:
+        strategy = acct.get(key, "")
+        if strategy:
+            blocks.append(CALLOUT(f"[{key}] {desc}\n{strategy}", icon, bg))
+            blocks.append(P(""))  # 여백
+
+    blocks.append(DIV())
+    return blocks
+
+
+def _section_persona_summary(result: BriefingResult) -> list[dict]:
+    """4개 페르소나 요약 섹션 (기존에 미렌더링)."""
+    raw = result.raw_json
+    personas = raw.get("persona_summary", {})
+    if not personas:
+        return []
+
+    # 토글 안에 넣어서 접을 수 있게
+    persona_blocks: list[dict] = []
+    persona_icons = {
+        "가치투자자": "📊",
+        "성장투자자": "🚀",
+        "기술적분석가": "📈",
+        "매크로분석가": "🌍",
+    }
+    for name, summary in personas.items():
+        icon = persona_icons.get(name, "🔹")
+        persona_blocks.append(CALLOUT(f"{icon} [{name}]\n{summary}", icon, "gray_background"))
+
+    # 레짐/리스크 정보도 포함
+    regime = raw.get("regime", "")
+    risk_level = raw.get("risk_level", "")
+    if regime or risk_level:
+        meta_text = ""
+        if regime:
+            meta_text += f"시장 레짐: {regime}"
+        if risk_level:
+            meta_text += f"   |   리스크 레벨: {risk_level}"
+        persona_blocks.append(P(meta_text, bold=True))
+
+    blocks = [TOGGLE("🧠  4개 페르소나 분석 요약 (펼치기)", persona_blocks, "default")]
+    blocks.append(DIV())
     return blocks
 
 
@@ -308,6 +437,18 @@ def _section_portfolio_raw(snapshot: MarketSnapshot) -> list[dict]:
     blocks.append(TABLE(rows))
     blocks.append(DIV())
     return blocks
+
+
+def _section_next_action(result: BriefingResult) -> list[dict]:
+    """다음 액션 섹션."""
+    raw = result.raw_json
+    next_action = raw.get("next_action", "")
+    if not next_action:
+        return []
+    return [
+        CALLOUT(f"📌  다음 액션\n{next_action}", "🎯", "blue_background"),
+        P(""),  # 여백
+    ]
 
 
 def _section_footer() -> list[dict]:
@@ -349,15 +490,18 @@ def save_to_notion(
     now_kst = datetime.now(KST)
     dt_iso = now_kst.isoformat()
 
-    # 블록 조립
+    # 블록 조립 — 결론 먼저, 상세는 뒤로
     blocks: list[dict] = []
     blocks += _section_header(now_kst.strftime("%Y-%m-%d %H:%M KST"), label)
-    blocks += _section_market_overview(snapshot)
-    blocks += _section_market_summary(result)
-    blocks += _section_portfolio(result, snapshot)
-    blocks += _section_advisor(result)
-    blocks += _section_strategy(result)
-    blocks += _section_portfolio_raw(snapshot)
+    blocks += _section_advisor(result)           # 1. AI 조언 + 결론 (가장 먼저)
+    blocks += _section_strategy(result)          # 2. 매수/매도 전략
+    blocks += _section_account_strategy(result)  # 3. 계좌별 전략 (신규)
+    blocks += _section_market_summary(result)    # 4. 시장 요약 + 합의/불일치
+    blocks += _section_portfolio(result, snapshot)  # 5. 보유 종목 현황
+    blocks += _section_market_overview(snapshot)  # 6. 시장 지수/매크로
+    blocks += _section_persona_summary(result)   # 7. 페르소나 요약 (토글, 신규)
+    blocks += _section_portfolio_raw(snapshot)    # 8. 실시간 현황 (참고)
+    blocks += _section_next_action(result)       # 9. 다음 액션
     blocks += _section_footer()
     children = blocks[:100]
 
