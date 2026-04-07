@@ -9,10 +9,9 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from config.settings import (
-    ALERT_COOLDOWN_SEC,
     CLAUDE_API_KEY,
     KST,
     MONITOR_INTERVAL_SEC,
@@ -20,7 +19,6 @@ from config.settings import (
     PRICE_CHANGE_THRESHOLD,
     RSI_HIGH_THRESHOLD,
     RSI_LOW_THRESHOLD,
-    US_PORTFOLIO,
     VIX_THRESHOLD,
 )
 from core.monitor_models import AlertResult, AlertTrigger, Severity, TriggerType
@@ -33,7 +31,7 @@ class MarketMonitor:
 
     def __init__(self) -> None:
         self._running: bool = False
-        self._cooldowns: dict[str, datetime] = {}
+        self._active_alerts: set[str] = set()  # 현재 발동 중인 알림 키
         self._last_scan: datetime | None = None
 
     def run(self) -> None:
@@ -58,12 +56,22 @@ class MarketMonitor:
                 triggers = self._scan_all()
                 self._last_scan = now
 
+                # 현재 스캔에서 발동된 키 수집
+                current_keys: set[str] = set()
                 for trigger in triggers:
-                    if not self._is_cooled_down(trigger):
+                    key = self._alert_key(trigger)
+                    current_keys.add(key)
+
+                    if key in self._active_alerts:
+                        # 이미 알림 보낸 상태 → 스킵
                         continue
+                    # 새로 발동 → 알림 전송
                     result = self._process_trigger(trigger)
                     self._send_alert(result)
-                    self._set_cooldown(trigger)
+                    self._active_alerts.add(key)
+
+                # 조건 해소된 알림 제거 (다음에 다시 발동하면 재전송)
+                self._active_alerts -= (self._active_alerts - current_keys)
 
                 self._sleep(MONITOR_INTERVAL_SEC)
 
@@ -82,11 +90,9 @@ class MarketMonitor:
 
     @property
     def active_cooldowns(self) -> dict[str, datetime]:
+        """하위 호환용 — 활성 알림 키 반환."""
         now = datetime.now(KST)
-        return {
-            k: v for k, v in self._cooldowns.items()
-            if v > now
-        }
+        return {k: now for k in self._active_alerts}
 
     # ─── Tier 1: 무료 수치 체크 ───────────────────────
 
@@ -195,24 +201,10 @@ class MarketMonitor:
             )
         return None
 
-    # ─── 쿨다운 관리 ──────────────────────────────────
+    # ─── 알림 상태 관리 ─────────────────────────────────
 
-    def _cooldown_key(self, trigger: AlertTrigger) -> str:
+    def _alert_key(self, trigger: AlertTrigger) -> str:
         return f"{trigger.ticker}:{trigger.trigger_type.value}"
-
-    def _is_cooled_down(self, trigger: AlertTrigger) -> bool:
-        """쿨다운 경과 여부. True면 알림 전송 가능."""
-        key = self._cooldown_key(trigger)
-        expires = self._cooldowns.get(key)
-        if expires is None:
-            return True
-        return datetime.now(KST) >= expires
-
-    def _set_cooldown(self, trigger: AlertTrigger) -> None:
-        key = self._cooldown_key(trigger)
-        self._cooldowns[key] = datetime.now(KST) + timedelta(
-            seconds=ALERT_COOLDOWN_SEC,
-        )
 
     # ─── Tier 2: AI 분석 (트리거 시에만) ───────────────
 
