@@ -164,11 +164,19 @@ API_PORT=8000         # API 서버 포트
 - 미국장 브리핑: KST 21:00 (UTC 12:00) — cron
 - 주가 업데이트: 국내 개장/마감 + 미국 개장/마감 (4회/일)
 
+## 모바일 접근
+
+- **SSH 앱 직접 접속** (권장, 빠름): `ssh ohmil@35.238.77.143` → `claude`
+- **Claude 앱 remote-control**: GCP에서 `tmux new -s claude` → `claude remote-control`
+- **텔레그램 봇**: 브리핑/시세 확인 (가장 빠름)
+- 모든 모바일 Claude Code 사용은 **구독 포함 (추가 비용 $0)**
+
 ## 개발 참고
 
 - Textual TUI 프레임워크 사용
 - 전략 논의는 Claude Code 터미널에서 직접 수행 (추가 비용 없음)
 - 텔레그램 대화형 챗봇은 비용 문제로 폐기 — 명령 수신 + 알림 전송만
 - 자동화 브리핑 API 호출 (월 ~$4) + 모니터 알림 (월 ~$0.1)
+- Claude 앱 프로젝트용 컨텍스트: `docs/claude_project_prompt.md`
 - 문서는 한국어로 작성
 - 개인 금융정보 포함 — 보안 유의 (API 키/계좌번호 하드코딩 금지)
