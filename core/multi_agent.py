@@ -269,16 +269,28 @@ def synthesize(
     else:
         market_focus = ""
 
-    # 보유 포지션 정보 (계좌별)
+    # 보유 포지션 정보 (계좌별, briefing_type에 따라 필터링)
     from config.settings import (
         DEFAULT_CASH,
         HOLDINGS_GENERAL,
+        HOLDINGS_ISA,
         HOLDINGS_IRP,
         HOLDINGS_PENSION,
+        ISA_CASH,
         IRP_CASH,
         IRP_DEFAULT_OPTION,
         PENSION_MMF,
     )
+
+    def _is_kr_ticker(tk: str) -> bool:
+        return ".KS" in tk
+
+    def _filter_holdings(holdings: dict, bt: str) -> dict:
+        if bt == "KR_BEFORE":
+            return {tk: info for tk, info in holdings.items() if _is_kr_ticker(tk)}
+        if bt == "US_BEFORE":
+            return {tk: info for tk, info in holdings.items() if not _is_kr_ticker(tk)}
+        return holdings
 
     def _fmt_holding(tk: str, info: dict) -> str:
         shares = info.get("shares", 0)
@@ -288,18 +300,27 @@ def synthesize(
             return f"  {tk}: {shares}주 (매수 ${info['avg_cost_usd']:.2f}){ria_tag}"
         return f"  {tk}: {shares}주 (매수 ₩{info.get('avg_cost_krw', 0):,.0f})"
 
-    general_lines = [_fmt_holding(tk, info) for tk, info in HOLDINGS_GENERAL.items()]
-    irp_lines = [_fmt_holding(tk, info) for tk, info in HOLDINGS_IRP.items()]
-    pension_lines = [_fmt_holding(tk, info) for tk, info in HOLDINGS_PENSION.items()]
+    filtered_general = _filter_holdings(HOLDINGS_GENERAL, briefing_type)
+    filtered_isa = _filter_holdings(HOLDINGS_ISA, briefing_type)
+    filtered_irp = _filter_holdings(HOLDINGS_IRP, briefing_type)
+    filtered_pension = _filter_holdings(HOLDINGS_PENSION, briefing_type)
+
+    general_lines = [_fmt_holding(tk, info) for tk, info in filtered_general.items()]
+    isa_lines = [_fmt_holding(tk, info) for tk, info in filtered_isa.items()]
+    irp_lines = [_fmt_holding(tk, info) for tk, info in filtered_irp.items()]
+    pension_lines = [_fmt_holding(tk, info) for tk, info in filtered_pension.items()]
 
     holdings_text = f"""[일반] 종합계좌 (예수금 ₩{DEFAULT_CASH:,.0f})
-{chr(10).join(general_lines)}
+{chr(10).join(general_lines) if general_lines else "  (해당 시장 보유 없음)"}
+
+[ISA] 중개형 ISA (예수금 ₩{ISA_CASH:,.0f})
+{chr(10).join(isa_lines) if isa_lines else "  (보유 종목 없음 — 신규 매수 가능)"}
 
 [IRP] 퇴직연금 (현금 ₩{IRP_CASH:,.0f} + 디폴트옵션 ₩{IRP_DEFAULT_OPTION:,.0f})
-{chr(10).join(irp_lines)}
+{chr(10).join(irp_lines) if irp_lines else "  (해당 시장 보유 없음)"}
 
 [연금저축] CMA (MMF ₩{PENSION_MMF:,.0f})
-{chr(10).join(pension_lines)}"""
+{chr(10).join(pension_lines) if pension_lines else "  (해당 시장 보유 없음)"}"""
 
     system = f"""당신은 최고 투자 전략가(CIO)입니다. 4명의 분석가 의견을 종합하여 최종 전략을 결정합니다.
 
@@ -316,9 +337,9 @@ def synthesize(
 
 ━━━ 계좌 규칙 (반드시 준수) ━━━
 - 모든 매수/매도 신호에 계좌 태그 필수: [일반], [ISA], [RIA], [연금저축], [IRP]
-- [ISA]: 국내주식 + 국내상장 ETF만 매수 가능. 해외 개별주식 불가.
+- [ISA]: 국내주식 + 국내상장 ETF만 매수 가능. 해외 개별주식 불가. 예수금 2,000만원 — 적극 활용 대상.
 - [RIA]: 매도 전용. NVDA/GOOGL만 적격 (2025.12.23 이전 매수분). 5/31까지 100% 양도세 면제.
-- [일반]: 5/31 전까지 해외주식 신규 매수 금지 (RIA 한도 차감). 국내주식은 ISA 우선.
+- [일반]: 5/31 전까지 해외주식 신규 매수 금지 (RIA 한도 차감). 국내주식은 ISA 우선 매수.
 - [연금저축/IRP]: 2026년 납입 완료. 리밸런싱만.
 - 전문 용어 사용 시 괄호로 쉬운 설명 병기 (예: RSI(과매도 지표) 35)
 - 한눈에 알아보기 쉽게. 표 적극 활용. 결론 먼저.{market_focus}"""
