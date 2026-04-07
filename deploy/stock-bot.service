@@ -12,9 +12,9 @@ ExecStart=/home/kanzaka110/Sanjuk-Stock-Simulator/venv/bin/python -u main.py bot
 Restart=always
 RestartSec=15
 
-# 로그
-StandardOutput=append:/home/kanzaka110/logs/bot/bot.log
-StandardError=append:/home/kanzaka110/logs/bot/bot.log
+# 로그 — journalctl -u stock-bot -f 로 확인
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
