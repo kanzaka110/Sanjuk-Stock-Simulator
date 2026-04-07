@@ -117,19 +117,40 @@ def _parse_signals(raw: list[dict], kind: str) -> tuple[Signal, ...]:
 
 
 def _parse_json(raw_text: str) -> dict:
-    """Claude/Gemini 응답에서 JSON 추출."""
+    """Claude/Gemini 응답에서 JSON 추출. 문법 오류 자동 복구."""
     data: dict = {}
+    candidates: list[str] = []
+
     if "```" in raw_text:
         for part in raw_text.split("```"):
             part = part.strip().lstrip("json").strip()
+            if part:
+                candidates.append(part)
+    candidates.append(raw_text)
+
+    for candidate in candidates:
+        for text in [candidate, _fix_json(candidate)]:
             try:
-                data = json.loads(part)
-                break
-            except json.JSONDecodeError:
+                data = json.loads(text)
+                if isinstance(data, dict):
+                    return data
+            except (json.JSONDecodeError, ValueError):
                 continue
-    if not data:
-        data = json.loads(raw_text)
-    return data
+
+    log.error(f"JSON 파싱 최종 실패 (길이: {len(raw_text)})")
+    raise json.JSONDecodeError("JSON 파싱 실패", raw_text, 0)
+
+
+def _fix_json(text: str) -> str:
+    """흔한 JSON 문법 오류 자동 수정."""
+    import re
+    # trailing comma 제거: ,} 또는 ,]
+    text = re.sub(r',\s*([}\]])', r'\1', text)
+    # 작은따옴표 → 큰따옴표
+    text = text.replace("'", '"')
+    # 제어 문자 제거
+    text = re.sub(r'[\x00-\x1f]+', ' ', text)
+    return text
 
 
 def _build_briefing_result(data: dict) -> BriefingResult:
