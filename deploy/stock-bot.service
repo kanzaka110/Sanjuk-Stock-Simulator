@@ -8,7 +8,7 @@ Type=simple
 User=kanzaka110
 WorkingDirectory=/home/kanzaka110/Sanjuk-Stock-Simulator
 EnvironmentFile=/home/kanzaka110/Sanjuk-Stock-Simulator/.env
-ExecStart=/bin/bash /home/kanzaka110/Sanjuk-Stock-Simulator/deploy/run_bot.sh
+ExecStart=/bin/bash -c 'cd /home/kanzaka110/Sanjuk-Stock-Simulator && /home/kanzaka110/Sanjuk-Stock-Simulator/venv/bin/python -u main.py bot'
 Restart=always
 RestartSec=15
 
