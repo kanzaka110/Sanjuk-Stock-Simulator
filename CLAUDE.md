@@ -26,6 +26,11 @@ Sanjuk-Stock-Simulator/
 │   ├── portfolio.py       # 포트폴리오 관리 (보유종목, 손익, 매매 제약)
 │   ├── notion.py          # Notion 브리핑 저장 (블록 빌더 + 페이지 생성)
 │   ├── telegram.py        # 텔레그램 알림 전송 (브리핑 결과만)
+│   ├── telegram_bot.py    # 텔레그램 봇 명령 수신 (getUpdates 폴링)
+│   ├── monitor.py         # 2-tier 시장 모니터 (수치 체크 + AI 알림)
+│   ├── monitor_models.py  # 모니터링 데이터 모델 (AlertTrigger/AlertResult)
+│   ├── market_hours.py    # 장 시간 판별 (한국장/미국장/써머타임)
+│   ├── briefing_runner.py # 브리핑 실행 공통 로직 (API+봇 공유)
 │   ├── price_updater.py   # Notion 주가 자동 업데이트
 │   └── models.py          # 데이터 모델 (frozen dataclass)
 ├── api/                   # API 서버 (자동화용)
@@ -50,8 +55,10 @@ Sanjuk-Stock-Simulator/
 전략 논의 / 분석 대화  →  Claude Code 터미널 (무료)
 자동 브리핑 (한국장)   →  KST 08:30, 한국 종목 중심
 자동 브리핑 (미국장)   →  KST 21:00, 미국 종목 중심
-수시 브리핑            →  python main.py briefing (MANUAL)
-브리핑 알림 수신       →  텔레그램 (자동 전송)
+수시 브리핑 (폰)       →  텔레그램에서 "전체 브리핑" 입력
+수시 브리핑 (PC)       →  python main.py briefing (MANUAL)
+긴급 시장 알림         →  시장 모니터 자동 감지 → 텔레그램 알림
+보유종목 확인 (폰)     →  텔레그램에서 "보유종목 확인" 입력
 ```
 
 ## 사용법
@@ -59,8 +66,31 @@ Sanjuk-Stock-Simulator/
 ```bash
 python main.py              # TUI 터미널 실행
 python main.py briefing     # 브리핑 생성 (Notion + 텔레그램 알림)
+python main.py bot          # 텔레그램 봇 + 시장 모니터 실행 (GCP 상시)
+python main.py monitor      # 시장 모니터만 실행
 python main.py server       # API 서버 시작 (자동화용)
 python main.py price        # Notion 주가 업데이트
+```
+
+## 텔레그램 봇 명령어
+
+```text
+전체 브리핑       →  전체 포트폴리오 11단계 AI 분석 (3~5분 소요)
+한국장 브리핑     →  한국 종목 중심 분석
+미국장 브리핑     →  미국 종목 중심 분석
+보유종목 확인     →  전 계좌 현재 시세 + 수익률
+도움말            →  명령어 목록
+```
+
+## 시장 모니터 (긴급 알림)
+
+```text
+5분 간격 자동 감시 (yfinance, 무료) → 트리거 시 AI 분석 (Haiku, ~$0.02/회)
+- VIX 30+ 급등        →  🚨 공포지수 급등 알림
+- RSI < 30 과매도     →  📉 과매도 진입 알림
+- RSI > 70 과매수     →  📈 과매수 경고 알림
+- 일중 ±5% 급등락    →  🔻/🔺 급등락 감지 알림
+- 동일 종목 1시간 쿨다운, 장 시간에만 동작
 ```
 
 ## 시장별 브리핑 분리
@@ -122,16 +152,23 @@ API_PORT=8000         # API 서버 포트
 ## GCP 관리
 
 - 인스턴스: sanjuk-project (us-central1-b)
-- 리포 경로: ~/Sanjuk-Stock-Simulator/
-- venv: ~/Sanjuk-Stock-Simulator/venv/ (독립)
-- 한국장 브리핑: KST 08:30 (UTC 23:30)
-- 미국장 브리핑: KST 21:00 (UTC 12:00)
+- **주의: SSH 사용자(`ohmil`) ≠ 서비스 사용자(`kanzaka110`)**
+- 서비스 리포: /home/kanzaka110/Sanjuk-Stock-Simulator/
+- SSH 리포: /home/ohmil/Sanjuk-Stock-Simulator/
+- venv: /home/kanzaka110/Sanjuk-Stock-Simulator/venv/
+- **배포 시 kanzaka110 경로에도 반드시 git pull:**
+  `sudo -u kanzaka110 git -C /home/kanzaka110/Sanjuk-Stock-Simulator pull origin master`
+- 서비스: `stock-bot` (텔레그램 봇 + 모니터, systemd 상시 실행)
+- 로그: `sudo journalctl -u stock-bot -f`
+- 한국장 브리핑: KST 08:30 (UTC 23:30) — cron
+- 미국장 브리핑: KST 21:00 (UTC 12:00) — cron
 - 주가 업데이트: 국내 개장/마감 + 미국 개장/마감 (4회/일)
 
 ## 개발 참고
 
 - Textual TUI 프레임워크 사용
 - 전략 논의는 Claude Code 터미널에서 직접 수행 (추가 비용 없음)
-- 자동화 브리핑만 API 호출 (월 ~$4)
+- 텔레그램 대화형 챗봇은 비용 문제로 폐기 — 명령 수신 + 알림 전송만
+- 자동화 브리핑 API 호출 (월 ~$4) + 모니터 알림 (월 ~$0.1)
 - 문서는 한국어로 작성
 - 개인 금융정보 포함 — 보안 유의 (API 키/계좌번호 하드코딩 금지)
