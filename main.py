@@ -105,10 +105,70 @@ def cmd_server() -> None:
     uvicorn.run(app, host="0.0.0.0", port=API_PORT)
 
 
+def cmd_bot() -> None:
+    """텔레그램 봇 + 시장 모니터 동시 실행."""
+    import signal
+    import threading
+
+    from core.monitor import MarketMonitor
+    from core.telegram_bot import TelegramBot
+
+    print(f"\n{'='*56}")
+    print("  산적 주식 시뮬레이터 — 봇 + 모니터")
+    print(f"{'='*56}\n")
+
+    bot = TelegramBot()
+    monitor = MarketMonitor()
+
+    # 모니터를 별도 스레드에서 실행
+    monitor_thread = threading.Thread(target=monitor.run, daemon=True)
+    monitor_thread.start()
+    print("  [OK] 시장 모니터 시작")
+
+    # graceful shutdown
+    def shutdown(signum, frame):
+        print("\n종료 중...")
+        bot.stop()
+        monitor.stop()
+
+    signal.signal(signal.SIGINT, shutdown)
+    signal.signal(signal.SIGTERM, shutdown)
+
+    # 봇 폴링은 메인 스레드에서 (KeyboardInterrupt 수신용)
+    print("  [OK] 텔레그램 봇 폴링 시작")
+    print(f"\n  텔레그램에서 '도움말'을 입력하세요")
+    print(f"{'='*56}\n")
+    bot.run_polling()
+
+
+def cmd_monitor() -> None:
+    """시장 모니터만 단독 실행."""
+    import signal
+
+    from core.monitor import MarketMonitor
+
+    print(f"\n{'='*56}")
+    print("  산적 주식 시뮬레이터 — 시장 모니터")
+    print(f"{'='*56}\n")
+
+    monitor = MarketMonitor()
+
+    def shutdown(signum, frame):
+        print("\n종료 중...")
+        monitor.stop()
+
+    signal.signal(signal.SIGINT, shutdown)
+    signal.signal(signal.SIGTERM, shutdown)
+
+    monitor.run()
+
+
 COMMANDS = {
     "briefing": cmd_briefing,
     "server": cmd_server,
     "price": cmd_price,
+    "bot": cmd_bot,
+    "monitor": cmd_monitor,
 }
 
 USAGE = """산적 주식 시뮬레이터
@@ -118,6 +178,8 @@ USAGE = """산적 주식 시뮬레이터
   python main.py briefing     브리핑 생성 (Notion + 텔레그램 알림)
   python main.py server       API 서버 시작 (자동화용)
   python main.py price        Notion 주가 업데이트
+  python main.py bot          텔레그램 봇 + 시장 모니터 실행
+  python main.py monitor      시장 모니터만 실행
   python main.py help         이 도움말
 """
 

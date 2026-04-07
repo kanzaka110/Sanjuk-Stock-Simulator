@@ -141,3 +141,11 @@ ISA_CASH: float = 20_000_000.0
 
 # ─── 예수금 ────────────────────────────────────────
 DEFAULT_CASH: float = 3_539_839.0
+
+# ─── 모니터링 설정 ─────────────────────────────────
+MONITOR_INTERVAL_SEC: int = int(os.environ.get("MONITOR_INTERVAL_SEC", "300"))
+ALERT_COOLDOWN_SEC: int = int(os.environ.get("ALERT_COOLDOWN_SEC", "3600"))
+VIX_THRESHOLD: float = float(os.environ.get("VIX_THRESHOLD", "30.0"))
+RSI_LOW_THRESHOLD: float = float(os.environ.get("RSI_LOW_THRESHOLD", "30.0"))
+RSI_HIGH_THRESHOLD: float = float(os.environ.get("RSI_HIGH_THRESHOLD", "70.0"))
+PRICE_CHANGE_THRESHOLD: float = float(os.environ.get("PRICE_CHANGE_THRESHOLD", "5.0"))

@@ -1,0 +1,20 @@
+[Unit]
+Description=Sanjuk Stock Bot + Market Monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kanzaka110
+WorkingDirectory=/home/kanzaka110/Sanjuk-Stock-Simulator
+EnvironmentFile=/home/kanzaka110/Sanjuk-Stock-Simulator/.env
+ExecStart=/home/kanzaka110/Sanjuk-Stock-Simulator/venv/bin/python -u main.py bot
+Restart=always
+RestartSec=15
+
+# 로그
+StandardOutput=append:/home/kanzaka110/logs/bot/bot.log
+StandardError=append:/home/kanzaka110/logs/bot/bot.log
+
+[Install]
+WantedBy=multi-user.target

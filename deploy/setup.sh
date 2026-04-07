@@ -49,8 +49,14 @@ sudo cp "$REPO_DIR/deploy/stock-chatbot.service" /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable stock-chatbot
 
+# 봇 + 모니터 서비스
+sudo cp "$REPO_DIR/deploy/stock-bot.service" /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable stock-bot
+
 # cron 래퍼 설치
 mkdir -p "$HOME/logs/briefing"
+mkdir -p "$HOME/logs/bot"
 cp "$REPO_DIR/deploy/run_briefing.sh" "$HOME/run_stock_briefing.sh"
 cp "$REPO_DIR/deploy/run_price_update.sh" "$HOME/run_stock_price.sh"
 chmod +x "$HOME/run_stock_briefing.sh" "$HOME/run_stock_price.sh"
@@ -63,7 +69,8 @@ echo ""
 echo "  다음 단계:"
 echo "  1. .env 편집:  nano $REPO_DIR/.env"
 echo "  2. 챗봇 시작:  sudo systemctl start stock-chatbot"
-echo "  3. 브리핑 cron: crontab -e 후 아래 추가"
+echo "  3. 봇+모니터: sudo systemctl start stock-bot"
+echo "  4. 브리핑 cron: crontab -e 후 아래 추가"
 echo ""
 echo "  # 주식 브리핑 (국내장 전 8:00, 미국장 전 22:00)"
 echo "  0 8 * * 1-5  ~/run_stock_briefing.sh KR_BEFORE >> ~/logs/briefing/kr.log 2>&1"
