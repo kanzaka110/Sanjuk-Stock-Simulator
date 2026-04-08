@@ -67,10 +67,18 @@ class MarketMonitor:
                     if key in self._active_alerts:
                         # 이미 알림 보낸 상태 → 스킵
                         continue
-                    # 새로 발동 → 알림 전송
+                    # 새로 발동 → AI 분석 후 액션 가능한 경우만 전송
                     result = self._process_trigger(trigger)
-                    self._send_alert(result)
-                    self._active_alerts.add(key)
+                    if self._is_actionable(result):
+                        self._send_alert(result)
+                        self._active_alerts.add(key)
+                    else:
+                        log.info(
+                            "알림 억제 (비액션): %s %s — %s",
+                            trigger.ticker,
+                            trigger.trigger_type.value,
+                            result.severity.value,
+                        )
 
                 # 조건 해소된 알림 제거 (다음에 다시 발동하면 재전송)
                 self._active_alerts -= (self._active_alerts - current_keys)
@@ -238,35 +246,66 @@ class MarketMonitor:
         )
 
     def _classify_severity(self, trigger: AlertTrigger) -> Severity:
-        """트리거 심각도 분류."""
+        """트리거 심각도 분류 — CRITICAL만 알림 대상."""
         tt = trigger.trigger_type
         val = abs(trigger.current_value)
 
         if tt == TriggerType.VIX_SPIKE:
-            return Severity.CRITICAL if val >= 35 else Severity.WARNING
+            return Severity.CRITICAL if val >= 40 else Severity.WARNING
         if tt in (TriggerType.PRICE_DROP, TriggerType.PRICE_SURGE):
-            return Severity.CRITICAL if val >= 8 else Severity.WARNING
+            return Severity.CRITICAL if val >= 10 else Severity.WARNING
         if tt == TriggerType.RSI_OVERSOLD:
             return Severity.CRITICAL if val <= 20 else Severity.WARNING
         if tt == TriggerType.RSI_OVERBOUGHT:
-            return Severity.WARNING
+            return Severity.INFO  # 과매수는 롱 전략에서 무의미
 
         return Severity.INFO
 
+    def _is_actionable(self, result: AlertResult) -> bool:
+        """알림을 실제 전송할지 판단.
+
+        조건: CRITICAL이거나, AI가 매수/매도를 명확히 권고한 경우.
+        관망/홀딩 권고이면 억제.
+        """
+        # CRITICAL은 AI 권고와 무관하게 항상 전송
+        if result.severity == Severity.CRITICAL:
+            return True
+
+        # WARNING: AI가 매수 또는 매도를 권고한 경우만
+        if result.severity == Severity.WARNING and result.ai_analysis:
+            analysis_lower = result.ai_analysis
+            has_action = any(
+                kw in analysis_lower
+                for kw in ("매수", "매도", "분할매수", "분할매도", "손절")
+            )
+            has_hold = any(
+                kw in analysis_lower
+                for kw in ("관망", "홀딩", "지켜보", "대기")
+            )
+            # 매수/매도 키워드가 있고, 관망 키워드가 없을 때만
+            return has_action and not has_hold
+
+        # INFO는 전송하지 않음
+        return False
+
     def _ai_analyze(self, trigger: AlertTrigger) -> str:
-        """Claude Haiku로 간단 AI 분석."""
+        """Claude Haiku로 간단 AI 분석 — 매수/매도/관망 명확히 판정."""
         try:
             import anthropic
 
             client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 
             prompt = (
-                f"당신은 주식 투자 어드바이저입니다.\n"
+                f"당신은 실전 주식 투자 어드바이저입니다. 불필요한 알림을 줄이는 것이 목표입니다.\n\n"
                 f"종목: {trigger.name} ({trigger.ticker})\n"
                 f"상황: {trigger.description}\n"
                 f"시각: {trigger.timestamp.strftime('%Y-%m-%d %H:%M KST')}\n\n"
-                f"이 상황에서 투자자가 취해야 할 행동을 3문장 이내로 간결하게 조언하세요.\n"
-                f"매수/매도/관망 중 하나를 명확히 권고하고, 이유를 설명하세요."
+                f"아래 기준으로 판단하세요:\n"
+                f"- 지금 당장 매수 또는 매도 행동이 필요한 상황인가?\n"
+                f"- 단순 변동성이나 일시적 움직임이면 '관망'으로 판단하세요.\n"
+                f"- 추세 전환, 펀더멘털 변화, 극단적 공포/탐욕 등 실제 액션이 필요할 때만 매수/매도를 권고하세요.\n\n"
+                f"첫 줄에 [매수], [매도], 또는 [관망] 태그를 반드시 포함하세요.\n"
+                f"2~3문장으로 이유를 설명하세요."
             )
 
             response = client.messages.create(
