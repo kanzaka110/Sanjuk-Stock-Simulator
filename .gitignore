@@ -16,6 +16,7 @@ venv/
 
 # Database
 *.db
+db/data/kis_token.json
 
 # IDE
 .vscode/

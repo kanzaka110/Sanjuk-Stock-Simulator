@@ -1,10 +1,11 @@
 """
-시장 데이터 수집 — yfinance 기반
+시장 데이터 수집 — KIS API (국내) + yfinance (해외/폴백)
 Stock_bot/scripts/briefing.py의 fetch_market() 로직 추출
 """
 
 from __future__ import annotations
 
+import logging
 import time
 
 import yfinance as yf
@@ -16,6 +17,8 @@ from config.settings import (
     PORTFOLIO,
 )
 from core.models import MarketSnapshot, Quote
+
+logger = logging.getLogger(__name__)
 
 
 # ─── 통화 포맷 유틸 ─────────────────────────────────
@@ -65,12 +68,28 @@ def signal_badge(signal: str) -> str:
 
 
 # ─── 데이터 수집 ────────────────────────────────────
-def _get_quote_realtime(ticker: str) -> Quote | None:
-    """fast_info로 실시간 시세 조회. 실패 시 일봉 폴백.
+def _get_quote_kis(ticker: str) -> Quote | None:
+    """국내 종목(.KS)이면 KIS API로 시세 조회. 해당 없으면 None."""
+    if ticker not in KRW_TICKERS:
+        return None
+    try:
+        from core.market_kis import get_domestic_price
 
-    기존 방식(1분봉 + 5일봉 2회 호출)에서 fast_info 단일 호출로 변경.
-    속도 개선 + 가격 갭 해소.
+        return get_domestic_price(ticker)
+    except Exception:
+        return None
+
+
+def _get_quote_realtime(ticker: str) -> Quote | None:
+    """시세 조회: 국내 → KIS 우선, 실패 시 yfinance 폴백.
+
+    해외 종목은 yfinance fast_info 직접 사용.
     """
+    # 국내 종목: KIS API 우선 시도
+    kis_quote = _get_quote_kis(ticker)
+    if kis_quote is not None:
+        return kis_quote
+
     try:
         t = yf.Ticker(ticker)
         name = PORTFOLIO.get(ticker, INDICES.get(ticker, MACRO.get(ticker, ticker)))
@@ -141,7 +160,7 @@ def _get_ticker_news(ticker: str, n: int = 3) -> list[str]:
 
 
 def _batch_quotes(ticker_map: dict[str, str]) -> dict[str, Quote]:
-    """yf.download 배치로 여러 종목 시세를 한 번에 조회.
+    """KIS (국내) + yf.download (해외) 배치로 시세 조회.
 
     Args:
         ticker_map: {ticker: display_name} 매핑
@@ -155,18 +174,37 @@ def _batch_quotes(ticker_map: dict[str, str]) -> dict[str, Quote]:
     tickers = list(ticker_map.keys())
     results: dict[str, Quote] = {}
 
+    # 국내 종목 KIS 배치 조회
+    kr_tickers = [tk for tk in tickers if tk in KRW_TICKERS]
+    if kr_tickers:
+        try:
+            from core.market_kis import get_domestic_prices
+
+            kis_results = get_domestic_prices(kr_tickers)
+            results.update(kis_results)
+            logger.info("KIS 배치 조회: %d/%d 성공", len(kis_results), len(kr_tickers))
+        except Exception as e:
+            logger.warning("KIS 배치 조회 실패, yfinance 폴백: %s", e)
+
+    # KIS에서 조회 실패한 국내 + 해외 종목은 yfinance로
+    remaining = [tk for tk in tickers if tk not in results]
+    if not remaining:
+        return results
+
+    ticker_map_remaining = {tk: ticker_map[tk] for tk in remaining}
+
     try:
         df = yf.download(
-            tickers,
+            remaining,
             period="1d",
             interval="1m",
             progress=False,
             threads=True,
         )
 
-        for tk in tickers:
+        for tk in remaining:
             try:
-                if len(tickers) == 1:
+                if len(remaining) == 1:
                     col = df
                 else:
                     col = df[tk] if tk in df.columns.get_level_values(0) else None
@@ -206,7 +244,7 @@ def _batch_quotes(ticker_map: dict[str, str]) -> dict[str, Quote]:
                     results[tk] = q
     except Exception:
         # 배치 전체 실패 → 개별 조회 폴백
-        for tk in tickers:
+        for tk in remaining:
             q = _get_quote_realtime(tk)
             if q:
                 results[tk] = q

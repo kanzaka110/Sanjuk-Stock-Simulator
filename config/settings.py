@@ -19,6 +19,13 @@ CLAUDE_API_KEY: str = os.environ.get(
     "CLAUDE_API_KEY", os.environ.get("ANTHROPIC_API_KEY", "")
 )
 
+# ─── 한국투자증권 KIS API ──────────────────────────
+KIS_APP_KEY: str = os.environ.get("KIS_APP_KEY", "")
+KIS_APP_SECRET: str = os.environ.get("KIS_APP_SECRET", "")
+KIS_HTS_ID: str = os.environ.get("KIS_HTS_ID", "")
+KIS_ACCOUNT_NO: str = os.environ.get("KIS_ACCOUNT_NO", "")  # 8자리-2자리
+KIS_BASE_URL: str = "https://openapi.koreainvestment.com:9443"
+
 # ─── Notion API ─────────────────────────────────────
 NOTION_API_KEY: str = os.environ.get("NOTION_API_KEY", "")
 NOTION_DB_ID: str = os.environ.get("NOTION_DB_ID", "")
