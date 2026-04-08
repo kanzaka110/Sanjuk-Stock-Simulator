@@ -68,6 +68,46 @@ def signal_badge(signal: str) -> str:
 
 
 # ─── 데이터 수집 ────────────────────────────────────
+def _get_quote_extended(ticker: str) -> Quote | None:
+    """yfinance info로 시간외(프리/애프터마켓) 가격 조회.
+
+    미국 정규장 마감 후 시간외 가격이 있으면 반환.
+    """
+    if ticker in KRW_TICKERS or ticker.startswith("^") or "=" in ticker:
+        return None
+
+    try:
+        info = yf.Ticker(ticker).info
+        regular = float(info.get("regularMarketPrice", 0))
+
+        # 애프터마켓 → 프리마켓 순서로 확인
+        ext_price = info.get("postMarketPrice") or info.get("preMarketPrice")
+        if not ext_price or float(ext_price) <= 0:
+            return None
+
+        ext_price = float(ext_price)
+
+        # 시간외 가격이 정규장과 같으면 의미 없음
+        if abs(ext_price - regular) < 0.01:
+            return None
+
+        change = ext_price - regular
+        pct = (change / regular * 100) if regular > 0 else 0.0
+        name = PORTFOLIO.get(ticker, ticker)
+
+        return Quote(
+            ticker=ticker,
+            name=name,
+            price=round(ext_price, 2),
+            change=round(change, 2),
+            pct=round(pct, 2),
+            high=round(ext_price, 2),
+            low=round(ext_price, 2),
+        )
+    except Exception:
+        return None
+
+
 def _get_quote_kis(ticker: str) -> Quote | None:
     """KIS API로 시세 조회 (국내 + 해외). 실패 시 None."""
     try:
@@ -87,8 +127,16 @@ def _get_quote_kis(ticker: str) -> Quote | None:
 
 
 def _get_quote_realtime(ticker: str) -> Quote | None:
-    """시세 조회: KIS 우선 (국내+해외), 실패 시 yfinance 폴백."""
-    # KIS API 우선 시도
+    """시세 조회: 시간외 → KIS → yfinance 순서.
+
+    미국 장 마감 후에는 시간외 가격 우선.
+    """
+    # 해외 종목: 시간외 가격 우선 확인
+    ext_quote = _get_quote_extended(ticker)
+    if ext_quote is not None:
+        return ext_quote
+
+    # KIS API 시도
     kis_quote = _get_quote_kis(ticker)
     if kis_quote is not None:
         return kis_quote
@@ -177,12 +225,19 @@ def _batch_quotes(ticker_map: dict[str, str]) -> dict[str, Quote]:
     tickers = list(ticker_map.keys())
     results: dict[str, Quote] = {}
 
-    # KIS 배치 조회 (국내 + 해외)
-    kr_tickers = [tk for tk in tickers if tk in KRW_TICKERS]
+    # 해외 종목: 시간외 가격 우선 확인
     us_tickers = [
         tk for tk in tickers
         if tk not in KRW_TICKERS and not tk.startswith("^") and "=" not in tk
     ]
+    for tk in us_tickers:
+        ext = _get_quote_extended(tk)
+        if ext is not None:
+            results[tk] = ext
+
+    # KIS 배치 조회 (국내 + 시간외 미조회 해외)
+    kr_tickers = [tk for tk in tickers if tk in KRW_TICKERS]
+    us_tickers = [tk for tk in us_tickers if tk not in results]
 
     if kr_tickers:
         try:
