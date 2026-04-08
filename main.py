@@ -28,6 +28,14 @@ if env_path.exists():
             key, _, value = line.partition("=")
             os.environ.setdefault(key.strip(), value.strip())
 
+# 설정 계층 로드 (settings.local.json 등)
+from core.config_loader import init_config, load_local_settings
+
+_local_settings = load_local_settings()
+if _local_settings:
+    from core.config_loader import apply_overrides
+    apply_overrides(_local_settings)
+
 
 def cmd_tui() -> None:
     """Textual TUI 실행."""
@@ -39,10 +47,17 @@ def cmd_tui() -> None:
 
 def cmd_briefing() -> None:
     """브리핑 생성 → Notion 저장 → 텔레그램 전송."""
+    from core.config_loader import validate_config
     from core.market import fetch_market
     from core.analyzer import analyze
     from core.notion import save_to_notion
     from core.telegram import send_briefing_telegram
+
+    # 설정 검증
+    validation = validate_config("briefing")
+    if not validation.valid:
+        print(f"[ERROR] 필수 설정 누락: {', '.join(validation.missing_required)}")
+        sys.exit(1)
 
     briefing_type = os.environ.get("BRIEFING_TYPE", "MANUAL")
 
@@ -110,8 +125,14 @@ def cmd_bot() -> None:
     import signal
     import threading
 
+    from core.config_loader import validate_config
     from core.monitor import MarketMonitor
     from core.telegram_bot import TelegramBot
+
+    validation = validate_config("bot")
+    if not validation.valid:
+        print(f"[ERROR] 필수 설정 누락: {', '.join(validation.missing_required)}")
+        sys.exit(1)
 
     print(f"\n{'='*56}")
     print("  산적 주식 시뮬레이터 — 봇 + 모니터")
@@ -188,6 +209,9 @@ def main() -> None:
     args = sys.argv[1:]
 
     if not args:
+        # TUI: ANALYSIS 모드
+        from core.permissions import set_mode, OperationMode
+        set_mode(OperationMode.ANALYSIS)
         cmd_tui()
         return
 
@@ -202,6 +226,10 @@ def main() -> None:
         print(f"알 수 없는 명령: {command}")
         print(USAGE)
         sys.exit(1)
+
+    # 운영 모드 자동 설정
+    from core.permissions import mode_from_command, set_mode
+    set_mode(mode_from_command(command))
 
     handler()
 

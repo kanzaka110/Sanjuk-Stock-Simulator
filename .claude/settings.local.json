@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ssh:*)",
+      "Bash(gcloud compute ssh ohmil@sanjuk-project:*)",
+      "Bash(gcloud compute instances add-metadata sanjuk-project:*)",
+      "Bash(gcloud compute connect-to-serial-port ohmil@sanjuk-project:*)",
+      "Bash(cd /tmp)",
+      "Bash(gh repo:*)",
+      "Bash(wc -l /tmp/claw-code/rust/crates/*/src/*.rs)",
+      "Bash(python -c ':*)"
+    ]
+  }
+}

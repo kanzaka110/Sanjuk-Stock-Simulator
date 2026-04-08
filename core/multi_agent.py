@@ -19,6 +19,8 @@ from datetime import datetime
 import anthropic
 
 from config.settings import CLAUDE_API_KEY, KST
+from core.recovery import claude_breaker, retry
+from core.task_registry import get_registry
 
 log = logging.getLogger(__name__)
 
@@ -119,8 +121,16 @@ def _run_persona(
     persona_name: str,
     persona_prompt: str,
     market_context: str,
+    team_id: str = "",
 ) -> PersonaAnalysis:
-    """단일 페르소나 분석 실행 (Haiku, tool_use 구조화)."""
+    """단일 페르소나 분석 실행 (Haiku, tool_use 구조화).
+
+    Task 레지스트리로 상태 추적 + 서킷 브레이커 적용.
+    """
+    registry = get_registry()
+    task = registry.create_task(persona_name, "persona", team_id=team_id)
+    registry.start_task(task.task_id)
+
     client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 
     system = f"""당신은 '{persona_name}' 관점의 투자 분석가입니다.
@@ -129,6 +139,9 @@ def _run_persona(
 시장 데이터를 분석한 후 반드시 submit_analysis 도구를 호출하여 결과를 제출하세요."""
 
     try:
+        if not claude_breaker.is_available:
+            raise RuntimeError("Claude API 서킷 브레이커 OPEN")
+
         response = client.messages.create(
             model=HAIKU_MODEL,
             max_tokens=1000,
@@ -137,6 +150,8 @@ def _run_persona(
             tools=[_ANALYSIS_TOOL],
             tool_choice={"type": "tool", "name": "submit_analysis"},
         )
+
+        claude_breaker.record_success()
 
         # tool_use 블록에서 구조화된 데이터 추출
         data: dict = {}
@@ -148,7 +163,7 @@ def _run_persona(
         if not data:
             raise ValueError("tool_use 응답 없음")
 
-        return PersonaAnalysis(
+        result = PersonaAnalysis(
             persona=persona_name,
             verdict=data.get("verdict", "관망"),
             confidence=int(data.get("confidence", 50)),
@@ -156,7 +171,11 @@ def _run_persona(
             key_factors=tuple(data.get("key_factors", [])),
             risk_warning=data.get("risk_warning", ""),
         )
+        registry.complete_task(task.task_id, result)
+        return result
     except Exception as e:
+        claude_breaker.record_failure()
+        registry.fail_task(task.task_id, str(e))
         log.warning(f"페르소나 분석 실패 ({persona_name}): {e}")
         return PersonaAnalysis(
             persona=persona_name,
@@ -172,18 +191,36 @@ def run_all_personas(market_context: str) -> list[PersonaAnalysis]:
     1라운드: 4명 독립 분석 (병렬)
     2라운드: 의견 충돌 감지 시 반론 (병렬) -- 다른 페르소나의 판단을 보고 재판단
 
+    Task 레지스트리로 팀 단위 실행 추적.
+
     Returns:
         PersonaAnalysis 리스트 (반론 라운드 후 최종 판단)
     """
+    registry = get_registry()
+    team = registry.create_team("persona_round1")
+    registry.start_team(team.team_id)
+
     # 1라운드: 독립 분석
     results: list[PersonaAnalysis] = []
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {
-            executor.submit(_run_persona, name, prompt, market_context): name
+            executor.submit(
+                _run_persona, name, prompt, market_context, team.team_id,
+            ): name
             for name, prompt in PERSONAS.items()
         }
         for future in as_completed(futures):
             results.append(future.result())
+
+    registry.complete_team(team.team_id)
+
+    # 실행 요약 로깅
+    summary = registry.get_team_summary(team.team_id)
+    log.info(
+        "  라운드1 완료: %d/%d 성공 (%.1fs)",
+        summary.get("completed", 0), summary.get("total", 0),
+        summary.get("duration_sec", 0),
+    )
 
     # 충돌 감지: 매수 vs 매도 의견이 동시에 존재하면 반론 라운드
     verdicts = {r.verdict for r in results if r.confidence > 0}
@@ -198,7 +235,10 @@ def run_all_personas(market_context: str) -> list[PersonaAnalysis]:
 
     log.info("  의견 충돌 감지 -- 반론 라운드 시작")
 
-    # 2라운드: 다른 페르소나의 판단을 보고 재판단
+    # 2라운드: 팀 생성 + 반론
+    team2 = registry.create_team("persona_round2_debate")
+    registry.start_team(team2.team_id)
+
     debate_context = _build_debate_context(results)
     augmented_context = f"{market_context}\n\n{debate_context}"
 
@@ -206,12 +246,21 @@ def run_all_personas(market_context: str) -> list[PersonaAnalysis]:
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {
             executor.submit(
-                _run_persona, name, prompt, augmented_context
+                _run_persona, name, prompt, augmented_context, team2.team_id,
             ): name
             for name, prompt in PERSONAS.items()
         }
         for future in as_completed(futures):
             round2.append(future.result())
+
+    registry.complete_team(team2.team_id)
+
+    summary2 = registry.get_team_summary(team2.team_id)
+    log.info(
+        "  라운드2 완료: %d/%d 성공 (%.1fs)",
+        summary2.get("completed", 0), summary2.get("total", 0),
+        summary2.get("duration_sec", 0),
+    )
 
     return round2
 

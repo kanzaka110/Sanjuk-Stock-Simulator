@@ -1,6 +1,7 @@
 """
 시장 데이터 수집 — KIS API (국내) + yfinance (해외/폴백)
-Stock_bot/scripts/briefing.py의 fetch_market() 로직 추출
+
+폴백 체인 + 서킷 브레이커 + 리트라이 적용 (claw-code 패턴).
 """
 
 from __future__ import annotations
@@ -17,6 +18,12 @@ from config.settings import (
     PORTFOLIO,
 )
 from core.models import MarketSnapshot, Quote
+from core.recovery import (
+    fallback_chain,
+    kis_breaker,
+    retry,
+    yfinance_breaker,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +83,9 @@ def _get_quote_extended(ticker: str) -> Quote | None:
     if ticker in KRW_TICKERS or ticker.startswith("^") or "=" in ticker:
         return None
 
+    if not yfinance_breaker.is_available:
+        return None
+
     try:
         info = yf.Ticker(ticker).info
         regular = float(info.get("regularMarketPrice", 0))
@@ -95,6 +105,7 @@ def _get_quote_extended(ticker: str) -> Quote | None:
         pct = (change / regular * 100) if regular > 0 else 0.0
         name = PORTFOLIO.get(ticker, ticker)
 
+        yfinance_breaker.record_success()
         return Quote(
             ticker=ticker,
             name=name,
@@ -105,41 +116,42 @@ def _get_quote_extended(ticker: str) -> Quote | None:
             low=round(ext_price, 2),
         )
     except Exception:
+        yfinance_breaker.record_failure()
         return None
 
 
 def _get_quote_kis(ticker: str) -> Quote | None:
     """KIS API로 시세 조회 (국내 + 해외). 실패 시 None."""
+    if not kis_breaker.is_available:
+        return None
+
     try:
         if ticker in KRW_TICKERS:
             from core.market_kis import get_domestic_price
 
-            return get_domestic_price(ticker)
+            result = get_domestic_price(ticker)
+            if result:
+                kis_breaker.record_success()
+            return result
 
         # 해외 종목 (지수/매크로 제외)
         if not ticker.startswith("^") and "=" not in ticker:
             from core.market_kis import get_overseas_price
 
-            return get_overseas_price(ticker)
-    except Exception:
-        pass
+            result = get_overseas_price(ticker)
+            if result:
+                kis_breaker.record_success()
+            return result
+    except Exception as e:
+        kis_breaker.record_failure()
+        logger.debug("KIS 시세 실패 [%s]: %s", ticker, e)
     return None
 
 
-def _get_quote_realtime(ticker: str) -> Quote | None:
-    """시세 조회: 시간외 → KIS → yfinance 순서.
-
-    미국 장 마감 후에는 시간외 가격 우선.
-    """
-    # 해외 종목: 시간외 가격 우선 확인
-    ext_quote = _get_quote_extended(ticker)
-    if ext_quote is not None:
-        return ext_quote
-
-    # KIS API 시도
-    kis_quote = _get_quote_kis(ticker)
-    if kis_quote is not None:
-        return kis_quote
+def _get_quote_yf_live(ticker: str) -> Quote | None:
+    """yfinance fast_info 실시간 시세 조회."""
+    if not yfinance_breaker.is_available:
+        return None
 
     try:
         t = yf.Ticker(ticker)
@@ -150,8 +162,9 @@ def _get_quote_realtime(ticker: str) -> Quote | None:
         prev_close = float(fi.regular_market_previous_close or fi.previous_close)
 
         if price <= 0 or prev_close <= 0:
-            return _get_quote_daily(ticker)
+            return None
 
+        yfinance_breaker.record_success()
         return Quote(
             ticker=ticker,
             name=name,
@@ -162,11 +175,12 @@ def _get_quote_realtime(ticker: str) -> Quote | None:
             low=round(float(fi.day_low), 2) if fi.day_low else round(price, 2),
         )
     except Exception:
-        return _get_quote_daily(ticker)
+        yfinance_breaker.record_failure()
+        return None
 
 
 def _get_quote_daily(ticker: str) -> Quote | None:
-    """일봉 기반 시세 조회 (폴백용)."""
+    """일봉 기반 시세 조회 (최종 폴백)."""
     try:
         h = yf.Ticker(ticker).history(period="5d")
         name = PORTFOLIO.get(ticker, INDICES.get(ticker, MACRO.get(ticker, ticker)))
@@ -194,6 +208,29 @@ def _get_quote_daily(ticker: str) -> Quote | None:
     except Exception:
         pass
     return None
+
+
+def _get_quote_realtime(ticker: str) -> Quote | None:
+    """시세 조회 — 구조화된 폴백 체인.
+
+    해외: 시간외 → KIS → yfinance live → 일봉
+    국내: KIS → yfinance live → 일봉
+    지수/매크로: yfinance live → 일봉
+    """
+    is_us = ticker not in KRW_TICKERS and not ticker.startswith("^") and "=" not in ticker
+    is_kr = ticker in KRW_TICKERS
+
+    steps: list[tuple[str, object]] = []
+
+    if is_us:
+        steps.append(("시간외", lambda t=ticker: _get_quote_extended(t)))
+    if is_kr or is_us:
+        steps.append(("KIS", lambda t=ticker: _get_quote_kis(t)))
+    steps.append(("yfinance_live", lambda t=ticker: _get_quote_yf_live(t)))
+    steps.append(("yfinance_daily", lambda t=ticker: _get_quote_daily(t)))
+
+    result = fallback_chain(steps, ticker=ticker)
+    return result.value
 
 
 def _get_ticker_news(ticker: str, n: int = 3) -> list[str]:
@@ -239,24 +276,28 @@ def _batch_quotes(ticker_map: dict[str, str]) -> dict[str, Quote]:
     kr_tickers = [tk for tk in tickers if tk in KRW_TICKERS]
     us_tickers = [tk for tk in us_tickers if tk not in results]
 
-    if kr_tickers:
+    if kr_tickers and kis_breaker.is_available:
         try:
             from core.market_kis import get_domestic_prices
 
             kis_kr = get_domestic_prices(kr_tickers)
             results.update(kis_kr)
+            kis_breaker.record_success()
             logger.info("KIS 국내 배치: %d/%d 성공", len(kis_kr), len(kr_tickers))
         except Exception as e:
+            kis_breaker.record_failure()
             logger.warning("KIS 국내 배치 실패, yfinance 폴백: %s", e)
 
-    if us_tickers:
+    if us_tickers and kis_breaker.is_available:
         try:
             from core.market_kis import get_overseas_prices
 
             kis_us = get_overseas_prices(us_tickers)
             results.update(kis_us)
+            kis_breaker.record_success()
             logger.info("KIS 해외 배치: %d/%d 성공", len(kis_us), len(us_tickers))
         except Exception as e:
+            kis_breaker.record_failure()
             logger.warning("KIS 해외 배치 실패, yfinance 폴백: %s", e)
 
     # KIS에서 조회 실패한 국내 + 해외 종목은 yfinance로
