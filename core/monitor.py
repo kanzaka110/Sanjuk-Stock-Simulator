@@ -13,12 +13,14 @@ from datetime import datetime
 
 from config.settings import (
     CLAUDE_API_KEY,
+    KR_PORTFOLIO,
     KST,
     MONITOR_INTERVAL_SEC,
     PORTFOLIO,
     PRICE_CHANGE_THRESHOLD,
     RSI_HIGH_THRESHOLD,
     RSI_LOW_THRESHOLD,
+    US_PORTFOLIO,
     VIX_THRESHOLD,
 )
 from core.monitor_models import AlertResult, AlertTrigger, Severity, TriggerType
@@ -97,17 +99,29 @@ class MarketMonitor:
     # ─── Tier 1: 무료 수치 체크 ───────────────────────
 
     def _scan_all(self) -> list[AlertTrigger]:
-        """전체 포트폴리오 + VIX 스캔."""
+        """개장 중인 시장의 종목만 스캔."""
+        from core.market_hours import is_kr_market_open, is_us_market_open
+
         triggers: list[AlertTrigger] = []
         now = datetime.now(KST)
 
-        # VIX 체크
-        vix_trigger = self._check_vix(now)
-        if vix_trigger:
-            triggers.append(vix_trigger)
+        kr_open = is_kr_market_open(now)
+        us_open = is_us_market_open(now)
 
-        # 포트폴리오 종목 체크 (미국 종목만 — 장중 확인 의미 있는 것)
-        for ticker, name in PORTFOLIO.items():
+        # VIX는 미국장 시간에만 의미 있음
+        if us_open:
+            vix_trigger = self._check_vix(now)
+            if vix_trigger:
+                triggers.append(vix_trigger)
+
+        # 개장 중인 시장의 종목만 체크
+        scan_targets: dict[str, str] = {}
+        if kr_open:
+            scan_targets.update(KR_PORTFOLIO)
+        if us_open:
+            scan_targets.update(US_PORTFOLIO)
+
+        for ticker, name in scan_targets.items():
             rsi_trigger = self._check_rsi(ticker, name, now)
             if rsi_trigger:
                 triggers.append(rsi_trigger)
