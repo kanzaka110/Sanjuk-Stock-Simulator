@@ -10,7 +10,8 @@
 ```text
 Sanjuk-Stock-Simulator/
 ├── core/                  # 핵심 비즈니스 로직
-│   ├── market.py          # yfinance 실시간 시세 (1분봉 인트라데이 + 일봉 폴백)
+│   ├── market.py          # 시세 라우터 (KIS API + 시간외 + yfinance 폴백)
+│   ├── market_kis.py      # 한국투자증권 KIS API (국내+해외 현재가, 토큰 관리)
 │   ├── news.py            # Gemini Google Search 뉴스 수집 (시장별 프롬프트)
 │   ├── analyzer.py        # 11단계 멀티 에이전트 AI 분석 파이프라인
 │   ├── multi_agent.py     # 4개 페르소나 분석 (Haiku) + 종합 (Sonnet) + 계좌별 전략
@@ -85,12 +86,14 @@ python main.py price        # Notion 주가 업데이트
 ## 시장 모니터 (긴급 알림)
 
 ```text
-5분 간격 자동 감시 (yfinance, 무료) → 트리거 시 AI 분석 (Haiku, ~$0.02/회)
-- VIX 30+ 급등        →  🚨 공포지수 급등 알림
-- RSI < 30 과매도     →  📉 과매도 진입 알림
-- RSI > 70 과매수     →  📈 과매수 경고 알림
-- 일중 ±5% 급등락    →  🔻/🔺 급등락 감지 알림
-- 동일 종목 1시간 쿨다운, 장 시간에만 동작
+5분 간격 자동 감시 (KIS API + yfinance) → AI 게이트키퍼 → 텔레그램 알림
+- VIX 35+ 급등        →  🚨 공포지수 급등 (CRITICAL: 40+)
+- RSI < 25 과매도     →  📉 과매도 진입 (CRITICAL: 20 이하)
+- 일중 ±7% 급등락    →  🔻/🔺 급등락 감지 (CRITICAL: 10%+)
+- RSI 과매수 알림 비활성화 (롱 전략에서 노이즈)
+- AI가 매수/매도 명확히 권고할 때만 전송, 관망이면 억제
+- CRITICAL은 AI 판단 무관하게 항상 전송
+- 상태 기반 중복 방지, 장 시간에만 동작
 ```
 
 ## 시장별 브리핑 분리
@@ -129,15 +132,26 @@ BRIEFING_TYPE=MANUAL     →  전체 포트폴리오 (기본값)
 
 ## 실시간 시세
 
-- 장중: yfinance 1분봉 인트라데이 (`_get_quote_realtime`)
-- 장 마감: 일봉 자동 폴백 (`_get_quote_daily`)
-- 추가 API 키 불필요
+시세 조회 우선순위 (자동 폴백 체인):
+```text
+국내 종목 (.KS):  KIS API → yfinance fast_info → yfinance 일봉
+해외 종목 (NVDA 등):  시간외 가격(yf info) → KIS API → yfinance fast_info → 일봉
+지수/매크로:  yfinance fast_info → 일봉
+```
+- KIS API: 한국투자증권 공식 실시간 (국내+해외, 무료)
+- 시간외: 미국 프리/애프터마켓 가격 (yfinance info)
+- 토큰 캐시: `db/data/kis_token.json` (24시간, 파일 기반)
+- KIS 환경변수 미설정 시 기존 yfinance만 사용 (하위 호환)
 
 ## 환경변수
 
 ```bash
 GEMINI_API_KEY=       # Gemini 2.5 Pro/Flash (뉴스 + 감성 + 차트)
 CLAUDE_API_KEY=       # Claude Haiku/Sonnet (페르소나 + 종합 판단)
+KIS_APP_KEY=          # 한국투자증권 앱키 (국내+해외 실시간 시세)
+KIS_APP_SECRET=       # 한국투자증권 앱시크릿
+KIS_HTS_ID=           # HTS 로그인 ID
+KIS_ACCOUNT_NO=       # 계좌번호 (8자리-2자리)
 NOTION_API_KEY=       # Notion 브리핑 저장
 NOTION_DB_ID=         # Notion 브리핑 DB ID
 NOTION_TOKEN=         # Notion 주가 업데이트 토큰
