@@ -66,37 +66,31 @@ def signal_badge(signal: str) -> str:
 
 # ─── 데이터 수집 ────────────────────────────────────
 def _get_quote_realtime(ticker: str) -> Quote | None:
-    """장중 1분봉으로 실시간에 가까운 시세 조회. 실패 시 일봉 폴백."""
+    """fast_info로 실시간 시세 조회. 실패 시 일봉 폴백.
+
+    기존 방식(1분봉 + 5일봉 2회 호출)에서 fast_info 단일 호출로 변경.
+    속도 개선 + 가격 갭 해소.
+    """
     try:
         t = yf.Ticker(ticker)
         name = PORTFOLIO.get(ticker, INDICES.get(ticker, MACRO.get(ticker, ticker)))
+        fi = t.fast_info
 
-        # 1분봉 시도 (장중일 때 최신 가격 제공)
-        intra = t.history(period="1d", interval="1m")
-        if len(intra) >= 2:
-            c = float(intra["Close"].iloc[-1])
-            day_high = round(float(intra["High"].max()), 2)
-            day_low = round(float(intra["Low"].min()), 2)
+        price = float(fi.last_price)
+        prev_close = float(fi.regular_market_previous_close or fi.previous_close)
 
-            # 전일 종가: 일봉에서 가져옴
-            daily = t.history(period="5d")
-            if len(daily) >= 2:
-                prev_close = float(daily["Close"].iloc[-2])
-            else:
-                prev_close = float(intra["Open"].iloc[0])
+        if price <= 0 or prev_close <= 0:
+            return _get_quote_daily(ticker)
 
-            return Quote(
-                ticker=ticker,
-                name=name,
-                price=round(c, 2),
-                change=round(c - prev_close, 2),
-                pct=round((c - prev_close) / prev_close * 100, 2),
-                high=day_high,
-                low=day_low,
-            )
-
-        # 1분봉 데이터 없음 (장 마감) → 일봉 폴백
-        return _get_quote_daily(ticker)
+        return Quote(
+            ticker=ticker,
+            name=name,
+            price=round(price, 2),
+            change=round(price - prev_close, 2),
+            pct=round((price - prev_close) / prev_close * 100, 2),
+            high=round(float(fi.day_high), 2) if fi.day_high else round(price, 2),
+            low=round(float(fi.day_low), 2) if fi.day_low else round(price, 2),
+        )
     except Exception:
         return _get_quote_daily(ticker)
 
@@ -146,8 +140,84 @@ def _get_ticker_news(ticker: str, n: int = 3) -> list[str]:
         return []
 
 
+def _batch_quotes(ticker_map: dict[str, str]) -> dict[str, Quote]:
+    """yf.download 배치로 여러 종목 시세를 한 번에 조회.
+
+    Args:
+        ticker_map: {ticker: display_name} 매핑
+
+    Returns:
+        {ticker_or_name: Quote} 딕셔너리
+    """
+    if not ticker_map:
+        return {}
+
+    tickers = list(ticker_map.keys())
+    results: dict[str, Quote] = {}
+
+    try:
+        df = yf.download(
+            tickers,
+            period="1d",
+            interval="1m",
+            progress=False,
+            threads=True,
+        )
+
+        for tk in tickers:
+            try:
+                if len(tickers) == 1:
+                    col = df
+                else:
+                    col = df[tk] if tk in df.columns.get_level_values(0) else None
+
+                if col is None or col.empty or col["Close"].dropna().empty:
+                    # 배치 실패 → 개별 폴백
+                    q = _get_quote_realtime(tk)
+                    if q:
+                        results[tk] = q
+                    continue
+
+                close_series = col["Close"].dropna()
+                price = round(float(close_series.iloc[-1]), 2)
+
+                # 전일 종가는 fast_info에서
+                fi = yf.Ticker(tk).fast_info
+                prev_close = float(
+                    fi.regular_market_previous_close or fi.previous_close,
+                )
+
+                if prev_close <= 0:
+                    continue
+
+                name = ticker_map[tk]
+                results[tk] = Quote(
+                    ticker=tk,
+                    name=name,
+                    price=price,
+                    change=round(price - prev_close, 2),
+                    pct=round((price - prev_close) / prev_close * 100, 2),
+                    high=round(float(col["High"].max()), 2),
+                    low=round(float(col["Low"].min()), 2),
+                )
+            except Exception:
+                q = _get_quote_realtime(tk)
+                if q:
+                    results[tk] = q
+    except Exception:
+        # 배치 전체 실패 → 개별 조회 폴백
+        for tk in tickers:
+            q = _get_quote_realtime(tk)
+            if q:
+                results[tk] = q
+
+    return results
+
+
 def fetch_market(briefing_type: str = "MANUAL") -> MarketSnapshot:
     """시장 데이터 수집 — briefing_type에 따라 시장별 필터링.
+
+    배치 다운로드로 속도 최적화 (N개 종목 → 1회 호출).
 
     Args:
         briefing_type: KR_BEFORE(한국 중심), US_BEFORE(미국 중심), MANUAL(전체)
@@ -158,13 +228,10 @@ def fetch_market(briefing_type: str = "MANUAL") -> MarketSnapshot:
 
     portfolio, indices_cfg, macro_cfg = get_market_config(briefing_type)
 
-    stocks: dict[str, Quote] = {}
-    for tk in portfolio:
-        q = _get_quote_realtime(tk)
-        if q is not None:
-            stocks[tk] = q
-        time.sleep(0.12)
+    # 배치로 종목 시세 조회
+    stocks = _batch_quotes(portfolio)
 
+    # 지수·매크로는 개별 조회 (종목 수 적음)
     indices: dict[str, Quote] = {}
     for tk, nm in indices_cfg.items():
         q = _get_quote_realtime(tk)
