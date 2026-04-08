@@ -69,23 +69,26 @@ def signal_badge(signal: str) -> str:
 
 # ─── 데이터 수집 ────────────────────────────────────
 def _get_quote_kis(ticker: str) -> Quote | None:
-    """국내 종목(.KS)이면 KIS API로 시세 조회. 해당 없으면 None."""
-    if ticker not in KRW_TICKERS:
-        return None
+    """KIS API로 시세 조회 (국내 + 해외). 실패 시 None."""
     try:
-        from core.market_kis import get_domestic_price
+        if ticker in KRW_TICKERS:
+            from core.market_kis import get_domestic_price
 
-        return get_domestic_price(ticker)
+            return get_domestic_price(ticker)
+
+        # 해외 종목 (지수/매크로 제외)
+        if not ticker.startswith("^") and "=" not in ticker:
+            from core.market_kis import get_overseas_price
+
+            return get_overseas_price(ticker)
     except Exception:
-        return None
+        pass
+    return None
 
 
 def _get_quote_realtime(ticker: str) -> Quote | None:
-    """시세 조회: 국내 → KIS 우선, 실패 시 yfinance 폴백.
-
-    해외 종목은 yfinance fast_info 직접 사용.
-    """
-    # 국내 종목: KIS API 우선 시도
+    """시세 조회: KIS 우선 (국내+해외), 실패 시 yfinance 폴백."""
+    # KIS API 우선 시도
     kis_quote = _get_quote_kis(ticker)
     if kis_quote is not None:
         return kis_quote
@@ -174,17 +177,32 @@ def _batch_quotes(ticker_map: dict[str, str]) -> dict[str, Quote]:
     tickers = list(ticker_map.keys())
     results: dict[str, Quote] = {}
 
-    # 국내 종목 KIS 배치 조회
+    # KIS 배치 조회 (국내 + 해외)
     kr_tickers = [tk for tk in tickers if tk in KRW_TICKERS]
+    us_tickers = [
+        tk for tk in tickers
+        if tk not in KRW_TICKERS and not tk.startswith("^") and "=" not in tk
+    ]
+
     if kr_tickers:
         try:
             from core.market_kis import get_domestic_prices
 
-            kis_results = get_domestic_prices(kr_tickers)
-            results.update(kis_results)
-            logger.info("KIS 배치 조회: %d/%d 성공", len(kis_results), len(kr_tickers))
+            kis_kr = get_domestic_prices(kr_tickers)
+            results.update(kis_kr)
+            logger.info("KIS 국내 배치: %d/%d 성공", len(kis_kr), len(kr_tickers))
         except Exception as e:
-            logger.warning("KIS 배치 조회 실패, yfinance 폴백: %s", e)
+            logger.warning("KIS 국내 배치 실패, yfinance 폴백: %s", e)
+
+    if us_tickers:
+        try:
+            from core.market_kis import get_overseas_prices
+
+            kis_us = get_overseas_prices(us_tickers)
+            results.update(kis_us)
+            logger.info("KIS 해외 배치: %d/%d 성공", len(kis_us), len(us_tickers))
+        except Exception as e:
+            logger.warning("KIS 해외 배치 실패, yfinance 폴백: %s", e)
 
     # KIS에서 조회 실패한 국내 + 해외 종목은 yfinance로
     remaining = [tk for tk in tickers if tk not in results]

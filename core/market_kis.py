@@ -209,6 +209,162 @@ def get_domestic_price(ticker: str) -> Quote | None:
         return None
 
 
+# ─── 해외주식 현재가 조회 ──────────────────────────
+# 거래소 코드 매핑 (yfinance 티커 → KIS 거래소 코드)
+_US_EXCHANGE_MAP: dict[str, str] = {
+    "NVDA": "NAS",
+    "GOOGL": "NAS",
+    "GOOG": "NAS",
+    "MU": "NAS",
+    "LMT": "NYS",
+    "AAPL": "NAS",
+    "MSFT": "NAS",
+    "AMZN": "NAS",
+    "TSLA": "NAS",
+    "META": "NAS",
+    "AMD": "NAS",
+    "INTC": "NAS",
+    "AVGO": "NAS",
+    "QCOM": "NAS",
+    "COST": "NAS",
+    "NFLX": "NAS",
+    "JPM": "NYS",
+    "V": "NYS",
+    "JNJ": "NYS",
+    "WMT": "NYS",
+    "BA": "NYS",
+    "DIS": "NYS",
+    "KO": "NYS",
+    "PG": "NYS",
+    "XOM": "NYS",
+    "CVX": "NYS",
+    "RTX": "NYS",
+    "GD": "NYS",
+    "NOC": "NYS",
+}
+
+# NAS 우선 시도 → NYS 폴백 순서
+_EXCHANGE_FALLBACK = ["NAS", "NYS", "AMS"]
+
+
+def _resolve_exchange(ticker: str) -> str | None:
+    """티커의 거래소 코드를 결정. 매핑에 없으면 순차 시도."""
+    if ticker in _US_EXCHANGE_MAP:
+        return _US_EXCHANGE_MAP[ticker]
+    return None
+
+
+def get_overseas_price(ticker: str) -> Quote | None:
+    """KIS API로 해외주식 현재가 조회.
+
+    Args:
+        ticker: yfinance 형식 티커 (예: NVDA, LMT)
+
+    Returns:
+        Quote 또는 실패 시 None
+    """
+    if not _is_kis_configured():
+        return None
+
+    token = _get_access_token()
+    if not token:
+        return None
+
+    # 거래소 코드 결정
+    known_excd = _resolve_exchange(ticker)
+    exchanges = [known_excd] if known_excd else _EXCHANGE_FALLBACK
+
+    for excd in exchanges:
+        quote = _fetch_overseas_quote(ticker, excd, token)
+        if quote is not None:
+            # 매핑에 없었으면 학습
+            if ticker not in _US_EXCHANGE_MAP:
+                _US_EXCHANGE_MAP[ticker] = excd
+            return quote
+
+    return None
+
+
+def _fetch_overseas_quote(
+    ticker: str, excd: str, token: str,
+) -> Quote | None:
+    """KIS 해외주식 현재가 API 호출."""
+    try:
+        resp = requests.get(
+            f"{KIS_BASE_URL}/uapi/overseas-price/v1/quotations/price",
+            headers={
+                "authorization": f"Bearer {token}",
+                "appkey": KIS_APP_KEY,
+                "appsecret": KIS_APP_SECRET,
+                "tr_id": "HHDFS00000300",
+                "content-type": "application/json; charset=utf-8",
+            },
+            params={
+                "AUTH": "",
+                "EXCD": excd,
+                "SYMB": ticker,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        if data.get("rt_cd") != "0":
+            return None
+
+        output = data.get("output", {})
+        price = float(output.get("last", 0))  # 현재가
+        prev_close = float(output.get("base", 0))  # 전일 종가
+        high = float(output.get("high", 0))  # 최고가
+        low = float(output.get("low", 0))  # 최저가
+
+        if price <= 0:
+            return None
+
+        change = price - prev_close if prev_close > 0 else 0.0
+        pct = (change / prev_close * 100) if prev_close > 0 else 0.0
+
+        name = PORTFOLIO.get(ticker, ticker)
+
+        return Quote(
+            ticker=ticker,
+            name=name,
+            price=round(price, 2),
+            change=round(change, 2),
+            pct=round(pct, 2),
+            high=round(high, 2),
+            low=round(low, 2),
+        )
+
+    except requests.RequestException:
+        return None
+    except (KeyError, ValueError, TypeError):
+        return None
+
+
+def get_overseas_prices(tickers: list[str]) -> dict[str, Quote]:
+    """여러 해외 종목 시세를 KIS API로 조회.
+
+    Args:
+        tickers: 해외 티커 목록 (예: ["NVDA", "GOOGL"])
+
+    Returns:
+        {ticker: Quote} 딕셔너리 (실패한 종목은 제외)
+    """
+    results: dict[str, Quote] = {}
+
+    if not _is_kis_configured():
+        return results
+
+    for tk in tickers:
+        q = get_overseas_price(tk)
+        if q is not None:
+            results[tk] = q
+        time.sleep(0.06)
+
+    return results
+
+
 def get_domestic_prices(tickers: list[str]) -> dict[str, Quote]:
     """여러 국내 종목 시세를 KIS API로 조회.
 
