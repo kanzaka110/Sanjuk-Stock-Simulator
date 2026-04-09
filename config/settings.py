@@ -143,8 +143,11 @@ HOLDINGS_PENSION: dict[str, dict] = {
 PENSION_MMF: float = 6_880_513.0  # MMF 잔고
 
 # [ISA] 중개형 ISA (2026-04-07 개설)
-HOLDINGS_ISA: dict[str, dict] = {}
-ISA_CASH: float = 20_000_000.0
+HOLDINGS_ISA: dict[str, dict] = {
+    "360750.KS": {"shares": 200, "avg_cost_krw": 24_900},   # TIGER 미국S&P500
+    "133690.KS": {"shares": 30, "avg_cost_krw": 163_000},   # TIGER 미국나스닥100
+}
+ISA_CASH: float = 10_130_000.0
 
 # ─── 예수금 ────────────────────────────────────────
 DEFAULT_CASH: float = 3_539_839.0
