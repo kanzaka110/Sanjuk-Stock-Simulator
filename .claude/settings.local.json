@@ -8,7 +8,14 @@
       "Bash(cd /tmp)",
       "Bash(gh repo:*)",
       "Bash(wc -l /tmp/claw-code/rust/crates/*/src/*.rs)",
-      "Bash(python -c ':*)"
+      "Bash(python -c ':*)",
+      "mcp__claude_ai_Notion__notion-search",
+      "mcp__claude_ai_Notion__notion-fetch",
+      "mcp__claude_ai_Notion__notion-create-pages",
+      "mcp__claude_ai_Notion__notion-update-data-source",
+      "mcp__claude_ai_Notion__notion-update-page",
+      "Bash(bash:*)",
+      "Bash(git add:*)"
     ]
   }
 }

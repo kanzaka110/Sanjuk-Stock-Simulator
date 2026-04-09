@@ -49,14 +49,28 @@ ssh ohmil@35.238.77.143 "
 
 - 코드 변경이 없었으면 재시작 스킵
 
-## 5. 메모리 점검
+## 5. GCP 메모리 동기화
+
+로컬 Claude Code 메모리를 GCP에 동기화:
+
+```bash
+scp -r ~/.claude/projects/C--dev-Sanjuk-Stock-Simulator/memory/ ohmil@35.238.77.143:~/.claude/projects/C--dev-Sanjuk-Stock-Simulator/memory/
+```
+
+- GCP에 디렉토리가 없으면 자동 생성:
+  ```bash
+  ssh ohmil@35.238.77.143 "mkdir -p ~/.claude/projects/C--dev-Sanjuk-Stock-Simulator/memory"
+  ```
+- 동기화 후 파일 수 확인
+
+## 6. 메모리 점검
 
 - 이번 작업에서 기억할 만한 새로운 사실이 있으면 메모리 업데이트
 - 없으면 스킵
 
-## 6. 최종 요약
+## 7. 최종 요약
 
 한 줄로 결과 요약:
 ```
-✅ 푸시 완료: 커밋 [있음/없음] → GitHub [push/최신] → GCP [배포/최신] → 서비스 [재시작/스킵]
+✅ 푸시 완료: 커밋 [있음/없음] → GitHub [push/최신] → GCP [배포/최신] → 서비스 [재시작/스킵] → 메모리 [동기화/스킵]
 ```
