@@ -332,24 +332,25 @@ class MarketMonitor:
         import subprocess
 
         prompt = (
-            f"당신은 실전 주식 투자 어드바이저입니다. 불필요한 알림을 줄이는 것이 목표입니다.\n\n"
+            f"당신은 실전 주식 투자 시니어 어드바이저입니다. 긴급 시장 이벤트에 대한 고수준 분석을 제공합니다.\n\n"
             f"종목: {trigger.name} ({trigger.ticker})\n"
             f"상황: {trigger.description}\n"
             f"시각: {trigger.timestamp.strftime('%Y-%m-%d %H:%M KST')}\n\n"
-            f"아래 기준으로 판단하세요:\n"
-            f"- 지금 당장 매수 또는 매도 행동이 필요한 상황인가?\n"
-            f"- 단순 변동성이나 일시적 움직임이면 '관망'으로 판단하세요.\n"
-            f"- 추세 전환, 펀더멘털 변화, 극단적 공포/탐욕 등 실제 액션이 필요할 때만 매수/매도를 권고하세요.\n\n"
+            f"아래 프레임워크로 분석하세요:\n"
+            f"1. 원인 분석 — 이 움직임의 근본 원인 (매크로/실적/수급/지정학)\n"
+            f"2. 과거 유사 사례 — 비슷한 상황에서 시장이 어떻게 반응했는지\n"
+            f"3. 대응 전략 — 구체적 액션 (진입가/손절가/목표가 포함)\n"
+            f"4. 리스크 — 이 판단이 틀릴 경우의 시나리오\n\n"
             f"첫 줄에 [매수], [매도], 또는 [관망] 태그를 반드시 포함하세요.\n"
-            f"2~3문장으로 이유를 설명하세요."
+            f"불필요한 알림을 줄이는 것이 목표입니다. 단순 변동성이면 반드시 [관망]으로 판단하세요."
         )
 
         try:
             result = subprocess.run(
-                ["/usr/bin/claude", "-p", prompt, "--model", "haiku"],
+                ["/usr/bin/claude", "-p", prompt, "--model", "opus"],
                 capture_output=True,
                 text=True,
-                timeout=60,
+                timeout=120,
                 cwd="/home/ohmil/Sanjuk-Stock-Simulator",
             )
             if result.returncode == 0 and result.stdout.strip():
@@ -357,7 +358,7 @@ class MarketMonitor:
             log.warning("CLI 분석 실패: returncode=%d", result.returncode)
             return ""
         except subprocess.TimeoutExpired:
-            log.warning("CLI 분석 타임아웃 (60초)")
+            log.warning("CLI 분석 타임아웃 (120초)")
             return ""
         except Exception as e:
             log.warning("CLI 분석 오류: %s", e)
