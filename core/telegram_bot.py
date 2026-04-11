@@ -35,14 +35,7 @@ log = logging.getLogger(__name__)
 
 # ─── 명령어 매핑 ──────────────────────────────────────
 COMMANDS: dict[str, str] = {
-    "전체 브리핑": "MANUAL",
-    "미국장 브리핑": "US_BEFORE",
-    "한국장 브리핑": "KR_BEFORE",
     "보유종목 확인": "PORTFOLIO",
-    # 슬래시 명령 (영어 대체)
-    "/briefing": "MANUAL",
-    "/us": "US_BEFORE",
-    "/kr": "KR_BEFORE",
     "/portfolio": "PORTFOLIO",
     "/status": "PORTFOLIO",
     "/help": "HELP",
@@ -51,12 +44,12 @@ COMMANDS: dict[str, str] = {
 
 HELP_TEXT = """📋 *사용 가능한 명령어*
 
-🔹 *전체 브리핑* — 전체 포트폴리오 AI 분석
-🔹 *한국장 브리핑* — 한국 종목 중심 분석
-🔹 *미국장 브리핑* — 미국 종목 중심 분석
 🔹 *보유종목 확인* — 현재 시세 + 수익률
 
-⏱ 브리핑은 3~5분 소요됩니다."""
+📊 브리핑은 매일 자동 전송됩니다.
+  • 한국장: KST 08:30
+  • 미국장: KST 21:00
+🚨 긴급 알림은 자동 감지됩니다."""
 
 
 class TelegramBot:
@@ -144,41 +137,6 @@ class TelegramBot:
             self._reply(HELP_TEXT)
         elif action == "PORTFOLIO":
             self._handle_portfolio()
-        else:
-            self._handle_briefing(action)
-
-    def _handle_briefing(self, briefing_type: str) -> None:
-        """브리핑 실행 요청."""
-        from core.briefing_runner import is_briefing_running, run_briefing
-
-        if is_briefing_running():
-            self._reply("⏳ 브리핑이 이미 진행 중입니다. 완료 후 결과를 전송합니다.")
-            return
-
-        labels = {
-            "MANUAL": "전체",
-            "US_BEFORE": "미국장",
-            "KR_BEFORE": "한국장",
-        }
-        label = labels.get(briefing_type, briefing_type)
-        self._reply(f"📊 *{label} 브리핑* 생성을 시작합니다.\n⏱ 3~5분 소요됩니다.")
-
-        # 별도 스레드에서 실행 (폴링 루프 블로킹 방지)
-        thread = threading.Thread(
-            target=self._run_briefing_thread,
-            args=(briefing_type, label),
-            daemon=True,
-        )
-        thread.start()
-
-    def _run_briefing_thread(self, briefing_type: str, label: str) -> None:
-        """브리핑 스레드 실행."""
-        from core.briefing_runner import run_briefing
-
-        result = run_briefing(briefing_type)
-        if not result.success:
-            self._reply(f"❌ {label} 브리핑 실패: {result.error}")
-        # 성공 시: briefing_runner가 이미 텔레그램으로 결과 전송함
 
     def _handle_portfolio(self) -> None:
         """보유종목 현재 시세 조회."""
