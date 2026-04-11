@@ -18,7 +18,11 @@
       "Bash(git add:*)",
       "Bash(git commit:*)",
       "Bash(git push:*)",
-      "Bash(scp -r ~/.claude/projects/C--dev-Sanjuk-Stock-Simulator/memory/ ohmil@35.238.77.143:~/.claude/projects/C--dev-Sanjuk-Stock-Simulator/memory/)"
+      "Bash(scp -r ~/.claude/projects/C--dev-Sanjuk-Stock-Simulator/memory/ ohmil@35.238.77.143:~/.claude/projects/C--dev-Sanjuk-Stock-Simulator/memory/)",
+      "Bash(git -C /home/ohmil/Sanjuk-Stock-Simulator log --oneline -3)",
+      "Bash(sudo -u kanzaka110 git -C /home/kanzaka110/Sanjuk-Stock-Simulator log --oneline -3)",
+      "Bash(sudo -u kanzaka110 git -C /home/kanzaka110/Sanjuk-Stock-Simulator pull origin master)",
+      "Bash(git -C /home/ohmil/Sanjuk-Stock-Simulator pull origin master)"
     ]
   }
 }
