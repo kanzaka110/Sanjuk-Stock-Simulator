@@ -12,7 +12,6 @@ import time
 from datetime import datetime
 
 from config.settings import (
-    CLAUDE_API_KEY,
     KR_PORTFOLIO,
     KST,
     MONITOR_INTERVAL_SEC,
@@ -235,8 +234,8 @@ class MarketMonitor:
         severity = self._classify_severity(trigger)
         ai_analysis = ""
 
-        # CRITICAL/WARNING 시에만 AI 호출 (비용 최적화)
-        if severity in (Severity.CRITICAL, Severity.WARNING) and CLAUDE_API_KEY:
+        # CRITICAL/WARNING 시에만 CLI AI 호출 ($0)
+        if severity in (Severity.CRITICAL, Severity.WARNING):
             ai_analysis = self._ai_analyze(trigger)
 
         return AlertResult(
@@ -289,33 +288,39 @@ class MarketMonitor:
         return False
 
     def _ai_analyze(self, trigger: AlertTrigger) -> str:
-        """Claude Haiku로 간단 AI 분석 — 매수/매도/관망 명확히 판정."""
+        """Claude CLI로 AI 분석 — 매수/매도/관망 판정 (API 비용 $0)."""
+        import subprocess
+
+        prompt = (
+            f"당신은 실전 주식 투자 어드바이저입니다. 불필요한 알림을 줄이는 것이 목표입니다.\n\n"
+            f"종목: {trigger.name} ({trigger.ticker})\n"
+            f"상황: {trigger.description}\n"
+            f"시각: {trigger.timestamp.strftime('%Y-%m-%d %H:%M KST')}\n\n"
+            f"아래 기준으로 판단하세요:\n"
+            f"- 지금 당장 매수 또는 매도 행동이 필요한 상황인가?\n"
+            f"- 단순 변동성이나 일시적 움직임이면 '관망'으로 판단하세요.\n"
+            f"- 추세 전환, 펀더멘털 변화, 극단적 공포/탐욕 등 실제 액션이 필요할 때만 매수/매도를 권고하세요.\n\n"
+            f"첫 줄에 [매수], [매도], 또는 [관망] 태그를 반드시 포함하세요.\n"
+            f"2~3문장으로 이유를 설명하세요."
+        )
+
         try:
-            import anthropic
-
-            client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
-
-            prompt = (
-                f"당신은 실전 주식 투자 어드바이저입니다. 불필요한 알림을 줄이는 것이 목표입니다.\n\n"
-                f"종목: {trigger.name} ({trigger.ticker})\n"
-                f"상황: {trigger.description}\n"
-                f"시각: {trigger.timestamp.strftime('%Y-%m-%d %H:%M KST')}\n\n"
-                f"아래 기준으로 판단하세요:\n"
-                f"- 지금 당장 매수 또는 매도 행동이 필요한 상황인가?\n"
-                f"- 단순 변동성이나 일시적 움직임이면 '관망'으로 판단하세요.\n"
-                f"- 추세 전환, 펀더멘털 변화, 극단적 공포/탐욕 등 실제 액션이 필요할 때만 매수/매도를 권고하세요.\n\n"
-                f"첫 줄에 [매수], [매도], 또는 [관망] 태그를 반드시 포함하세요.\n"
-                f"2~3문장으로 이유를 설명하세요."
+            result = subprocess.run(
+                ["/usr/bin/claude", "-p", prompt, "--model", "haiku"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                cwd="/home/ohmil/Sanjuk-Stock-Simulator",
             )
-
-            response = client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=300,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return response.content[0].text.strip()
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+            log.warning("CLI 분석 실패: returncode=%d", result.returncode)
+            return ""
+        except subprocess.TimeoutExpired:
+            log.warning("CLI 분석 타임아웃 (60초)")
+            return ""
         except Exception as e:
-            log.warning(f"AI 분석 실패: {e}")
+            log.warning("CLI 분석 오류: %s", e)
             return ""
 
     # ─── 알림 전송 ────────────────────────────────────
