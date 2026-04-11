@@ -144,7 +144,7 @@ class MarketMonitor:
         return triggers
 
     def _check_vix(self, now: datetime) -> AlertTrigger | None:
-        """VIX 급등 체크."""
+        """VIX 급등 체크 — 교차검증 포함."""
         from core.market import _get_quote_realtime
 
         quote = _get_quote_realtime("^VIX")
@@ -152,6 +152,19 @@ class MarketMonitor:
             return None
 
         if quote.price >= VIX_THRESHOLD:
+            # yfinance로 교차검증
+            cross = self._cross_verify_price("^VIX")
+            if cross is not None:
+                # VIX는 변동률이 아니라 절대값이므로, yfinance 가격 직접 확인
+                try:
+                    import yfinance as yf
+                    yf_price = yf.Ticker("^VIX").fast_info["lastPrice"]
+                    if yf_price < VIX_THRESHOLD * 0.85:
+                        log.info("VIX 교차검증 불일치: 1차 %.1f vs yf %.1f → 스킵", quote.price, yf_price)
+                        return None
+                except Exception:
+                    pass  # 검증 실패 시 원래 값 신뢰
+
             return AlertTrigger(
                 ticker="^VIX",
                 name="VIX",
@@ -195,31 +208,58 @@ class MarketMonitor:
     def _check_price_change(
         self, ticker: str, name: str, now: datetime,
     ) -> AlertTrigger | None:
-        """일중 급등/급락 체크."""
+        """일중 급등/급락 체크 — KIS + yfinance 교차검증."""
         from core.market import _get_quote_realtime
 
         quote = _get_quote_realtime(ticker)
         if quote is None or quote.pct == 0:
             return None
 
-        if quote.pct <= -PRICE_CHANGE_THRESHOLD:
+        pct = quote.pct
+
+        # 임계치 초과 시 교차검증: yfinance로 별도 확인
+        if abs(pct) >= PRICE_CHANGE_THRESHOLD:
+            cross_pct = self._cross_verify_price(ticker)
+            if cross_pct is not None and abs(cross_pct) < PRICE_CHANGE_THRESHOLD * 0.5:
+                # yfinance에서 절반도 안 되면 오탐 가능성 → 스킵
+                log.info(
+                    "교차검증 불일치 [%s]: 1차 %.1f%% vs 2차 %.1f%% → 스킵",
+                    ticker, pct, cross_pct,
+                )
+                return None
+
+        if pct <= -PRICE_CHANGE_THRESHOLD:
             return AlertTrigger(
                 ticker=ticker,
                 name=name,
                 trigger_type=TriggerType.PRICE_DROP,
-                current_value=quote.pct,
+                current_value=pct,
                 threshold=PRICE_CHANGE_THRESHOLD,
                 timestamp=now,
             )
-        if quote.pct >= PRICE_CHANGE_THRESHOLD:
+        if pct >= PRICE_CHANGE_THRESHOLD:
             return AlertTrigger(
                 ticker=ticker,
                 name=name,
                 trigger_type=TriggerType.PRICE_SURGE,
-                current_value=quote.pct,
+                current_value=pct,
                 threshold=PRICE_CHANGE_THRESHOLD,
                 timestamp=now,
             )
+        return None
+
+    def _cross_verify_price(self, ticker: str) -> float | None:
+        """yfinance로 별도 가격 변동률 확인 (교차검증용)."""
+        try:
+            import yfinance as yf
+
+            fi = yf.Ticker(ticker).fast_info
+            price = fi["lastPrice"]
+            prev = fi["previousClose"]
+            if prev and prev > 0:
+                return ((price - prev) / prev) * 100
+        except Exception:
+            pass
         return None
 
     # ─── 알림 상태 관리 ─────────────────────────────────
