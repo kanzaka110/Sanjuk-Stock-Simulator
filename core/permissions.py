@@ -135,7 +135,6 @@ def mode_from_command(command: str) -> OperationMode:
         "briefing": OperationMode.BRIEFING,
         "monitor": OperationMode.MONITOR,
         "bot": OperationMode.BRIEFING,  # 봇은 브리핑도 할 수 있으므로
-        "server": OperationMode.BRIEFING,
         "price": OperationMode.ADMIN,
         "": OperationMode.ANALYSIS,     # TUI
     }

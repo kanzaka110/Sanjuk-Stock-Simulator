@@ -74,10 +74,6 @@ MACRO: dict[str, str] = {
     "GC=F": "금",
 }
 
-# ─── API 서버 ──────────────────────────────────────
-API_SECRET_KEY: str = os.environ.get("API_SECRET_KEY", "")
-API_PORT: int = int(os.environ.get("API_PORT", "8000"))
-
 # ─── 시장별 포트폴리오 분리 ────────────────────────────
 KR_PORTFOLIO: dict[str, str] = {
     tk: nm for tk, nm in PORTFOLIO.items() if ".KS" in tk

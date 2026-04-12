@@ -39,8 +39,6 @@ Sanjuk-Stock-Simulator/
 │   ├── task_registry.py   # Task 레지스트리 (에이전트 상태 추적/팀 조율)
 │   ├── config_loader.py   # 설정 계층 로더 (5단계 체인 + 검증)
 │   └── permissions.py     # Permission 계층 (운영 모드별 동작 제한)
-├── api/                   # API 서버 (자동화용)
-│   └── server.py          # FastAPI 브리핑 엔드포인트
 ├── terminal/              # 터미널 UI (Textual TUI)
 │   ├── app.py             # 메인 TUI 앱
 │   └── screens/           # 화면 모듈
@@ -74,7 +72,6 @@ python main.py              # TUI 터미널 실행
 python main.py briefing     # 브리핑 생성 (Notion + 텔레그램 알림)
 python main.py bot          # 텔레그램 봇 + 시장 모니터 실행 (GCP 상시)
 python main.py monitor      # 시장 모니터만 실행
-python main.py server       # API 서버 시작 (자동화용)
 python main.py price        # Notion 주가 업데이트
 ```
 
@@ -190,8 +187,6 @@ NOTION_DATABASE_ID=   # Notion 주가 DB ID
 TELEGRAM_BOT_TOKEN=   # 텔레그램 봇 토큰 (알림 전송용)
 TELEGRAM_CHAT_ID=     # 텔레그램 채팅 ID
 BRIEFING_TYPE=MANUAL  # 브리핑 유형 (KR_BEFORE / US_BEFORE / MANUAL)
-API_SECRET_KEY=       # API 서버 인증키 (비어있으면 인증 비활성화)
-API_PORT=8000         # API 서버 포트
 ```
 
 ## GCP 관리

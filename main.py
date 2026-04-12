@@ -4,7 +4,6 @@
 사용법:
   python main.py              # TUI 터미널 실행
   python main.py briefing     # 브리핑 생성 → Notion + 텔레그램
-  python main.py server       # API 서버 시작 (자동화용)
   python main.py price        # Notion 주가 업데이트
 """
 
@@ -109,17 +108,6 @@ def cmd_price() -> None:
     print(f"주가 업데이트 완료: {count}종목")
 
 
-def cmd_server() -> None:
-    """API 서버 시작."""
-    import uvicorn
-
-    from api.server import app
-    from config.settings import API_PORT
-
-    print(f"산적 주식 시뮬레이터 API 서버 시작 (포트 {API_PORT})...")
-    uvicorn.run(app, host="0.0.0.0", port=API_PORT)
-
-
 def cmd_bot() -> None:
     """텔레그램 봇 + 시장 모니터 동시 실행."""
     import signal
@@ -186,7 +174,6 @@ def cmd_monitor() -> None:
 
 COMMANDS = {
     "briefing": cmd_briefing,
-    "server": cmd_server,
     "price": cmd_price,
     "bot": cmd_bot,
     "monitor": cmd_monitor,
@@ -197,7 +184,6 @@ USAGE = """산적 주식 시뮬레이터
 사용법:
   python main.py              TUI 터미널 실행
   python main.py briefing     브리핑 생성 (Notion + 텔레그램 알림)
-  python main.py server       API 서버 시작 (자동화용)
   python main.py price        Notion 주가 업데이트
   python main.py bot          텔레그램 봇 + 시장 모니터 실행
   python main.py monitor      시장 모니터만 실행

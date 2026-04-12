@@ -81,7 +81,7 @@ def validate_config(mode: str = "briefing") -> ConfigValidation:
     """운영 모드별 필수 설정 검증.
 
     Args:
-        mode: "briefing", "monitor", "bot", "server", "tui"
+        mode: "briefing", "monitor", "bot", "tui"
 
     Returns:
         ConfigValidation
@@ -94,7 +94,6 @@ def validate_config(mode: str = "briefing") -> ConfigValidation:
         "briefing": ["GEMINI_API_KEY", "CLAUDE_API_KEY"],
         "monitor": ["CLAUDE_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"],
         "bot": ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "CLAUDE_API_KEY", "GEMINI_API_KEY"],
-        "server": ["CLAUDE_API_KEY", "GEMINI_API_KEY"],
         "tui": [],
     }
 
