@@ -23,13 +23,9 @@
       "Bash(sudo -u kanzaka110 git -C /home/kanzaka110/Sanjuk-Stock-Simulator log --oneline -3)",
       "Bash(sudo -u kanzaka110 git -C /home/kanzaka110/Sanjuk-Stock-Simulator pull origin master)",
       "Bash(git -C /home/ohmil/Sanjuk-Stock-Simulator pull origin master)",
-      "Bash(git stash:*)",
-      "Bash(ls -la *.pyc)",
-      "Bash(ls -la *.log)",
-      "Bash(find . -name \"__pycache__\" -type d -exec rm -rf {} +)",
-      "Bash(find . -name \"*.pyc\" -delete)",
-      "Bash(python:*)",
-      "WebSearch"
+      "Bash(git pull:*)",
+      "Bash(git fetch:*)",
+      "Bash(git stash:*)"
     ]
   }
 }

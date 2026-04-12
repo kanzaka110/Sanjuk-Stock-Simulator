@@ -60,8 +60,7 @@ Sanjuk-Stock-Simulator/
 자동 브리핑 (한국장)   →  KST 08:30, Claude Code 스케줄 트리거 ($0)
 자동 브리핑 (미국장)   →  KST 21:00, Claude Code 스케줄 트리거 ($0)
 수시 브리핑 (PC)       →  /한국장, /미국장, /통합 커맨드 ($0)
-수시 브리핑 (폰)       →  텔레그램에서 "전체 브리핑" (API $0.06)
-긴급 시장 알림         →  시장 모니터 자동 감지 → 텔레그램 알림
+긴급 시장 알림         →  시장 모니터 Tier1 교차검증 + Tier2 Opus CLI ($0)
 보유종목 확인 (폰)     →  텔레그램에서 "보유종목 확인" 입력
 ```
 
@@ -69,10 +68,10 @@ Sanjuk-Stock-Simulator/
 
 ```bash
 python main.py              # TUI 터미널 실행
-python main.py briefing     # 브리핑 생성 (Notion + 텔레그램 알림)
 python main.py bot          # 텔레그램 봇 + 시장 모니터 실행 (GCP 상시)
 python main.py monitor      # 시장 모니터만 실행
 python main.py price        # Notion 주가 업데이트
+# 브리핑은 CLI 커맨드(/한국장, /미국장, /통합) 또는 스케줄 트리거로 실행
 ```
 
 ## 인프라 패턴 (claw-code 적용)
