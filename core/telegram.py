@@ -260,6 +260,29 @@ def _build_briefing_message(
         lines.append("⏸️  매수/매도 신호 없음 — 관망 유지")
         lines.append("")
 
+    # ── 신규 주 매수 후보 ──
+    new_candidates = raw.get("new_stock_candidates", [])
+    lines.append("")
+    lines.append(f"{'─' * 24}")
+    lines.append("🆕  *신규 주 매수 후보*")
+    lines.append("")
+    if new_candidates:
+        for c in new_candidates:
+            account = c.get("account", "")
+            acct_tag = f" {account}" if account else ""
+            urgency = c.get("urgency", "")
+            lines.append(f"{urgency}  *{c.get('name', '')}*{acct_tag}")
+            lines.append(f"    진입 {c.get('entry_price', '')}  →  목표 {c.get('target_price', '')}")
+            lines.append(f"    손절 {c.get('stop_loss', '')}  |  수량 {c.get('shares', '')}")
+            reason = c.get("reason", "")
+            if reason:
+                short_reason = reason[:60] + ("…" if len(reason) > 60 else "")
+                lines.append(f"    📝 {short_reason}")
+            lines.append("")
+    else:
+        lines.append("    없음")
+        lines.append("")
+
     # ── 계좌별 전략 ──
     acct_strategy = raw.get("account_strategy", {})
     if acct_strategy:

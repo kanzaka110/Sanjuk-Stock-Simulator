@@ -391,7 +391,8 @@ def synthesize(
 - [일반]: 5/31 전까지 해외주식 신규 매수 금지 (RIA 한도 차감). 국내주식은 ISA 우선 매수.
 - [연금저축/IRP]: 2026년 납입 완료. 리밸런싱만.
 - 전문 용어 사용 시 괄호로 쉬운 설명 병기 (예: RSI(과매도 지표) 35)
-- 한눈에 알아보기 쉽게. 표 적극 활용. 결론 먼저.{market_focus}"""
+- 한눈에 알아보기 쉽게. 표 적극 활용. 결론 먼저.
+- new_stock_candidates: 현재 보유하지 않은 신규 편입 후보만 포함. 신규 매수 후보가 없으면 반드시 빈 배열 [] 반환.{market_focus}"""
 
     prompt = f"""{market_context}
 
@@ -442,6 +443,20 @@ def synthesize(
       "stop_loss": "손절가",
       "timing": "매도 타이밍",
       "reason": "매도 근거"
+    }}
+  ],
+  "new_stock_candidates": [
+    {{
+      "ticker": "코드", "name": "종목명",
+      "account": "[ISA]|[일반]",
+      "urgency": "🔥강력|⚡적극|✅일반",
+      "current_price": "현재가",
+      "entry_price": "진입가 범위",
+      "target_price": "목표가",
+      "stop_loss": "손절가",
+      "shares": "추천 수량",
+      "reason": "신규 편입 근거 (현재 미보유 종목만)",
+      "risk_note": "리스크 요약"
     }}
   ],
   "strategy_summary": "오늘 가장 중요한 매수/매도 판단 요약. 300자 이상.",

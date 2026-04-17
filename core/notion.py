@@ -358,6 +358,51 @@ def _section_advisor(result: BriefingResult) -> list[dict]:
     return blocks
 
 
+def _section_new_stocks(result: BriefingResult) -> list[dict]:
+    """신규 편입 후보 섹션 — 현재 미보유 종목 추천."""
+    raw = result.raw_json
+    candidates = raw.get("new_stock_candidates", [])
+
+    blocks = [H1("🆕  신규 주 매수 후보", "green_background")]
+
+    if not candidates:
+        blocks.append(CALLOUT("신규 매수 후보 없음", "⏸️", "gray_background"))
+        blocks.append(DIV())
+        return blocks
+
+    rows: list[list[str]] = [["종목", "계좌", "긴급도", "진입가", "목표가", "손절가", "수량"]]
+    for c in candidates:
+        rows.append([
+            f"{c.get('name', '')} ({c.get('ticker', '')})",
+            c.get("account", ""),
+            urgency_badge(c.get("urgency", "")),
+            c.get("entry_price", ""),
+            c.get("target_price", ""),
+            c.get("stop_loss", ""),
+            c.get("shares", ""),
+        ])
+    blocks.append(TABLE(rows))
+    blocks.append(P(""))
+
+    for c in candidates:
+        detail: list[dict] = []
+        if c.get("reason"):
+            detail.append(P("편입 근거", bold=True))
+            for line in c["reason"].split("\n"):
+                if line.strip():
+                    detail.append(BUL(line.strip()))
+        if c.get("risk_note"):
+            detail.append(CALLOUT(f"리스크: {c['risk_note']}", "⚠️", "red_background"))
+        if detail:
+            blocks.append(TOGGLE(
+                f"▸  {c.get('name', '')} ({c.get('ticker', '')}) 편입 상세",
+                detail, "green",
+            ))
+
+    blocks.append(DIV())
+    return blocks
+
+
 def _section_account_strategy(result: BriefingResult) -> list[dict]:
     """계좌별 전략 섹션 (기존에 미렌더링)."""
     raw = result.raw_json
@@ -495,7 +540,8 @@ def save_to_notion(
     blocks += _section_header(now_kst.strftime("%Y-%m-%d %H:%M KST"), label)
     blocks += _section_advisor(result)           # 1. AI 조언 + 결론 (가장 먼저)
     blocks += _section_strategy(result)          # 2. 매수/매도 전략
-    blocks += _section_account_strategy(result)  # 3. 계좌별 전략 (신규)
+    blocks += _section_new_stocks(result)        # 3. 신규 주 매수 후보
+    blocks += _section_account_strategy(result)  # 4. 계좌별 전략
     blocks += _section_market_summary(result)    # 4. 시장 요약 + 합의/불일치
     blocks += _section_portfolio(result, snapshot)  # 5. 보유 종목 현황
     blocks += _section_market_overview(snapshot)  # 6. 시장 지수/매크로
