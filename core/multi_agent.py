@@ -4,14 +4,15 @@
 ai-hedge-fund 패턴 참고: 각 페르소나가 독립 분석 후
 종합 에이전트가 최종 매매 판단을 내린다.
 
-페르소나 에이전트: Haiku 4.5 (비용 절감)
-종합 에이전트: Sonnet 4.6 (정확도)
+페르소나 에이전트: Haiku 4.5 API (tool_use 구조화 + 병렬)
+종합 에이전트: Opus 4.7 CLI (Max 구독, $0) + Sonnet API fallback
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -19,6 +20,7 @@ from datetime import datetime
 import anthropic
 
 from config.settings import CLAUDE_API_KEY, KST
+from core.claude_cli import claude_cli
 from core.recovery import claude_breaker, retry
 from core.task_registry import get_registry
 
@@ -26,6 +28,17 @@ log = logging.getLogger(__name__)
 
 HAIKU_MODEL = "claude-haiku-4-5-20251001"
 SONNET_MODEL = "claude-sonnet-4-6"
+OPUS_MODEL = "claude-opus-4-7"
+
+# 종합 단계 엔진 선택: "opus_cli" (기본, Max 구독, $0) 또는 "sonnet_api" (fallback용)
+_SYNTHESIS_ENGINE_ALLOWED = {"opus_cli", "sonnet_api"}
+SYNTHESIS_ENGINE = os.environ.get("SYNTHESIS_ENGINE", "opus_cli")
+if SYNTHESIS_ENGINE not in _SYNTHESIS_ENGINE_ALLOWED:
+    log.warning(
+        "SYNTHESIS_ENGINE 값이 잘못됨: %r (허용: %s) → sonnet_api로 강제",
+        SYNTHESIS_ENGINE, sorted(_SYNTHESIS_ENGINE_ALLOWED),
+    )
+    SYNTHESIS_ENGINE = "sonnet_api"
 
 
 # ═══════════════════════════════════════════════════════
@@ -290,7 +303,12 @@ def synthesize(
     market_context: str,
     briefing_type: str = "MANUAL",
 ) -> str:
-    """4개 페르소나 분석을 종합하여 최종 전략 JSON 생성 (Sonnet)."""
+    """4개 페르소나 분석을 종합하여 최종 전략 JSON 생성.
+
+    기본: Opus 4.7 CLI (Max 구독, $0, 최고 추론력).
+    실패/빈 응답 시 자동으로 Sonnet 4.6 API로 fallback.
+    SYNTHESIS_ENGINE=sonnet_api 환경변수로 CLI 건너뛰고 바로 API 사용 가능.
+    """
     # 페르소나 결과 텍스트화
     persona_text = ""
     for pa in persona_results:
@@ -470,6 +488,19 @@ def synthesize(
     "매크로분석가": "한줄 요약"
   }}
 }}"""
+
+    if SYNTHESIS_ENGINE == "opus_cli":
+        cli_output = claude_cli(
+            prompt,
+            model="opus",
+            system_prompt=system,
+            timeout=240,
+            effort="high",
+        )
+        if cli_output:
+            log.info("synthesis: Opus 4.7 CLI 성공 (%d chars)", len(cli_output))
+            return cli_output
+        log.warning("synthesis: Opus CLI 실패 → Sonnet API fallback")
 
     response = client.messages.create(
         model=SONNET_MODEL,
