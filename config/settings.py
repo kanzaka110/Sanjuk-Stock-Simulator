@@ -36,6 +36,11 @@ NOTION_DATABASE_ID: str = os.environ.get("NOTION_DATABASE_ID", NOTION_DB_ID)
 TELEGRAM_BOT_TOKEN: str = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID: str = os.environ.get("TELEGRAM_CHAT_ID", "")
 
+# ─── Gmail SMTP (브리핑/분석 메일 전송) ────────────
+GMAIL_USER: str = os.environ.get("GMAIL_USER", "")  # 발송 계정 (예: kanzaka110@gmail.com)
+GMAIL_APP_PASSWORD: str = os.environ.get("GMAIL_APP_PASSWORD", "")  # 16자 앱 비밀번호
+GMAIL_TO: str = os.environ.get("GMAIL_TO", "")  # 수신자 (미설정 시 GMAIL_USER로)
+
 # ─── 포트폴리오 ─────────────────────────────────────
 PORTFOLIO: dict[str, str] = {
     "005930.KS": "삼성전자",

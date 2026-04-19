@@ -23,6 +23,7 @@ class BriefingRunResult:
     title: str = ""
     notion_url: str = ""
     telegram_sent: bool = False
+    email_sent: bool = False
     error: str = ""
 
 
@@ -55,6 +56,7 @@ def is_briefing_running() -> bool:
 def _execute_briefing(briefing_type: str) -> BriefingRunResult:
     """브리핑 실제 실행."""
     from core.analyzer import analyze
+    from core.email import send_briefing_email
     from core.market import fetch_market
     from core.notion import save_to_notion
     from core.telegram import send_briefing_telegram
@@ -74,12 +76,19 @@ def _execute_briefing(briefing_type: str) -> BriefingRunResult:
 
         telegram_sent = send_briefing_telegram(result, page_id, briefing_type)
 
+        email_sent = False
+        try:
+            email_sent = send_briefing_email(result, page_id, briefing_type)
+        except Exception as e:
+            log.warning(f"메일 전송 실패: {e}")
+
         log.info(f"브리핑 완료: {result.title}")
         return BriefingRunResult(
             success=True,
             title=result.title,
             notion_url=notion_url,
             telegram_sent=telegram_sent,
+            email_sent=email_sent,
         )
     except Exception as e:
         log.error(f"브리핑 실패: {e}")
