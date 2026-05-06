@@ -17,7 +17,7 @@ from datetime import datetime
 
 import anthropic
 
-from config.settings import CLAUDE_API_KEY, KST, PORTFOLIO, get_market_config
+from config.settings import KST, PORTFOLIO, get_market_config
 from core.market import fmt_change, fmt_price
 from core.models import BriefingResult, MarketSnapshot, Signal
 from core.news import gather_news
@@ -206,9 +206,6 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
         ValueError: API 키 미설정
         json.JSONDecodeError: Claude 응답 파싱 실패
     """
-    if not CLAUDE_API_KEY:
-        raise ValueError("CLAUDE_API_KEY 환경변수가 설정되지 않았습니다.")
-
     portfolio, _, _ = get_market_config(briefing_type)
 
     from core.backtest import (
@@ -434,9 +431,6 @@ def ask_ai(
 
     예: "한화에어로스페이스 팔때 됐나?"
     """
-    if not CLAUDE_API_KEY:
-        raise ValueError("CLAUDE_API_KEY 환경변수가 설정되지 않았습니다.")
-
     context = _build_market_context(snapshot)
     system = f"{ASK_SYSTEM_PROMPT}\n\n{context}"
 
@@ -445,7 +439,8 @@ def ask_ai(
         messages.extend(history)
     messages.append({"role": "user", "content": question})
 
-    client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
+    from core.oauth import get_client
+    client = get_client()
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=4000,

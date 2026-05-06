@@ -91,9 +91,9 @@ def validate_config(mode: str = "briefing") -> ConfigValidation:
 
     # 모드별 필수
     mode_required: dict[str, list[str]] = {
-        "briefing": ["GEMINI_API_KEY", "CLAUDE_API_KEY"],
-        "monitor": ["CLAUDE_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"],
-        "bot": ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "CLAUDE_API_KEY", "GEMINI_API_KEY"],
+        "briefing": ["GEMINI_API_KEY"],
+        "monitor": ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"],
+        "bot": ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "GEMINI_API_KEY"],
         "tui": [],
     }
 

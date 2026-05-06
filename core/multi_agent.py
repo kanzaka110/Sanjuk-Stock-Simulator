@@ -4,8 +4,8 @@
 ai-hedge-fund 패턴 참고: 각 페르소나가 독립 분석 후
 종합 에이전트가 최종 매매 판단을 내린다.
 
-페르소나 에이전트: Haiku 4.5 API (tool_use 구조화 + 병렬)
-종합 에이전트: Opus 4.7 CLI (Max 구독, $0) + Sonnet API fallback
+페르소나 에이전트: Haiku 4.5 OAuth (tool_use 구조화 + 병렬)
+종합 에이전트: Opus CLI ($0) → OAuth API 폴백 (Opus → Sonnet → Haiku)
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from datetime import datetime
 
 import anthropic
 
-from config.settings import CLAUDE_API_KEY, KST
+from config.settings import KST
 from core.claude_cli import claude_cli
 from core.recovery import claude_breaker, retry
 from core.task_registry import get_registry
@@ -28,17 +28,7 @@ log = logging.getLogger(__name__)
 
 HAIKU_MODEL = "claude-haiku-4-5-20251001"
 SONNET_MODEL = "claude-sonnet-4-6"
-OPUS_MODEL = "claude-opus-4-7"
-
-# 종합 단계 엔진 선택: "opus_cli" (기본, Max 구독, $0) 또는 "sonnet_api" (fallback용)
-_SYNTHESIS_ENGINE_ALLOWED = {"opus_cli", "sonnet_api"}
-SYNTHESIS_ENGINE = os.environ.get("SYNTHESIS_ENGINE", "opus_cli")
-if SYNTHESIS_ENGINE not in _SYNTHESIS_ENGINE_ALLOWED:
-    log.warning(
-        "SYNTHESIS_ENGINE 값이 잘못됨: %r (허용: %s) → sonnet_api로 강제",
-        SYNTHESIS_ENGINE, sorted(_SYNTHESIS_ENGINE_ALLOWED),
-    )
-    SYNTHESIS_ENGINE = "sonnet_api"
+OPUS_MODEL = "claude-opus-4-6"
 
 
 # ═══════════════════════════════════════════════════════
@@ -144,7 +134,8 @@ def _run_persona(
     task = registry.create_task(persona_name, "persona", team_id=team_id)
     registry.start_task(task.task_id)
 
-    client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
+    from core.oauth import get_client
+    client = get_client()
 
     system = f"""당신은 '{persona_name}' 관점의 투자 분석가입니다.
 {persona_prompt}
@@ -155,14 +146,24 @@ def _run_persona(
         if not claude_breaker.is_available:
             raise RuntimeError("Claude API 서킷 브레이커 OPEN")
 
-        response = client.messages.create(
-            model=HAIKU_MODEL,
-            max_tokens=1000,
-            system=system,
-            messages=[{"role": "user", "content": market_context}],
-            tools=[_ANALYSIS_TOOL],
-            tool_choice={"type": "tool", "name": "submit_analysis"},
-        )
+        response = None
+        for attempt in range(3):
+            try:
+                response = client.messages.create(
+                    model=HAIKU_MODEL,
+                    max_tokens=1000,
+                    system=system,
+                    messages=[{"role": "user", "content": market_context}],
+                    tools=[_ANALYSIS_TOOL],
+                    tool_choice={"type": "tool", "name": "submit_analysis"},
+                )
+                break
+            except anthropic.RateLimitError:
+                if attempt < 2:
+                    import time
+                    time.sleep(30 * (attempt + 1))
+                else:
+                    raise
 
         claude_breaker.record_success()
 
@@ -215,7 +216,7 @@ def run_all_personas(market_context: str) -> list[PersonaAnalysis]:
 
     # 1라운드: 독립 분석
     results: list[PersonaAnalysis] = []
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    with ThreadPoolExecutor(max_workers=2) as executor:
         futures = {
             executor.submit(
                 _run_persona, name, prompt, market_context, team.team_id,
@@ -256,7 +257,7 @@ def run_all_personas(market_context: str) -> list[PersonaAnalysis]:
     augmented_context = f"{market_context}\n\n{debate_context}"
 
     round2: list[PersonaAnalysis] = []
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    with ThreadPoolExecutor(max_workers=2) as executor:
         futures = {
             executor.submit(
                 _run_persona, name, prompt, augmented_context, team2.team_id,
@@ -305,9 +306,8 @@ def synthesize(
 ) -> str:
     """4개 페르소나 분석을 종합하여 최종 전략 JSON 생성.
 
-    기본: Opus 4.7 CLI (Max 구독, $0, 최고 추론력).
-    실패/빈 응답 시 자동으로 Sonnet 4.6 API로 fallback.
-    SYNTHESIS_ENGINE=sonnet_api 환경변수로 CLI 건너뛰고 바로 API 사용 가능.
+    1순위: Opus CLI (Max 구독, $0)
+    2순위: OAuth API 폴백 (Opus → Sonnet → Haiku)
     """
     # 페르소나 결과 텍스트화
     persona_text = ""
@@ -320,7 +320,8 @@ def synthesize(
   리스크: {pa.risk_warning}
 """
 
-    client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
+    from core.oauth import get_client
+    client = get_client()
 
     # 시장 초점 지시
     if briefing_type == "KR_BEFORE":
@@ -397,6 +398,9 @@ def synthesize(
 ③ 분석가 간 의견 충돌이 있으면 명시
 ④ 아부 금지. 데이터 기반 직언.
 ⑤ 모든 수치는 구체적으로 (%, 가격)
+⑥ 관망도 적극적 판단이다 — "살 수 없으니 관망"은 금지. 제약 내에서 최선의 액션을 찾아라.
+   ISA에서 국내 ETF/주식 매수 기회가 있는지, RIA 매도 타이밍이 맞는지, 리밸런싱 필요성이 있는지 반드시 검토.
+   진짜 할 게 없으면 "왜 지금은 안 되는지" 구체적 조건과 "어떤 조건이 충족되면 행동할지" 트리거를 명시.
 
 ━━━ 실제 보유 포지션 ━━━
 {holdings_text}
@@ -463,7 +467,7 @@ def synthesize(
     }}
   ],
   "strategy_summary": "오늘 가장 중요한 매수/매도 판단 요약. 300자 이상.",
-  "advisor_verdict": "매수대기|소액분할|적극매수|매도고려",
+  "advisor_verdict": "적극매수|소액분할|매도고려|리밸런싱|매수대기",
   "advisor_oneliner": "한 문장 직언 (수치 포함)",
   "advisor_conclusion": "300자 이상 종합 결론. 4개 관점의 합의/불일치 반영.",
   "advisor_checklist": [
@@ -476,10 +480,10 @@ def synthesize(
   ],
   "next_action": "다음 액션",
   "account_strategy": {{
-    "ISA": "국내 ETF/주식 매수 전략 또는 대기 사유",
-    "RIA": "NVDA/GOOGL 매도 판단 (5/31 데드라인)",
-    "일반": "해외주식 전략 (5/31 전 매수 금지 명시)",
-    "연금_IRP": "리밸런싱 사항 또는 변동 없음"
+    "ISA": "국내 ETF/주식 구체적 매수 후보와 진입 조건. 기회가 없으면 진입 트리거 명시",
+    "RIA": "NVDA/GOOGL 매도 타이밍 판단 — 지금 매도 vs 보유 근거 + 5/31 데드라인 역산",
+    "일반": "5/31 전 해외 매수 제한 내에서 국내 매수 또는 기존 보유 관리 전략",
+    "연금_IRP": "리밸런싱 필요성 검토. 비중 조정할 게 없으면 이유 명시"
   }},
   "persona_summary": {{
     "가치투자자": "한줄 요약",
@@ -489,23 +493,43 @@ def synthesize(
   }}
 }}"""
 
-    if SYNTHESIS_ENGINE == "opus_cli":
-        cli_output = claude_cli(
-            prompt,
-            model="opus",
-            system_prompt=system,
-            timeout=240,
-            effort="high",
-        )
-        if cli_output:
-            log.info("synthesis: Opus 4.7 CLI 성공 (%d chars)", len(cli_output))
-            return cli_output
-        log.warning("synthesis: Opus CLI 실패 → Sonnet API fallback")
-
-    response = client.messages.create(
-        model=SONNET_MODEL,
-        max_tokens=10000,
-        system=system,
-        messages=[{"role": "user", "content": prompt}],
+    # 1순위: Opus CLI ($0)
+    cli_output = claude_cli(
+        prompt,
+        model="opus",
+        system_prompt=system,
+        timeout=240,
+        effort="high",
     )
-    return response.content[0].text.strip()
+    if cli_output:
+        log.info("synthesis: Opus CLI 성공 (%d chars)", len(cli_output))
+        return cli_output
+
+    log.warning("synthesis: Opus CLI 실패 → OAuth API fallback")
+
+    # 2순위: OAuth API (Opus → Sonnet → Haiku)
+    import time
+    from core.oauth import get_client
+    client = get_client()
+
+    models = [OPUS_MODEL, SONNET_MODEL, HAIKU_MODEL]
+    for model in models:
+        for attempt in range(3):
+            try:
+                response = client.messages.create(
+                    model=model,
+                    max_tokens=10000,
+                    system=system,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                log.info("synthesis: OAuth %s 성공", model)
+                return response.content[0].text.strip()
+            except anthropic.RateLimitError:
+                if attempt < 2:
+                    wait = 30 * (attempt + 1)
+                    log.warning("Rate limit (%s), %d초 대기 후 재시도", model, wait)
+                    time.sleep(wait)
+                else:
+                    log.warning("%s rate limit 초과, 다음 모델로 폴백", model)
+                    break
+    raise RuntimeError("모든 모델 rate limit 초과")
