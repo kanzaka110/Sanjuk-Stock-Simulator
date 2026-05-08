@@ -21,6 +21,7 @@ import anthropic
 
 from config.settings import KST
 from core.claude_cli import claude_cli
+from datetime import date as _date
 from core.recovery import claude_breaker, retry
 from core.task_registry import get_registry
 
@@ -390,6 +391,8 @@ def synthesize(
 [연금저축] CMA (MMF ₩{PENSION_MMF:,.0f})
 {chr(10).join(pension_lines) if pension_lines else "  (해당 시장 보유 없음)"}"""
 
+    ria_days_left = max((_date(2026, 5, 31) - _date.today()).days, 0)
+
     system = f"""당신은 최고 투자 전략가(CIO)입니다. 4명의 분석가 의견을 종합하여 최종 전략을 결정합니다.
 
 규칙:
@@ -411,6 +414,18 @@ def synthesize(
 - [ISA]: 국내주식 + 국내상장 ETF만 매수 가능. 해외 개별주식 불가. 예수금 2,000만원 — 적극 활용 대상.
 - [RIA]: 매도 전용. NVDA/GOOGL만 적격 (2025.12.23 이전 매수분). 5/31까지 100% 양도세 면제.
 - [일반]: 5/31 전까지 해외주식 신규 매수 금지 (RIA 한도 차감). 국내주식은 ISA 우선 매수.
+
+━━━ 🚨 RIA 매도 타이밍 체크 (최우선) ━━━
+- 데드라인: 2026-05-31 (D-{(_date(2026, 5, 31) - _date.today()).days}일)
+- 대상: NVDA 46주 (평단 $132.91), GOOGL 9주 (평단 $318.03)
+- 100% 양도세 면제 → 매도 시 절약 금액이 크므로 반드시 5/31 전에 매도 완료
+- 매도 타이밍 판단 기준:
+  · 기술적 과열 (RSI 70+, 볼린저 상단 이탈) → 즉시 매도 권고
+  · 안정 상승 중 → D-10 이전까지 매도 권고 (마감 쏠림 리스크 방지)
+  · 단기 급락 중 → 반등 확인 후 매도하되, D-5 이전에는 반드시 매도
+  · D-5 이내 → 시장 상황 무관 전량 매도 강력 권고
+- strategy_sell에 RIA 매도 판단을 매 브리핑마다 반드시 포함할 것
+- "아직 오를 수 있으니 보유" 판단은 D-10 이후 금지 — 세금 면제가 추가 수익보다 확실
 - [연금저축/IRP]: 2026년 납입 완료. 리밸런싱만.
 - 전문 용어 사용 시 괄호로 쉬운 설명 병기 (예: RSI(과매도 지표) 35)
 - 한눈에 알아보기 쉽게. 표 적극 활용. 결론 먼저.{market_focus}"""
@@ -481,7 +496,7 @@ def synthesize(
   "next_action": "다음 액션",
   "account_strategy": {{
     "ISA": "국내 ETF/주식 구체적 매수 후보와 진입 조건. 기회가 없으면 진입 트리거 명시",
-    "RIA": "NVDA/GOOGL 매도 타이밍 판단 — 지금 매도 vs 보유 근거 + 5/31 데드라인 역산",
+    "RIA": "NVDA/GOOGL 매도 판단 — D-{ria_days_left}일 남음. 현재 RSI/추세 기준 즉시매도 vs 반등 후 매도 명시. 매도 지연 시 리스크(추가 하락+면제 기한 초과) 정량화. D-10 이후는 보유 불가.",
     "일반": "5/31 전 해외 매수 제한 내에서 국내 매수 또는 기존 보유 관리 전략",
     "연금_IRP": "리밸런싱 필요성 검토. 비중 조정할 게 없으면 이유 명시"
   }},
