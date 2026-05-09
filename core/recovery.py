@@ -212,5 +212,5 @@ def fallback_chain(
 # ═══════════════════════════════════════════════════════
 kis_breaker = CircuitBreaker(name="KIS_API", failure_threshold=3, recovery_timeout=120.0)
 yfinance_breaker = CircuitBreaker(name="yfinance", failure_threshold=5, recovery_timeout=60.0)
-claude_breaker = CircuitBreaker(name="Claude_API", failure_threshold=3, recovery_timeout=180.0)
-gemini_breaker = CircuitBreaker(name="Gemini_API", failure_threshold=3, recovery_timeout=180.0)
+claude_breaker = CircuitBreaker(name="Claude_API", failure_threshold=8, recovery_timeout=180.0)
+gemini_breaker = CircuitBreaker(name="Gemini_API", failure_threshold=8, recovery_timeout=180.0)

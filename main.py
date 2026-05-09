@@ -45,12 +45,12 @@ def cmd_tui() -> None:
 
 
 def cmd_briefing() -> None:
-    """브리핑 생성 → Notion 저장 → 텔레그램 전송."""
+    """브리핑 생성 → 메일 발송(상세) + 텔레그램 전송(요약)."""
     from core.config_loader import validate_config
     from core.market import fetch_market
     from core.analyzer import analyze
-    from core.notion import save_to_notion
     from core.telegram import send_briefing_telegram
+    from core.email import send_briefing_email
 
     # 설정 검증
     validation = validate_config("briefing")
@@ -78,22 +78,18 @@ def cmd_briefing() -> None:
         for name, summary in persona_summary.items():
             print(f"  [{name}] {summary}")
 
-    print("[3/3] Notion 저장...")
+    print("[3/3] 메일(상세) + 텔레그램(요약) 전송...")
     try:
-        page_id = save_to_notion(result, snapshot, briefing_type)
-        page_url = f"https://notion.so/{page_id.replace('-', '')}"
-        print(f"  Notion: {page_url}")
-
-        print("텔레그램 전송...")
-        sent = send_briefing_telegram(result, page_id, briefing_type)
-        if sent:
-            print("  텔레그램 전송 완료")
-        else:
-            print("  텔레그램 전송 실패 또는 설정 없음")
+        email_sent = send_briefing_email(result, "", briefing_type)
+        print(f"  메일 전송: {'완료' if email_sent else '실패/스킵'}")
     except Exception as e:
-        print(f"  Notion 저장 실패: {e}")
-        # Notion 없이도 텔레그램 전송 시도
-        send_briefing_telegram(result, "", briefing_type)
+        print(f"  메일 전송 실패: {e}")
+
+    try:
+        sent = send_briefing_telegram(result, "", briefing_type)
+        print(f"  텔레그램 전송: {'완료' if sent else '실패/스킵'}")
+    except Exception as e:
+        print(f"  텔레그램 전송 실패: {e}")
 
     print(f"\n{'='*56}")
     print("  브리핑 완료!")

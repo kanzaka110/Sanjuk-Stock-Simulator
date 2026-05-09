@@ -18,11 +18,67 @@ from datetime import datetime
 import anthropic
 
 from config.settings import KST, PORTFOLIO, get_market_config
+
+try:
+    from config.settings import WATCHLIST
+except ImportError:
+    WATCHLIST: dict[str, str] = {}
+
 from core.market import fmt_change, fmt_price
 from core.models import BriefingResult, MarketSnapshot, Signal
 from core.news import gather_news
 
 log = logging.getLogger(__name__)
+
+
+def _fetch_watchlist_text() -> str:
+    """Watchlist 종목 가격 + RSI + MA를 텍스트로 변환. 보유 외 신규 후보."""
+    if not WATCHLIST:
+        return ""
+
+    try:
+        import yfinance as yf
+    except ImportError:
+        return ""
+
+    lines = ["【신규 매수 후보 (Watchlist) — 보유 외, RSI/MA 기준 검토】"]
+
+    for tk, name in WATCHLIST.items():
+        try:
+            ticker = yf.Ticker(tk)
+            hist = ticker.history(period="60d")
+            if len(hist) < 14:
+                lines.append(f"  {name}({tk}): 데이터 부족")
+                continue
+
+            close = hist["Close"]
+            price = float(close.iloc[-1])
+            prev = float(close.iloc[-2]) if len(close) > 1 else price
+            pct = (price - prev) / prev * 100 if prev > 0 else 0.0
+
+            # RSI(14)
+            delta = close.diff()
+            gain = delta.where(delta > 0, 0.0).rolling(14).mean()
+            loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
+            rs = gain / loss.replace(0, float("inf"))
+            rsi_series = 100 - (100 / (1 + rs))
+            rsi = float(rsi_series.iloc[-1]) if len(rsi_series) > 0 else 50.0
+
+            # MA20 / MA60
+            ma20 = float(close.tail(20).mean()) if len(close) >= 20 else price
+            ma60 = float(close.tail(60).mean()) if len(close) >= 60 else price
+
+            # 통화
+            unit = "₩" if (".KS" in tk or ".KQ" in tk) else "$"
+
+            lines.append(
+                f"  {name}({tk}): {unit}{price:,.0f} "
+                f"({pct:+.2f}%) | RSI {rsi:.0f} | MA20 {unit}{ma20:,.0f} | MA60 {unit}{ma60:,.0f}",
+            )
+        except Exception as e:
+            lines.append(f"  {name}({tk}): 데이터 조회 실패 ({type(e).__name__})")
+
+    return "\n".join(lines)
 
 
 def _build_full_context(
@@ -34,6 +90,7 @@ def _build_full_context(
     backtest_text: str = "",
     kr_market_text: str = "",
     fundamentals_text: str = "",
+    watchlist_text: str = "",
 ) -> str:
     """멀티 에이전트에 전달할 통합 시장 컨텍스트 생성."""
     now = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
@@ -69,7 +126,12 @@ def _build_full_context(
 {mac}
 
 【포트폴리오 (통화 포함 현재가)】
-{stk}
+{stk}"""
+
+    if watchlist_text:
+        context += f"\n\n{watchlist_text}"
+
+    context += f"""
 
 ━━━ 실시간 뉴스 (Gemini Google Search) ━━━
 {gathered_news}"""
@@ -347,11 +409,18 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
         extra_context += f"\n\n━━━ 차트 패턴 (AI Vision) ━━━\n{chart_text}"
     extra_context += f"\n\n━━━ 매매 제약 (반드시 준수) ━━━\n{constraints_text}"
 
+    log.info("[12.5/13] Watchlist 신규 후보 데이터 수집...")
+    try:
+        watchlist_text = _fetch_watchlist_text()
+    except Exception as e:
+        log.warning(f"Watchlist 수집 실패: {e}")
+        watchlist_text = ""
+
     market_context = _build_full_context(
         snapshot, gathered_news,
         indicators_text, sentiment_text,
         risk_text, backtest_text, kr_text,
-        fundamentals_text,
+        fundamentals_text, watchlist_text,
     )
     market_context += extra_context
 
@@ -372,6 +441,19 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
             pa.persona: f"{pa.verdict} ({pa.confidence}%) — {pa.reasoning[:60]}"
             for pa in persona_results
         }
+    # 페르소나 풀 디테일 (메일 HTML용)
+    data["persona_details"] = [
+        {
+            "persona": pa.persona,
+            "verdict": pa.verdict,
+            "confidence": pa.confidence,
+            "reasoning": pa.reasoning,
+            "key_factors": list(pa.key_factors),
+            "risk_warning": pa.risk_warning,
+            "stock_views": list(pa.stock_views),
+        }
+        for pa in persona_results
+    ]
     data["risk_level"] = risk_report.overall_risk
     data["regime"] = regime.regime
     data["regime_adjustment"] = regime.risk_adjustment

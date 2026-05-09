@@ -196,7 +196,19 @@ SMA20, SMA50 이동평균과 볼린저밴드가 표시되어 있다.
         if not raw:
             return None
 
-        data = json.loads(raw)
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            import re
+            match = re.search(r"\{.*\}", raw, re.DOTALL)
+            if not match:
+                log.warning(f"차트 비전 JSON 미발견 ({ticker}): {raw[:120]!r}")
+                return None
+            try:
+                data = json.loads(match.group(0))
+            except json.JSONDecodeError as je:
+                log.warning(f"차트 비전 JSON 파싱 실패 ({ticker}): {je}")
+                return None
 
         return ChartAnalysis(
             ticker=ticker,

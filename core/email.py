@@ -76,12 +76,333 @@ def _markdown_to_plain(text: str) -> str:
     return text
 
 
+_HTML_CSS = """<style>
+body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; line-height: 1.85; color: #222; max-width: 760px; margin: 0 auto; padding: 24px; }
+h1 { color: #1a3a6c; border-bottom: 3px solid #1a3a6c; padding-bottom: 10px; margin-bottom: 16px; }
+h2 { color: #1a3a6c; margin-top: 40px; margin-bottom: 14px; border-left: 4px solid #1a3a6c; padding: 4px 0 4px 12px; }
+h3 { color: #2c4f80; margin-top: 26px; margin-bottom: 10px; padding-bottom: 4px; border-bottom: 1px dotted #ccd; }
+p { margin: 10px 0; }
+table { border-collapse: collapse; width: 100%; margin: 14px 0 22px; }
+th, td { border: 1px solid #ddd; padding: 10px 14px; text-align: left; vertical-align: top; line-height: 1.7; }
+th { background: #f0f4fa; font-weight: 600; }
+.verdict { background: #e8f5e9; border-left: 5px solid #2e7d32; padding: 18px 20px; margin: 20px 0; font-size: 1.05em; line-height: 1.8; }
+.verdict b { display: block; margin-bottom: 8px; font-size: 1.1em; }
+.warn { background: #fff3e0; border-left: 5px solid #ef6c00; padding: 14px 18px; margin: 16px 0; line-height: 1.75; }
+.crit { background: #ffebee; border-left: 5px solid #c62828; padding: 14px 18px; margin: 16px 0; line-height: 1.75; }
+.opp  { background: #e3f2fd; border-left: 5px solid #1565c0; padding: 14px 18px; margin: 16px 0; line-height: 1.75; }
+.warn b, .crit b, .opp b { display: block; margin-bottom: 8px; }
+.warn ul, .crit ul, .opp ul { margin-top: 6px; }
+.kpi { display: inline-block; background: #f5f5f5; padding: 8px 14px; margin: 6px 6px 6px 0; border-radius: 6px; font-size: 0.95em; }
+.kpi b { color: #1a3a6c; }
+.kpi-row { margin: 14px 0 24px; }
+ul { margin: 10px 0 14px; padding-left: 24px; }
+li { margin: 8px 0; line-height: 1.75; }
+.footer { color: #777; font-size: 0.85em; margin-top: 40px; border-top: 1px solid #ddd; padding-top: 14px; line-height: 1.7; }
+code { background: #f5f5f5; padding: 2px 6px; border-radius: 3px; font-size: 0.95em; }
+.persona-card { background: #fafbfd; border: 1px solid #e0e6ee; border-radius: 8px; padding: 18px 22px; margin: 18px 0; }
+.persona-card h3 { margin-top: 0; border-bottom: none; }
+.persona-meta { color: #555; font-size: 0.95em; margin-bottom: 12px; }
+.reasoning-block { background: #fff; border-left: 3px solid #b8c5d6; padding: 12px 16px; margin: 12px 0; line-height: 1.85; }
+.reasoning-block p { margin: 8px 0; }
+.section-intro { color: #555; font-size: 0.95em; margin-bottom: 16px; }
+</style>"""
+
+
+def _split_into_paragraphs(text: str) -> list[str]:
+    """긴 문장을 단락으로 분리 (마침표/물음표/느낌표 기준 + 2-3문장씩 묶음)."""
+    if not text:
+        return []
+    import re
+    text = text.strip()
+    sentences = re.split(r"(?<=[\.!\?。])\s+", text)
+    sentences = [s.strip() for s in sentences if s.strip()]
+    if not sentences:
+        return [text]
+
+    paragraphs: list[str] = []
+    buffer: list[str] = []
+    for s in sentences:
+        buffer.append(s)
+        # 2-3문장 모이거나 80자 이상이면 단락 끊기
+        joined = " ".join(buffer)
+        if len(buffer) >= 3 or len(joined) >= 140:
+            paragraphs.append(joined)
+            buffer = []
+    if buffer:
+        paragraphs.append(" ".join(buffer))
+    return paragraphs
+
+
+def _esc(text: object) -> str:
+    """HTML escape 안전 변환."""
+    if text is None:
+        return ""
+    s = str(text)
+    return (
+        s.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _build_briefing_html(
+    result: BriefingResult,
+    raw: dict,
+    label: str,
+    title: str,
+) -> str:
+    """raw_json을 풍부한 HTML 메일로 변환 (참고 .eml 디자인)."""
+    advisor_verdict = raw.get("advisor_verdict", "") or "—"
+    advisor_oneliner = raw.get("advisor_oneliner", "") or ""
+    advisor_conclusion = raw.get("advisor_conclusion", "") or ""
+    next_action = raw.get("next_action", "") or ""
+
+    persona_summary = raw.get("persona_summary", {}) or {}
+    persona_details = raw.get("persona_details", []) or []
+    account_strategy = raw.get("account_strategy", {}) or {}
+    risks = raw.get("advisor_risks", []) or []
+    opportunities = raw.get("advisor_opportunities", []) or []
+    scenarios = raw.get("advisor_scenarios", []) or []
+    checklist = raw.get("advisor_checklist", []) or []
+    buy_recs = raw.get("buy_recommendations", []) or []
+    sell_recs = raw.get("sell_recommendations", []) or []
+    strategy_summary = raw.get("strategy_summary", "") or ""
+    market_summary = getattr(result, "market_summary", "") or ""
+    risk_level = raw.get("risk_level", "") or ""
+    regime = raw.get("regime", "") or ""
+    regime_adj = raw.get("regime_adjustment", "") or ""
+
+    # BriefingResult.buy_signals/sell_signals (raw_json에 buy_recommendations 없을 때 fallback)
+    buy_signals = getattr(result, "buy_signals", ()) or ()
+    sell_signals = getattr(result, "sell_signals", ()) or ()
+    portfolio_signals = getattr(result, "portfolio_signals", ()) or ()
+
+    now_str = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
+
+    parts: list[str] = []
+    parts.append('<!DOCTYPE html><html><head><meta charset="UTF-8">')
+    parts.append(f"<title>{_esc(title)}</title>")
+    parts.append(_HTML_CSS)
+    parts.append("</head><body>")
+
+    parts.append(f"<h1>{_esc(label)}</h1>")
+    parts.append(f'<p style="color:#666;">{_esc(title)}<br>분석: 멀티 에이전트 (가치/성장/기술/매크로) + CIO · 생성: {_esc(now_str)}</p>')
+
+    parts.append('<div class="verdict">')
+    parts.append(f"<b>결론: {_esc(advisor_verdict)}</b><br>")
+    if advisor_oneliner:
+        parts.append(f"{_esc(advisor_oneliner)}<br>")
+    if next_action:
+        parts.append(f"<i>다음 액션: {_esc(next_action)}</i>")
+    parts.append("</div>")
+
+    section = 0
+
+    # KPI 칩 (Regime / Risk / 의견 분기)
+    if regime or risk_level:
+        parts.append('<div class="kpi-row">')
+        if regime:
+            parts.append(f'<div class="kpi">시장 체제 <b>{_esc(regime)}</b></div>')
+        if regime_adj:
+            parts.append(f'<div class="kpi">리스크 조정 <b>{_esc(regime_adj)}</b></div>')
+        if risk_level:
+            parts.append(f'<div class="kpi">전체 리스크 <b>{_esc(risk_level)}</b></div>')
+        parts.append("</div>")
+
+    if market_summary:
+        section += 1
+        parts.append(f"<h2>{section}. 시장 요약</h2>")
+        for p in _split_into_paragraphs(market_summary):
+            parts.append(f"<p>{_esc(p)}</p>")
+
+    # 페르소나 풀 디테일 (요약 표 + 각자 카드)
+    if persona_details:
+        section += 1
+        parts.append(f"<h2>{section}. 페르소나 4인 상세 분석</h2>")
+        parts.append('<p class="section-intro">4인의 독립 분석가가 동일한 시장 데이터를 두고 각자의 관점에서 분석했습니다. 아래는 의견 분포이며, 상세 분석은 각 카드에서 확인할 수 있습니다.</p>')
+        parts.append('<table><tr><th>관점</th><th>판단</th><th>확신도</th><th>핵심 포인트</th></tr>')
+        for pd in persona_details:
+            verdict_color = {
+                "매수": "#2e7d32", "매도": "#c62828", "홀딩": "#1565c0", "관망": "#666",
+            }.get(pd.get("verdict", ""), "#666")
+            kf_list = pd.get("key_factors", []) or []
+            first_factor = kf_list[0] if kf_list else (pd.get("reasoning", "") or "")[:60]
+            parts.append(
+                f'<tr><td><b>{_esc(pd.get("persona", ""))}</b></td>'
+                f'<td><span style="color:{verdict_color};font-weight:600;">{_esc(pd.get("verdict", ""))}</span></td>'
+                f'<td>{_esc(pd.get("confidence", 0))}%</td>'
+                f'<td>{_esc(first_factor)}</td></tr>',
+            )
+        parts.append("</table>")
+
+        for pd in persona_details:
+            verdict = pd.get("verdict", "")
+            verdict_color = {
+                "매수": "#2e7d32", "매도": "#c62828", "홀딩": "#1565c0", "관망": "#666",
+            }.get(verdict, "#666")
+
+            parts.append('<div class="persona-card">')
+            parts.append(f'<h3>{_esc(pd.get("persona", ""))}</h3>')
+            parts.append(
+                f'<div class="persona-meta">'
+                f'판단 <span style="color:{verdict_color};font-weight:600;">{_esc(verdict)}</span> '
+                f'· 확신도 <b>{_esc(pd.get("confidence", 0))}%</b>'
+                f'</div>',
+            )
+
+            reasoning = pd.get("reasoning", "")
+            if reasoning:
+                parts.append('<div class="reasoning-block">')
+                for p in _split_into_paragraphs(reasoning):
+                    parts.append(f"<p>{_esc(p)}</p>")
+                parts.append("</div>")
+
+            kf = pd.get("key_factors", []) or []
+            if kf:
+                parts.append("<p><b>핵심 요인</b></p><ul>")
+                for f in kf:
+                    parts.append(f"<li>{_esc(f)}</li>")
+                parts.append("</ul>")
+
+            rw = pd.get("risk_warning", "")
+            if rw:
+                parts.append('<div class="warn"><b>주의해야 할 리스크</b>')
+                for p in _split_into_paragraphs(rw):
+                    parts.append(f"<p>{_esc(p)}</p>")
+                parts.append("</div>")
+
+            sv = pd.get("stock_views", []) or []
+            if sv:
+                parts.append("<p><b>종목별 의견</b></p>")
+                parts.append("<table><tr><th>종목</th><th>의견</th><th>근거</th></tr>")
+                for v in sv:
+                    parts.append(
+                        f'<tr><td>{_esc(v.get("ticker", ""))}</td>'
+                        f'<td>{_esc(v.get("view", ""))}</td>'
+                        f'<td>{_esc(v.get("reason", ""))}</td></tr>',
+                    )
+                parts.append("</table>")
+
+            parts.append("</div>")
+    elif persona_summary:
+        section += 1
+        parts.append(f"<h2>{section}. 페르소나 요약</h2>")
+        parts.append('<table><tr><th>관점</th><th>판단</th></tr>')
+        for name in ("가치투자자", "성장투자자", "기술적분석가", "매크로분석가"):
+            summary = persona_summary.get(name, "")
+            if summary:
+                parts.append(
+                    f'<tr class="persona-row"><td><b>{_esc(name)}</b></td><td>{_esc(summary)}</td></tr>',
+                )
+        parts.append("</table>")
+
+    if advisor_conclusion:
+        section += 1
+        parts.append(f"<h2>{section}. CIO 종합 결론</h2>")
+        for p in _split_into_paragraphs(advisor_conclusion):
+            parts.append(f"<p>{_esc(p)}</p>")
+
+    if buy_recs:
+        section += 1
+        parts.append(f"<h2>{section}. 매수 추천</h2>")
+        parts.append("<table><tr><th>종목</th><th>계좌</th><th>수량</th><th>매수가</th><th>손절</th><th>익절</th><th>근거</th></tr>")
+        for rec in buy_recs:
+            parts.append("<tr>")
+            parts.append(f"<td><b>{_esc(rec.get('ticker', ''))}</b></td>")
+            parts.append(f"<td>{_esc(rec.get('account', ''))}</td>")
+            parts.append(f"<td>{_esc(rec.get('shares', ''))}</td>")
+            parts.append(f"<td>{_esc(rec.get('entry_price', ''))}</td>")
+            parts.append(f"<td>{_esc(rec.get('stop_loss', ''))}</td>")
+            parts.append(f"<td>{_esc(rec.get('take_profit', ''))}</td>")
+            parts.append(f"<td>{_esc(rec.get('reason', ''))}</td>")
+            parts.append("</tr>")
+        parts.append("</table>")
+
+    if sell_recs:
+        section += 1
+        parts.append(f"<h2>{section}. 매도 추천</h2>")
+        parts.append("<table><tr><th>종목</th><th>수량</th><th>익절가</th><th>손절가</th><th>타이밍</th><th>근거</th></tr>")
+        for rec in sell_recs:
+            parts.append("<tr>")
+            parts.append(f"<td><b>{_esc(rec.get('ticker', ''))}</b></td>")
+            parts.append(f"<td>{_esc(rec.get('shares', ''))}</td>")
+            parts.append(f"<td>{_esc(rec.get('take_profit', ''))}</td>")
+            parts.append(f"<td>{_esc(rec.get('stop_loss', ''))}</td>")
+            parts.append(f"<td>{_esc(rec.get('timing', ''))}</td>")
+            parts.append(f"<td>{_esc(rec.get('reason', ''))}</td>")
+            parts.append("</tr>")
+        parts.append("</table>")
+
+    if account_strategy:
+        section += 1
+        parts.append(f"<h2>{section}. 계좌별 전략</h2>")
+        parts.append("<table><tr><th>계좌</th><th>전략</th></tr>")
+        for acct in ("ISA", "RIA", "일반", "연금_IRP"):
+            strategy = account_strategy.get(acct, "")
+            if strategy:
+                parts.append(f"<tr><td><b>{_esc(acct)}</b></td><td>{_esc(strategy)}</td></tr>")
+        parts.append("</table>")
+
+    if opportunities:
+        parts.append('<div class="opp"><b>💡 호재 / 기회</b><ul>')
+        for o in opportunities:
+            parts.append(f"<li>{_esc(o)}</li>")
+        parts.append("</ul></div>")
+
+    if risks:
+        parts.append('<div class="warn"><b>⚠️ 리스크</b><ul>')
+        for r in risks:
+            parts.append(f"<li>{_esc(r)}</li>")
+        parts.append("</ul></div>")
+
+    if scenarios:
+        section += 1
+        parts.append(f"<h2>{section}. 시나리오</h2>")
+        parts.append("<table><tr><th>시나리오</th><th>조건</th><th>액션</th><th>금액/수량</th></tr>")
+        for s in scenarios:
+            parts.append("<tr>")
+            parts.append(f"<td><b>{_esc(s.get('label', ''))}</b></td>")
+            parts.append(f"<td>{_esc(s.get('condition', ''))}</td>")
+            parts.append(f"<td>{_esc(s.get('action', ''))}</td>")
+            parts.append(f"<td>{_esc(s.get('amount', ''))}</td>")
+            parts.append("</tr>")
+        parts.append("</table>")
+
+    if checklist:
+        section += 1
+        parts.append(f"<h2>{section}. 체크리스트</h2><ul>")
+        emoji_map = {"충족": "✅", "미충족": "❌", "부분충족": "🟡"}
+        for c in checklist:
+            mark = emoji_map.get(c.get("status", ""), "☐")
+            parts.append(
+                f"<li>{mark} <b>{_esc(c.get('condition', ''))}</b>: "
+                f"{_esc(c.get('detail', ''))}</li>",
+            )
+        parts.append("</ul>")
+
+    if strategy_summary:
+        section += 1
+        parts.append(f"<h2>{section}. 전략 요약</h2>")
+        for p in _split_into_paragraphs(strategy_summary):
+            parts.append(f"<p>{_esc(p)}</p>")
+
+    parts.append('<div class="footer">')
+    parts.append("<b>면책:</b> 본 분석은 정보 제공 목적이며 투자 권유가 아닙니다. 최종 판단은 본인 책임이며, 투자 손실에 대한 어떠한 책임도 지지 않습니다.<br>")
+    parts.append(f"생성: Claude Code (Sanjuk-Stock-Simulator) / {_esc(now_str)}")
+    parts.append("</div>")
+
+    parts.append("</body></html>")
+
+    return "".join(parts)
+
+
 def send_briefing_email(
     result: BriefingResult,
     notion_page_id: str,
     briefing_type: str = "MANUAL",
 ) -> bool:
-    """브리핑 결과를 Gmail로 전송. 텔레그램 메시지 본문 재활용."""
+    """브리핑 결과를 Gmail로 HTML 메일 전송 (텍스트 fallback 포함)."""
     if not GMAIL_USER or not GMAIL_APP_PASSWORD:
         log.warning("Gmail 설정 없음 — 메일 건너뜀")
         return False
@@ -92,12 +413,11 @@ def send_briefing_email(
     label = LABEL_MAP.get(briefing_type, "📊 수시 브리핑")
     raw = result.raw_json
     title = result.title or datetime.now(KST).strftime("%Y.%m.%d %H:%M 브리핑")
-    notion_url = f"https://notion.so/{notion_page_id.replace('-', '')}" if notion_page_id else ""
 
-    body_md = _build_briefing_message(result, raw, label, title, notion_url)
-    body_text = _markdown_to_plain(body_md)
+    body_html = _build_briefing_html(result, raw, label, title)
+    body_text = _markdown_to_plain(_build_briefing_message(result, raw, label, title, ""))
 
-    clean_label = re.sub(r'[^\w가-힣 ]', '', label).strip()
-    subject = f"[{clean_label}] {title}"
+    clean_label = re.sub(r"[^\w가-힣 ]", "", label).strip()
+    subject = f"[Sanjuk-Stock][{clean_label}] {title}"
 
-    return send_email(subject, body_text)
+    return send_email(subject, body_text, body_html=body_html)

@@ -52,8 +52,24 @@ class EarningsEvent:
     event_type: str  # earnings/economic/fed
 
 
+_ETF_KEYWORDS = (
+    "TIGER", "KODEX", "PLUS", "ARIRANG", "KOSEF", "KBSTAR", "HANARO",
+    "ETF", "ISHARES", "VANGUARD", "SPDR", "INVESCO",
+)
+
+
+def _is_etf(name: str) -> bool:
+    """종목명에서 ETF 운용사/접두어 감지."""
+    upper = name.upper()
+    return any(kw in upper for kw in _ETF_KEYWORDS)
+
+
 def fetch_financial_data(ticker: str, name: str = "") -> FinancialData | None:
-    """yfinance에서 재무 데이터 수집."""
+    """yfinance에서 재무 데이터 수집. ETF는 fundamentals 무의미하므로 skip."""
+    if _is_etf(name):
+        log.debug(f"ETF fundamentals skip: {ticker} ({name})")
+        return FinancialData(ticker=ticker, name=name)
+
     try:
         tk = yf.Ticker(ticker)
         info = tk.info or {}

@@ -29,7 +29,56 @@ log = logging.getLogger(__name__)
 
 HAIKU_MODEL = "claude-haiku-4-5-20251001"
 SONNET_MODEL = "claude-sonnet-4-6"
-OPUS_MODEL = "claude-opus-4-6"
+OPUS_MODEL = "claude-opus-4-7"
+
+
+def _extract_persona_data(text: str) -> dict:
+    """페르소나 응답 텍스트를 PersonaAnalysis dict로 파싱한다.
+
+    1) JSON 통째로 → ```json``` 블록 → 첫 { ~ 마지막 } 시도
+    2) 실패 시 자연어에서 verdict/confidence 정규식 추출
+    """
+    text = text.strip()
+    import re
+
+    for candidate in _json_candidates(text):
+        try:
+            data = json.loads(candidate)
+            if isinstance(data, dict) and "verdict" in data:
+                return data
+        except json.JSONDecodeError:
+            continue
+
+    verdict_match = re.search(r"(매수|매도|홀딩|관망)", text)
+    confidence_match = (
+        re.search(r"확신도[^\d]{0,5}(\d{1,3})", text)
+        or re.search(r"(\d{1,3})\s*[%／/]\s*100", text)
+        or re.search(r"\b(\d{1,3})\s*%", text)
+    )
+
+    if not verdict_match:
+        raise ValueError(f"verdict 추출 실패 (미리보기: {text[:200]!r})")
+
+    return {
+        "verdict": verdict_match.group(1),
+        "confidence": min(100, max(0, int(confidence_match.group(1)))) if confidence_match else 50,
+        "reasoning": text[:600],
+        "key_factors": [],
+        "risk_warning": "",
+    }
+
+
+def _json_candidates(text: str):
+    """가능한 JSON 후보 substrings를 yield."""
+    import re
+    yield text
+    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if fence:
+        yield fence.group(1)
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end > start:
+        yield text[start : end + 1]
 
 
 # ═══════════════════════════════════════════════════════
@@ -45,6 +94,7 @@ class PersonaAnalysis:
     reasoning: str
     key_factors: tuple[str, ...] = ()
     risk_warning: str = ""
+    stock_views: tuple[dict, ...] = ()  # [{ticker, view, reason}, ...]
 
 
 PERSONAS: dict[str, str] = {
@@ -104,21 +154,84 @@ _ANALYSIS_TOOL = {
             },
             "reasoning": {
                 "type": "string",
-                "description": "핵심 판단 근거 (200자 이내)",
+                "description": "핵심 판단 근거. 구체 종목·수치·사례 포함 500~800자. 단순 결론 금지, 추론 과정 명시.",
             },
             "key_factors": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "핵심 요인 3개",
+                "description": "핵심 요인 5개. 각 항목은 종목/지표 + 수치 + 시사점 형태",
             },
             "risk_warning": {
                 "type": "string",
-                "description": "주요 리스크 (100자 이내)",
+                "description": "주요 리스크. 구체 시나리오 + 트리거 + 대응책 포함 200~300자",
+            },
+            "stock_views": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "ticker": {"type": "string"},
+                        "view": {"type": "string", "enum": ["매수", "매도", "홀딩", "관망"]},
+                        "reason": {"type": "string", "description": "100자 이내"},
+                    },
+                    "required": ["ticker", "view", "reason"],
+                },
+                "description": "포트폴리오 종목별 개별 의견 (선택적, 있으면 3~5개)",
             },
         },
         "required": ["verdict", "confidence", "reasoning", "key_factors", "risk_warning"],
     },
 }
+
+
+def _run_persona_gemini(
+    persona_name: str,
+    persona_prompt: str,
+    market_context: str,
+    system: str,
+) -> dict:
+    """Gemini API로 페르소나 분석 (JSON mode 강제). 실패 시 RuntimeError."""
+    from core.recovery import gemini_breaker
+
+    if not gemini_breaker.is_available:
+        raise RuntimeError("Gemini API 서킷 브레이커 OPEN")
+
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY 미설정")
+
+    from google import genai
+    from google.genai import types
+
+    schema_for_gemini = _ANALYSIS_TOOL["input_schema"]
+
+    client = genai.Client(api_key=api_key)
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=[market_context],
+        config=types.GenerateContentConfig(
+            system_instruction=system,
+            max_output_tokens=2000,
+            response_mime_type="application/json",
+            response_schema=schema_for_gemini,
+        ),
+    )
+    raw = response.text.strip() if response.text else ""
+    if not raw:
+        gemini_breaker.record_failure()
+        raise RuntimeError("Gemini 응답 비어있음")
+
+    gemini_breaker.record_success()
+    return _extract_persona_data(raw)
+
+
+def _persona_backend(persona_name: str) -> str:
+    """페르소나 → 백엔드 라우팅. 환경 변수로 Gemini 하이브리드 토글."""
+    if os.environ.get("STOCK_PERSONA_GEMINI", "false").lower() != "true":
+        return "claude"
+    if persona_name in ("성장투자자", "기술적분석가"):
+        return "gemini"
+    return "claude"
 
 
 def _run_persona(
@@ -135,48 +248,74 @@ def _run_persona(
     task = registry.create_task(persona_name, "persona", team_id=team_id)
     registry.start_task(task.task_id)
 
-    from core.oauth import get_client
-    client = get_client()
-
+    schema_for_prompt = json.dumps(_ANALYSIS_TOOL["input_schema"], ensure_ascii=False, indent=2)
     system = f"""당신은 '{persona_name}' 관점의 투자 분석가입니다.
 {persona_prompt}
 
-시장 데이터를 분석한 후 반드시 submit_analysis 도구를 호출하여 결과를 제출하세요."""
+분석 대상:
+- 보유 종목(포트폴리오): 매수/매도/홀딩/관망 판단
+- **신규 매수 후보(Watchlist)**: 시장 컨텍스트에 별도 섹션으로 제공됨. 보유 외 종목 중 매수 매력이 있다고 판단되면 stock_views 또는 reasoning에 명시할 것.
+
+응답 규칙 (반드시 준수):
+1. 응답은 단일 JSON 객체만 포함합니다. 마크다운 헤더, 표, 설명 텍스트 금지.
+2. 응답의 첫 글자는 `{{`, 마지막 글자는 `}}`입니다. 코드 펜스(```) 사용 금지.
+3. 다음 스키마를 정확히 따릅니다:
+{schema_for_prompt}
+
+응답 예시:
+{{"verdict":"매수","confidence":75,"reasoning":"한화에어로 RSI 29.1 과매도, 매출 +74.5%. Watchlist의 시프트업도 RSI 35로 진입 검토 가능","key_factors":["방산 TAM 확장","RSI 과매도","외인 매도 마무리","시프트업 신규 진입 후보","ETF 과열 회피"],"risk_warning":"코스피 사상최고 부담","stock_views":[{{"ticker":"012450.KS","view":"매수","reason":"보유, RSI 29 분할매수"}},{{"ticker":"462870.KS","view":"매수","reason":"신규 후보, RSI 35 진입"}}]}}"""
 
     try:
-        if not claude_breaker.is_available:
-            raise RuntimeError("Claude API 서킷 브레이커 OPEN")
-
-        response = None
-        for attempt in range(3):
+        backend = _persona_backend(persona_name)
+        if backend == "gemini":
             try:
-                response = client.messages.create(
-                    model=HAIKU_MODEL,
-                    max_tokens=1000,
-                    system=system,
-                    messages=[{"role": "user", "content": market_context}],
-                    tools=[_ANALYSIS_TOOL],
-                    tool_choice={"type": "tool", "name": "submit_analysis"},
+                data = _run_persona_gemini(
+                    persona_name, persona_prompt, market_context, system,
                 )
+                claude_breaker.record_success()
+                result = PersonaAnalysis(
+                    persona=persona_name,
+                    verdict=data.get("verdict", "관망"),
+                    confidence=int(data.get("confidence", 50)),
+                    reasoning=data.get("reasoning", ""),
+                    key_factors=tuple(data.get("key_factors", [])),
+                    risk_warning=data.get("risk_warning", ""),
+                    stock_views=tuple(data.get("stock_views", []) or []),
+                )
+                registry.complete_task(task.task_id, result)
+                return result
+            except Exception as ge:
+                log.warning(f"Gemini 페르소나 실패 ({persona_name}): {ge} → Claude 폴백")
+
+        if not claude_breaker.is_available:
+            raise RuntimeError("Claude CLI 서킷 브레이커 OPEN")
+
+        schema_json = json.dumps(_ANALYSIS_TOOL["input_schema"], ensure_ascii=False)
+        raw = ""
+        for attempt, model in enumerate(("sonnet", "sonnet", "haiku")):
+            if attempt > 0:
+                import time as _time
+                _time.sleep(3 * attempt)
+                log.info(
+                    "페르소나 재시도 (%s, attempt=%d, model=%s)",
+                    persona_name, attempt + 1, model,
+                )
+            raw = claude_cli(
+                prompt=market_context,
+                model=model,
+                system_prompt=system,
+                timeout=180,
+                json_schema=schema_json,
+            )
+            if raw:
                 break
-            except anthropic.RateLimitError:
-                if attempt < 2:
-                    import time
-                    time.sleep(30 * (attempt + 1))
-                else:
-                    raise
+
+        if not raw:
+            raise RuntimeError("Claude CLI 응답 없음 (3회 재시도 모두 실패)")
+
+        data = _extract_persona_data(raw)
 
         claude_breaker.record_success()
-
-        # tool_use 블록에서 구조화된 데이터 추출
-        data: dict = {}
-        for block in response.content:
-            if block.type == "tool_use" and block.name == "submit_analysis":
-                data = block.input
-                break
-
-        if not data:
-            raise ValueError("tool_use 응답 없음")
 
         result = PersonaAnalysis(
             persona=persona_name,
@@ -217,7 +356,7 @@ def run_all_personas(market_context: str) -> list[PersonaAnalysis]:
 
     # 1라운드: 독립 분석
     results: list[PersonaAnalysis] = []
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with ThreadPoolExecutor(max_workers=1) as executor:
         futures = {
             executor.submit(
                 _run_persona, name, prompt, market_context, team.team_id,
@@ -258,7 +397,7 @@ def run_all_personas(market_context: str) -> list[PersonaAnalysis]:
     augmented_context = f"{market_context}\n\n{debate_context}"
 
     round2: list[PersonaAnalysis] = []
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with ThreadPoolExecutor(max_workers=1) as executor:
         futures = {
             executor.submit(
                 _run_persona, name, prompt, augmented_context, team2.team_id,
@@ -308,7 +447,7 @@ def synthesize(
     """4개 페르소나 분석을 종합하여 최종 전략 JSON 생성.
 
     1순위: Opus CLI (Max 구독, $0)
-    2순위: OAuth API 폴백 (Opus → Sonnet → Haiku)
+    2순위: Sonnet CLI (Max 구독, $0) — Opus 타임아웃 시 폴백
     """
     # 페르소나 결과 텍스트화
     persona_text = ""
@@ -320,9 +459,6 @@ def synthesize(
   핵심 요인: {factors}
   리스크: {pa.risk_warning}
 """
-
-    from core.oauth import get_client
-    client = get_client()
 
     # 시장 초점 지시
     if briefing_type == "KR_BEFORE":
@@ -404,6 +540,7 @@ def synthesize(
 ⑥ 관망도 적극적 판단이다 — "살 수 없으니 관망"은 금지. 제약 내에서 최선의 액션을 찾아라.
    ISA에서 국내 ETF/주식 매수 기회가 있는지, RIA 매도 타이밍이 맞는지, 리밸런싱 필요성이 있는지 반드시 검토.
    진짜 할 게 없으면 "왜 지금은 안 되는지" 구체적 조건과 "어떤 조건이 충족되면 행동할지" 트리거를 명시.
+⑦ **strategy_buy / buy_recommendations에는 보유 종목뿐 아니라 Watchlist 신규 후보도 포함**할 것. 시장 컨텍스트에 별도 'Watchlist' 섹션이 있으며, RSI/MA 기준으로 매력적인 종목이 있으면 매수 후보로 명시 추천. 기존 포트폴리오에 없는 종목이라도 진입가/손절/익절을 구체화.
 
 ━━━ 실제 보유 포지션 ━━━
 {holdings_text}
@@ -481,10 +618,10 @@ def synthesize(
       "reason": "매도 근거"
     }}
   ],
-  "strategy_summary": "오늘 가장 중요한 매수/매도 판단 요약. 300자 이상.",
+  "strategy_summary": "오늘 가장 중요한 매수/매도 판단 요약. 보유+신규 후보 모두 다룰 것. 400자 이상.",
   "advisor_verdict": "적극매수|소액분할|매도고려|리밸런싱|매수대기",
   "advisor_oneliner": "한 문장 직언 (수치 포함)",
-  "advisor_conclusion": "300자 이상 종합 결론. 4개 관점의 합의/불일치 반영.",
+  "advisor_conclusion": "500자 이상 종합 결론. 4개 관점의 합의/불일치 반영. 보유 종목과 Watchlist 신규 후보를 모두 검토.",
   "advisor_checklist": [
     {{"condition": "조건", "status": "충족|미충족|부분충족", "detail": "현황"}}
   ],
@@ -508,43 +645,34 @@ def synthesize(
   }}
 }}"""
 
-    # 1순위: Opus CLI ($0)
-    cli_output = claude_cli(
-        prompt,
-        model="opus",
-        system_prompt=system,
-        timeout=240,
-        effort="high",
+    import time as _time
+    attempts = (
+        ("opus", 600, "medium"),
+        ("opus", 600, "medium"),
+        ("sonnet", 300, "medium"),
+        ("sonnet", 300, "medium"),
+        ("haiku", 240, "low"),
     )
-    if cli_output:
-        log.info("synthesis: Opus CLI 성공 (%d chars)", len(cli_output))
-        return cli_output
 
-    log.warning("synthesis: Opus CLI 실패 → OAuth API fallback")
+    for idx, (model, timeout, effort) in enumerate(attempts):
+        if idx > 0:
+            wait = 5 * idx
+            log.warning(
+                "synthesis: %d번째 시도 → %s (대기 %ds)", idx + 1, model, wait,
+            )
+            _time.sleep(wait)
+        cli_output = claude_cli(
+            prompt,
+            model=model,
+            system_prompt=system,
+            timeout=timeout,
+            effort=effort,
+        )
+        if cli_output:
+            log.info(
+                "synthesis: %s CLI 성공 (%d chars, attempt=%d)",
+                model, len(cli_output), idx + 1,
+            )
+            return cli_output
 
-    # 2순위: OAuth API (Opus → Sonnet → Haiku)
-    import time
-    from core.oauth import get_client
-    client = get_client()
-
-    models = [OPUS_MODEL, SONNET_MODEL, HAIKU_MODEL]
-    for model in models:
-        for attempt in range(3):
-            try:
-                response = client.messages.create(
-                    model=model,
-                    max_tokens=10000,
-                    system=system,
-                    messages=[{"role": "user", "content": prompt}],
-                )
-                log.info("synthesis: OAuth %s 성공", model)
-                return response.content[0].text.strip()
-            except anthropic.RateLimitError:
-                if attempt < 2:
-                    wait = 30 * (attempt + 1)
-                    log.warning("Rate limit (%s), %d초 대기 후 재시도", model, wait)
-                    time.sleep(wait)
-                else:
-                    log.warning("%s rate limit 초과, 다음 모델로 폴백", model)
-                    break
-    raise RuntimeError("모든 모델 rate limit 초과")
+    raise RuntimeError("synthesis: 모든 모델 retry 실패")

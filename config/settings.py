@@ -6,12 +6,19 @@ import os
 from datetime import timezone, timedelta
 from pathlib import Path
 
-# ─── 타임존 ─────────────────────────────────────────
-KST = timezone(timedelta(hours=9))
-
 # ─── 프로젝트 경로 ──────────────────────────────────
 ROOT_DIR = Path(__file__).parent.parent
 DB_DIR = ROOT_DIR / "db" / "data"
+
+# ─── .env 자동 로드 (쉘 export와 무관하게 안전) ─────
+try:
+    from dotenv import load_dotenv
+    load_dotenv(ROOT_DIR / ".env")
+except ImportError:
+    pass
+
+# ─── 타임존 ─────────────────────────────────────────
+KST = timezone(timedelta(hours=9))
 
 # ─── API 키 (환경변수) ──────────────────────────────
 GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "")
@@ -53,8 +60,28 @@ PORTFOLIO: dict[str, str] = {
     "LMT": "록히드마틴",
 }
 
-# KRW 통화 판별 (국내 종목)
-KRW_TICKERS: set[str] = {t for t in PORTFOLIO if ".KS" in t}
+# ─── 신규 매수 후보 (Watchlist) ─────────────────────
+# 보유 외 관심 종목. 분석 시 시장 데이터/지표를 함께 수집해서
+# 매수 후보로 검토 가능. 사용자가 자유롭게 추가/제거.
+WATCHLIST: dict[str, str] = {
+    # 한국 (KOSPI/KOSDAQ 시총·테마 상위)
+    "462870.KS": "시프트업",
+    "035420.KS": "NAVER",
+    "035720.KS": "카카오",
+    "000660.KS": "SK하이닉스",
+    "207940.KS": "삼성바이오로직스",
+    "247540.KQ": "에코프로비엠",
+    "086520.KQ": "에코프로",
+    # 미국
+    "AAPL": "애플",
+    "MSFT": "마이크로소프트",
+    "TSLA": "테슬라",
+    "AMD": "AMD",
+    "PLTR": "팔란티어",
+}
+
+# KRW 통화 판별 (국내 종목, 보유+watchlist)
+KRW_TICKERS: set[str] = {t for t in PORTFOLIO if ".KS" in t} | {t for t in WATCHLIST if ".KS" in t or ".KQ" in t}
 
 # 시장 지수
 INDICES: dict[str, str] = {

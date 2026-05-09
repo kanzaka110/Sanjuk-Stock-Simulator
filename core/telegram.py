@@ -43,10 +43,185 @@ def send_briefing_telegram(
 
     raw = result.raw_json
     title = result.title or datetime.now(KST).strftime("%Y.%m.%d %H:%M 브리핑")
-    notion_url = f"https://notion.so/{notion_page_id.replace('-', '')}"
 
-    msg = _build_briefing_message(result, raw, label, title, notion_url)
+    msg = _build_impact_message(result, raw, label, title)
     return _send_message(msg)
+
+
+def _verdict_emoji(v: str) -> str:
+    return {"매수": "🟢", "매도": "🔴", "홀딩": "🟡", "관망": "⚪"}.get(v, "⚪")
+
+
+def _persona_short(name: str) -> str:
+    return {
+        "가치투자자": "가치", "성장투자자": "성장",
+        "기술적분석가": "기술", "매크로분석가": "매크로",
+    }.get(name, name)
+
+
+def _build_impact_message(
+    result: BriefingResult,
+    raw: dict,
+    label: str,
+    title: str,
+) -> str:
+    """텔레그램용 임팩트 메시지. 한눈에 보이되 핵심 정보만 — 중간 강도."""
+    verdict = raw.get("advisor_verdict", "") or "—"
+    oneliner = raw.get("advisor_oneliner", "") or ""
+    next_action = raw.get("next_action", "") or ""
+    persona_details = raw.get("persona_details", []) or []
+    persona_summary = raw.get("persona_summary", {}) or {}
+    opportunities = raw.get("advisor_opportunities", []) or []
+    risks = raw.get("advisor_risks", []) or []
+    buy_recs = raw.get("buy_recommendations", []) or raw.get("strategy_buy", []) or []
+    sell_recs = raw.get("sell_recommendations", []) or raw.get("strategy_sell", []) or []
+
+    SEP = "━━━━━━━━━━━━━━━━━━"
+
+    lines: list[str] = []
+
+    # 헤더 — 결론 강조
+    lines.append(f"{label}")
+    lines.append(f"📅 {title}")
+    lines.append("")
+    lines.append(f"🎯 *판단: {verdict}*")
+    if oneliner:
+        lines.append(f"💬 {oneliner}")
+    lines.append("")
+
+    # 매수 추천 (한 줄에 핵심만)
+    if buy_recs:
+        lines.append(SEP)
+        lines.append("💰 *매수 추천*")
+        for rec in buy_recs[:3]:
+            ticker = rec.get("ticker", "")
+            name = rec.get("name", "")
+            account = rec.get("account", "")
+            entry = rec.get("entry_price", "")
+            shares = rec.get("shares", "")
+            display = name or ticker
+            parts = [f"▸ *{display}*"]
+            if account:
+                parts.append(account)
+            if shares:
+                parts.append(shares)
+            if entry:
+                parts.append(f"진입 {entry}")
+            lines.append(" · ".join(parts))
+        lines.append("")
+
+    # 매도 추천 (한 줄)
+    if sell_recs:
+        lines.append(SEP)
+        lines.append("📉 *매도 추천*")
+        for rec in sell_recs[:3]:
+            ticker = rec.get("ticker", "")
+            name = rec.get("name", "")
+            shares = rec.get("shares", "")
+            timing = rec.get("timing", "")
+            display = name or ticker
+            parts = [f"▸ *{display}*"]
+            if shares:
+                parts.append(shares)
+            if timing:
+                parts.append(timing)
+            lines.append(" · ".join(parts))
+        lines.append("")
+
+    # 페르소나 — 한 줄씩 (key_factors[0]만)
+    lines.append(SEP)
+    lines.append("👥 *페르소나*")
+    if persona_details:
+        for pd in persona_details:
+            name = _persona_short(pd.get("persona", ""))
+            v = pd.get("verdict", "")
+            conf = pd.get("confidence", 0)
+            kf_list = pd.get("key_factors", []) or []
+            point = kf_list[0] if kf_list else (pd.get("reasoning", "") or "")[:50]
+            lines.append(f"{_verdict_emoji(v)} *{name}* {v} {conf}% — {point}")
+    elif persona_summary:
+        for full_name in ("가치투자자", "성장투자자", "기술적분석가", "매크로분석가"):
+            s = persona_summary.get(full_name, "")
+            if s:
+                lines.append(f"⚪ *{_persona_short(full_name)}* {s}")
+    lines.append("")
+
+    # 호재/리스크 (각 2개)
+    if opportunities or risks:
+        lines.append(SEP)
+        if opportunities:
+            lines.append("⚡ *호재*")
+            for o in opportunities[:2]:
+                lines.append(f"• {o}")
+        if risks:
+            if opportunities:
+                lines.append("")
+            lines.append("⚠️ *리스크*")
+            for r in risks[:2]:
+                lines.append(f"• {r}")
+        lines.append("")
+
+    # 다음 액션
+    if next_action:
+        lines.append(SEP)
+        lines.append(f"⏭️ *다음 액션*\n{next_action}")
+        lines.append("")
+
+    # 푸터
+    lines.append(SEP)
+    lines.append("📧 *상세 분석은 메일로 발송*")
+    lines.append(
+        "[📬 Gmail 열기](https://mail.google.com/) · "
+        "[🔍 검색](https://mail.google.com/mail/u/0/#search/Sanjuk-Stock)",
+    )
+
+    return "\n".join(lines)
+
+
+def _build_summary_message(
+    result: BriefingResult,
+    raw: dict,
+    label: str,
+    title: str,
+    notion_url: str,
+) -> str:
+    """텔레그램용 핵심 요약 메시지. 상세 내용은 메일로 발송됨."""
+    GMAIL_INBOX_URL = "https://mail.google.com/"
+    GMAIL_SEARCH_URL = "https://mail.google.com/mail/u/0/#search/Sanjuk-Stock"
+
+    verdict = raw.get("advisor_verdict", "") or "—"
+    oneliner = raw.get("advisor_oneliner", "") or ""
+    next_action = raw.get("next_action", "") or ""
+
+    persona_summary = raw.get("persona_summary", {}) or {}
+
+    lines: list[str] = []
+    lines.append(f"{label}")
+    lines.append(f"━━━━━━━━━━━━━━━━━━")
+    lines.append(f"📌 {title}")
+    lines.append("")
+    lines.append(f"🎯 판단: *{verdict}*")
+    if oneliner:
+        lines.append(f"💬 {oneliner}")
+    lines.append("")
+
+    if persona_summary:
+        lines.append("👥 페르소나 요약")
+        for name in ("가치투자자", "성장투자자", "기술적분석가", "매크로분석가"):
+            summary = persona_summary.get(name, "").strip()
+            if summary:
+                lines.append(f"• {name}: {summary}")
+        lines.append("")
+
+    if next_action:
+        lines.append(f"⏭ 다음 액션: {next_action}")
+        lines.append("")
+
+    lines.append("━━━━━━━━━━━━━━━━━━")
+    lines.append("📧 상세 분석은 메일로 발송 (검색어: Sanjuk-Stock)")
+    lines.append(f"[📬 Gmail 열기]({GMAIL_INBOX_URL}) | [🔍 검색 결과]({GMAIL_SEARCH_URL})")
+
+    return "\n".join(lines)
 
 
 def _strip_leading_emoji(text: str) -> str:

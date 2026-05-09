@@ -195,18 +195,19 @@ def _simulate_from_signals(
         elif signals.iloc[i] == -1 and holding:
             holding = False
             exit_price = float(close.iloc[i])
-            pnl_pct = (exit_price - entry_price) / entry_price * 100
-            trades.append(pnl_pct)
+            if entry_price > 0:
+                pnl_pct = (exit_price - entry_price) / entry_price * 100
+                trades.append(pnl_pct)
 
     # 미청산 포지션 처리
-    if holding:
+    if holding and entry_price > 0:
         exit_price = float(close.iloc[-1])
         pnl_pct = (exit_price - entry_price) / entry_price * 100
         trades.append(pnl_pct)
 
     # 바이앤홀드
     start_valid = close.dropna()
-    if len(start_valid) < 2:
+    if len(start_valid) < 2 or float(start_valid.iloc[0]) == 0:
         bnh = 0.0
     else:
         bnh = (float(start_valid.iloc[-1]) - float(start_valid.iloc[0])) / float(start_valid.iloc[0]) * 100
