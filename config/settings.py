@@ -48,6 +48,7 @@ GMAIL_TO: str = os.environ.get("GMAIL_TO", "")  # 수신자 (미설정 시 GMAIL
 PORTFOLIO: dict[str, str] = {
     "005930.KS": "삼성전자",
     "012450.KS": "한화에어로스페이스",
+    "462870.KS": "시프트업",
     "133690.KS": "TIGER 미국나스닥100",
     "360750.KS": "TIGER 미국S&P500",
     "251350.KS": "KODEX MSCI선진국",
@@ -166,12 +167,14 @@ HOLDINGS_PENSION: dict[str, dict] = {
 }
 PENSION_MMF: float = 6_880_513.0  # MMF 잔고
 
-# [ISA] 중개형 ISA (2026-04-07 개설)
+# [ISA] 중개형 ISA (2026-04-07 개설, 2026-05-11 시프트업·한화에어로 매수)
 HOLDINGS_ISA: dict[str, dict] = {
     "360750.KS": {"shares": 200, "avg_cost_krw": 24_900},   # TIGER 미국S&P500
     "133690.KS": {"shares": 30, "avg_cost_krw": 163_000},   # TIGER 미국나스닥100
+    "462870.KS": {"shares": 30, "avg_cost_krw": 31_700},    # 시프트업
+    "012450.KS": {"shares": 1, "avg_cost_krw": 1_320_000},  # 한화에어로스페이스
 }
-ISA_CASH: float = 10_130_000.0
+ISA_CASH: float = 7_859_000.0
 
 # ─── 예수금 ────────────────────────────────────────
 DEFAULT_CASH: float = 3_539_839.0
