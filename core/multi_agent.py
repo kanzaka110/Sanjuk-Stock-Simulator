@@ -460,20 +460,6 @@ def synthesize(
   리스크: {pa.risk_warning}
 """
 
-    # 시장 초점 지시
-    if briefing_type == "KR_BEFORE":
-        market_focus = """
-⑥ 이 브리핑은 【한국 시장 중심】입니다. 한국 종목(삼성전자, 한화에어로스페이스, 국내 ETF 등)에 초점을 맞추세요.
-⑦ 코스피/코스닥 동향, 외국인/기관 수급, 원달러 환율이 핵심입니다.
-⑧ 미국 시장은 한국장에 미치는 영향 관점에서만 간략히 언급하세요."""
-    elif briefing_type == "US_BEFORE":
-        market_focus = """
-⑥ 이 브리핑은 【미국 시장 중심】입니다. 미국 종목(NVDA, GOOGL, MU, LMT)에 초점을 맞추세요.
-⑦ S&P500/나스닥/다우 동향, Fed 정책, VIX, 미국 국채 금리가 핵심입니다.
-⑧ 한국 시장은 미국장에 미치는 영향 관점에서만 간략히 언급하세요."""
-    else:
-        market_focus = ""
-
     # 보유 포지션 정보 (계좌별, briefing_type에 따라 필터링)
     from config.settings import (
         DEFAULT_CASH,
@@ -481,11 +467,74 @@ def synthesize(
         HOLDINGS_ISA,
         HOLDINGS_IRP,
         HOLDINGS_PENSION,
+        HOLDINGS_RIA,
         ISA_CASH,
         IRP_CASH,
         IRP_DEFAULT_OPTION,
         PENSION_MMF,
+        RIA_CASH,
+        RIA_REALIZED_GAIN_USD,
     )
+
+    # RIA 현재 상태 (프롬프트 동적 갱신용)
+    ria_nvda_shares = HOLDINGS_RIA.get("NVDA", {}).get("shares", 0)
+    ria_nvda_avg = HOLDINGS_RIA.get("NVDA", {}).get("avg_cost_usd", 0.0)
+
+    # RIA 외 해외 매수 가중치 (사용자 B안 전략 기반)
+    _today = _date.today()
+    # 절세 손실 계산: (매수금액 × 가중치 / RIA 매도금액) × 양도차익 × 세율
+    # 현재 상태: RIA 매도금액 ₩20,584,797, 양도차익 ₩7,210,348, 세율 22%
+    _ria_sales_krw = 20_584_797
+    _ria_gain_krw = 7_210_348
+    _tax_rate = 0.22
+
+    if _today >= _date(2027, 1, 1):
+        ria_weight_phase = "종료(2027+)"
+        ria_weight_pct = 0
+        ria_tax_loss_per_10m = 0
+        ria_b_guidance = "RIA 제도 종료. 일반/ISA/IRP/연금에서 해외 ETF·해외주식 자유 매수 추천 (절세 손실 없음)."
+    elif _today >= _date(2026, 8, 1):
+        ria_weight_phase = "8~12월"
+        ria_weight_pct = 50
+        ria_tax_loss_per_10m = int(10_000_000 * 0.50 / _ria_sales_krw * _ria_gain_krw * _tax_rate)
+        ria_b_guidance = f"가중치 50% 적용 시점. ₩10,000,000 매수 시 절세 손실 약 ₩{ria_tax_loss_per_10m:,}. B안 권장 시점 — 매수 적극 검토."
+    elif _today >= _date(2026, 6, 1):
+        ria_weight_phase = "6~7월"
+        ria_weight_pct = 80
+        ria_tax_loss_per_10m = int(10_000_000 * 0.80 / _ria_sales_krw * _ria_gain_krw * _tax_rate)
+        ria_b_guidance = f"가중치 80% 적용. ₩10,000,000 매수 시 절세 손실 약 ₩{ria_tax_loss_per_10m:,}. B안 기본은 자제이나 강세 신호 명확 시 오버라이드 가능 — 기대 수익이 절세 손실 초과 시 매수 추천."
+    else:
+        ria_weight_phase = "5월 이전 (현재)"
+        ria_weight_pct = 100
+        ria_tax_loss_per_10m = int(10_000_000 * 1.00 / _ria_sales_krw * _ria_gain_krw * _tax_rate)
+        ria_b_guidance = f"가중치 100% 적용. ₩10,000,000 매수 시 절세 손실 약 ₩{ria_tax_loss_per_10m:,}. 매우 강한 강세 신호 아니면 자제 권장."
+
+    # 시장 초점 지시
+    if briefing_type == "KR_BEFORE":
+        market_focus = """
+⑥ 이 브리핑은 【한국 시장 중심】입니다. 한국 종목(삼성전자, 한화에어로스페이스, 국내 ETF 등)에 초점을 맞추세요.
+⑦ 코스피/코스닥 동향, 외국인/기관 수급, 원달러 환율이 핵심입니다.
+⑧ 미국 시장은 한국장에 미치는 영향 관점에서만 간략히 언급하세요."""
+    elif briefing_type == "US_BEFORE":
+        us_focus_tickers = "MU, LMT" if ria_nvda_shares == 0 else "NVDA, MU, LMT"
+        if ria_nvda_shares > 0:
+            ria_focus = (
+                f"⑨ **RIA NVDA {ria_nvda_shares}주(평단 ${ria_nvda_avg:.2f})는 5/31 100% 면제 데드라인 종목 "
+                f"— 매 브리핑마다 매도 타이밍 명시 필수. 누적 면제 차익 ${RIA_REALIZED_GAIN_USD:,.2f} 사용.**"
+            )
+        else:
+            ria_focus = (
+                f"⑨ RIA 잔존 0, 누적 면제 차익 ${RIA_REALIZED_GAIN_USD:,.2f} 확정. RIA 현금 ₩{RIA_CASH:,.0f} 활용처는 국내자산 편입 ETF·국내주식 위주 추천 (해외편입 ETF 불가, 1년 의무 보유).\n"
+                f"⑩ 일반/ISA에서 미국주·해외 ETF 매수 추천 시 B안 룰: 현재 가중치 {ria_weight_pct}% ({ria_weight_phase}). "
+                f"강세 신호 명확(VIX <18 + RSI 50+ + 5일+ 상승 추세, 또는 종목별 강력 매수 시그널)이면 절세 손실 약 ₩{ria_tax_loss_per_10m:,}/₩10M 명시 후 오버라이드 추천 OK. 모호하면 매수 자제."
+            )
+        market_focus = f"""
+⑥ 이 브리핑은 【미국 시장 중심】입니다. 미국 종목({us_focus_tickers})에 초점을 맞추세요.
+⑦ S&P500/나스닥/다우 동향, Fed 정책, VIX, 미국 국채 금리가 핵심입니다.
+⑧ 한국 시장은 미국장에 미치는 영향 관점에서만 간략히 언급하세요.
+{ria_focus}"""
+    else:
+        market_focus = ""
 
     def _is_kr_ticker(tk: str) -> bool:
         return ".KS" in tk
@@ -506,17 +555,22 @@ def synthesize(
         return f"  {tk}: {shares}주 (매수 ₩{info.get('avg_cost_krw', 0):,.0f})"
 
     filtered_general = _filter_holdings(HOLDINGS_GENERAL, briefing_type)
+    filtered_ria = _filter_holdings(HOLDINGS_RIA, briefing_type)
     filtered_isa = _filter_holdings(HOLDINGS_ISA, briefing_type)
     filtered_irp = _filter_holdings(HOLDINGS_IRP, briefing_type)
     filtered_pension = _filter_holdings(HOLDINGS_PENSION, briefing_type)
 
     general_lines = [_fmt_holding(tk, info) for tk, info in filtered_general.items()]
+    ria_lines = [_fmt_holding(tk, info) for tk, info in filtered_ria.items()]
     isa_lines = [_fmt_holding(tk, info) for tk, info in filtered_isa.items()]
     irp_lines = [_fmt_holding(tk, info) for tk, info in filtered_irp.items()]
     pension_lines = [_fmt_holding(tk, info) for tk, info in filtered_pension.items()]
 
     holdings_text = f"""[일반] 종합계좌 (예수금 ₩{DEFAULT_CASH:,.0f})
 {chr(10).join(general_lines) if general_lines else "  (해당 시장 보유 없음)"}
+
+[RIA] 종합(RIA) (예수금 ₩{RIA_CASH:,.0f}) — 5/31까지 100% 양도세 면제
+{chr(10).join(ria_lines) if ria_lines else "  (해당 시장 보유 없음)"}
 
 [ISA] 중개형 ISA (예수금 ₩{ISA_CASH:,.0f})
 {chr(10).join(isa_lines) if isa_lines else "  (보유 종목 없음 — 신규 매수 가능)"}
@@ -548,21 +602,29 @@ def synthesize(
 
 ━━━ 계좌 규칙 (반드시 준수) ━━━
 - 모든 매수/매도 신호에 계좌 태그 필수: [일반], [ISA], [RIA], [연금저축], [IRP]
-- [ISA]: 국내주식 + 국내상장 ETF만 매수 가능. 해외 개별주식 불가. 예수금 2,000만원 — 적극 활용 대상.
-- [RIA]: 매도 전용. NVDA/GOOGL만 적격 (2025.12.23 이전 매수분). 5/31까지 100% 양도세 면제.
-- [일반]: 5/31 전까지 해외주식 신규 매수 금지 (RIA 한도 차감). 국내주식은 ISA 우선 매수.
+- [ISA]: 국내주식 + 국내상장 ETF 매수 가능. 해외 개별주식 불가. 예수금 ₩{ISA_CASH:,.0f}.
+- [RIA]: {("매도 전용. 현재 잔존 NVDA " + str(ria_nvda_shares) + "주만 보유. 5/31까지 잔여분 100% 양도세 면제.") if ria_nvda_shares > 0 else "현금 ₩" + f'{RIA_CASH:,.0f}' + " 1년 의무 보유 (인출 시 전체 면제 취소). 국내자산 편입 ETF·국내주식·예탁금만 매수 가능 — 해외편입 ETF(TIGER 미국 시리즈·KODEX MSCI선진국·TIGER 차이나 등) 매수 불가."} 누적 실현 차익 ${RIA_REALIZED_GAIN_USD:,.2f}.
+- [일반]: 예수금 ₩{DEFAULT_CASH:,.0f}. 한국·미국·ETF 자유 매수 가능. 단 미국주·해외 ETF 매수는 사용자 B안 룰 적용 (아래 참조).
+- [IRP/연금저축]: 해외 ETF 자동매수 설정 있다면 정지 권장 (RIA 혜택 보호용, B안 룰).
 
-━━━ 🚨 RIA 매도 타이밍 체크 (최우선) ━━━
-- 데드라인: 2026-05-31 (D-{(_date(2026, 5, 31) - _date.today()).days}일)
-- 대상: NVDA 46주 (평단 $132.91), GOOGL 9주 (평단 $318.03)
-- 100% 양도세 면제 → 매도 시 절약 금액이 크므로 반드시 5/31 전에 매도 완료
-- 매도 타이밍 판단 기준:
-  · 기술적 과열 (RSI 70+, 볼린저 상단 이탈) → 즉시 매도 권고
-  · 안정 상승 중 → D-10 이전까지 매도 권고 (마감 쏠림 리스크 방지)
-  · 단기 급락 중 → 반등 확인 후 매도하되, D-5 이전에는 반드시 매도
-  · D-5 이내 → 시장 상황 무관 전량 매도 강력 권고
-- strategy_sell에 RIA 매도 판단을 매 브리핑마다 반드시 포함할 것
-- "아직 오를 수 있으니 보유" 판단은 D-10 이후 금지 — 세금 면제가 추가 수익보다 확실
+━━━ 🎯 사용자 B안 전략 (2026-05-18 결정) ━━━
+- **기본 방침**: 2026-08-01 전까지 일반·ISA·IRP·연금저축에서 해외 ETF·해외주식·해외주식형 펀드 신규 매수 자제 (RIA 세제혜택 보호)
+- **현재 시점**: {ria_weight_phase} (가중치 {ria_weight_pct}%). {ria_b_guidance}
+- **오버라이드 조건** (강세 시 매수 추천 허용):
+  · 명확한 강세 신호 1: VIX < 18 + S&P500/나스닥 RSI 50+ + 5일+ 상승 추세
+  · 명확한 강세 신호 2: 종목별 강력 매수 시그널 (RSI 30 이하 과매도 반등 + 거래량 급증 + 핵심 지지선 확인 등)
+  · 오버라이드 추천 시 절세 손실액 정량 명시 필수: 현재 가중치 기준 ₩10,000,000 매수당 약 ₩{ria_tax_loss_per_10m:,} 절세 손실
+  · 기대 수익 vs 절세 손실 정량 비교 후 추천 (예: "절세 손실 ₩{ria_tax_loss_per_10m:,} vs 단기 +5% 기대 = ₩500,000 수익 → 매수 합리")
+- **계좌별 추천 가이드**:
+  · [RIA]: 국내자산 편입 ETF 위주 매수 추천 (KODEX 200·KODEX 코스닥150·TIGER 200·KODEX 자동차·KODEX 반도체·PLUS 고배당주 등). 진입가·분할 계획·트리거 명시. 1년 의무 보유 감안 장기 종목 선호.
+  · [일반]·[ISA]: 한국 자산은 자유 추천 (RIA 영향 없음). 미국 자산은 B안 + 오버라이드 룰 적용.
+  · [IRP]·[연금저축]: 한국 자산 위주 리밸런싱 추천. 해외 ETF 신규는 B안 영향 표시.
+
+━━━ RIA 진행 상황 ━━━
+- 5/31 면제 데드라인: D-{(_date(2026, 5, 31) - _date.today()).days}일
+- 잔존: {("NVDA " + str(ria_nvda_shares) + "주 (평단 $" + f"{ria_nvda_avg:.2f}" + ")") if ria_nvda_shares > 0 else "0 — 전량 매도 완료 (2026-05-18)"}
+- 누적 실현 면제 차익: ${RIA_REALIZED_GAIN_USD:,.2f} (1차 5/12 GOOGL 9 @$387 + NVDA 23 @$219, 2차 5/14 NVDA 12 @$232, 3차 5/18 NVDA 11 @$228.30)
+{("- 잔여 NVDA " + str(ria_nvda_shares) + "주도 100% 양도세 면제 → 반드시 5/31 전 매도 완료. 기술적 과열(RSI 70+) 즉시 매도, D-10 이내 강제 매도.") if ria_nvda_shares > 0 else "- RIA 매도 타이밍 분석 불필요. RIA 현금 ₩{0:,.0f} 활용처(일반/ISA 이체·재투자) 위주로 검토.".format(RIA_CASH)}
 - [연금저축/IRP]: 2026년 납입 완료. 리밸런싱만.
 - 전문 용어 사용 시 괄호로 쉬운 설명 병기 (예: RSI(과매도 지표) 35)
 - 한눈에 알아보기 쉽게. 표 적극 활용. 결론 먼저.{market_focus}"""
@@ -632,10 +694,10 @@ def synthesize(
   ],
   "next_action": "다음 액션",
   "account_strategy": {{
-    "ISA": "국내 ETF/주식 구체적 매수 후보와 진입 조건. 기회가 없으면 진입 트리거 명시",
-    "RIA": "NVDA/GOOGL 매도 판단 — D-{ria_days_left}일 남음. 현재 RSI/추세 기준 즉시매도 vs 반등 후 매도 명시. 매도 지연 시 리스크(추가 하락+면제 기한 초과) 정량화. D-10 이후는 보유 불가.",
-    "일반": "5/31 전 해외 매수 제한 내에서 국내 매수 또는 기존 보유 관리 전략",
-    "연금_IRP": "리밸런싱 필요성 검토. 비중 조정할 게 없으면 이유 명시"
+    "ISA": "한국주식·국내 ETF 구체 매수 후보·진입가·분할 계획·손절가 명시. 해외 ETF(TIGER 미국/KODEX MSCI선진국 등) 추천 시 B안 룰 적용 — 현재 가중치 {ria_weight_pct}%, 강세 신호 명확하면 절세 손실 정량 명시 후 오버라이드 가능. 한국 자산은 자유 추천.",
+    "RIA": "{('잔존 NVDA ' + str(ria_nvda_shares) + '주 매도 타이밍 명시 (RSI/추세/D-' + str(ria_days_left) + '). 5/31 면제 ₩5,000만 한도 대비 누적 $' + f'{RIA_REALIZED_GAIN_USD:,.2f}' + ' 사용.') if ria_nvda_shares > 0 else ('현금 ₩' + f'{RIA_CASH:,.0f}' + ' 활용처 — 국내자산 편입 ETF 위주 매수 추천 (KODEX 200/코스닥150/TIGER 200/KODEX 반도체·자동차·PLUS 고배당주 등). 종목별 진입가·분할 계획·매수 트리거(예: RSI 40 이하 진입, MA60 지지 등) 명시 필수. 해외편입 ETF·미국 개별주 추천 절대 금지. 1년 의무 보유(2027-05-12/14/18 분할 만료) 감안 장기 종목 선호. 예탁금 보유 대안도 비교 제시. 누적 실현 면제 $' + f'{RIA_REALIZED_GAIN_USD:,.2f}' + ' 확정.')}",
+    "일반": "예수금 ₩{DEFAULT_CASH:,.0f}. 한국주식·한국 ETF 자유 추천. 미국주식·해외 ETF는 B안 룰 적용 — 현재 가중치 {ria_weight_pct}% ({ria_weight_phase}). 매수 추천 시 'RIA 절세 손실 ₩X vs 단기 기대 수익 ₩Y' 정량 비교 후 추천/보류 결정. 기존 보유 MU/LMT 관리 전략도 포함.",
+    "연금_IRP": "한국 자산 리밸런싱 위주 추천. 해외 ETF(TIGER 미국 시리즈·차이나·KODEX MSCI선진국) 자동매수 설정 있다면 정지 권장 명시. 신규 매수 시 B안 룰 + 가중치 {ria_weight_pct}% 영향 표시."
   }},
   "persona_summary": {{
     "가치투자자": "한줄 요약",

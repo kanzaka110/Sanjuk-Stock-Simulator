@@ -19,8 +19,10 @@ from config.settings import (
     HOLDINGS_IRP,
     HOLDINGS_ISA,
     HOLDINGS_PENSION,
+    HOLDINGS_RIA,
     ISA_CASH,
     IRP_CASH,
+    RIA_CASH,
     IRP_DEFAULT_OPTION,
     KST,
     KRW_TICKERS,
@@ -184,6 +186,13 @@ def _build_portfolio_message() -> str:
     )
     lines.extend(gen_lines)
     total_value += gen_value + DEFAULT_CASH
+
+    # RIA (종합·5/31 면제)
+    ria_value, ria_lines = _format_account(
+        "🟥 RIA", HOLDINGS_RIA, _get_quote_realtime,
+    )
+    lines.extend(ria_lines)
+    total_value += ria_value + RIA_CASH
 
     # ISA
     isa_value, isa_lines = _format_account(

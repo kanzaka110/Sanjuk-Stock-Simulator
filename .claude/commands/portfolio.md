@@ -9,7 +9,7 @@ user-invocable: true
 
 ## 지시사항
 
-1. `config/settings.py`에서 HOLDINGS_GENERAL, HOLDINGS_ISA, HOLDINGS_IRP, HOLDINGS_PENSION을 읽습니다.
+1. `config/settings.py`에서 HOLDINGS_GENERAL, HOLDINGS_RIA, HOLDINGS_ISA, HOLDINGS_IRP, HOLDINGS_PENSION을 읽습니다.
 2. `core/market.py`의 `_get_quote_realtime()`으로 각 종목의 현재가를 조회합니다.
 3. 계좌별로 종목명, 보유수량, 평균단가, 현재가, 수익률을 테이블로 보여줍니다.
 4. 계좌별 합계와 전체 포트폴리오 합계를 계산합니다.
@@ -18,14 +18,15 @@ user-invocable: true
 
 ```python
 from config.settings import (
-    HOLDINGS_GENERAL, HOLDINGS_ISA, HOLDINGS_IRP, HOLDINGS_PENSION,
-    DEFAULT_CASH, ISA_CASH, IRP_CASH, IRP_DEFAULT_OPTION, PENSION_MMF,
+    HOLDINGS_GENERAL, HOLDINGS_RIA, HOLDINGS_ISA, HOLDINGS_IRP, HOLDINGS_PENSION,
+    DEFAULT_CASH, RIA_CASH, ISA_CASH, IRP_CASH, IRP_DEFAULT_OPTION, PENSION_MMF,
     PORTFOLIO
 )
 from core.market import _get_quote_realtime
 
 all_holdings = {
     "[일반]": (HOLDINGS_GENERAL, DEFAULT_CASH),
+    "[RIA]": (HOLDINGS_RIA, RIA_CASH),
     "[ISA]": (HOLDINGS_ISA, ISA_CASH),
     "[IRP]": (HOLDINGS_IRP, IRP_CASH),
     "[연금저축]": (HOLDINGS_PENSION, PENSION_MMF),
