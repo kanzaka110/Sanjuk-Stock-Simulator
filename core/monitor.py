@@ -351,7 +351,7 @@ class MarketMonitor:
                 capture_output=True,
                 text=True,
                 timeout=120,
-                cwd="/home/ohmil/Sanjuk-Stock-Simulator",
+                cwd="/home/kanzaka110/Sanjuk-Stock-Simulator",
             )
             if result.returncode == 0 and result.stdout.strip():
                 return result.stdout.strip()

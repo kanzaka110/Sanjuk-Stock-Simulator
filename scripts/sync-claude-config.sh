@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Claude Code 설정 동기화 스크립트
-# 로컬 → GCP 또는 GCP → 로컬로 메모리/룰/설정을 동기화
+# Claude Code 설정 동기화 스크립트 (외부 PC ↔ GCP)
+#
+# 주의(2026-05-18): GCP를 직접 운영(kanzaka110)으로 전환한 뒤 이 스크립트는
+# 사실상 사용하지 않습니다. 외부 PC에서 GCP로 메모리 백업이 필요할 때만 활용.
+# SSH는 ohmil 계정으로 접근하지만 실제 운영 메모리는 kanzaka110에 있습니다.
 #
 # 사용법:
 #   ./scripts/sync-claude-config.sh push   # 로컬 → GCP
@@ -10,7 +13,8 @@
 set -euo pipefail
 
 GCP_HOST="ohmil@35.238.77.143"
-GCP_CLAUDE_DIR="/home/ohmil/.claude"
+# 실제 운영 메모리는 kanzaka110 계정 아래에 있음. 쓰기 시 sudo 필요할 수 있음.
+GCP_CLAUDE_DIR="/home/kanzaka110/.claude-rc"
 
 # 동기화 대상 (상대 경로, ~/.claude/ 기준)
 SYNC_PATHS=(

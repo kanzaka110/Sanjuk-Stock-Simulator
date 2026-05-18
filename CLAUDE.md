@@ -191,12 +191,9 @@ BRIEFING_TYPE=MANUAL  # 브리핑 유형 (KR_BEFORE / US_BEFORE / MANUAL)
 ## GCP 관리
 
 - 인스턴스: sanjuk-project (us-central1-b)
-- **주의: SSH 사용자(`ohmil`) ≠ 서비스 사용자(`kanzaka110`)**
-- 서비스 리포: /home/kanzaka110/Sanjuk-Stock-Simulator/
-- SSH 리포: /home/ohmil/Sanjuk-Stock-Simulator/
-- venv: /home/kanzaka110/Sanjuk-Stock-Simulator/venv/
-- **배포 시 kanzaka110 경로에도 반드시 git pull:**
-  `sudo -u kanzaka110 git -C /home/kanzaka110/Sanjuk-Stock-Simulator pull origin master`
+- 서비스 사용자: `kanzaka110` (Claude Code는 이 계정에서 직접 실행)
+- 리포 경로: `/home/kanzaka110/Sanjuk-Stock-Simulator/` (단일 리포)
+- venv: `/home/kanzaka110/Sanjuk-Stock-Simulator/venv/`
 - 서비스: `stock-bot` (텔레그램 봇 + 모니터, systemd 상시 실행)
 - 로그: `sudo journalctl -u stock-bot -f`
 - 한국장 브리핑: KST 08:30 (UTC 23:30) — cron
@@ -205,8 +202,8 @@ BRIEFING_TYPE=MANUAL  # 브리핑 유형 (KR_BEFORE / US_BEFORE / MANUAL)
 
 ## 모바일 접근
 
-- **SSH 앱 직접 접속** (권장, 빠름): `ssh ohmil@35.238.77.143` → `claude`
 - **Claude 앱 remote-control**: GCP에서 `tmux new -s claude` → `claude remote-control`
+- **SSH 앱 직접 접속**: `ssh ohmil@35.238.77.143` 후 `sudo su - kanzaka110` → `claude`
 - **텔레그램 봇**: 브리핑/시세 확인 (가장 빠름)
 - 모든 모바일 Claude Code 사용은 **구독 포함 (추가 비용 $0)**
 
