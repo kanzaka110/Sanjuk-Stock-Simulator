@@ -68,6 +68,27 @@ def _init_tables(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_predictions_status
             ON predictions(status);
     """)
+    # Phase 2 마이그레이션: 기존 DB에 새 컬럼 추가
+    _migrate_phase2(conn)
+
+
+def _migrate_phase2(conn: sqlite3.Connection) -> None:
+    """Phase 2 컬럼 안전 추가. 이미 있으면 무시."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(predictions)").fetchall()}
+    new_columns = [
+        ("strategy_type", "TEXT DEFAULT '일반'"),
+        ("strategy_tags", "TEXT DEFAULT ''"),
+        ("horizon_days", "INTEGER DEFAULT 7"),
+        ("benchmark_ticker", "TEXT DEFAULT ''"),
+        ("execution_condition", "TEXT DEFAULT ''"),
+        ("invalidation_condition", "TEXT DEFAULT ''"),
+        ("risk_reward", "REAL DEFAULT 0"),
+    ]
+    for col_name, col_def in new_columns:
+        if col_name not in existing:
+            conn.execute(f"ALTER TABLE predictions ADD COLUMN {col_name} {col_def}")
+            log.info("Phase 2 마이그레이션: predictions.%s 추가", col_name)
+    conn.commit()
 
 
 # ═══════════════════════════════════════════════════════
@@ -93,6 +114,14 @@ class Prediction:
     closed_price: float = 0.0
     pnl_pct: float = 0.0
     outcome: str = ""  # win/loss/neutral
+    # Phase 2: 전략 메타데이터
+    strategy_type: str = "일반"  # 단기매매/중기보유/리밸런싱/세금전략/관망
+    strategy_tags: str = ""      # 콤마 구분: RSI반등,볼린저하단,...
+    horizon_days: int = 7
+    benchmark_ticker: str = ""
+    execution_condition: str = ""
+    invalidation_condition: str = ""
+    risk_reward: float = 0.0
 
 
 def calibrate_confidence(ticker: str, raw_confidence: int) -> int:
@@ -146,15 +175,17 @@ def calibrate_confidence(ticker: str, raw_confidence: int) -> int:
     return calibrated
 
 
-def _is_duplicate_prediction(ticker: str, signal: str) -> bool:
-    """24시간 내 같은 종목+같은 방향의 미결(open) 추천이 있으면 중복으로 판단.
-    이미 closed된 추천은 중복으로 보지 않는다 (재추천 허용)."""
+def _is_duplicate_prediction(ticker: str, signal: str, strategy_type: str = "일반") -> bool:
+    """24시간 내 같은 종목+같은 방향+같은 전략유형의 미결(open) 추천이 있으면 중복.
+    이미 closed된 추천은 중복으로 보지 않는다 (재추천 허용).
+    같은 종목이라도 전략이 다르면 별도 저장 허용."""
     conn = _get_conn()
     cutoff = (datetime.now(KST) - timedelta(hours=24)).isoformat()
     row = conn.execute(
         """SELECT COUNT(*) FROM predictions
-           WHERE ticker = ? AND signal = ? AND created_at > ? AND status = 'open'""",
-        (ticker, signal, cutoff),
+           WHERE ticker = ? AND signal = ? AND strategy_type = ?
+           AND created_at > ? AND status = 'open'""",
+        (ticker, signal, strategy_type, cutoff),
     ).fetchone()
     return (row[0] or 0) > 0
 
@@ -169,11 +200,18 @@ def save_prediction(
     confidence: int = 50,
     reasoning: str = "",
     persona: str = "종합",
+    strategy_type: str = "일반",
+    strategy_tags: str = "",
+    horizon_days: int = 7,
+    benchmark_ticker: str = "",
+    execution_condition: str = "",
+    invalidation_condition: str = "",
+    risk_reward: float = 0.0,
 ) -> int:
     """새 추천 기록 저장. 확신도 보정 + 중복 방지 적용. Returns prediction ID."""
-    # 중복 예측 방지
-    if _is_duplicate_prediction(ticker, signal):
-        log.info("중복 예측 스킵: %s %s (24시간 내 동일 추천 존재)", ticker, signal)
+    # 중복 예측 방지 (같은 종목+방향+전략유형)
+    if _is_duplicate_prediction(ticker, signal, strategy_type):
+        log.info("중복 예측 스킵: %s %s %s (24시간 내 동일 추천 존재)", ticker, signal, strategy_type)
         return 0
 
     # 확신도 보정
@@ -184,10 +222,14 @@ def save_prediction(
     cursor = conn.execute(
         """INSERT INTO predictions
            (created_at, ticker, name, signal, entry_price, target_price,
-            stop_loss, confidence, reasoning, persona)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            stop_loss, confidence, reasoning, persona,
+            strategy_type, strategy_tags, horizon_days, benchmark_ticker,
+            execution_condition, invalidation_condition, risk_reward)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (now, ticker, name, signal, entry_price, target_price,
-         stop_loss, calibrated, reasoning, persona),
+         stop_loss, calibrated, reasoning, persona,
+         strategy_type, strategy_tags, horizon_days, benchmark_ticker,
+         execution_condition, invalidation_condition, risk_reward),
     )
     conn.commit()
     return cursor.lastrowid or 0
@@ -196,6 +238,12 @@ def save_prediction(
 def save_predictions_from_briefing(raw_json: dict) -> int:
     """브리핑 결과에서 추천 기록 자동 저장. Returns 저장된 건수."""
     count = 0
+
+    def _extract_tags(row: dict) -> str:
+        tags = row.get("strategy_tags", [])
+        if isinstance(tags, list):
+            return ",".join(tags)
+        return str(tags) if tags else ""
 
     for row in raw_json.get("strategy_buy", []):
         try:
@@ -211,6 +259,13 @@ def save_predictions_from_briefing(raw_json: dict) -> int:
                 target_price=target,
                 stop_loss=stop,
                 reasoning=row.get("reason", "")[:200],
+                strategy_type=row.get("strategy_type", "일반"),
+                strategy_tags=_extract_tags(row),
+                horizon_days=int(row.get("horizon_days", 7)),
+                benchmark_ticker=row.get("benchmark_ticker", ""),
+                execution_condition=row.get("execution_condition", "")[:200],
+                invalidation_condition=row.get("invalidation_condition", "")[:200],
+                risk_reward=float(row.get("risk_reward", 0)),
             )
             if pid > 0:
                 count += 1
@@ -231,6 +286,13 @@ def save_predictions_from_briefing(raw_json: dict) -> int:
                 target_price=target,
                 stop_loss=stop,
                 reasoning=row.get("reason", "")[:200],
+                strategy_type=row.get("strategy_type", "일반"),
+                strategy_tags=_extract_tags(row),
+                horizon_days=int(row.get("horizon_days", 7)),
+                benchmark_ticker=row.get("benchmark_ticker", ""),
+                execution_condition=row.get("execution_condition", "")[:200],
+                invalidation_condition=row.get("invalidation_condition", "")[:200],
+                risk_reward=float(row.get("risk_reward", 0)),
             )
             if pid > 0:
                 count += 1
@@ -430,6 +492,70 @@ def get_accuracy_summary() -> dict[str, dict]:
     }
 
 
+def get_strategy_accuracy_summary() -> dict[str, dict]:
+    """전략 유형별 정확도 통계. Phase 2."""
+    conn = _get_conn()
+    rows = conn.execute("""
+        SELECT strategy_type,
+               COUNT(*) as total,
+               SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END) as wins,
+               SUM(CASE WHEN outcome='loss' THEN 1 ELSE 0 END) as losses,
+               AVG(pnl_pct) as avg_pnl
+        FROM predictions
+        WHERE status = 'closed' AND strategy_type != ''
+        GROUP BY strategy_type
+        HAVING total >= 2
+        ORDER BY total DESC
+    """).fetchall()
+
+    result = {}
+    for r in rows:
+        total = r["total"]
+        wins = r["wins"] or 0
+        result[r["strategy_type"]] = {
+            "total": total,
+            "wins": wins,
+            "losses": r["losses"] or 0,
+            "avg_pnl": r["avg_pnl"] or 0,
+            "win_rate": (wins / total * 100) if total > 0 else 0,
+        }
+    return result
+
+
+def get_tag_accuracy_summary() -> dict[str, dict]:
+    """전략 태그별 정확도 통계. Phase 2."""
+    conn = _get_conn()
+    rows = conn.execute("""
+        SELECT strategy_tags, outcome, pnl_pct
+        FROM predictions
+        WHERE status = 'closed' AND strategy_tags != ''
+    """).fetchall()
+
+    # 태그별 집계 (콤마 구분 태그를 개별로 분리)
+    tag_stats: dict[str, list] = {}
+    for r in rows:
+        tags = [t.strip() for t in (r["strategy_tags"] or "").split(",") if t.strip()]
+        for tag in tags:
+            if tag not in tag_stats:
+                tag_stats[tag] = []
+            tag_stats[tag].append({"outcome": r["outcome"], "pnl": r["pnl_pct"] or 0})
+
+    result = {}
+    for tag, entries in tag_stats.items():
+        if len(entries) < 2:
+            continue
+        total = len(entries)
+        wins = sum(1 for e in entries if e["outcome"] == "win")
+        avg_pnl = sum(e["pnl"] for e in entries) / total
+        result[tag] = {
+            "total": total,
+            "wins": wins,
+            "avg_pnl": avg_pnl,
+            "win_rate": (wins / total * 100) if total > 0 else 0,
+        }
+    return result
+
+
 def memory_to_text() -> str:
     """메모리를 텍스트로 변환 (프롬프트 삽입용)."""
     predictions = get_recent_predictions(10)
@@ -497,6 +623,27 @@ def memory_to_text() -> str:
                     f"  🟢 {t}: 승률 {s['win_rate']:.0f}% 평균 {s['avg_pnl']:+.1f}% ({s['total']}건) "
                     f"→ 확신도 +{bonus}% 자동 가중됨."
                 )
+
+    # Phase 2: 전략 유형별 성과
+    strat_stats = get_strategy_accuracy_summary()
+    if strat_stats:
+        lines.append("\n  [📊 전략 유형별 성과]")
+        for stype, s in strat_stats.items():
+            icon = "✅" if s["win_rate"] >= 60 else "⚠️" if s["win_rate"] >= 40 else "❌"
+            lines.append(
+                f"  {icon} {stype}: {s['total']}건 승률 {s['win_rate']:.0f}% 평균 {s['avg_pnl']:+.1f}%"
+            )
+
+    # Phase 2: 전략 태그별 성과
+    tag_stats = get_tag_accuracy_summary()
+    if tag_stats:
+        lines.append("\n  [🏷️ 전략 태그별 성과]")
+        sorted_tags = sorted(tag_stats.items(), key=lambda x: x[1]["total"], reverse=True)
+        for tag, s in sorted_tags[:8]:
+            icon = "✅" if s["win_rate"] >= 60 else "⚠️" if s["win_rate"] >= 40 else "❌"
+            lines.append(
+                f"  {icon} {tag}: {s['total']}건 승률 {s['win_rate']:.0f}% 평균 {s['avg_pnl']:+.1f}%"
+            )
 
     if len(lines) == 1:
         lines.append("  (기록 없음 — 첫 브리핑 후 축적됩니다)")

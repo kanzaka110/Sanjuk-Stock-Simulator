@@ -760,7 +760,14 @@ def synthesize(
       "split_plan": "분할 매수 계획",
       "timing": "진입 타이밍",
       "risk_note": "리스크 요약",
-      "reason": "매수 근거 상세"
+      "reason": "매수 근거 상세",
+      "strategy_type": "단기매매|중기보유|리밸런싱|세금전략|일반",
+      "strategy_tags": ["RSI반등", "볼린저하단", "펀더멘털성장 등 해당하는 전략 태그"],
+      "horizon_days": 7,
+      "benchmark_ticker": "^KS11|^IXIC|^GSPC",
+      "execution_condition": "지금|지정가 조건|장마감 확인 후",
+      "invalidation_condition": "손절가 이탈|뉴스 반전|기술 신호 훼손",
+      "risk_reward": 2.0
     }}
   ],
   "strategy_sell": [
@@ -773,7 +780,14 @@ def synthesize(
       "take_profit": "익절 목표가",
       "stop_loss": "손절가",
       "timing": "매도 타이밍",
-      "reason": "매도 근거"
+      "reason": "매도 근거",
+      "strategy_type": "단기매매|중기보유|리밸런싱|세금전략|일반",
+      "strategy_tags": ["과열매도", "이벤트드리븐", "세금전략 등 해당하는 전략 태그"],
+      "horizon_days": 7,
+      "benchmark_ticker": "^KS11|^IXIC|^GSPC",
+      "execution_condition": "즉시|RSI 70+ 시|장마감 확인 후",
+      "invalidation_condition": "목표가 도달|추세 반전|세금 이벤트 종료",
+      "risk_reward": 1.5
     }}
   ],
   "strategy_summary": "오늘 가장 중요한 매수/매도 판단 요약. 보유+신규 후보 모두 다룰 것. 400자 이상.",
