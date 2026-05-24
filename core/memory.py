@@ -175,15 +175,64 @@ def calibrate_confidence(ticker: str, raw_confidence: int) -> int:
     return calibrated
 
 
+_VALID_STRATEGY_TYPES = {"단기매매", "중기보유", "리밸런싱", "세금전략", "관망", "일반"}
+
+
+def _normalize_strategy_type(val) -> str:
+    """strategy_type을 정규화. None/빈값/잘못된 값 → '일반'."""
+    if not val or not isinstance(val, str) or not val.strip():
+        return "일반"
+    cleaned = val.strip()
+    return cleaned if cleaned in _VALID_STRATEGY_TYPES else "일반"
+
+
+def _safe_int(val, default: int = 7) -> int:
+    """LLM JSON에서 온 값을 안전하게 int로. '7일', null, '' 등 방어."""
+    if val is None:
+        return default
+    if isinstance(val, int):
+        return val
+    if isinstance(val, float):
+        return int(val)
+    s = str(val).strip().rstrip("일days일 ")
+    try:
+        return int(float(s)) if s else default
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_float(val, default: float = 0.0) -> float:
+    """LLM JSON에서 온 값을 안전하게 float로. '2:1', null, '' 등 방어."""
+    if val is None:
+        return default
+    if isinstance(val, (int, float)):
+        return float(val)
+    s = str(val).strip()
+    if not s:
+        return default
+    # "2:1" → 2.0, "1:2" → 0.5 비율 해석
+    if ":" in s:
+        try:
+            parts = s.split(":")
+            return float(parts[0]) / float(parts[1])
+        except (ValueError, ZeroDivisionError):
+            return default
+    try:
+        return float(s)
+    except (ValueError, TypeError):
+        return default
+
+
 def _is_duplicate_prediction(ticker: str, signal: str, strategy_type: str = "일반") -> bool:
     """24시간 내 같은 종목+같은 방향+같은 전략유형의 미결(open) 추천이 있으면 중복.
     이미 closed된 추천은 중복으로 보지 않는다 (재추천 허용).
     같은 종목이라도 전략이 다르면 별도 저장 허용."""
+    strategy_type = _normalize_strategy_type(strategy_type)
     conn = _get_conn()
     cutoff = (datetime.now(KST) - timedelta(hours=24)).isoformat()
     row = conn.execute(
         """SELECT COUNT(*) FROM predictions
-           WHERE ticker = ? AND signal = ? AND strategy_type = ?
+           WHERE ticker = ? AND signal = ? AND COALESCE(strategy_type, '일반') = ?
            AND created_at > ? AND status = 'open'""",
         (ticker, signal, strategy_type, cutoff),
     ).fetchone()
@@ -209,6 +258,9 @@ def save_prediction(
     risk_reward: float = 0.0,
 ) -> int:
     """새 추천 기록 저장. 확신도 보정 + 중복 방지 적용. Returns prediction ID."""
+    # 정규화
+    strategy_type = _normalize_strategy_type(strategy_type)
+
     # 중복 예측 방지 (같은 종목+방향+전략유형)
     if _is_duplicate_prediction(ticker, signal, strategy_type):
         log.info("중복 예측 스킵: %s %s %s (24시간 내 동일 추천 존재)", ticker, signal, strategy_type)
@@ -259,13 +311,13 @@ def save_predictions_from_briefing(raw_json: dict) -> int:
                 target_price=target,
                 stop_loss=stop,
                 reasoning=row.get("reason", "")[:200],
-                strategy_type=row.get("strategy_type", "일반"),
+                strategy_type=_normalize_strategy_type(row.get("strategy_type")),
                 strategy_tags=_extract_tags(row),
-                horizon_days=int(row.get("horizon_days", 7)),
-                benchmark_ticker=row.get("benchmark_ticker", ""),
-                execution_condition=row.get("execution_condition", "")[:200],
-                invalidation_condition=row.get("invalidation_condition", "")[:200],
-                risk_reward=float(row.get("risk_reward", 0)),
+                horizon_days=_safe_int(row.get("horizon_days"), 7),
+                benchmark_ticker=str(row.get("benchmark_ticker", "") or ""),
+                execution_condition=str(row.get("execution_condition", "") or "")[:200],
+                invalidation_condition=str(row.get("invalidation_condition", "") or "")[:200],
+                risk_reward=_safe_float(row.get("risk_reward"), 0),
             )
             if pid > 0:
                 count += 1
@@ -286,13 +338,13 @@ def save_predictions_from_briefing(raw_json: dict) -> int:
                 target_price=target,
                 stop_loss=stop,
                 reasoning=row.get("reason", "")[:200],
-                strategy_type=row.get("strategy_type", "일반"),
+                strategy_type=_normalize_strategy_type(row.get("strategy_type")),
                 strategy_tags=_extract_tags(row),
-                horizon_days=int(row.get("horizon_days", 7)),
-                benchmark_ticker=row.get("benchmark_ticker", ""),
-                execution_condition=row.get("execution_condition", "")[:200],
-                invalidation_condition=row.get("invalidation_condition", "")[:200],
-                risk_reward=float(row.get("risk_reward", 0)),
+                horizon_days=_safe_int(row.get("horizon_days"), 7),
+                benchmark_ticker=str(row.get("benchmark_ticker", "") or ""),
+                execution_condition=str(row.get("execution_condition", "") or "")[:200],
+                invalidation_condition=str(row.get("invalidation_condition", "") or "")[:200],
+                risk_reward=_safe_float(row.get("risk_reward"), 0),
             )
             if pid > 0:
                 count += 1
@@ -453,6 +505,12 @@ def get_recent_predictions(limit: int = 20) -> list[Prediction]:
         (limit,),
     ).fetchall()
 
+    def _row_get(row, key, default=""):
+        try:
+            return row[key] if row[key] is not None else default
+        except (IndexError, KeyError):
+            return default
+
     return [
         Prediction(
             id=r["id"],
@@ -471,6 +529,14 @@ def get_recent_predictions(limit: int = 20) -> list[Prediction]:
             closed_price=r["closed_price"] or 0,
             pnl_pct=r["pnl_pct"] or 0,
             outcome=r["outcome"] or "",
+            # Phase 2 필드
+            strategy_type=_row_get(r, "strategy_type", "일반"),
+            strategy_tags=_row_get(r, "strategy_tags", ""),
+            horizon_days=_row_get(r, "horizon_days", 7) or 7,
+            benchmark_ticker=_row_get(r, "benchmark_ticker", ""),
+            execution_condition=_row_get(r, "execution_condition", ""),
+            invalidation_condition=_row_get(r, "invalidation_condition", ""),
+            risk_reward=_row_get(r, "risk_reward", 0) or 0,
         )
         for r in rows
     ]
