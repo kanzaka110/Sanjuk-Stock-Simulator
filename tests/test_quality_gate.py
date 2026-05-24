@@ -133,3 +133,56 @@ class TestQualityGate:
             strategy_type="일반", agreement_count=4,
         )
         assert pid2 == 0, "중복 추천이 저장되면 안 됨"
+
+
+class TestBriefingIntegration:
+    """save_predictions_from_briefing 경로 통합 테스트."""
+
+    def test_nvda_danger_agreement_2_blocked(self, seed_accuracy):
+        """위험 종목 + 동의 2명 → 차단."""
+        from core.memory import save_predictions_from_briefing, get_recent_predictions
+        data = {
+            "strategy_sell": [{
+                "ticker": "NVDA",
+                "name": "NVIDIA",
+                "current_price": "200",
+                "take_profit": "180",
+                "stop_loss": "220",
+                "reason": "테스트",
+                "strategy_type": "일반",
+                "risk_reward": "2.5",
+                "invalidation_condition": "추세반전",
+                "agreement_count": 2,
+            }],
+        }
+        saved = save_predictions_from_briefing(data)
+        assert saved == 0, "동의 2명이면 위험 종목 저장 안 됨"
+
+    def test_nvda_danger_agreement_3_conditional(self, seed_accuracy):
+        """위험 종목 + 동의 3명 + 조건 충족 → CONDITIONAL 저장."""
+        from core.memory import save_predictions_from_briefing, _get_conn
+        data = {
+            "strategy_sell": [{
+                "ticker": "NVDA",
+                "name": "NVIDIA",
+                "current_price": "200",
+                "take_profit": "180",
+                "stop_loss": "220",
+                "reason": "테스트",
+                "strategy_type": "세금전략",
+                "risk_reward": "2.5",
+                "invalidation_condition": "세금이벤트종료",
+                "agreement_count": 3,
+            }],
+        }
+        saved = save_predictions_from_briefing(data)
+        assert saved == 1, "동의 3명+조건 충족이면 저장되어야 함"
+        # 저장된 레코드 확인
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT * FROM predictions WHERE ticker='NVDA' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert row is not None
+        # NVDA 확신도 보정(승률0%→-15)으로 35가 되어 WATCH로 격하될 수 있음
+        # 핵심: 위험 종목이 agreement 3이면 BLOCKED가 아니라 저장됨
+        assert "예외허용" in (row["reasoning"] or "")

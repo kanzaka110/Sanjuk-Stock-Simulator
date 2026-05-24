@@ -263,11 +263,11 @@ def _quality_gate(
     """추천 품질 게이트. (action_grade, adjusted_confidence, gate_reason) 반환.
 
     룰:
-    1. 확신도 55 미만 → WATCH (매수/매도 금지)
-    2. 위험 종목(승률 30% 미만) → BLOCKED (예외 허용 조건 있으면 CONDITIONAL)
+    1. 확신도 55 미만 → WATCH (매수/매도 관망 처리)
+    2. 위험 종목(승률 30% 미만) → BLOCKED (예외: 손절+무효화+손익비2.0++동의3/4)
     3. 손절가 없으면 → BLOCKED
-    4. 손익비 1.5 미만 → WATCH
-    5. 진입가 0 → WATCH (조건부 후보)
+    4. 손익비 1.5 미만 (0 포함) → BLOCKED
+    5. 진입가 0 → BLOCKED (매수/매도)
     6. 데이터 실패 1개당 confidence -10, 2개 이상이면 신규 매수 BLOCKED
     """
     reasons = []
@@ -443,6 +443,7 @@ def save_predictions_from_briefing(raw_json: dict, data_failures: int = 0) -> in
                 invalidation_condition=str(row.get("invalidation_condition", "") or "")[:200],
                 risk_reward=_safe_float(row.get("risk_reward"), 0),
                 data_failures=data_failures,
+                agreement_count=_safe_int(row.get("agreement_count") or row.get("consensus_count"), 0),
             )
             if pid > 0:
                 count += 1
@@ -471,6 +472,7 @@ def save_predictions_from_briefing(raw_json: dict, data_failures: int = 0) -> in
                 invalidation_condition=str(row.get("invalidation_condition", "") or "")[:200],
                 risk_reward=_safe_float(row.get("risk_reward"), 0),
                 data_failures=data_failures,
+                agreement_count=_safe_int(row.get("agreement_count") or row.get("consensus_count"), 0),
             )
             if pid > 0:
                 count += 1
