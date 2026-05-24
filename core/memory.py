@@ -83,6 +83,7 @@ def _migrate_phase2(conn: sqlite3.Connection) -> None:
         ("execution_condition", "TEXT DEFAULT ''"),
         ("invalidation_condition", "TEXT DEFAULT ''"),
         ("risk_reward", "REAL DEFAULT 0"),
+        ("agreement_count", "INTEGER DEFAULT 0"),
     ]
     for col_name, col_def in new_columns:
         if col_name not in existing:
@@ -122,6 +123,7 @@ class Prediction:
     execution_condition: str = ""
     invalidation_condition: str = ""
     risk_reward: float = 0.0
+    agreement_count: int = 0     # 분석가 동의 수 (4명 중)
 
 
 def calibrate_confidence(ticker: str, raw_confidence: int) -> int:
@@ -396,12 +398,12 @@ def save_prediction(
            (created_at, ticker, name, signal, entry_price, target_price,
             stop_loss, confidence, reasoning, persona,
             strategy_type, strategy_tags, horizon_days, benchmark_ticker,
-            execution_condition, invalidation_condition, risk_reward)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            execution_condition, invalidation_condition, risk_reward, agreement_count)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (now, ticker, name, signal, entry_price, target_price,
          stop_loss, gated_conf, reasoning + f" [게이트:{grade}|{gate_reason}]", persona,
          strategy_type, strategy_tags, horizon_days, benchmark_ticker,
-         execution_condition, invalidation_condition, risk_reward),
+         execution_condition, invalidation_condition, risk_reward, agreement_count),
     )
     conn.commit()
 
@@ -665,6 +667,7 @@ def get_recent_predictions(limit: int = 20) -> list[Prediction]:
             execution_condition=_row_get(r, "execution_condition", ""),
             invalidation_condition=_row_get(r, "invalidation_condition", ""),
             risk_reward=_row_get(r, "risk_reward", 0) or 0,
+            agreement_count=_row_get(r, "agreement_count", 0) or 0,
         )
         for r in rows
     ]
