@@ -110,6 +110,31 @@ def _build_impact_message(
             lines.append(" · ".join(parts))
         lines.append("")
 
+    # 야간 프리브리핑: 예약 주문 요약
+    night_orders = raw.get("night_orders", []) or []
+    if night_orders:
+        lines.append(SEP)
+        lines.append("🌙 *내일 예약 주문*")
+        for order in night_orders:
+            name = order.get("종목", "")
+            acct = order.get("계좌", "")
+            price = order.get("지정가", "")
+            qty = order.get("수량", "")
+            valid = order.get("유효시간", "")
+            cond = order.get("조건", "")
+            lines.append(f"▸ *{name}* {acct} {price} × {qty}")
+            if valid:
+                lines.append(f"  ⏰ {valid}")
+            if cond:
+                lines.append(f"  📌 {cond}")
+        gap = raw.get("gap_scenarios", {}) or {}
+        if gap:
+            lines.append("")
+            lines.append("📊 *갭 시나리오*")
+            for scenario, action in gap.items():
+                lines.append(f"• {scenario}: {action}")
+        lines.append("")
+
     # 매도 추천 (한 줄)
     if sell_recs:
         lines.append(SEP)
@@ -508,7 +533,10 @@ def send_simple_message(text: str) -> bool:
 
 
 def _send_message(text: str) -> bool:
-    """텔레그램 메시지 전송. 4096자 초과 시 자동 분할."""
+    """텔레그램 메시지 전송. 4096자 초과 시 자동 분할.
+
+    Markdown 파싱 실패 시 plain text로 자동 fallback (parse entities 오류 회피).
+    """
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return False
 
@@ -518,16 +546,42 @@ def _send_message(text: str) -> bool:
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     all_ok = True
     for chunk in chunks:
-        payload = {
+        base_payload = {
             "chat_id": TELEGRAM_CHAT_ID,
             "text": chunk,
-            "parse_mode": "Markdown",
             "disable_web_page_preview": True,
         }
         try:
-            res = requests.post(url, json=payload, timeout=30)
-            if res.status_code != 200:
-                log.warning(f"텔레그램 전송 실패: {res.status_code} {res.text[:200]}")
+            # 1차 시도: Markdown
+            res = requests.post(
+                url,
+                json={**base_payload, "parse_mode": "Markdown"},
+                timeout=30,
+            )
+            if res.status_code == 200:
+                continue
+
+            # 2차 시도: parse entities 오류 시 plain text fallback
+            if res.status_code == 400 and "parse" in res.text.lower():
+                log.warning(
+                    "텔레그램 Markdown 파싱 실패 → plain text 재시도: %s",
+                    res.text[:160],
+                )
+                res2 = requests.post(url, json=base_payload, timeout=30)
+                if res2.status_code == 200:
+                    continue
+                log.warning(
+                    "텔레그램 plain text 재시도도 실패: %d %s",
+                    res2.status_code,
+                    res2.text[:160],
+                )
+                all_ok = False
+            else:
+                log.warning(
+                    "텔레그램 전송 실패: %d %s",
+                    res.status_code,
+                    res.text[:200],
+                )
                 all_ok = False
         except Exception as e:
             log.error(f"텔레그램 전송 오류: {e}")

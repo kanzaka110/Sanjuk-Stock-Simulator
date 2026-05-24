@@ -128,9 +128,9 @@ def get_market_config(briefing_type: str) -> tuple[dict[str, str], dict[str, str
     US_BEFORE: 미국 종목 + 미국 지수 중심 (한국 지수는 참고용 포함)
     기타(MANUAL): 전체 포트폴리오
     """
-    if briefing_type == "KR_BEFORE":
+    if briefing_type in ("KR_BEFORE", "KR_NIGHT"):
         return KR_PORTFOLIO, {**KR_INDICES, **US_INDICES}, MACRO
-    if briefing_type == "US_BEFORE":
+    if briefing_type in ("US_BEFORE", "US_NIGHT"):
         return US_PORTFOLIO, {**US_INDICES, **KR_INDICES}, MACRO
     return PORTFOLIO, INDICES, MACRO
 
@@ -199,12 +199,10 @@ HOLDINGS_ISA: dict[str, dict] = {
     "462870.KS": {"shares": 90, "avg_cost_krw": 30_633},      # 시프트업 (5/11+5/12+5/18 각 30주)
     "012450.KS": {"shares": 1, "avg_cost_krw": 1_320_000},    # 한화에어로스페이스 (5/11)
     "161510.KS": {"shares": 13, "avg_cost_krw": 28_100},      # PLUS 고배당주 (5/12)
-    "035720.KS": {"shares": 10, "avg_cost_krw": 44_700},      # 카카오 (5/12)
-    "207940.KS": {"shares": 1, "avg_cost_krw": 1_454_000},    # 삼성바이오로직스 (5/12)
     "251350.KS": {"shares": 11, "avg_cost_krw": 39_940},      # KODEX MSCI선진국 (5/12)
 }
-# ISA_CASH: 10,130,000 - 2,271,000(5/11) - 3,626,640(5/12) - 885,000(5/18) = 3,347,360
-ISA_CASH: float = 3_347_360.0
+# ISA_CASH: 10,130,000 - 2,271,000(5/11) - 3,626,640(5/12) - 885,000(5/18) + 1,778,000(5/19 삼바+카카오 매도) = 5,125,360
+ISA_CASH: float = 5_125_360.0
 
 # ─── 예수금 ────────────────────────────────────────
 DEFAULT_CASH: float = 3_539_839.0

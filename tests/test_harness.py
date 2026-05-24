@@ -40,7 +40,7 @@ class TestNoHardcodedSecrets:
     def test_no_secrets_in_source(self):
         violations = []
         for py_file in PROJECT_ROOT.rglob("*.py"):
-            if "test_" in py_file.name or "__pycache__" in str(py_file):
+            if "test_" in py_file.name or "__pycache__" in str(py_file) or "venv" in str(py_file):
                 continue
             content = py_file.read_text(encoding="utf-8", errors="ignore")
             for pattern in SECRET_PATTERNS:

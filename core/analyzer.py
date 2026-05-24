@@ -334,9 +334,9 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
     # 6단계: 백테스트 (기본 + 레짐별 + 최적화, 로컬)
     log.info("[6/11] 백테스트 검증 중 (레짐별 + 파라미터 최적화)...")
     backtest_results = []
-    if briefing_type == "KR_BEFORE":
+    if briefing_type in ("KR_BEFORE", "KR_NIGHT"):
         key_tickers = ["005930.KS", "012450.KS"]
-    elif briefing_type == "US_BEFORE":
+    elif briefing_type in ("US_BEFORE", "US_NIGHT"):
         key_tickers = ["NVDA", "MU", "GOOGL", "LMT"]
     else:
         key_tickers = ["NVDA", "005930.KS", "012450.KS", "MU"]

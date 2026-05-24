@@ -11,7 +11,7 @@ from __future__ import annotations
 import sqlite3
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from config.settings import DB_DIR, KST
 
@@ -95,6 +95,70 @@ class Prediction:
     outcome: str = ""  # win/loss/neutral
 
 
+def calibrate_confidence(ticker: str, raw_confidence: int) -> int:
+    """종목별 과거 적중률 기반으로 확신도를 보정한다.
+
+    보정 공식:
+        최종 = raw + 종목 보정 + 샘플 보정
+        - 승률 70%+ & 양수 수익 → +10%
+        - 승률 30% 미만 → -30%
+        - 샘플 4건 미만 → 보정폭 절반
+        - 결과: 10~95 범위로 클램프
+    """
+    stats = get_accuracy_summary()
+    s = stats.get(ticker)
+    if not s or s["total"] < 2:
+        return max(10, min(95, raw_confidence))  # 데이터 부족, 클램프만 적용
+
+    adjustment = 0
+    wr = s["win_rate"] or 0
+    avg = s["avg_pnl"] or 0
+    total = s["total"]
+
+    # 위험 종목: 승률 30% 미만
+    if wr < 30:
+        adjustment = -30
+    # 저신뢰: 승률 30~50%
+    elif wr < 50:
+        adjustment = -15
+    # 보통: 승률 50~70%
+    elif wr < 70:
+        adjustment = 0
+    # 고신뢰: 승률 70%+ & 양수 수익
+    elif avg > 0:
+        adjustment = 10
+    else:
+        adjustment = 5
+
+    # 샘플 수 부족 시 과신 방지 (4건 미만이면 보정폭 절반)
+    if total < 4:
+        adjustment = adjustment // 2
+
+    calibrated = raw_confidence + adjustment
+    calibrated = max(10, min(95, calibrated))
+
+    if adjustment != 0:
+        log.info(
+            "확신도 보정: %s %d%% → %d%% (조정 %+d, 승률 %.0f%%, %d건)",
+            ticker, raw_confidence, calibrated, adjustment, wr, total,
+        )
+
+    return calibrated
+
+
+def _is_duplicate_prediction(ticker: str, signal: str) -> bool:
+    """24시간 내 같은 종목+같은 방향의 미결(open) 추천이 있으면 중복으로 판단.
+    이미 closed된 추천은 중복으로 보지 않는다 (재추천 허용)."""
+    conn = _get_conn()
+    cutoff = (datetime.now(KST) - timedelta(hours=24)).isoformat()
+    row = conn.execute(
+        """SELECT COUNT(*) FROM predictions
+           WHERE ticker = ? AND signal = ? AND created_at > ? AND status = 'open'""",
+        (ticker, signal, cutoff),
+    ).fetchone()
+    return (row[0] or 0) > 0
+
+
 def save_prediction(
     ticker: str,
     name: str,
@@ -106,7 +170,15 @@ def save_prediction(
     reasoning: str = "",
     persona: str = "종합",
 ) -> int:
-    """새 추천 기록 저장. Returns prediction ID."""
+    """새 추천 기록 저장. 확신도 보정 + 중복 방지 적용. Returns prediction ID."""
+    # 중복 예측 방지
+    if _is_duplicate_prediction(ticker, signal):
+        log.info("중복 예측 스킵: %s %s (24시간 내 동일 추천 존재)", ticker, signal)
+        return 0
+
+    # 확신도 보정
+    calibrated = calibrate_confidence(ticker, confidence)
+
     conn = _get_conn()
     now = datetime.now(KST).isoformat()
     cursor = conn.execute(
@@ -115,7 +187,7 @@ def save_prediction(
             stop_loss, confidence, reasoning, persona)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (now, ticker, name, signal, entry_price, target_price,
-         stop_loss, confidence, reasoning, persona),
+         stop_loss, calibrated, reasoning, persona),
     )
     conn.commit()
     return cursor.lastrowid or 0
@@ -131,7 +203,7 @@ def save_predictions_from_briefing(raw_json: dict) -> int:
             target = _parse_price(row.get("target_price", "0"))
             stop = _parse_price(row.get("stop_loss", "0"))
 
-            save_prediction(
+            pid = save_prediction(
                 ticker=row.get("ticker", ""),
                 name=row.get("name", ""),
                 signal="매수",
@@ -140,7 +212,8 @@ def save_predictions_from_briefing(raw_json: dict) -> int:
                 stop_loss=stop,
                 reasoning=row.get("reason", "")[:200],
             )
-            count += 1
+            if pid > 0:
+                count += 1
         except Exception as e:
             log.debug(f"매수 추천 저장 실패: {e}")
 
@@ -150,7 +223,7 @@ def save_predictions_from_briefing(raw_json: dict) -> int:
             target = _parse_price(row.get("take_profit", "0"))
             stop = _parse_price(row.get("stop_loss", "0"))
 
-            save_prediction(
+            pid = save_prediction(
                 ticker=row.get("ticker", ""),
                 name=row.get("name", ""),
                 signal="매도",
@@ -159,7 +232,8 @@ def save_predictions_from_briefing(raw_json: dict) -> int:
                 stop_loss=stop,
                 reasoning=row.get("reason", "")[:200],
             )
-            count += 1
+            if pid > 0:
+                count += 1
         except Exception as e:
             log.debug(f"매도 추천 저장 실패: {e}")
 
@@ -389,6 +463,39 @@ def memory_to_text() -> str:
                 icon = "✅" if p.outcome == "win" else "❌" if p.outcome == "loss" else "➖"
                 lines.append(
                     f"  {icon} {p.name} {p.signal}: {p.pnl_pct:+.1f}% [{p.outcome}]"
+                )
+
+    # 신뢰도 기반 피드백 주입
+    if accuracy:
+        high = [t for t, s in accuracy.items() if s["total"] >= 2 and s["win_rate"] >= 70 and s["avg_pnl"] > 0]
+        danger = [t for t, s in accuracy.items() if s["total"] >= 2 and s["win_rate"] < 30]
+        if high or danger:
+            lines.append("\n  [⚡ 신뢰도 기반 판단 보정]")
+        if danger:
+            conn = _get_conn()
+            for t in danger:
+                s = accuracy[t]
+                penalty = -30 if s["total"] >= 4 else -15
+                lines.append(
+                    f"  🔴 {t}: 승률 {s['win_rate']:.0f}% 평균 {s['avg_pnl']:+.1f}% ({s['total']}건) "
+                    f"→ 확신도 {penalty:+d}% 자동 보정됨."
+                )
+                # 최근 실패 이유 추가
+                fails = conn.execute(
+                    """SELECT signal, substr(reasoning, 1, 120) as r FROM predictions
+                       WHERE ticker = ? AND outcome = 'loss'
+                       ORDER BY closed_at DESC LIMIT 2""",
+                    (t,),
+                ).fetchall()
+                for f in fails:
+                    lines.append(f"    실패 기록: {f[0]} | {f[1]}")
+        if high:
+            for t in high:
+                s = accuracy[t]
+                bonus = 10 if s["total"] >= 4 else 5
+                lines.append(
+                    f"  🟢 {t}: 승률 {s['win_rate']:.0f}% 평균 {s['avg_pnl']:+.1f}% ({s['total']}건) "
+                    f"→ 확신도 +{bonus}% 자동 가중됨."
                 )
 
     if len(lines) == 1:
