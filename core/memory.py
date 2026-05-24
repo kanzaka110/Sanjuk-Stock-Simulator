@@ -258,6 +258,7 @@ def _quality_gate(
     invalidation_condition: str,
     strategy_type: str,
     data_failures: int = 0,
+    agreement_count: int = 0,
 ) -> tuple[str, int, str]:
     """추천 품질 게이트. (action_grade, adjusted_confidence, gate_reason) 반환.
 
@@ -286,16 +287,26 @@ def _quality_gate(
     stats = get_accuracy_summary()
     s = stats.get(ticker)
     if s and s["total"] >= 2 and (s["win_rate"] or 0) < 30:
-        # 예외 조건 체크
+        # 예외 조건: 4개 모두 충족해야 허용
         has_stoploss = stop_loss > 0
         has_invalidation = bool(invalidation_condition and invalidation_condition.strip())
         good_rr = risk_reward >= 2.0
-        if has_stoploss and has_invalidation and good_rr:
+        enough_agreement = agreement_count >= 3  # 분석가 4명 중 3명 이상 동의
+        if has_stoploss and has_invalidation and good_rr and enough_agreement:
             grade = max_grade(grade, ACTION_CONDITIONAL)
-            reasons.append(f"위험종목(승률{s['win_rate']:.0f}%)→예외허용(손절+무효화+손익비)")
+            reasons.append(f"위험종목(승률{s['win_rate']:.0f}%)→예외허용(손절+무효화+손익비+동의{agreement_count}/4)")
         else:
+            missing = []
+            if not has_stoploss:
+                missing.append("손절가")
+            if not has_invalidation:
+                missing.append("무효화조건")
+            if not good_rr:
+                missing.append(f"손익비{risk_reward:.1f}<2.0")
+            if not enough_agreement:
+                missing.append(f"동의{agreement_count}/4<3")
             grade = ACTION_BLOCKED
-            reasons.append(f"위험종목(승률{s['win_rate']:.0f}%)→차단")
+            reasons.append(f"위험종목(승률{s['win_rate']:.0f}%)→차단(미충족:{','.join(missing)})")
 
     # 확신도 기준
     if adj_conf < 55 and signal in ("매수", "매도"):
@@ -307,15 +318,15 @@ def _quality_gate(
         grade = max_grade(grade, ACTION_BLOCKED)
         reasons.append("손절가없음→저장금지")
 
-    # 손익비 기준
-    if signal == "매수" and 0 < risk_reward < 1.5:
-        grade = max_grade(grade, ACTION_WATCH)
-        reasons.append(f"손익비{risk_reward:.1f}<1.5→관망")
+    # 손익비 기준 (0 또는 누락도 차단)
+    if signal == "매수" and risk_reward < 1.5:
+        grade = max_grade(grade, ACTION_BLOCKED)
+        reasons.append(f"손익비{risk_reward:.1f}<1.5→차단")
 
-    # 진입가 0 → 조건부
-    if entry_price <= 0:
-        grade = max_grade(grade, ACTION_WATCH)
-        reasons.append("진입가0→조건부후보")
+    # 진입가 0 → 차단 (실전 추천에 진입가 없으면 의미 없음)
+    if entry_price <= 0 and signal in ("매수", "매도"):
+        grade = max_grade(grade, ACTION_BLOCKED)
+        reasons.append("진입가0→저장금지")
 
     reason_text = "; ".join(reasons) if reasons else "통과"
     return grade, max(10, min(95, adj_conf)), reason_text
@@ -345,14 +356,18 @@ def save_prediction(
     invalidation_condition: str = "",
     risk_reward: float = 0.0,
     data_failures: int = 0,
+    agreement_count: int = 0,
 ) -> int:
     """새 추천 기록 저장. 품질 게이트 + 확신도 보정 + 중복 방지. Returns prediction ID."""
     # 정규화
     strategy_type = _normalize_strategy_type(strategy_type)
 
-    # 중복 예측 방지
+    # 중복 예측 방지 (원래 signal + 관망 변환 모두 체크)
     if _is_duplicate_prediction(ticker, signal, strategy_type):
         log.info("중복 예측 스킵: %s %s %s", ticker, signal, strategy_type)
+        return 0
+    if signal in ("매수", "매도") and _is_duplicate_prediction(ticker, "관망", strategy_type):
+        log.info("중복 예측 스킵(관망 변환 중복): %s %s→관망 %s", ticker, signal, strategy_type)
         return 0
 
     # 확신도 보정 (종목별 과거 적중률)
@@ -362,6 +377,7 @@ def save_prediction(
     grade, gated_conf, gate_reason = _quality_gate(
         ticker, signal, calibrated, entry_price, stop_loss,
         risk_reward, invalidation_condition, strategy_type, data_failures,
+        agreement_count,
     )
 
     if grade == ACTION_BLOCKED:

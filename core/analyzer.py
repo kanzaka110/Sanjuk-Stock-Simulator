@@ -460,10 +460,23 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
 
     result = _build_briefing_result(data)
 
-    # 추천 기록을 메모리에 저장
-    saved = save_predictions_from_briefing(data)
+    # 데이터 실패 집계 (품질 게이트에 전달)
+    _data_failures = 0
+    if not kr_text and briefing_type not in ("US_BEFORE", "US_NIGHT"):
+        _data_failures += 1  # KRX 데이터 실패
+    if not chart_analyses:
+        _data_failures += 1  # 차트 비전 실패
+    if not sentiment_text or sentiment_text == "":
+        _data_failures += 1  # 감성 분석 실패
+    failed_personas = 4 - len(persona_results)
+    _data_failures += failed_personas  # 페르소나 실패
+
+    # 추천 기록을 메모리에 저장 (품질 게이트 적용)
+    saved = save_predictions_from_briefing(data, data_failures=_data_failures)
     if saved > 0:
-        log.info(f"  {saved}건 추천 기록 메모리에 저장")
+        log.info(f"  {saved}건 추천 기록 메모리에 저장 (데이터실패: {_data_failures}건)")
+    elif _data_failures > 0:
+        log.warning(f"  데이터 실패 {_data_failures}건 → 품질 게이트 강화 적용")
 
     return result
 
