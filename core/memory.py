@@ -239,6 +239,94 @@ def _is_duplicate_prediction(ticker: str, signal: str, strategy_type: str = "일
     return (row[0] or 0) > 0
 
 
+# ═══════════════════════════════════════════════════════
+# 액션 등급
+# ═══════════════════════════════════════════════════════
+ACTION_IMMEDIATE = "IMMEDIATE_ACTION"
+ACTION_CONDITIONAL = "CONDITIONAL_ACTION"
+ACTION_WATCH = "WATCH"
+ACTION_BLOCKED = "BLOCKED"
+
+
+def _quality_gate(
+    ticker: str,
+    signal: str,
+    confidence: int,
+    entry_price: float,
+    stop_loss: float,
+    risk_reward: float,
+    invalidation_condition: str,
+    strategy_type: str,
+    data_failures: int = 0,
+) -> tuple[str, int, str]:
+    """추천 품질 게이트. (action_grade, adjusted_confidence, gate_reason) 반환.
+
+    룰:
+    1. 확신도 55 미만 → WATCH (매수/매도 금지)
+    2. 위험 종목(승률 30% 미만) → BLOCKED (예외 허용 조건 있으면 CONDITIONAL)
+    3. 손절가 없으면 → BLOCKED
+    4. 손익비 1.5 미만 → WATCH
+    5. 진입가 0 → WATCH (조건부 후보)
+    6. 데이터 실패 1개당 confidence -10, 2개 이상이면 신규 매수 BLOCKED
+    """
+    reasons = []
+    grade = ACTION_IMMEDIATE
+    adj_conf = confidence
+
+    # 데이터 품질 감점
+    if data_failures > 0:
+        penalty = data_failures * 10
+        adj_conf -= penalty
+        reasons.append(f"데이터실패{data_failures}건(-{penalty})")
+        if data_failures >= 2 and signal == "매수":
+            grade = ACTION_BLOCKED
+            reasons.append("데이터2+실패→신규매수금지")
+
+    # 위험 종목 체크
+    stats = get_accuracy_summary()
+    s = stats.get(ticker)
+    if s and s["total"] >= 2 and (s["win_rate"] or 0) < 30:
+        # 예외 조건 체크
+        has_stoploss = stop_loss > 0
+        has_invalidation = bool(invalidation_condition and invalidation_condition.strip())
+        good_rr = risk_reward >= 2.0
+        if has_stoploss and has_invalidation and good_rr:
+            grade = max_grade(grade, ACTION_CONDITIONAL)
+            reasons.append(f"위험종목(승률{s['win_rate']:.0f}%)→예외허용(손절+무효화+손익비)")
+        else:
+            grade = ACTION_BLOCKED
+            reasons.append(f"위험종목(승률{s['win_rate']:.0f}%)→차단")
+
+    # 확신도 기준
+    if adj_conf < 55 and signal in ("매수", "매도"):
+        grade = max_grade(grade, ACTION_WATCH)
+        reasons.append(f"확신도{adj_conf}<55→관망")
+
+    # 손절가 필수 (매수)
+    if signal == "매수" and stop_loss <= 0:
+        grade = max_grade(grade, ACTION_BLOCKED)
+        reasons.append("손절가없음→저장금지")
+
+    # 손익비 기준
+    if signal == "매수" and 0 < risk_reward < 1.5:
+        grade = max_grade(grade, ACTION_WATCH)
+        reasons.append(f"손익비{risk_reward:.1f}<1.5→관망")
+
+    # 진입가 0 → 조건부
+    if entry_price <= 0:
+        grade = max_grade(grade, ACTION_WATCH)
+        reasons.append("진입가0→조건부후보")
+
+    reason_text = "; ".join(reasons) if reasons else "통과"
+    return grade, max(10, min(95, adj_conf)), reason_text
+
+
+def max_grade(current: str, new: str) -> str:
+    """더 제한적인 등급 반환. BLOCKED > WATCH > CONDITIONAL > IMMEDIATE."""
+    order = {ACTION_IMMEDIATE: 0, ACTION_CONDITIONAL: 1, ACTION_WATCH: 2, ACTION_BLOCKED: 3}
+    return current if order.get(current, 0) >= order.get(new, 0) else new
+
+
 def save_prediction(
     ticker: str,
     name: str,
@@ -256,18 +344,34 @@ def save_prediction(
     execution_condition: str = "",
     invalidation_condition: str = "",
     risk_reward: float = 0.0,
+    data_failures: int = 0,
 ) -> int:
-    """새 추천 기록 저장. 확신도 보정 + 중복 방지 적용. Returns prediction ID."""
+    """새 추천 기록 저장. 품질 게이트 + 확신도 보정 + 중복 방지. Returns prediction ID."""
     # 정규화
     strategy_type = _normalize_strategy_type(strategy_type)
 
-    # 중복 예측 방지 (같은 종목+방향+전략유형)
+    # 중복 예측 방지
     if _is_duplicate_prediction(ticker, signal, strategy_type):
-        log.info("중복 예측 스킵: %s %s %s (24시간 내 동일 추천 존재)", ticker, signal, strategy_type)
+        log.info("중복 예측 스킵: %s %s %s", ticker, signal, strategy_type)
         return 0
 
-    # 확신도 보정
+    # 확신도 보정 (종목별 과거 적중률)
     calibrated = calibrate_confidence(ticker, confidence)
+
+    # 품질 게이트
+    grade, gated_conf, gate_reason = _quality_gate(
+        ticker, signal, calibrated, entry_price, stop_loss,
+        risk_reward, invalidation_condition, strategy_type, data_failures,
+    )
+
+    if grade == ACTION_BLOCKED:
+        log.info("품질 게이트 차단: %s %s %s — %s", ticker, signal, name, gate_reason)
+        return 0
+
+    # WATCH 등급은 저장하되 signal을 "관망"으로 변경
+    if grade == ACTION_WATCH and signal in ("매수", "매도"):
+        log.info("품질 게이트 관망: %s %s→관망 — %s", ticker, signal, gate_reason)
+        signal = "관망"
 
     conn = _get_conn()
     now = datetime.now(KST).isoformat()
@@ -279,16 +383,20 @@ def save_prediction(
             execution_condition, invalidation_condition, risk_reward)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (now, ticker, name, signal, entry_price, target_price,
-         stop_loss, calibrated, reasoning, persona,
+         stop_loss, gated_conf, reasoning + f" [게이트:{grade}|{gate_reason}]", persona,
          strategy_type, strategy_tags, horizon_days, benchmark_ticker,
          execution_condition, invalidation_condition, risk_reward),
     )
     conn.commit()
+
+    if grade != ACTION_IMMEDIATE:
+        log.info("품질 게이트 통과(%s): %s %s conf=%d — %s", grade, ticker, signal, gated_conf, gate_reason)
+
     return cursor.lastrowid or 0
 
 
-def save_predictions_from_briefing(raw_json: dict) -> int:
-    """브리핑 결과에서 추천 기록 자동 저장. Returns 저장된 건수."""
+def save_predictions_from_briefing(raw_json: dict, data_failures: int = 0) -> int:
+    """브리핑 결과에서 추천 기록 자동 저장. 품질 게이트 적용. Returns 저장된 건수."""
     count = 0
 
     def _extract_tags(row: dict) -> str:
@@ -318,6 +426,7 @@ def save_predictions_from_briefing(raw_json: dict) -> int:
                 execution_condition=str(row.get("execution_condition", "") or "")[:200],
                 invalidation_condition=str(row.get("invalidation_condition", "") or "")[:200],
                 risk_reward=_safe_float(row.get("risk_reward"), 0),
+                data_failures=data_failures,
             )
             if pid > 0:
                 count += 1
@@ -345,6 +454,7 @@ def save_predictions_from_briefing(raw_json: dict) -> int:
                 execution_condition=str(row.get("execution_condition", "") or "")[:200],
                 invalidation_condition=str(row.get("invalidation_condition", "") or "")[:200],
                 risk_reward=_safe_float(row.get("risk_reward"), 0),
+                data_failures=data_failures,
             )
             if pid > 0:
                 count += 1
