@@ -225,6 +225,58 @@ def calculate_all(
     return results
 
 
+SECTOR_ETFS: dict[str, str] = {
+    "091160.KS": "반도체(KODEX)",
+    "091180.KS": "자동차(KODEX)",
+    "266370.KS": "2차전지(KODEX)",
+    "012450.KS": "방산(한화에어로)",  # proxy
+}
+
+
+def calculate_sector_momentum(period: str = "3mo") -> str:
+    """섹터 ETF RSI/추세 요약 — 프롬프트 삽입용 텍스트 반환."""
+    lines = ["【섹터 모멘텀】"]
+    for ticker, name in SECTOR_ETFS.items():
+        try:
+            hist = yf.Ticker(ticker).history(period=period)
+            if len(hist) < 26:
+                lines.append(f"  {name}: 데이터 부족")
+                continue
+
+            close = hist["Close"]
+
+            # RSI (14일)
+            delta = close.diff()
+            gain = delta.where(delta > 0, 0.0).rolling(14).mean()
+            loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
+            rs = gain / loss.replace(0, float("inf"))
+            rsi_series = 100 - (100 / (1 + rs))
+            rsi = float(rsi_series.iloc[-1])
+
+            # 20일 수익률
+            if len(close) >= 20:
+                ret_20d = (float(close.iloc[-1]) / float(close.iloc[-20]) - 1) * 100
+            else:
+                ret_20d = 0.0
+
+            # RSI 레이블
+            if rsi >= 70:
+                label = "과매수 경계"
+            elif rsi <= 30:
+                label = "과매도"
+            else:
+                label = "중립"
+
+            lines.append(
+                f"  {name}: RSI {rsi:.1f} ({label}) | 20일 {ret_20d:+.1f}%"
+            )
+        except Exception as e:
+            log.debug("섹터 모멘텀 계산 실패 (%s): %s", ticker, e)
+            lines.append(f"  {name}: 조회 실패")
+
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
 def indicators_to_text(indicators: dict[str, IndicatorResult]) -> str:
     """기술 지표 결과를 텍스트로 변환 (프롬프트 삽입용)."""
     if not indicators:

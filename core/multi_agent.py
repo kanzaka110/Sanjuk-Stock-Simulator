@@ -304,7 +304,7 @@ def _run_persona(
                 prompt=market_context,
                 model=model,
                 system_prompt=system,
-                timeout=180,
+                timeout=300,
                 json_schema=schema_json,
             )
             if raw:

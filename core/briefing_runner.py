@@ -92,4 +92,15 @@ def _execute_briefing(briefing_type: str) -> BriefingRunResult:
         )
     except Exception as e:
         log.error(f"브리핑 실패: {e}")
+        # 실패 시 텔레그램 알림
+        try:
+            from core.telegram import send_simple_message
+            send_simple_message(
+                f"🚨 브리핑 생성 실패\n"
+                f"유형: {briefing_type}\n"
+                f"오류: {str(e)[:200]}\n\n"
+                f"수동 확인 필요: sudo journalctl -u stock-bot -n 50"
+            )
+        except Exception:
+            pass  # 알림 실패는 무시
         return BriefingRunResult(success=False, error=str(e))

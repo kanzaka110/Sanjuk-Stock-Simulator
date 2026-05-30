@@ -22,6 +22,26 @@ from core.models import BriefingResult
 
 log = logging.getLogger(__name__)
 
+import re as _re
+
+
+def _sanitize_markdown(text: str) -> str:
+    """Telegram Markdown 파싱 오류 방지를 위한 정제.
+
+    - 짝이 안 맞는 *bold* 마커 제거
+    - 짝이 안 맞는 _italic_ 마커 제거
+    - 짝이 안 맞는 `code` 마커 제거
+    """
+    # 각 마커별로 짝수인지 확인, 홀수면 마지막 하나 제거
+    for marker in ("*", "_", "`"):
+        count = text.count(marker)
+        if count % 2 != 0:
+            # 마지막 등장 위치의 마커 제거
+            idx = text.rfind(marker)
+            text = text[:idx] + text[idx + 1:]
+    return text
+
+
 
 # ─── 브리핑 알림 전송 ───────────────────────────────────
 def send_briefing_telegram(
@@ -110,21 +130,26 @@ def _build_impact_message(
             lines.append(" · ".join(parts))
         lines.append("")
 
-    # 야간 프리브리핑: 예약 주문 요약
+    # 야간 프리브리핑: 예약 주문 요약 (매수 + 매도)
     night_orders = raw.get("night_orders", []) or []
     if night_orders:
         lines.append(SEP)
         lines.append("🌙 *내일 예약 주문*")
         for order in night_orders:
+            side = order.get("구분", "매수")
             name = order.get("종목", "")
             acct = order.get("계좌", "")
             price = order.get("지정가", "")
             qty = order.get("수량", "")
-            valid = order.get("유효시간", "")
+            valid = order.get("유효시간", order.get("유효기간", ""))
             cond = order.get("조건", "")
-            lines.append(f"▸ *{name}* {acct} {price} × {qty}")
+            reason = order.get("사유", "")
+            side_icon = "🟢매수" if side == "매수" else "🔴매도"
+            lines.append(f"{side_icon} *{name}* {acct} {price} × {qty}")
             if valid:
                 lines.append(f"  ⏰ {valid}")
+            if reason:
+                lines.append(f"  💬 {reason}")
             if cond:
                 lines.append(f"  📌 {cond}")
         gap = raw.get("gap_scenarios", {}) or {}
@@ -546,6 +571,9 @@ def _send_message(text: str) -> bool:
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     all_ok = True
     for chunk in chunks:
+        # Markdown 특수문자 정제
+        chunk = _sanitize_markdown(chunk)
+
         base_payload = {
             "chat_id": TELEGRAM_CHAT_ID,
             "text": chunk,
@@ -567,7 +595,13 @@ def _send_message(text: str) -> bool:
                     "텔레그램 Markdown 파싱 실패 → plain text 재시도: %s",
                     res.text[:160],
                 )
-                res2 = requests.post(url, json=base_payload, timeout=30)
+                # Markdown 기호 제거 후 plain text
+                plain = chunk.replace("*", "").replace("_", "").replace("`", "")
+                res2 = requests.post(
+                    url,
+                    json={**base_payload, "text": plain},
+                    timeout=30,
+                )
                 if res2.status_code == 200:
                     continue
                 log.warning(

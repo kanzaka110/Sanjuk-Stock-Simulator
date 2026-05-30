@@ -192,23 +192,52 @@ SMA20, SMA50 이동평균과 볼린저밴드가 표시되어 있다.
             ),
         )
 
-        raw = response.text.strip() if response.text else ""
-        if not raw:
-            return None
+        # JSON 파싱 (최대 2회 시도)
+        data = None
+        for vision_attempt in range(2):
+            if vision_attempt > 0:
+                log.info(f"차트 비전 JSON 재시도 ({ticker}, attempt={vision_attempt+1})")
+                response = client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=[prompt + "\n\n반드시 유효한 JSON만 출력하세요. 코드블록 없이.", image_part],
+                    config=types.GenerateContentConfig(
+                        max_output_tokens=2000,
+                        response_mime_type="application/json",
+                        response_schema=chart_schema,
+                    ),
+                )
 
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            import re
-            match = re.search(r"\{.*\}", raw, re.DOTALL)
-            if not match:
-                log.warning(f"차트 비전 JSON 미발견 ({ticker}): {raw[:120]!r}")
-                return None
+            raw = response.text.strip() if response.text else ""
+            if not raw:
+                continue
+
             try:
-                data = json.loads(match.group(0))
-            except json.JSONDecodeError as je:
-                log.warning(f"차트 비전 JSON 파싱 실패 ({ticker}): {je}")
-                return None
+                data = json.loads(raw)
+                break  # 파싱 성공
+            except json.JSONDecodeError:
+                import re
+                match = re.search(r"\{.*\}", raw, re.DOTALL)
+                if match:
+                    try:
+                        data = json.loads(match.group(0))
+                        break
+                    except json.JSONDecodeError:
+                        pass
+                log.warning(f"차트 비전 JSON 파싱 실패 ({ticker}, attempt={vision_attempt+1}): {raw[:120]!r}")
+
+        if not data:
+            # fallback: text 요약으로 대체
+            log.warning(f"차트 비전 JSON 2회 실패 → text fallback ({ticker})")
+            return ChartAnalysis(
+                ticker=ticker,
+                name=name,
+                patterns=("JSON 파싱 실패 — 차트 데이터 미제공",),
+                support_levels=(),
+                resistance_levels=(),
+                trend_description=raw[:200] if raw else "분석 불가",
+                action_suggestion="차트 비전 실패 — 기술 지표 기반으로 판단",
+                confidence=0,
+            )
 
         return ChartAnalysis(
             ticker=ticker,

@@ -77,64 +77,77 @@ def fetch_institutional_flow(date: str | None = None) -> list[InstitutionalFlow]
                 date = d.strftime("%Y%m%d")
                 break
 
-    try:
-        # KRX OTP 발급
-        otp_params = {
-            "locale": "ko_KR",
-            "mktId": "STK",
-            "trdDd": date,
-            "money": "1",
-            "csvxls_is498No": "",
-            "name": "fileDown",
-            "url": "dbms/MDC/STAT/standard/MDCSTAT02203",
-        }
-        otp_res = requests.post(KRX_OTP_URL, data=otp_params, headers=HEADERS, timeout=10)
-        otp = otp_res.text
+    # 최대 2회 시도 (당일 실패 시 전일 재시도)
+    dates_to_try = [date]
+    prev = datetime.now(KST) - timedelta(days=1)
+    while prev.weekday() >= 5:
+        prev -= timedelta(days=1)
+    prev_date = prev.strftime("%Y%m%d")
+    if prev_date != date:
+        dates_to_try.append(prev_date)
 
-        # CSV 다운로드
-        csv_res = requests.post(
-            KRX_DOWNLOAD_URL,
-            data={"code": otp},
-            headers=HEADERS,
-            timeout=10,
-        )
+    for try_date in dates_to_try:
+        try:
+            otp_params = {
+                "locale": "ko_KR",
+                "mktId": "STK",
+                "trdDd": try_date,
+                "money": "1",
+                "csvxls_is498No": "",
+                "name": "fileDown",
+                "url": "dbms/MDC/STAT/standard/MDCSTAT02203",
+            }
+            otp_res = requests.post(KRX_OTP_URL, data=otp_params, headers=HEADERS, timeout=10)
+            otp = otp_res.text
 
-        if csv_res.status_code != 200 or len(csv_res.content) < 100:
-            log.warning(f"KRX 데이터 조회 실패: {csv_res.status_code}")
-            return []
+            csv_res = requests.post(
+                KRX_DOWNLOAD_URL,
+                data={"code": otp},
+                headers=HEADERS,
+                timeout=10,
+            )
 
-        import io
-        import pandas as pd
-
-        df = pd.read_csv(io.BytesIO(csv_res.content), encoding="euc-kr")
-
-        results: list[InstitutionalFlow] = []
-        portfolio_codes = {_krx_ticker(tk) for tk in KRW_TICKERS}
-
-        for _, row in df.iterrows():
-            code = str(row.get("종목코드", "")).strip()
-            if code not in portfolio_codes:
+            if csv_res.status_code != 200 or len(csv_res.content) < 100:
+                log.warning(f"KRX 데이터 조회 실패 ({try_date}): {csv_res.status_code}")
                 continue
 
-            name = str(row.get("종목명", "")).strip()
-            foreign = float(str(row.get("외국인합계", "0")).replace(",", "") or "0")
-            institution = float(str(row.get("기관합계", "0")).replace(",", "") or "0")
-            individual = float(str(row.get("개인", "0")).replace(",", "") or "0")
+            import io
+            import pandas as pd
 
-            results.append(InstitutionalFlow(
-                ticker=f"{code}.KS",
-                name=name,
-                foreign_net=foreign,
-                institution_net=institution,
-                individual_net=individual,
-                foreign_label="매수" if foreign > 0 else "매도",
-                institution_label="매수" if institution > 0 else "매도",
-            ))
+            df = pd.read_csv(io.BytesIO(csv_res.content), encoding="euc-kr")
 
-        return results
-    except Exception as e:
-        log.warning(f"기관/외국인 매매 조회 실패: {e}")
-        return []
+            results: list[InstitutionalFlow] = []
+            portfolio_codes = {_krx_ticker(tk) for tk in KRW_TICKERS}
+
+            for _, row in df.iterrows():
+                code = str(row.get("종목코드", "")).strip()
+                if code not in portfolio_codes:
+                    continue
+
+                name = str(row.get("종목명", "")).strip()
+                foreign = float(str(row.get("외국인합계", "0")).replace(",", "") or "0")
+                institution = float(str(row.get("기관합계", "0")).replace(",", "") or "0")
+                individual = float(str(row.get("개인", "0")).replace(",", "") or "0")
+
+                results.append(InstitutionalFlow(
+                    ticker=f"{code}.KS",
+                    name=name,
+                    foreign_net=foreign,
+                    institution_net=institution,
+                    individual_net=individual,
+                    foreign_label="매수" if foreign > 0 else "매도",
+                    institution_label="매수" if institution > 0 else "매도",
+                ))
+
+            if results:
+                if try_date != date:
+                    log.info(f"KRX 당일 데이터 없음 → 전일({try_date}) 데이터 활용")
+                return results
+        except Exception as e:
+            log.warning(f"기관/외국인 매매 조회 실패 ({try_date}): {e}")
+
+    log.warning("KRX 기관/외국인 매매 2회 시도 모두 실패")
+    return []
 
 
 def fetch_fundamentals() -> list[Fundamental]:
@@ -205,9 +218,67 @@ def fetch_fundamentals() -> list[Fundamental]:
         return []
 
 
+def fetch_cumulative_flows(days: int = 5) -> dict[str, dict]:
+    """N일 누적 외국인/기관 순매수 데이터 — KRX API 다중 호출.
+
+    Returns:
+        {ticker: {"foreign_5d": sum, "institution_5d": sum, "foreign_trend": "매수전환/매도지속/..."}}
+    """
+    now = datetime.now(KST)
+    cumulative: dict[str, dict] = {}
+
+    for offset in range(days):
+        d = now - timedelta(days=offset)
+        # 주말 건너뛰기
+        while d.weekday() >= 5:
+            d -= timedelta(days=1)
+        date_str = d.strftime("%Y%m%d")
+
+        try:
+            flows = fetch_institutional_flow(date=date_str)
+            for f in flows:
+                if f.ticker not in cumulative:
+                    cumulative[f.ticker] = {
+                        "name": f.name,
+                        "foreign_5d": 0.0,
+                        "institution_5d": 0.0,
+                        "daily_foreign": [],
+                    }
+                cumulative[f.ticker]["foreign_5d"] += f.foreign_net
+                cumulative[f.ticker]["institution_5d"] += f.institution_net
+                cumulative[f.ticker]["daily_foreign"].append(f.foreign_net)
+        except Exception as e:
+            log.debug("누적 수급 %s 조회 실패: %s", date_str, e)
+            continue
+
+    # 추세 레이블 생성
+    for ticker, data in cumulative.items():
+        daily = data.get("daily_foreign", [])
+        cum = data["foreign_5d"]
+
+        if len(daily) < 2:
+            data["foreign_trend"] = "데이터부족"
+        elif cum > 0 and daily[0] > 0:
+            data["foreign_trend"] = "매수지속" if all(d > 0 for d in daily) else "매수전환"
+        elif cum < 0 and daily[0] < 0:
+            data["foreign_trend"] = "매도지속" if all(d < 0 for d in daily) else "매도전환"
+        elif cum > 0:
+            data["foreign_trend"] = "매수전환"
+        elif cum < 0:
+            data["foreign_trend"] = "매도전환"
+        else:
+            data["foreign_trend"] = "중립"
+
+        # daily_foreign은 텍스트 생성에 불필요하므로 제거
+        del data["daily_foreign"]
+
+    return cumulative
+
+
 def kr_market_to_text(
     flows: list[InstitutionalFlow],
     fundamentals: list[Fundamental],
+    cumulative: dict[str, dict] | None = None,
 ) -> str:
     """한국 시장 데이터를 텍스트로 변환."""
     lines = ["【한국 시장 심층 데이터】"]
@@ -215,9 +286,16 @@ def kr_market_to_text(
     if flows:
         lines.append("\n  [기관/외국인 매매 동향]")
         for f in flows:
+            cum_info = ""
+            if cumulative and f.ticker in cumulative:
+                c = cumulative[f.ticker]
+                cum_info = (
+                    f" | 5일 누적 외국인 {c['foreign_5d']:+,.0f}백만 ({c['foreign_trend']})"
+                    f" | 5일 누적 기관 {c['institution_5d']:+,.0f}백만"
+                )
             lines.append(
                 f"  {f.name}: 외국인 {f.foreign_net:+,.0f}백만 ({f.foreign_label}) | "
-                f"기관 {f.institution_net:+,.0f}백만 ({f.institution_label})"
+                f"기관 {f.institution_net:+,.0f}백만 ({f.institution_label}){cum_info}"
             )
 
     if fundamentals:

@@ -139,6 +139,10 @@ class MarketMonitor:
 
             time.sleep(0.1)  # yfinance rate limit 방지
 
+        # 목표가/손절가 체크 (미결 추천 기반)
+        target_triggers = self._check_price_targets(now)
+        triggers.extend(target_triggers)
+
         if triggers:
             log.info(f"트리거 {len(triggers)}건 감지")
         return triggers
@@ -248,6 +252,80 @@ class MarketMonitor:
             )
         return None
 
+    def _check_price_targets(self, now: datetime) -> list[AlertTrigger]:
+        """미결 추천의 목표가/손절가 도달 체크."""
+        from core.market import _get_quote_realtime
+
+        triggers: list[AlertTrigger] = []
+        try:
+            from core.memory import _get_conn
+            conn = _get_conn()
+            rows = conn.execute(
+                """SELECT ticker, name, signal, target_price, stop_loss
+                   FROM predictions
+                   WHERE status = 'open'
+                     AND ((target_price IS NOT NULL AND target_price > 0)
+                       OR (stop_loss IS NOT NULL AND stop_loss > 0))"""
+            ).fetchall()
+        except Exception as e:
+            log.debug("목표가/손절가 조회 실패: %s", e)
+            return triggers
+
+        checked: set[str] = set()  # 티커 중복 방지
+        for row in rows:
+            ticker = row["ticker"]
+            if ticker in checked:
+                continue
+            checked.add(ticker)
+
+            quote = _get_quote_realtime(ticker)
+            if quote is None or quote.price <= 0:
+                continue
+
+            name = row["name"]
+            target = float(row["target_price"] or 0)
+            stop = float(row["stop_loss"] or 0)
+            signal = row["signal"]
+
+            # 매수 추천: 현재가 ≥ 목표가 → 익절, 현재가 ≤ 손절가 → 손절
+            if signal == "매수":
+                if target > 0 and quote.price >= target:
+                    triggers.append(AlertTrigger(
+                        ticker=ticker, name=name,
+                        trigger_type=TriggerType.TARGET_HIT,
+                        current_value=quote.price, threshold=target,
+                        timestamp=now,
+                    ))
+                elif stop > 0 and quote.price <= stop:
+                    triggers.append(AlertTrigger(
+                        ticker=ticker, name=name,
+                        trigger_type=TriggerType.STOP_LOSS_HIT,
+                        current_value=quote.price, threshold=stop,
+                        timestamp=now,
+                    ))
+            # 매도 추천: 현재가 ≤ 목표가 → 익절, 현재가 ≥ 손절가 → 손절
+            elif signal == "매도":
+                if target > 0 and quote.price <= target:
+                    triggers.append(AlertTrigger(
+                        ticker=ticker, name=name,
+                        trigger_type=TriggerType.TARGET_HIT,
+                        current_value=quote.price, threshold=target,
+                        timestamp=now,
+                    ))
+                elif stop > 0 and quote.price >= stop:
+                    triggers.append(AlertTrigger(
+                        ticker=ticker, name=name,
+                        trigger_type=TriggerType.STOP_LOSS_HIT,
+                        current_value=quote.price, threshold=stop,
+                        timestamp=now,
+                    ))
+
+            time.sleep(0.1)  # rate limit
+
+        if triggers:
+            log.info("목표가/손절가 트리거 %d건 감지", len(triggers))
+        return triggers
+
     def _cross_verify_price(self, ticker: str) -> float | None:
         """yfinance로 별도 가격 변동률 확인 (교차검증용)."""
         try:
@@ -297,6 +375,10 @@ class MarketMonitor:
             return Severity.CRITICAL if val <= 20 else Severity.WARNING
         if tt == TriggerType.RSI_OVERBOUGHT:
             return Severity.INFO  # 과매수는 롱 전략에서 무의미
+        if tt == TriggerType.TARGET_HIT:
+            return Severity.WARNING  # 익절 검토
+        if tt == TriggerType.STOP_LOSS_HIT:
+            return Severity.CRITICAL  # 손절은 항상 알림
 
         return Severity.INFO
 
@@ -402,6 +484,8 @@ def _build_alert_message(result: AlertResult) -> str:
         TriggerType.RSI_OVERBOUGHT: "📈",
         TriggerType.PRICE_DROP: "🔻",
         TriggerType.PRICE_SURGE: "🔺",
+        TriggerType.TARGET_HIT: "🎯",
+        TriggerType.STOP_LOSS_HIT: "🛑",
     }
     icon = type_icons.get(trigger.trigger_type, "📢")
     lines.append(f"{icon} *{trigger.name}* ({trigger.ticker})")

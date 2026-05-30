@@ -42,7 +42,7 @@ def check_circuit_breaker(
     portfolio_drawdown_pct: float,
     ticker_outcomes: dict[str, list[str]] | None = None,
     max_consecutive_losses: int = 3,
-    max_portfolio_drawdown: float = -5.0,
+    max_portfolio_drawdown: float = -7.5,
 ) -> CircuitBreakerStatus:
     """서킷 브레이커 체크.
 
@@ -62,7 +62,7 @@ def check_circuit_breaker(
         portfolio_locked = True
         reasons.append(
             f"포트폴리오 낙폭 {portfolio_drawdown_pct:.1f}% "
-            f"(한도 {max_portfolio_drawdown}%) 초과 → 전체 매매 중단"
+            f"(한도 {max_portfolio_drawdown}%) 초과 → 보수 관점 강화 (소량 선별 허용)"
         )
 
     # 전체 연속 손실 체크

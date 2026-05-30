@@ -186,3 +186,203 @@ class TestBriefingIntegration:
         # NVDA 확신도 보정(승률0%→-15)으로 35가 되어 WATCH로 격하될 수 있음
         # 핵심: 위험 종목이 agreement 3이면 BLOCKED가 아니라 저장됨
         assert "예외허용" in (row["reasoning"] or "")
+
+
+class TestPriceDivergenceGate:
+    """가격 괴리 검증 게이트 — RIA ETF 할루시네이션 방지."""
+
+    def test_kodex200_huge_divergence_blocked(self):
+        """KODEX 200 현재가 123350, 진입가 53500 → 괴리 56.6% → BLOCKED."""
+        from core.memory import _quality_gate, ACTION_BLOCKED
+        grade, conf, reason = _quality_gate(
+            "069500.KS", "매수", 70, 53500, 50000, 2.0, "하락시", "중기보유",
+            0, 4, current_price=123350,
+        )
+        assert grade == ACTION_BLOCKED
+        assert "진입가-현재가 괴리 초과" in reason
+        assert "123,350" in reason
+        assert "53,500" in reason
+
+    def test_kodex_semiconductor_divergence_blocked(self):
+        """KODEX 반도체 현재가 155500, 진입가 17500 → 괴리 88.7% → BLOCKED."""
+        from core.memory import _quality_gate, ACTION_BLOCKED
+        grade, conf, reason = _quality_gate(
+            "091160.KS", "매수", 70, 17500, 15000, 2.0, "하락시", "중기보유",
+            0, 4, current_price=155500,
+        )
+        assert grade == ACTION_BLOCKED
+        assert "진입가-현재가 괴리 초과" in reason
+
+    def test_plus_high_dividend_small_divergence_pass(self):
+        """PLUS 고배당주 현재가 27230, 진입가 26800 → 괴리 1.6% → 통과."""
+        from core.memory import _quality_gate, ACTION_BLOCKED
+        grade, conf, reason = _quality_gate(
+            "161510.KS", "매수", 70, 26800, 25000, 2.0, "하락시", "중기보유",
+            0, 4, current_price=27230,
+        )
+        assert grade != ACTION_BLOCKED or "괴리" not in reason
+
+    def test_no_current_price_new_buy_blocked(self):
+        """현재가 없는 신규 매수 → 시세 미수집 저장 차단."""
+        from core.memory import _quality_gate, ACTION_BLOCKED
+        grade, conf, reason = _quality_gate(
+            "069500.KS", "매수", 70, 53500, 50000, 2.0, "하락시", "중기보유",
+            0, 4, current_price=0.0,  # 명시적으로 0 (시세 미수집)
+        )
+        assert grade == ACTION_BLOCKED
+        assert "시세미수집" in reason
+
+    def test_divergence_gate_in_save_predictions(self):
+        """save_predictions_from_briefing에서 current_prices 전달 시 괴리 차단."""
+        from core.memory import save_predictions_from_briefing
+        data = {
+            "strategy_buy": [{
+                "ticker": "069500.KS",
+                "name": "KODEX 200",
+                "entry_price": "₩53,500",
+                "target_price": "₩60,000",
+                "stop_loss": "₩50,000",
+                "reason": "테스트",
+                "strategy_type": "중기보유",
+                "risk_reward": "2.0",
+                "invalidation_condition": "하락시",
+                "agreement_count": 4,
+            }],
+        }
+        saved = save_predictions_from_briefing(
+            data, current_prices={"069500.KS": 123350},
+        )
+        assert saved == 0, "현재가 123350 vs 진입가 53500 → 괴리 초과로 저장 안 됨"
+
+    def test_no_current_price_in_save_predictions_blocked(self):
+        """save_predictions_from_briefing에서 current_prices에 종목 없으면 차단."""
+        from core.memory import save_predictions_from_briefing
+        data = {
+            "strategy_buy": [{
+                "ticker": "069500.KS",
+                "name": "KODEX 200",
+                "entry_price": "₩53,500",
+                "target_price": "₩60,000",
+                "stop_loss": "₩50,000",
+                "reason": "테스트",
+                "strategy_type": "중기보유",
+                "risk_reward": "2.0",
+                "invalidation_condition": "하락시",
+                "agreement_count": 4,
+            }],
+        }
+        # current_prices에 069500.KS 없음 → 시세 미수집 차단
+        saved = save_predictions_from_briefing(data, current_prices={"005930.KS": 60000})
+        assert saved == 0, "시세 미수집 종목은 저장되면 안 됨"
+
+
+class TestTickerNormalization:
+    """티커 정규화 유틸리티 테스트."""
+
+    def test_bare_code_to_ks(self):
+        from core.memory import normalize_ticker
+        assert normalize_ticker("069500") == "069500.KS"
+
+    def test_alias_kodex_200(self):
+        from core.memory import normalize_ticker
+        assert normalize_ticker("KODEX 200") == "069500.KS"
+        assert normalize_ticker("KODEX_200") == "069500.KS"
+
+    def test_alias_kodex_semiconductor(self):
+        from core.memory import normalize_ticker
+        assert normalize_ticker("091160") == "091160.KS"
+        assert normalize_ticker("KODEX 반도체") == "091160.KS"
+        assert normalize_ticker("KODEX_반도체") == "091160.KS"
+
+    def test_alias_kodex_leverage(self):
+        from core.memory import normalize_ticker
+        assert normalize_ticker("122630") == "122630.KS"
+        assert normalize_ticker("KODEX 레버리지") == "122630.KS"
+
+    def test_alias_kodex_auto(self):
+        from core.memory import normalize_ticker
+        assert normalize_ticker("091180") == "091180.KS"
+        assert normalize_ticker("KODEX 자동차") == "091180.KS"
+
+    def test_already_normalized(self):
+        from core.memory import normalize_ticker
+        assert normalize_ticker("069500.KS") == "069500.KS"
+        assert normalize_ticker("005930.KS") == "005930.KS"
+
+    def test_us_ticker_unchanged(self):
+        from core.memory import normalize_ticker
+        assert normalize_ticker("NVDA") == "NVDA"
+        assert normalize_ticker("AAPL") == "AAPL"
+
+    def test_normalization_in_save_prediction(self):
+        """save_prediction 경로에서 정규화가 적용되는지 확인."""
+        from core.memory import save_prediction, _get_conn
+        pid = save_prediction(
+            ticker="069500",  # 정규화 전
+            name="KODEX 200",
+            signal="관망",
+            entry_price=0,
+            confidence=60,
+        )
+        if pid > 0:
+            conn = _get_conn()
+            row = conn.execute(
+                "SELECT ticker FROM predictions WHERE id=?", (pid,)
+            ).fetchone()
+            assert row["ticker"] == "069500.KS", "저장 시 티커가 정규화되어야 함"
+
+    def test_normalization_in_briefing_save(self):
+        """save_predictions_from_briefing에서 정규화 + 현재가 조회가 작동하는지."""
+        from core.memory import save_predictions_from_briefing, _get_conn
+        data = {
+            "strategy_buy": [{
+                "ticker": "069500",  # 정규화 전
+                "name": "KODEX 200",
+                "entry_price": "₩123,000",
+                "target_price": "₩130,000",
+                "stop_loss": "₩118,000",
+                "reason": "테스트",
+                "strategy_type": "중기보유",
+                "risk_reward": "2.5",
+                "invalidation_condition": "하락시",
+                "agreement_count": 4,
+            }],
+        }
+        # current_prices에 정규화된 코드로 등록
+        saved = save_predictions_from_briefing(
+            data, current_prices={"069500.KS": 123350},
+        )
+        assert saved == 1, "정규화된 티커로 현재가 조회 성공 → 괴리 없으면 저장"
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT ticker FROM predictions ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert row["ticker"] == "069500.KS"
+
+
+class TestRIAAllowedTickers:
+    """RIA_ALLOWED_TICKERS가 KRW_TICKERS와 수집 대상에 포함되는지."""
+
+    def test_ria_tickers_in_krw(self):
+        from config.settings import KRW_TICKERS, RIA_ALLOWED_TICKERS
+        for tk in RIA_ALLOWED_TICKERS:
+            assert tk in KRW_TICKERS, f"{tk}이 KRW_TICKERS에 없음"
+
+    def test_ria_tickers_in_kr_market_config(self):
+        from config.settings import get_market_config, RIA_ALLOWED_TICKERS
+        portfolio, _, _ = get_market_config("KR_BEFORE")
+        for tk in RIA_ALLOWED_TICKERS:
+            assert tk in portfolio, f"{tk}이 KR_BEFORE portfolio에 없음"
+
+    def test_ria_tickers_in_manual_market_config(self):
+        from config.settings import get_market_config, RIA_ALLOWED_TICKERS
+        portfolio, _, _ = get_market_config("MANUAL")
+        for tk in RIA_ALLOWED_TICKERS:
+            assert tk in portfolio, f"{tk}이 MANUAL portfolio에 없음"
+
+    def test_ria_tickers_not_in_us_market_config(self):
+        """US_BEFORE에서는 국내 ETF가 포함되지 않아야 함."""
+        from config.settings import get_market_config, RIA_ALLOWED_TICKERS
+        portfolio, _, _ = get_market_config("US_BEFORE")
+        for tk in RIA_ALLOWED_TICKERS:
+            assert tk not in portfolio, f"{tk}이 US_BEFORE에 잘못 포함"

@@ -19,6 +19,8 @@ class TriggerType(str, Enum):
     RSI_OVERBOUGHT = "RSI_OVERBOUGHT"
     PRICE_DROP = "PRICE_DROP"
     PRICE_SURGE = "PRICE_SURGE"
+    TARGET_HIT = "TARGET_HIT"
+    STOP_LOSS_HIT = "STOP_LOSS_HIT"
 
 
 class Severity(str, Enum):
@@ -49,6 +51,8 @@ class AlertTrigger:
             TriggerType.RSI_OVERBOUGHT: f"RSI {self.current_value:.1f} 과매수 경고 (임계: {self.threshold:.0f})",
             TriggerType.PRICE_DROP: f"일중 {self.current_value:+.1f}% 급락 (임계: {self.threshold:+.0f}%)",
             TriggerType.PRICE_SURGE: f"일중 {self.current_value:+.1f}% 급등 (임계: +{self.threshold:.0f}%)",
+            TriggerType.TARGET_HIT: f"목표가 도달 — 현재가 {self.current_value:,.0f} ≥ 목표 {self.threshold:,.0f} (익절 검토)",
+            TriggerType.STOP_LOSS_HIT: f"손절가 이탈 — 현재가 {self.current_value:,.0f} ≤ 손절 {self.threshold:,.0f} (손절 검토)",
         }
         return descs.get(self.trigger_type, str(self.trigger_type))
 

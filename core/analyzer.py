@@ -277,8 +277,9 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
         optimize_rsi_params,
     )
     from core.chart_vision import analyze_key_charts, chart_analyses_to_text
-    from core.indicators import calculate_all, indicators_to_text
+    from core.indicators import calculate_all, calculate_sector_momentum, indicators_to_text
     from core.kr_market import (
+        fetch_cumulative_flows,
         fetch_fundamentals,
         fetch_institutional_flow,
         kr_market_to_text,
@@ -307,6 +308,14 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
     log.info("[3/11] 기술 지표 계산 중...")
     indicators = calculate_all(portfolio)
     indicators_text = indicators_to_text(indicators)
+
+    # 3.5단계: 섹터 모멘텀 (로컬)
+    log.info("[3.5/13] 섹터 모멘텀 계산 중...")
+    try:
+        sector_momentum_text = calculate_sector_momentum()
+    except Exception as e:
+        log.warning("섹터 모멘텀 계산 실패: %s", e)
+        sector_momentum_text = ""
 
     # 4단계: 감성 분석 (Gemini Flash)
     log.info("[4/11] 감성 분석 중...")
@@ -371,7 +380,13 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
         log.info("[8/13] 한국 시장 데이터 조회 중...")
         flows = fetch_institutional_flow()
         fundamentals = fetch_fundamentals()
-        kr_text = kr_market_to_text(flows, fundamentals)
+        # 5일 누적 수급 (KRX API 다중 호출)
+        try:
+            cumulative = fetch_cumulative_flows(days=5)
+        except Exception as e:
+            log.warning("누적 수급 조회 실패: %s", e)
+            cumulative = None
+        kr_text = kr_market_to_text(flows, fundamentals, cumulative)
     else:
         log.info("[8/13] 한국 시장 데이터 스킵 (미국장 브리핑)")
 
@@ -401,6 +416,18 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
 
     # 추가 컨텍스트
     extra_context = ""
+
+    # 실적 캘린더 경고 (D-7 이내 실적 발표 종목 강조)
+    earnings_warnings = []
+    for f in fund_data:
+        if f.days_to_earnings is not None and 0 <= f.days_to_earnings <= 7:
+            earnings_warnings.append(f"⚠️ {f.name} 실적 발표 D-{f.days_to_earnings}")
+    if earnings_warnings:
+        extra_context += "\n\n━━━ ⚠️ 실적 캘린더 경고 ━━━\n" + "\n".join(earnings_warnings)
+        extra_context += "\n→ 실적 D-3 이내 종목은 이벤트 리스크 명시 필수. 신규 매수 시 실적 후 진입 검토."
+
+    if sector_momentum_text:
+        extra_context += f"\n\n━━━ 섹터 모멘텀 ━━━\n{sector_momentum_text}"
     if regime_text:
         extra_context += f"\n\n━━━ 시장 레짐 ━━━\n{regime_text}"
     if mem_text:
@@ -431,9 +458,45 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
 
     # 12단계: 종합 판단 (Sonnet)
     log.info("[13/13] 종합 판단 생성 중...")
-    raw_text = synthesize(persona_results, market_context, briefing_type)
-
-    data = _parse_json(raw_text)
+    try:
+        raw_text = synthesize(persona_results, market_context, briefing_type)
+        data = _parse_json(raw_text)
+    except (RuntimeError, Exception) as synth_err:
+        log.error(f"synthesis 실패 → 페르소나 요약 fallback: {synth_err}")
+        # 페르소나 결과로 최소한의 브리핑 구성
+        verdicts = [pa.verdict for pa in persona_results]
+        most_common = max(set(verdicts), key=verdicts.count) if verdicts else "관망"
+        persona_summary_lines = []
+        for pa in persona_results:
+            persona_summary_lines.append(
+                f"[{pa.persona}] {pa.verdict} ({pa.confidence}%) — {pa.reasoning[:100]}"
+            )
+        data = {
+            "title": f"[FALLBACK] 종합 판단 생성 실패 — 페르소나 요약",
+            "market_status": "혼조",
+            "investment_decision": "관망",
+            "market_summary": f"종합 판단(synthesis) 생성에 실패했습니다. 페르소나 {len(persona_results)}명 분석 결과만 제공합니다.",
+            "consensus": f"다수 의견: {most_common}",
+            "dissent": "",
+            "portfolio_rows": [],
+            "strategy_buy": [],
+            "strategy_sell": [],
+            "strategy_summary": "\n".join(persona_summary_lines),
+            "advisor_verdict": most_common,
+            "advisor_oneliner": f"synthesis 실패 — 페르소나 다수 의견: {most_common}",
+            "advisor_conclusion": "\n".join(persona_summary_lines),
+            "advisor_checklist": [],
+            "advisor_risks": [f"synthesis 실패로 종합 분석 미제공 — 개별 페르소나 의견만 참고"],
+            "advisor_opportunities": [],
+            "advisor_scenarios": [],
+            "next_action": "종합 판단 없음 — 수동 판단 필요",
+            "account_strategy": {},
+            "persona_summary": {
+                pa.persona: f"{pa.verdict} ({pa.confidence}%)"
+                for pa in persona_results
+            },
+            "night_orders": [],
+        }
 
     # 메타데이터 보존
     if "persona_summary" not in data:
@@ -471,8 +534,8 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
     failed_personas = 4 - len(persona_results)
     _data_failures += failed_personas  # 페르소나 실패
 
-    # 추천 기록을 메모리에 저장 (품질 게이트 적용)
-    saved = save_predictions_from_briefing(data, data_failures=_data_failures)
+    # 추천 기록을 메모리에 저장 (품질 게이트 + 가격 괴리 검증)
+    saved = save_predictions_from_briefing(data, data_failures=_data_failures, current_prices=current_prices)
     if saved > 0:
         log.info(f"  {saved}건 추천 기록 메모리에 저장 (데이터실패: {_data_failures}건)")
     elif _data_failures > 0:

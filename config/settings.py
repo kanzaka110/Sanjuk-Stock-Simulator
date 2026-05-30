@@ -80,8 +80,24 @@ WATCHLIST: dict[str, str] = {
     "NVDA": "엔비디아",  # 2026-05-18 RIA 전량 매도 완료, 재진입 후보로 모니터링
 }
 
-# KRW 통화 판별 (국내 종목, 보유+watchlist)
-KRW_TICKERS: set[str] = {t for t in PORTFOLIO if ".KS" in t} | {t for t in WATCHLIST if ".KS" in t or ".KQ" in t}
+# ─── RIA 허용 종목 (국내자산 편입 ETF) ──────────────
+# RIA 계좌에서 매수 가능한 국내 ETF — 시세 수집 + 프롬프트 주입 대상
+RIA_ALLOWED_TICKERS: dict[str, str] = {
+    "069500.KS": "KODEX 200",
+    "229200.KS": "KODEX 코스닥150",
+    "102110.KS": "TIGER 200",
+    "091160.KS": "KODEX 반도체",
+    "091180.KS": "KODEX 자동차",
+    "122630.KS": "KODEX 레버리지",
+    # PLUS 고배당주(161510)는 PORTFOLIO에 이미 포함
+}
+
+# KRW 통화 판별 (국내 종목, 보유+watchlist+RIA허용)
+KRW_TICKERS: set[str] = (
+    {t for t in PORTFOLIO if ".KS" in t}
+    | {t for t in WATCHLIST if ".KS" in t or ".KQ" in t}
+    | set(RIA_ALLOWED_TICKERS.keys())
+)
 
 # 시장 지수
 INDICES: dict[str, str] = {
@@ -126,13 +142,14 @@ def get_market_config(briefing_type: str) -> tuple[dict[str, str], dict[str, str
 
     KR_BEFORE: 한국 종목 + 한국 지수 중심 (미국 지수는 참고용 포함)
     US_BEFORE: 미국 종목 + 미국 지수 중심 (한국 지수는 참고용 포함)
-    기타(MANUAL): 전체 포트폴리오
+    기타(MANUAL): 전체 포트폴리오 + RIA 허용 종목
+    RIA_ALLOWED_TICKERS는 KR 브리핑 및 MANUAL에 항상 포함 (시세 수집 대상).
     """
     if briefing_type in ("KR_BEFORE", "KR_NIGHT"):
-        return KR_PORTFOLIO, {**KR_INDICES, **US_INDICES}, MACRO
+        return {**KR_PORTFOLIO, **RIA_ALLOWED_TICKERS}, {**KR_INDICES, **US_INDICES}, MACRO
     if briefing_type in ("US_BEFORE", "US_NIGHT"):
         return US_PORTFOLIO, {**US_INDICES, **KR_INDICES}, MACRO
-    return PORTFOLIO, INDICES, MACRO
+    return {**PORTFOLIO, **RIA_ALLOWED_TICKERS}, INDICES, MACRO
 
 
 # ─── 실제 보유 수량 (삼성증권 실데이터 기준, 2026-04-07) ─────
@@ -193,16 +210,19 @@ PENSION_MMF: float = 6_880_513.0  # MMF 잔고
 #   - 2026-05-11: 시프트업 30주 @ ₩31,700, 한화에어로 1주 @ ₩1,320,000
 #   - 2026-05-12: 시프트업 30주 @ ₩30,700, PLUS 고배당 13주, 카카오 10주, 삼성바이오 1주, KODEX MSCI선진국 11주
 #   - 2026-05-18: 시프트업 30주 @ ₩29,500 (추매)
+#   - 2026-05-26: 한화에어로 1주 @ ₩1,250,000 + NAVER 3주 @ ₩200,000 (야간 프리브리핑 지정가 체결)
+#   - 2026-05-27: 시프트업 30주 @ ₩28,500 (SGF 카탈리스트 배팅)
 HOLDINGS_ISA: dict[str, dict] = {
     "360750.KS": {"shares": 200, "avg_cost_krw": 24_900},     # TIGER 미국S&P500 (4/7)
     "133690.KS": {"shares": 30, "avg_cost_krw": 163_000},     # TIGER 미국나스닥100 (4/7)
-    "462870.KS": {"shares": 90, "avg_cost_krw": 30_633},      # 시프트업 (5/11+5/12+5/18 각 30주)
-    "012450.KS": {"shares": 1, "avg_cost_krw": 1_320_000},    # 한화에어로스페이스 (5/11)
+    "462870.KS": {"shares": 120, "avg_cost_krw": 30_100},     # 시프트업 (5/11+5/12+5/18 각30주 + 5/27 30주@28,500)
+    "012450.KS": {"shares": 2, "avg_cost_krw": 1_285_000},    # 한화에어로스페이스 (5/11 1주@1,320,000 + 5/26 1주@1,250,000)
     "161510.KS": {"shares": 13, "avg_cost_krw": 28_100},      # PLUS 고배당주 (5/12)
     "251350.KS": {"shares": 11, "avg_cost_krw": 39_940},      # KODEX MSCI선진국 (5/12)
+    "035420.KS": {"shares": 3, "avg_cost_krw": 200_000},      # NAVER (5/26)
 }
-# ISA_CASH: 10,130,000 - 2,271,000(5/11) - 3,626,640(5/12) - 885,000(5/18) + 1,778,000(5/19 삼바+카카오 매도) = 5,125,360
-ISA_CASH: float = 5_125_360.0
+# ISA_CASH: 3,275,360 - 855,000(5/27 시프트업 30주) = 2,420,360
+ISA_CASH: float = 2_420_360.0
 
 # ─── 예수금 ────────────────────────────────────────
 DEFAULT_CASH: float = 3_539_839.0

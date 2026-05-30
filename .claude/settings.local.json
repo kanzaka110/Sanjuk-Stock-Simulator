@@ -25,7 +25,8 @@
       "Bash(git -C /home/ohmil/Sanjuk-Stock-Simulator pull origin master)",
       "Bash(git pull:*)",
       "Bash(git fetch:*)",
-      "Bash(git stash:*)"
+      "Bash(git stash:*)",
+      "Bash(crontab -l)"
     ]
   }
 }

@@ -177,6 +177,58 @@ def calibrate_confidence(ticker: str, raw_confidence: int) -> int:
     return calibrated
 
 
+# ═══════════════════════════════════════════════════════
+# 티커 정규화 — AI가 생성한 다양한 표기를 표준 yfinance 코드로 변환
+# ═══════════════════════════════════════════════════════
+_TICKER_ALIASES: dict[str, str] = {
+    # KODEX 200
+    "069500": "069500.KS",
+    "KODEX 200": "069500.KS",
+    "KODEX_200": "069500.KS",
+    "KODEX200": "069500.KS",
+    # KODEX 반도체
+    "091160": "091160.KS",
+    "KODEX 반도체": "091160.KS",
+    "KODEX_반도체": "091160.KS",
+    "KODEX반도체": "091160.KS",
+    # KODEX 레버리지
+    "122630": "122630.KS",
+    "KODEX 레버리지": "122630.KS",
+    "KODEX_레버리지": "122630.KS",
+    "KODEX레버리지": "122630.KS",
+    # KODEX 자동차
+    "091180": "091180.KS",
+    "KODEX 자동차": "091180.KS",
+    "KODEX_자동차": "091180.KS",
+    "KODEX자동차": "091180.KS",
+}
+
+
+def normalize_ticker(ticker: str) -> str:
+    """AI가 생성한 티커를 표준 yfinance 코드로 정규화.
+
+    예: '069500' → '069500.KS', 'KODEX 200' → '069500.KS'
+    이미 정규화된 코드는 그대로 반환.
+    """
+    if not ticker:
+        return ticker
+    stripped = ticker.strip()
+    # 직접 매칭
+    if stripped in _TICKER_ALIASES:
+        return _TICKER_ALIASES[stripped]
+    # 이미 .KS/.KQ 접미사가 있으면 그대로
+    if stripped.endswith((".KS", ".KQ")):
+        return stripped
+    # 숫자 6자리 (한국 종목코드) → .KS 추가
+    if stripped.isdigit() and len(stripped) == 6:
+        return f"{stripped}.KS"
+    return stripped
+
+
+# 가격 괴리 검증 임계값 (10%)
+PRICE_DIVERGENCE_THRESHOLD = 0.10
+
+
 _VALID_STRATEGY_TYPES = {"단기매매", "중기보유", "리밸런싱", "세금전략", "관망", "일반"}
 
 
@@ -261,6 +313,7 @@ def _quality_gate(
     strategy_type: str,
     data_failures: int = 0,
     agreement_count: int = 0,
+    current_price: float | None = None,
 ) -> tuple[str, int, str]:
     """추천 품질 게이트. (action_grade, adjusted_confidence, gate_reason) 반환.
 
@@ -330,6 +383,21 @@ def _quality_gate(
         grade = max_grade(grade, ACTION_BLOCKED)
         reasons.append("진입가0→저장금지")
 
+    # 가격 괴리 검증 (current_price가 명시적으로 전달된 경우만 적용)
+    if current_price is not None and signal in ("매수", "매도"):
+        if current_price > 0 and entry_price > 0:
+            divergence = abs(entry_price - current_price) / current_price
+            if divergence > PRICE_DIVERGENCE_THRESHOLD:
+                grade = max_grade(grade, ACTION_BLOCKED)
+                reasons.append(
+                    f"진입가-현재가 괴리 초과(현재가={current_price:,.0f}, "
+                    f"진입가={entry_price:,.0f}, 괴리율={divergence:.1%})"
+                )
+        elif current_price == 0 and entry_price > 0:
+            # 현재가 없는 신규 매수/매도 → 차단 (시세 미수집 종목)
+            grade = max_grade(grade, ACTION_BLOCKED)
+            reasons.append("현재가없음→시세미수집종목저장차단")
+
     reason_text = "; ".join(reasons) if reasons else "통과"
     return grade, max(10, min(95, adj_conf)), reason_text
 
@@ -359,9 +427,12 @@ def save_prediction(
     risk_reward: float = 0.0,
     data_failures: int = 0,
     agreement_count: int = 0,
+    current_price: float | None = None,
 ) -> int:
     """새 추천 기록 저장. 품질 게이트 + 확신도 보정 + 중복 방지. Returns prediction ID."""
-    # 정규화
+    # 티커 정규화 (AI 할루시네이션 방지)
+    ticker = normalize_ticker(ticker)
+    # 전략 정규화
     strategy_type = _normalize_strategy_type(strategy_type)
 
     # 중복 예측 방지 (원래 signal + 관망 변환 모두 체크)
@@ -379,7 +450,7 @@ def save_prediction(
     grade, gated_conf, gate_reason = _quality_gate(
         ticker, signal, calibrated, entry_price, stop_loss,
         risk_reward, invalidation_condition, strategy_type, data_failures,
-        agreement_count,
+        agreement_count, current_price,
     )
 
     if grade == ACTION_BLOCKED:
@@ -413,9 +484,14 @@ def save_prediction(
     return cursor.lastrowid or 0
 
 
-def save_predictions_from_briefing(raw_json: dict, data_failures: int = 0) -> int:
-    """브리핑 결과에서 추천 기록 자동 저장. 품질 게이트 적용. Returns 저장된 건수."""
+def save_predictions_from_briefing(
+    raw_json: dict,
+    data_failures: int = 0,
+    current_prices: dict[str, float] | None = None,
+) -> int:
+    """브리핑 결과에서 추천 기록 자동 저장. 품질 게이트 + 가격 괴리 검증. Returns 저장된 건수."""
     count = 0
+    prices = current_prices
 
     def _extract_tags(row: dict) -> str:
         tags = row.get("strategy_tags", [])
@@ -423,14 +499,24 @@ def save_predictions_from_briefing(raw_json: dict, data_failures: int = 0) -> in
             return ",".join(tags)
         return str(tags) if tags else ""
 
+    def _resolve_current_price(ticker: str) -> float | None:
+        """정규화된 티커로 현재가 조회. prices 미전달이면 None (검증 스킵)."""
+        if prices is None:
+            return None
+        normalized = normalize_ticker(ticker)
+        # 정규화된 코드 또는 원본 코드로 조회, 둘 다 없으면 0.0 (시세 미수집)
+        return prices.get(normalized, prices.get(ticker, 0.0))
+
     for row in raw_json.get("strategy_buy", []):
         try:
+            raw_ticker = row.get("ticker", "")
             entry = _parse_price(row.get("entry_price", "0"))
             target = _parse_price(row.get("target_price", "0"))
             stop = _parse_price(row.get("stop_loss", "0"))
+            cur_price = _resolve_current_price(raw_ticker)
 
             pid = save_prediction(
-                ticker=row.get("ticker", ""),
+                ticker=raw_ticker,
                 name=row.get("name", ""),
                 signal="매수",
                 entry_price=entry,
@@ -446,6 +532,7 @@ def save_predictions_from_briefing(raw_json: dict, data_failures: int = 0) -> in
                 risk_reward=_safe_float(row.get("risk_reward"), 0),
                 data_failures=data_failures,
                 agreement_count=_safe_int(row.get("agreement_count") or row.get("consensus_count"), 0),
+                current_price=cur_price,
             )
             if pid > 0:
                 count += 1
@@ -454,12 +541,14 @@ def save_predictions_from_briefing(raw_json: dict, data_failures: int = 0) -> in
 
     for row in raw_json.get("strategy_sell", []):
         try:
+            raw_ticker = row.get("ticker", "")
             entry = _parse_price(row.get("current_price", "0"))
             target = _parse_price(row.get("take_profit", "0"))
             stop = _parse_price(row.get("stop_loss", "0"))
+            cur_price = _resolve_current_price(raw_ticker)
 
             pid = save_prediction(
-                ticker=row.get("ticker", ""),
+                ticker=raw_ticker,
                 name=row.get("name", ""),
                 signal="매도",
                 entry_price=entry,
@@ -475,6 +564,7 @@ def save_predictions_from_briefing(raw_json: dict, data_failures: int = 0) -> in
                 risk_reward=_safe_float(row.get("risk_reward"), 0),
                 data_failures=data_failures,
                 agreement_count=_safe_int(row.get("agreement_count") or row.get("consensus_count"), 0),
+                current_price=cur_price,
             )
             if pid > 0:
                 count += 1
@@ -842,7 +932,79 @@ def memory_to_text() -> str:
                 f"  {icon} {tag}: {s['total']}건 승률 {s['win_rate']:.0f}% 평균 {s['avg_pnl']:+.1f}%"
             )
 
+    # 주간 리뷰 요약 (최근 7일 종료된 추천이 있으면 추가)
+    weekly = generate_weekly_review()
+    if weekly:
+        lines.append("")
+        lines.append(weekly)
+
     if len(lines) == 1:
         lines.append("  (기록 없음 — 첫 브리핑 후 축적됩니다)")
+
+    return "\n".join(lines)
+
+
+def generate_weekly_review() -> str:
+    """지난 7일간 마감된 추천 분석 — 왜 맞았고 왜 틀렸는지."""
+    conn = _get_conn()
+    cutoff = (datetime.now(KST) - timedelta(days=7)).isoformat()
+    rows = conn.execute(
+        """SELECT * FROM predictions
+           WHERE status = 'closed' AND closed_at > ?
+           ORDER BY closed_at DESC""",
+        (cutoff,),
+    ).fetchall()
+
+    if not rows:
+        return ""
+
+    wins = [r for r in rows if r["outcome"] == "win"]
+    losses = [r for r in rows if r["outcome"] == "loss"]
+    neutrals = [r for r in rows if r["outcome"] == "neutral"]
+
+    total = len(rows)
+    win_rate = (len(wins) / total * 100) if total > 0 else 0
+    pnl_values = [r["pnl_pct"] or 0 for r in rows]
+    avg_pnl = sum(pnl_values) / len(pnl_values) if pnl_values else 0
+    best = max(pnl_values) if pnl_values else 0
+    worst = min(pnl_values) if pnl_values else 0
+
+    lines = ["  [📅 주간 리뷰 (최근 7일)]"]
+    lines.append(
+        f"  총 {total}건: ✅{len(wins)}승 ❌{len(losses)}패 ➖{len(neutrals)}중립 "
+        f"| 승률 {win_rate:.0f}% | 평균 {avg_pnl:+.1f}%"
+    )
+    lines.append(f"  최고 {best:+.1f}% | 최저 {worst:+.1f}%")
+
+    # 승리 요인 분석
+    if wins:
+        lines.append("\n  [✅ 성공 요인]")
+        for w in wins[:3]:
+            tags = w["strategy_tags"] or ""
+            name = w["name"] or w["ticker"]
+            lines.append(
+                f"  {name} {w['signal']} {w['pnl_pct']:+.1f}%"
+                f" — 태그: {tags or '없음'}"
+            )
+
+    # 실패 요인 분석
+    if losses:
+        lines.append("\n  [❌ 실패 원인]")
+        for l_row in losses[:3]:
+            tags = l_row["strategy_tags"] or ""
+            name = l_row["name"] or l_row["ticker"]
+            reasoning = (l_row["reasoning"] or "")[:80]
+            invalidation = ""
+            try:
+                invalidation = l_row["invalidation_condition"] or ""
+            except (KeyError, IndexError):
+                pass
+            reason_label = "무효화조건 미달" if invalidation else "분석 오류"
+            lines.append(
+                f"  {name} {l_row['signal']} {l_row['pnl_pct']:+.1f}%"
+                f" — {reason_label} | 태그: {tags or '없음'}"
+            )
+            if reasoning:
+                lines.append(f"    근거: {reasoning}")
 
     return "\n".join(lines)
