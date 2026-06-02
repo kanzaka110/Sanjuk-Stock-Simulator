@@ -673,13 +673,38 @@ def synthesize(
             return {tk: info for tk, info in holdings.items() if not _is_kr_ticker(tk)}
         return holdings
 
+    # 보유 종목 손익 계산 (현재가 vs 매수가)
+    from core.market import _get_quote_realtime
+    _holding_alerts: list[str] = []
+
     def _fmt_holding(tk: str, info: dict) -> str:
         shares = info.get("shares", 0)
         ria = info.get("ria_eligible", 0)
         ria_tag = f" [RIA 적격 {ria}주]" if ria > 0 else ""
+        # 현재가 조회 → 손익률 계산
+        try:
+            q = _get_quote_realtime(tk)
+            cur_price = q.price if q else 0
+        except Exception:
+            cur_price = 0
         if "avg_cost_usd" in info:
-            return f"  {tk}: {shares}주 (매수 ${info['avg_cost_usd']:.2f}){ria_tag}"
-        return f"  {tk}: {shares}주 (매수 ₩{info.get('avg_cost_krw', 0):,.0f})"
+            avg = info['avg_cost_usd']
+            pnl = (cur_price - avg) / avg * 100 if avg and cur_price else 0
+            pnl_str = f" → 현재 ${cur_price:,.2f} ({pnl:+.1f}%)" if cur_price else ""
+            if pnl <= -10:
+                _holding_alerts.append(f"🚨 {tk}: 매수 ${avg:.2f} → 현재 ${cur_price:.2f} ({pnl:+.1f}%) — 손절 검토 필요")
+            elif pnl <= -5:
+                _holding_alerts.append(f"⚠️ {tk}: 매수 ${avg:.2f} → 현재 ${cur_price:.2f} ({pnl:+.1f}%) — 주의")
+            return f"  {tk}: {shares}주 (매수 ${avg:.2f}{pnl_str}){ria_tag}"
+        else:
+            avg = info.get('avg_cost_krw', 0)
+            pnl = (cur_price - avg) / avg * 100 if avg and cur_price else 0
+            pnl_str = f" → 현재 ₩{cur_price:,.0f} ({pnl:+.1f}%)" if cur_price else ""
+            if pnl <= -10:
+                _holding_alerts.append(f"🚨 {tk}: 매수 ₩{avg:,.0f} → 현재 ₩{cur_price:,.0f} ({pnl:+.1f}%) — 손절 검토 필요")
+            elif pnl <= -5:
+                _holding_alerts.append(f"⚠️ {tk}: 매수 ₩{avg:,.0f} → 현재 ₩{cur_price:,.0f} ({pnl:+.1f}%) — 주의")
+            return f"  {tk}: {shares}주 (매수 ₩{avg:,.0f}{pnl_str})"
 
     filtered_general = _filter_holdings(HOLDINGS_GENERAL, briefing_type)
     filtered_ria = _filter_holdings(HOLDINGS_RIA, briefing_type)
@@ -723,11 +748,26 @@ def synthesize(
    ISA에서 국내 ETF/주식 매수 기회가 있는지, RIA 매도 타이밍이 맞는지, 리밸런싱 필요성이 있는지 반드시 검토.
    진짜 할 게 없으면 "왜 지금은 안 되는지" 구체적 조건과 "어떤 조건이 충족되면 행동할지" 트리거를 명시.
 ⑦ **strategy_buy / buy_recommendations에는 보유 종목뿐 아니라 Watchlist 신규 후보도 포함**할 것. 시장 컨텍스트에 별도 'Watchlist' 섹션이 있으며, RSI/MA 기준으로 매력적인 종목이 있으면 매수 후보로 명시 추천. 기존 포트폴리오에 없는 종목이라도 진입가/손절/익절을 구체화.
+
+━━━ 🔴 보유 종목 매도/손절 판단 규칙 (매수 규칙만큼 중요) ━━━
+⑨ **매 브리핑마다 모든 보유 종목의 손익률을 점검**하고, 아래 조건에 해당하면 반드시 strategy_sell에 포함:
+  · 매수가 대비 **-10% 이상 손실** → 🚨 "손절 검토" 의무 명시. 홀딩 근거가 명확하지 않으면 매도 추천.
+  · 매수가 대비 **-5% 이상 손실** + OBV 매도 → ⚠️ "추세 악화 경고" 명시
+  · **3일 연속 하락** + MACD 매도 → "하락 추세 가속" 경고
+  · RSI 과매도(30 이하)라도 **OBV 매도이면 저점 미확인** — "RSI만 보고 홀딩하라"는 금지
+⑩ **"관망 = 아무것도 하지 마라"가 아님**. 서킷브레이커 발동 중이라도:
+  · 매수 추천은 억제해도 **매도 추천은 억제하지 마라**
+  · 손절해야 할 종목은 서킷브레이커와 무관하게 매도 추천
+  · "관망"이면서 손실 종목을 언급 안 하는 것은 가장 나쁜 판단
+⑫ **보유 종목 손익 경고가 아래에 표시됨** — 반드시 읽고 strategy_sell 또는 분석에 반영할 것.
 ⑪ **시세 미수집 종목 가격 추측 금지**: 포트폴리오 현황에 현재가가 표시되지 않은 종목(snapshot에 없는 종목)은 구체적 진입가/목표가/손절가를 생성하지 마세요. 해당 종목은 "시세 확인 필요" 또는 "관망"으로만 출력. 특히 RIA ETF(KODEX 200, KODEX 반도체, KODEX 자동차 등) 추천 시 반드시 수집된 현재가 기반으로만 진입가를 작성하세요. 가격을 추측하면 시스템이 자동 차단합니다.
 
 ━━━ 실제 보유 포지션 ━━━
 {holdings_text}
 예수금: ₩{DEFAULT_CASH:,.0f}
+
+━━━ 🚨 보유 종목 손익 경고 ━━━
+{chr(10).join(_holding_alerts) if _holding_alerts else "✅ 모든 보유 종목 정상 범위 (손실 -5% 미만)"}
 
 ━━━ 계좌 규칙 (반드시 준수) ━━━
 - 모든 매수/매도 신호에 계좌 태그 필수: [일반], [ISA], [RIA], [연금저축], [IRP]
