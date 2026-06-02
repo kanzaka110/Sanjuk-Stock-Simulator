@@ -608,10 +608,11 @@ def evaluate_open_predictions(current_prices: dict[str, float]) -> int:
 
     # 14일 이상 된 미결 추천 자동 정리 (stale prediction 방지)
     now = datetime.now(KST).isoformat()
+    cutoff_14d = (datetime.now(KST) - timedelta(days=14)).isoformat()
     stale = conn.execute(
         """UPDATE predictions SET status = 'closed', closed_at = ?, outcome = 'expired'
-           WHERE status = 'open' AND created_at < datetime('now', '-14 days')""",
-        (now,),
+           WHERE status = 'open' AND created_at < ?""",
+        (now, cutoff_14d),
     ).rowcount
     if stale > 0:
         conn.commit()

@@ -278,15 +278,18 @@ class MarketMonitor:
             from core.memory import _get_conn
             conn = _get_conn()
             # 최신 7일 이내 + 매수/매도 시그널만 + 목표가 또는 손절가 있는 것만
+            from datetime import timedelta
+            cutoff_7d = (datetime.now(KST) - timedelta(days=7)).isoformat()
             rows = conn.execute(
                 """SELECT ticker, name, signal, target_price, stop_loss, created_at
                    FROM predictions
                    WHERE status = 'open'
                      AND signal IN ('매수', '매도')
-                     AND created_at > datetime('now', '-7 days')
+                     AND created_at > ?
                      AND ((target_price IS NOT NULL AND target_price > 0)
                        OR (stop_loss IS NOT NULL AND stop_loss > 0))
-                   ORDER BY created_at DESC"""
+                   ORDER BY created_at DESC""",
+                (cutoff_7d,),
             ).fetchall()
         except Exception as e:
             log.debug("목표가/손절가 조회 실패: %s", e)
