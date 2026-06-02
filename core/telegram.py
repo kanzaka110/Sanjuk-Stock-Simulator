@@ -136,7 +136,10 @@ def _build_impact_message(
         lines.append(SEP)
         lines.append("🌙 *내일 예약 주문*")
         for order in night_orders:
-            side = order.get("구분", "매수")
+            side = order.get("구분", "")
+            if not side:
+                log.warning("night_orders에 '구분' 필드 누락 — 주문 스킵: %s", order)
+                continue
             name = order.get("종목", "")
             acct = order.get("계좌", "")
             price = order.get("지정가", "")

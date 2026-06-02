@@ -66,7 +66,7 @@ PORTFOLIO: dict[str, str] = {
 # 매수 후보로 검토 가능. 사용자가 자유롭게 추가/제거.
 WATCHLIST: dict[str, str] = {
     # 한국 (KOSPI/KOSDAQ 시총·테마 상위)
-    "035420.KS": "NAVER",
+    # "035420.KS": "NAVER",  # 2026-05-26 ISA 매수 → HOLDINGS_ISA로 이동
     "000660.KS": "SK하이닉스",
     "247540.KQ": "에코프로비엠",
     "086520.KQ": "에코프로",
@@ -240,3 +240,4 @@ VIX_THRESHOLD: float = float(os.environ.get("VIX_THRESHOLD", "35.0"))
 RSI_LOW_THRESHOLD: float = float(os.environ.get("RSI_LOW_THRESHOLD", "25.0"))
 RSI_HIGH_THRESHOLD: float = float(os.environ.get("RSI_HIGH_THRESHOLD", "999.0"))  # 과매수 알림 비활성화
 PRICE_CHANGE_THRESHOLD: float = float(os.environ.get("PRICE_CHANGE_THRESHOLD", "7.0"))
+CIRCUIT_BREAKER_DRAWDOWN: float = float(os.environ.get("CIRCUIT_BREAKER_DRAWDOWN", "-7.5"))

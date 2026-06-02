@@ -945,15 +945,27 @@ def memory_to_text() -> str:
 
 
 def generate_open_positions_review(current_prices: dict[str, float]) -> str:
-    """미결 추천 상세 점검 — 매 브리핑마다 "이 포지션을 유지할 근거가 있는가?" 강제 점검.
+    """미결 추천 상세 점검 — 실제 보유 종목만. "이 포지션을 유지할 근거가 있는가?" 강제 점검.
 
     Returns:
         프롬프트 삽입용 텍스트. 미결 추천이 없으면 빈 문자열.
     """
+    # 실제 보유 종목만 필터 (워치리스트 추천 제외)
+    from config.settings import (
+        HOLDINGS_GENERAL, HOLDINGS_ISA, HOLDINGS_RIA,
+        HOLDINGS_IRP, HOLDINGS_PENSION,
+    )
+    held_tickers: set[str] = set()
+    for holdings in (HOLDINGS_GENERAL, HOLDINGS_ISA, HOLDINGS_RIA, HOLDINGS_IRP, HOLDINGS_PENSION):
+        held_tickers.update(holdings.keys())
+
     conn = _get_conn()
     rows = conn.execute(
         "SELECT * FROM predictions WHERE status = 'open' ORDER BY created_at DESC"
     ).fetchall()
+
+    # 보유 종목만 필터
+    rows = [r for r in rows if r["ticker"] in held_tickers]
 
     if not rows:
         return ""

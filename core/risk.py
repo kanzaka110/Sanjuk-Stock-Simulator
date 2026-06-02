@@ -42,7 +42,7 @@ def check_circuit_breaker(
     portfolio_drawdown_pct: float,
     ticker_outcomes: dict[str, list[str]] | None = None,
     max_consecutive_losses: int = 3,
-    max_portfolio_drawdown: float = -7.5,
+    max_portfolio_drawdown: float | None = None,
 ) -> CircuitBreakerStatus:
     """서킷 브레이커 체크.
 
@@ -53,6 +53,10 @@ def check_circuit_breaker(
         max_consecutive_losses: 연속 손실 허용 횟수
         max_portfolio_drawdown: 포트폴리오 최대 낙폭 허용치 (%)
     """
+    if max_portfolio_drawdown is None:
+        from config.settings import CIRCUIT_BREAKER_DRAWDOWN
+        max_portfolio_drawdown = CIRCUIT_BREAKER_DRAWDOWN
+
     reasons: list[str] = []
     locked_tickers: list[str] = []
     portfolio_locked = False
@@ -455,8 +459,16 @@ def generate_risk_report(
         if dd:
             drawdowns.append(dd)
 
-    # 서킷 브레이커
-    avg_drawdown = np.mean([d.current_drawdown_pct for d in drawdowns]) if drawdowns else 0
+    # 서킷 브레이커 — 실제 보유 종목 낙폭만 반영 (워치리스트/RIA허용 제외)
+    from config.settings import (
+        HOLDINGS_GENERAL, HOLDINGS_ISA, HOLDINGS_RIA,
+        HOLDINGS_IRP, HOLDINGS_PENSION,
+    )
+    held_tickers: set[str] = set()
+    for holdings in (HOLDINGS_GENERAL, HOLDINGS_ISA, HOLDINGS_RIA, HOLDINGS_IRP, HOLDINGS_PENSION):
+        held_tickers.update(holdings.keys())
+    held_drawdowns = [d for d in drawdowns if d.ticker in held_tickers]
+    avg_drawdown = np.mean([d.current_drawdown_pct for d in held_drawdowns]) if held_drawdowns else 0
     cb = check_circuit_breaker(
         recent_outcomes=recent_outcomes or [],
         portfolio_drawdown_pct=avg_drawdown,

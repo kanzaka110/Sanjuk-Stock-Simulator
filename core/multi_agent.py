@@ -356,7 +356,7 @@ def run_all_personas(market_context: str) -> list[PersonaAnalysis]:
 
     # 1라운드: 독립 분석
     results: list[PersonaAnalysis] = []
-    with ThreadPoolExecutor(max_workers=1) as executor:
+    with ThreadPoolExecutor(max_workers=2) as executor:
         futures = {
             executor.submit(
                 _run_persona, name, prompt, market_context, team.team_id,
@@ -397,7 +397,7 @@ def run_all_personas(market_context: str) -> list[PersonaAnalysis]:
     augmented_context = f"{market_context}\n\n{debate_context}"
 
     round2: list[PersonaAnalysis] = []
-    with ThreadPoolExecutor(max_workers=1) as executor:
+    with ThreadPoolExecutor(max_workers=2) as executor:
         futures = {
             executor.submit(
                 _run_persona, name, prompt, augmented_context, team2.team_id,
@@ -443,6 +443,7 @@ def synthesize(
     persona_results: list[PersonaAnalysis],
     market_context: str,
     briefing_type: str = "MANUAL",
+    current_prices: dict[str, float] | None = None,
 ) -> str:
     """4개 페르소나 분석을 종합하여 최종 전략 JSON 생성.
 
@@ -673,20 +674,15 @@ def synthesize(
             return {tk: info for tk, info in holdings.items() if not _is_kr_ticker(tk)}
         return holdings
 
-    # 보유 종목 손익 계산 (현재가 vs 매수가)
-    from core.market import _get_quote_realtime
+    # 보유 종목 손익 계산 (current_prices 캐시 활용 — API 과호출 방지)
+    _prices = current_prices or {}
     _holding_alerts: list[str] = []
 
     def _fmt_holding(tk: str, info: dict) -> str:
         shares = info.get("shares", 0)
         ria = info.get("ria_eligible", 0)
         ria_tag = f" [RIA 적격 {ria}주]" if ria > 0 else ""
-        # 현재가 조회 → 손익률 계산
-        try:
-            q = _get_quote_realtime(tk)
-            cur_price = q.price if q else 0
-        except Exception:
-            cur_price = 0
+        cur_price = _prices.get(tk, 0)
         if "avg_cost_usd" in info:
             avg = info['avg_cost_usd']
             pnl = (cur_price - avg) / avg * 100 if avg and cur_price else 0

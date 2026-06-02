@@ -468,7 +468,7 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
     # 12단계: 종합 판단 (Sonnet)
     log.info("[13/13] 종합 판단 생성 중...")
     try:
-        raw_text = synthesize(persona_results, market_context, briefing_type)
+        raw_text = synthesize(persona_results, market_context, briefing_type, current_prices)
         data = _parse_json(raw_text)
     except (RuntimeError, Exception) as synth_err:
         log.error(f"synthesis 실패 → 페르소나 요약 fallback: {synth_err}")
