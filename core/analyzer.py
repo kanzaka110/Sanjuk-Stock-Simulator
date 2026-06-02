@@ -609,7 +609,7 @@ def ask_ai(
     from core.oauth import get_client
     client = get_client()
     response = client.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-opus-4-6",
         max_tokens=4000,
         system=system,
         messages=messages,
