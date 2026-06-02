@@ -159,7 +159,7 @@ HOLDINGS_GENERAL: dict[str, dict] = {
     "005930.KS": {"shares": 90, "avg_cost_krw": 60_425},
     "360750.KS": {"shares": 343, "avg_cost_krw": 24_800},
     "MU": {"shares": 11, "avg_cost_usd": 408.8181, "ria_eligible": 0},
-    "012450.KS": {"shares": 2, "avg_cost_krw": 1_314_500},
+    # 012450.KS: 한화에어로 2주 → 2026-06-02 전량 매도 @ ₩1,085,000 (손절, -17.5%)
     "LMT": {"shares": 1, "avg_cost_usd": 639.0, "ria_eligible": 0},
 }
 
@@ -169,14 +169,19 @@ HOLDINGS_GENERAL: dict[str, dict] = {
 #   - 2026-05-12: GOOGL 9주 @ $387.00 (전량), NVDA 23주 @ $219.00
 #   - 2026-05-14: NVDA 12주 @ $232.00
 #   - 2026-05-18: NVDA 11주 @ $228.30 (잔여 0주 — 면제 활용 종료)
-HOLDINGS_RIA: dict[str, dict] = {}
+# 매수 이력:
+#   - 2026-06-02: TIGER 리츠부동산인프라 100주 @ ₩3,900 (RIA 국내자산 편입 시작)
+HOLDINGS_RIA: dict[str, dict] = {
+    "329200.KS": {"shares": 100, "avg_cost_krw": 3_900},    # TIGER 리츠부동산인프라 (6/2)
+}
 
 # 매도대금 누적 (수수료 차감 후 추정):
 #   1차 ≈ ₩12,610,537
 #   2차 ≈ ₩4,136,287
 #   3차 ≈ ₩3,738,952 ($2,504.97 × ₩1,492.68, 수수료 추정 차감 후)
 #   합계 ≈ ₩20,485,776
-RIA_CASH: float = 20_485_776.0
+# RIA_CASH: 20,485,776 - 390,000(6/2 TIGER 리츠 100주) = 20,095,776
+RIA_CASH: float = 20_095_776.0
 
 # RIA 5/31 면제 누적 양도차익 (USD) — 최종 확정
 #   1차 5/12: GOOGL $620.73 + NVDA $1,980.06 = $2,600.79
@@ -225,7 +230,8 @@ HOLDINGS_ISA: dict[str, dict] = {
 ISA_CASH: float = 2_420_360.0
 
 # ─── 예수금 ────────────────────────────────────────
-DEFAULT_CASH: float = 3_539_839.0
+# DEFAULT_CASH: 3,539,839 + 2,170,000(6/2 한화에어로 2주 매도) = 5,709,839
+DEFAULT_CASH: float = 5_709_839.0
 
 # ─── 모니터링 설정 ─────────────────────────────────
 MONITOR_INTERVAL_SEC: int = int(os.environ.get("MONITOR_INTERVAL_SEC", "300"))

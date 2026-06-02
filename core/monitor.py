@@ -253,10 +253,20 @@ class MarketMonitor:
         return None
 
     def _check_price_targets(self, now: datetime) -> list[AlertTrigger]:
-        """미결 추천의 목표가/손절가 도달 체크."""
+        """미결 추천의 목표가/손절가 도달 체크 — 실제 보유 종목만."""
         from core.market import _get_quote_realtime
 
         triggers: list[AlertTrigger] = []
+
+        # 실제 보유 종목 티커 집합 (워치리스트 제외)
+        from config.settings import (
+            HOLDINGS_GENERAL, HOLDINGS_ISA, HOLDINGS_RIA,
+            HOLDINGS_IRP, HOLDINGS_PENSION,
+        )
+        held_tickers: set[str] = set()
+        for holdings in (HOLDINGS_GENERAL, HOLDINGS_ISA, HOLDINGS_RIA, HOLDINGS_IRP, HOLDINGS_PENSION):
+            held_tickers.update(holdings.keys())
+
         try:
             from core.memory import _get_conn
             conn = _get_conn()
@@ -277,6 +287,10 @@ class MarketMonitor:
             if ticker in checked:
                 continue
             checked.add(ticker)
+
+            # 실제 보유 종목이 아니면 스킵 (워치리스트 추천은 무시)
+            if ticker not in held_tickers:
+                continue
 
             quote = _get_quote_realtime(ticker)
             if quote is None or quote.price <= 0:
