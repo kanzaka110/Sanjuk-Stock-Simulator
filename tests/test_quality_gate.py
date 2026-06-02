@@ -25,15 +25,31 @@ def seed_accuracy():
     """위험/고신뢰 종목 통계 시드."""
     import core.memory as mem
     conn = mem._get_conn()
+    # 새 스키마에 맞춰 시드 데이터 삽입
+    conn.execute("DROP TABLE IF EXISTS accuracy_stats")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS accuracy_stats (
+            ticker TEXT PRIMARY KEY,
+            total_predictions INTEGER DEFAULT 0,
+            evaluated_count INTEGER DEFAULT 0,
+            wins INTEGER DEFAULT 0,
+            losses INTEGER DEFAULT 0,
+            neutral_count INTEGER DEFAULT 0,
+            avg_pnl REAL DEFAULT 0,
+            win_rate REAL DEFAULT 0,
+            last_updated TEXT
+        )
+    """)
     conn.executescript("""
-        INSERT OR REPLACE INTO accuracy_stats (ticker, total_predictions, correct, wrong, avg_pnl, win_rate)
+        INSERT OR REPLACE INTO accuracy_stats
+            (ticker, total_predictions, evaluated_count, wins, losses, neutral_count, avg_pnl, win_rate)
         VALUES
-            ('NVDA', 3, 0, 3, -19.2, 0),
-            ('GOOGL', 2, 0, 2, -32.1, 0),
-            ('207940.KS', 7, 2, 5, -1.8, 28.6),
-            ('035720.KS', 4, 1, 3, 1.5, 25.0),
-            ('LMT', 4, 4, 0, 14.7, 100.0),
-            ('133690.KS', 2, 2, 0, 14.6, 100.0);
+            ('NVDA', 3, 3, 0, 3, 0, -19.2, 0),
+            ('GOOGL', 2, 2, 0, 2, 0, -32.1, 0),
+            ('207940.KS', 7, 7, 2, 5, 0, -1.8, 28.6),
+            ('035720.KS', 4, 4, 1, 3, 0, 1.5, 25.0),
+            ('LMT', 4, 4, 4, 0, 0, 14.7, 100.0),
+            ('133690.KS', 2, 2, 2, 0, 0, 14.6, 100.0);
     """)
 
 
@@ -465,3 +481,129 @@ class TestNotionUpdateExceptionIsolation:
         import inspect
         src = inspect.getsource(update_all_prices)
         assert "실패 종목" in src
+
+
+class TestPhase3StatisticsCorrection:
+    """Phase 3: 통계 왜곡 수정 테스트."""
+
+    def test_ticker_normalization_in_accuracy(self):
+        """같은 종목의 다른 alias가 하나로 집계되는지."""
+        import core.memory as mem
+        conn = mem._get_conn()
+        now = "2026-05-20T00:00:00"
+        # 같은 종목을 다른 alias로 저장
+        conn.execute(
+            """INSERT INTO predictions
+               (created_at, ticker, name, signal, entry_price, target_price,
+                stop_loss, confidence, status, closed_at, closed_price, pnl_pct, outcome)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (now, "091160", "KODEX 반도체", "매수", 100, 110, 90, 70,
+             "closed", now, 110, 10.0, "win"),
+        )
+        conn.execute(
+            """INSERT INTO predictions
+               (created_at, ticker, name, signal, entry_price, target_price,
+                stop_loss, confidence, status, closed_at, closed_price, pnl_pct, outcome)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (now, "091160.KS", "KODEX 반도체", "매수", 100, 110, 90, 70,
+             "closed", now, 90, -10.0, "loss"),
+        )
+        conn.execute(
+            """INSERT INTO predictions
+               (created_at, ticker, name, signal, entry_price, target_price,
+                stop_loss, confidence, status, closed_at, closed_price, pnl_pct, outcome)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (now, "KODEX 반도체", "KODEX 반도체", "매수", 100, 110, 90, 70,
+             "closed", now, 105, 5.0, "win"),
+        )
+        conn.commit()
+        mem._update_accuracy_stats()
+        summary = mem.get_accuracy_summary()
+        # 3개 alias 모두 091160.KS로 정규화되어 한 행이어야 함
+        assert "091160.KS" in summary
+        s = summary["091160.KS"]
+        assert s["wins"] == 2
+        assert s["losses"] == 1
+        assert s["total"] == 3
+
+    def test_neutral_excluded_from_win_rate(self):
+        """neutral이 승률 분모에서 제외되는지."""
+        import core.memory as mem
+        conn = mem._get_conn()
+        now = "2026-05-20T00:00:00"
+        # win 2, loss 1, neutral 2
+        for outcome, pnl in [("win", 5.0), ("win", 8.0), ("loss", -3.0),
+                              ("neutral", 0.5), ("neutral", -0.2)]:
+            conn.execute(
+                """INSERT INTO predictions
+                   (created_at, ticker, name, signal, entry_price, target_price,
+                    stop_loss, confidence, status, closed_at, closed_price, pnl_pct, outcome)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (now, "005930.KS", "삼성전자", "매수", 60000, 65000, 57000, 70,
+                 "closed", now, 63000, pnl, outcome),
+            )
+        conn.commit()
+        mem._update_accuracy_stats()
+        summary = mem.get_accuracy_summary()
+        s = summary["005930.KS"]
+        # 승률 = 2 / (2+1) = 66.7%, neutral 제외
+        assert s["evaluated_count"] == 3
+        assert s["neutral_count"] == 2
+        assert abs(s["win_rate"] - 66.7) < 1.0
+
+    def test_small_sample_marked(self):
+        """evaluated_count < 3이면 샘플부족 처리 — 보정 스킵."""
+        import core.memory as mem
+        conn = mem._get_conn()
+        now = "2026-05-20T00:00:00"
+        # win 1건만 (evaluated_count=1)
+        conn.execute(
+            """INSERT INTO predictions
+               (created_at, ticker, name, signal, entry_price, target_price,
+                stop_loss, confidence, status, closed_at, closed_price, pnl_pct, outcome)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (now, "MU", "Micron", "매수", 100, 120, 90, 70,
+             "closed", now, 115, 15.0, "win"),
+        )
+        conn.commit()
+        mem._update_accuracy_stats()
+        # calibrate_confidence는 evaluated < 3이면 raw를 그대로 반환
+        result = mem.calibrate_confidence("MU", 50)
+        assert result == 50, "샘플부족 시 raw confidence 그대로 반환해야 함"
+
+    def test_unrealistic_return_excluded(self):
+        """abs(pnl_pct) > 100%인 한국 종목이 data_error로 처리."""
+        import core.memory as mem
+        conn = mem._get_conn()
+        now = "2026-05-20T00:00:00"
+        # pnl 500% — 한국 종목 기준 비현실적
+        conn.execute(
+            """INSERT INTO predictions
+               (created_at, ticker, name, signal, entry_price, target_price,
+                stop_loss, confidence, status, pnl_pct, outcome)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (now, "005930.KS", "삼성전자", "매수", 10000, 60000, 9000, 70,
+             "open", None, None),
+        )
+        conn.commit()
+        # evaluate로 종료 처리
+        closed = mem.evaluate_open_predictions({"005930.KS": 60000})
+        assert closed == 1
+        row = conn.execute(
+            "SELECT outcome, pnl_pct FROM predictions WHERE ticker='005930.KS' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert row["outcome"] == "data_error"
+        assert abs(row["pnl_pct"]) > 100
+
+    def test_zero_entry_price_not_saved(self):
+        """entry_price=0 추천은 저장되지 않는지."""
+        import core.memory as mem
+        pid = mem.save_prediction(
+            ticker="005930.KS",
+            name="삼성전자",
+            signal="매수",
+            entry_price=0,
+            stop_loss=0,
+            risk_reward=2.0,
+        )
+        assert pid == 0, "entry_price=0인 매수 추천은 차단되어야 함"

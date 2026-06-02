@@ -134,12 +134,19 @@ def calibrate_confidence(ticker: str, raw_confidence: int) -> int:
         - 승률 70%+ & 양수 수익 → +10%
         - 승률 30% 미만 → -30%
         - 샘플 4건 미만 → 보정폭 절반
+        - evaluated_count < 3이면 보정 스킵 (샘플부족)
         - 결과: 10~95 범위로 클램프
     """
+    ticker = normalize_ticker(ticker)
     stats = get_accuracy_summary()
     s = stats.get(ticker)
     if not s or s["total"] < 2:
         return max(10, min(95, raw_confidence))  # 데이터 부족, 클램프만 적용
+
+    # 평가 완료 건수(win+loss) 기준 — 3건 미만이면 샘플부족, 보정 스킵
+    evaluated = s.get("evaluated_count", s.get("wins", 0) + s.get("losses", 0))
+    if evaluated < 3:
+        return max(10, min(95, raw_confidence))
 
     adjustment = 0
     wr = s["win_rate"] or 0
@@ -653,6 +660,16 @@ def evaluate_open_predictions(current_prices: dict[str, float]) -> int:
         conn.commit()
         log.info(f"미결 추천 {stale}건 자동 만료 (14일 초과)")
 
+    # 좀비 레코드 정리: entry_price=0 AND stop_loss=0 → invalid
+    zombie = conn.execute(
+        """UPDATE predictions SET status = 'closed', closed_at = ?, outcome = 'invalid'
+           WHERE status = 'open' AND entry_price <= 0 AND stop_loss <= 0""",
+        (now,),
+    ).rowcount
+    if zombie > 0:
+        conn.commit()
+        log.info(f"좀비 레코드 {zombie}건 정리 (entry_price=0, stop_loss=0)")
+
     rows = conn.execute(
         "SELECT * FROM predictions WHERE status = 'open'"
     ).fetchall()
@@ -704,6 +721,12 @@ def evaluate_open_predictions(current_prices: dict[str, float]) -> int:
 
         if should_close:
             pnl_pct = (current - entry) / entry * 100 if signal == "매수" else (entry - current) / entry * 100
+            # 비현실 수익률 → data_error 처리
+            threshold = _unrealistic_pnl_threshold(ticker)
+            if abs(pnl_pct) > threshold:
+                outcome = "data_error"
+                log.info("비현실 수익률 감지: %s pnl=%.1f%% (임계 %.0f%%) → data_error",
+                         ticker, pnl_pct, threshold)
             conn.execute(
                 """UPDATE predictions
                    SET status='closed', closed_at=?, closed_price=?,
@@ -729,33 +752,83 @@ def _days_since(iso_date: str) -> int:
         return 0
 
 
+def _is_korean_ticker(ticker: str) -> bool:
+    """한국 종목 여부 판별."""
+    return ticker.endswith((".KS", ".KQ"))
+
+
+def _unrealistic_pnl_threshold(ticker: str) -> float:
+    """비현실 수익률 임계값. 한국 100%, 미국 300%."""
+    return 100.0 if _is_korean_ticker(ticker) else 300.0
+
+
 def _update_accuracy_stats() -> None:
-    """정확도 통계 업데이트."""
+    """정확도 통계 업데이트 — 티커 정규화 + neutral 제외 + 비현실 수익률 필터."""
     conn = _get_conn()
     now = datetime.now(KST).isoformat()
 
+    # 기존 accuracy_stats 테이블 재생성 (캐시 테이블)
+    conn.execute("DROP TABLE IF EXISTS accuracy_stats")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS accuracy_stats (
+            ticker TEXT PRIMARY KEY,
+            total_predictions INTEGER DEFAULT 0,
+            evaluated_count INTEGER DEFAULT 0,
+            wins INTEGER DEFAULT 0,
+            losses INTEGER DEFAULT 0,
+            neutral_count INTEGER DEFAULT 0,
+            avg_pnl REAL DEFAULT 0,
+            win_rate REAL DEFAULT 0,
+            last_updated TEXT
+        )
+    """)
+
     rows = conn.execute(
-        """SELECT ticker,
-                  COUNT(*) as total,
-                  SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END) as wins,
-                  SUM(CASE WHEN outcome='loss' THEN 1 ELSE 0 END) as losses,
-                  AVG(pnl_pct) as avg_pnl
+        """SELECT ticker, outcome, pnl_pct
            FROM predictions
-           WHERE status='closed'
-           GROUP BY ticker"""
+           WHERE status='closed'"""
     ).fetchall()
 
+    # 정규화된 티커별로 집계
+    from collections import defaultdict
+    stats: dict[str, dict] = defaultdict(lambda: {
+        "total": 0, "wins": 0, "losses": 0, "neutral": 0, "pnl_values": [],
+    })
+
     for row in rows:
-        total = row["total"]
-        wins = row["wins"]
-        win_rate = (wins / total * 100) if total > 0 else 0
+        norm_ticker = normalize_ticker(row["ticker"])
+        outcome = row["outcome"] or ""
+        pnl = row["pnl_pct"] or 0.0
+        s = stats[norm_ticker]
+        s["total"] += 1
+
+        if outcome == "win":
+            s["wins"] += 1
+        elif outcome == "loss":
+            s["losses"] += 1
+        elif outcome in ("neutral", "expired", "invalid", "data_error"):
+            s["neutral"] += 1
+
+        # 비현실 수익률 필터 — avg_pnl 계산에서 제외
+        threshold = _unrealistic_pnl_threshold(norm_ticker)
+        if abs(pnl) > threshold:
+            log.info("비현실 수익률 제외: %s pnl=%.1f%%", norm_ticker, pnl)
+        else:
+            if outcome in ("win", "loss"):
+                s["pnl_values"].append(pnl)
+
+    for ticker, s in stats.items():
+        evaluated = s["wins"] + s["losses"]
+        win_rate = (s["wins"] / evaluated * 100) if evaluated > 0 else 0
+        avg_pnl = (sum(s["pnl_values"]) / len(s["pnl_values"])) if s["pnl_values"] else 0
 
         conn.execute(
             """INSERT OR REPLACE INTO accuracy_stats
-               (ticker, total_predictions, correct, wrong, avg_pnl, win_rate, last_updated)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (row["ticker"], total, wins, row["losses"],
-             round(row["avg_pnl"] or 0, 2), round(win_rate, 1), now),
+               (ticker, total_predictions, evaluated_count, wins, losses,
+                neutral_count, avg_pnl, win_rate, last_updated)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (ticker, s["total"], evaluated, s["wins"], s["losses"],
+             s["neutral"], round(avg_pnl, 2), round(win_rate, 1), now),
         )
     conn.commit()
 
@@ -811,19 +884,37 @@ def get_recent_predictions(limit: int = 20) -> list[Prediction]:
 
 
 def get_accuracy_summary() -> dict[str, dict]:
-    """종목별 정확도 통계."""
+    """종목별 정확도 통계 — 정규화된 티커로 반환."""
     conn = _get_conn()
+    # 컬럼 존재 여부 확인 (마이그레이션 전 호환)
+    col_names = {row[1] for row in conn.execute("PRAGMA table_info(accuracy_stats)").fetchall()}
+    has_new_schema = "evaluated_count" in col_names
     rows = conn.execute("SELECT * FROM accuracy_stats").fetchall()
-    return {
-        r["ticker"]: {
-            "total": r["total_predictions"],
-            "wins": r["correct"],
-            "losses": r["wrong"],
-            "avg_pnl": r["avg_pnl"],
-            "win_rate": r["win_rate"],
-        }
-        for r in rows
-    }
+    result = {}
+    for r in rows:
+        norm = normalize_ticker(r["ticker"])
+        if has_new_schema:
+            result[norm] = {
+                "total": r["total_predictions"],
+                "evaluated_count": r["evaluated_count"],
+                "wins": r["wins"],
+                "losses": r["losses"],
+                "neutral_count": r["neutral_count"],
+                "avg_pnl": r["avg_pnl"],
+                "win_rate": r["win_rate"],
+            }
+        else:
+            # 구 스키마 호환
+            result[norm] = {
+                "total": r["total_predictions"],
+                "evaluated_count": (r["correct"] or 0) + (r["wrong"] or 0),
+                "wins": r["correct"],
+                "losses": r["wrong"],
+                "neutral_count": 0,
+                "avg_pnl": r["avg_pnl"],
+                "win_rate": r["win_rate"],
+            }
+    return result
 
 
 def get_strategy_accuracy_summary() -> dict[str, dict]:
@@ -900,9 +991,11 @@ def memory_to_text() -> str:
     if accuracy:
         lines.append("\n  [정확도 통계]")
         for ticker, stats in accuracy.items():
+            evaluated = stats.get("evaluated_count", stats["wins"] + stats["losses"])
+            sample_note = " [샘플부족]" if evaluated < 3 else ""
             lines.append(
                 f"  {ticker}: {stats['total']}건 중 {stats['wins']}적중 "
-                f"(승률 {stats['win_rate']:.0f}%, 평균 {stats['avg_pnl']:+.1f}%)"
+                f"(승률 {stats['win_rate']:.0f}%, 평균 {stats['avg_pnl']:+.1f}%){sample_note}"
             )
 
     if predictions:
@@ -921,8 +1014,11 @@ def memory_to_text() -> str:
             lines.append("\n  [최근 종료]")
             for p in closed_preds[:5]:
                 icon = "✅" if p.outcome == "win" else "❌" if p.outcome == "loss" else "➖"
+                tag_suffix = ""
+                if p.signal == "매도" and p.strategy_tags:
+                    tag_suffix = f" ({p.strategy_tags})"
                 lines.append(
-                    f"  {icon} {p.name} {p.signal}: {p.pnl_pct:+.1f}% [{p.outcome}]"
+                    f"  {icon} {p.name} {p.signal}{tag_suffix}: {p.pnl_pct:+.1f}% [{p.outcome}]"
                 )
 
     # 신뢰도 기반 피드백 주입
