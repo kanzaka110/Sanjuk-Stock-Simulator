@@ -58,7 +58,6 @@ def _execute_briefing(briefing_type: str) -> BriefingRunResult:
     from core.analyzer import analyze
     from core.email import send_briefing_email
     from core.market import fetch_market
-    from core.notion import save_to_notion
     from core.telegram import send_briefing_telegram
 
     try:
@@ -66,13 +65,8 @@ def _execute_briefing(briefing_type: str) -> BriefingRunResult:
         snapshot = fetch_market(briefing_type)
         result = analyze(snapshot, briefing_type)
 
-        notion_url = ""
+        # Notion 저장 비활성화 — 메일로 충분 (2026-06-02)
         page_id = ""
-        try:
-            page_id = save_to_notion(result, snapshot, briefing_type)
-            notion_url = f"https://notion.so/{page_id.replace('-', '')}"
-        except Exception as e:
-            log.warning(f"Notion 저장 실패: {e}")
 
         telegram_sent = send_briefing_telegram(result, page_id, briefing_type)
 

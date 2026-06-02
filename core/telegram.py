@@ -550,7 +550,7 @@ def _build_briefing_message(
     # ── 푸터 ──
     lines.append("")
     lines.append(f"{'━' * 24}")
-    lines.append(f"📋  [Notion 상세보기]({notion_url})")
+    lines.append("📧 *상세 분석은 메일로 발송*")
 
     return "\n".join(lines)
 

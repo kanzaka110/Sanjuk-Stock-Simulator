@@ -25,14 +25,14 @@ Sanjuk-Stock-Simulator/
 │   ├── chart_vision.py    # 멀티모달 차트 분석 (이미지 → Gemini 패턴 인식)
 │   ├── fundamentals.py    # 재무 데이터 (PER/EPS/매출/실적일정)
 │   ├── portfolio.py       # 포트폴리오 관리 (보유종목, 손익, 매매 제약)
-│   ├── notion.py          # Notion 브리핑 저장 (블록 빌더 + 페이지 생성)
+│   ├── notion.py          # Notion 라벨 맵 (LABEL_MAP만 사용, 저장 비활성화)
 │   ├── telegram.py        # 텔레그램 알림 전송 (브리핑 결과만)
 │   ├── telegram_bot.py    # 텔레그램 봇 명령 수신 (getUpdates 폴링)
 │   ├── monitor.py         # 2-tier 시장 모니터 (수치 체크 + AI 알림)
 │   ├── monitor_models.py  # 모니터링 데이터 모델 (AlertTrigger/AlertResult)
 │   ├── market_hours.py    # 장 시간 판별 (한국장/미국장/써머타임)
 │   ├── briefing_runner.py # 브리핑 실행 공통 로직 (API+봇 공유)
-│   ├── price_updater.py   # Notion 주가 자동 업데이트
+│   ├── price_updater.py   # Notion 주가 업데이트 (자동 cron 비활성화, 수동만 가능)
 │   ├── models.py          # 데이터 모델 (frozen dataclass)
 │   ├── errors.py          # 실패 분류 체계 (MARKET/BROKER/ANALYSIS/INFRA)
 │   ├── recovery.py        # 복구 패턴 (리트라이/서킷 브레이커/폴백 체인)
@@ -206,7 +206,7 @@ BRIEFING_TYPE=MANUAL  # 브리핑 유형 (KR_BEFORE / US_BEFORE / MANUAL)
 - 야간 프리브리핑: KST 23:00 (UTC 14:00) — cron (내일 한국장 지정가 주문용)
 - 미국장 프리브리핑: KST 20:00 (UTC 11:00) — cron (오늘 밤 미국장 지정가 주문용)
 - 미국장 브리핑: KST 21:00 (UTC 12:00) — cron
-- 주가 업데이트: 국내 개장/마감 + 미국 개장/마감 (4회/일)
+- 주가 업데이트: 비활성화 (Notion 사용 중단, 메일로 대체)
 
 ## 모바일 접근
 
