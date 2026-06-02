@@ -292,7 +292,7 @@ def _run_persona(
 
         schema_json = json.dumps(_ANALYSIS_TOOL["input_schema"], ensure_ascii=False)
         raw = ""
-        for attempt, model in enumerate(("sonnet", "sonnet", "haiku")):
+        for attempt, model in enumerate(("opus", "sonnet", "haiku")):
             if attempt > 0:
                 import time as _time
                 _time.sleep(3 * attempt)
