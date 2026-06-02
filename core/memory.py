@@ -605,12 +605,23 @@ def evaluate_open_predictions(current_prices: dict[str, float]) -> int:
         종료된 건수
     """
     conn = _get_conn()
+
+    # 14일 이상 된 미결 추천 자동 정리 (stale prediction 방지)
+    now = datetime.now(KST).isoformat()
+    stale = conn.execute(
+        """UPDATE predictions SET status = 'closed', closed_at = ?, outcome = 'expired'
+           WHERE status = 'open' AND created_at < datetime('now', '-14 days')""",
+        (now,),
+    ).rowcount
+    if stale > 0:
+        conn.commit()
+        log.info(f"미결 추천 {stale}건 자동 만료 (14일 초과)")
+
     rows = conn.execute(
         "SELECT * FROM predictions WHERE status = 'open'"
     ).fetchall()
 
     closed_count = 0
-    now = datetime.now(KST).isoformat()
 
     for row in rows:
         ticker = row["ticker"]

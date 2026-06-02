@@ -253,12 +253,19 @@ class MarketMonitor:
         return None
 
     def _check_price_targets(self, now: datetime) -> list[AlertTrigger]:
-        """미결 추천의 목표가/손절가 도달 체크 — 실제 보유 종목만."""
+        """미결 추천의 목표가/손절가 도달 체크.
+
+        안전장치:
+        - 실제 보유 종목만 (HOLDINGS 기준)
+        - "매수" 또는 "매도" 시그널만 (관망/홀딩 제외)
+        - 7일 이상 된 추천은 무시 (최신 추천만)
+        - 같은 종목에 여러 추천 시 가장 최신 것만 사용
+        """
         from core.market import _get_quote_realtime
 
         triggers: list[AlertTrigger] = []
 
-        # 실제 보유 종목 티커 집합 (워치리스트 제외)
+        # 실제 보유 종목만
         from config.settings import (
             HOLDINGS_GENERAL, HOLDINGS_ISA, HOLDINGS_RIA,
             HOLDINGS_IRP, HOLDINGS_PENSION,
@@ -270,25 +277,28 @@ class MarketMonitor:
         try:
             from core.memory import _get_conn
             conn = _get_conn()
+            # 최신 7일 이내 + 매수/매도 시그널만 + 목표가 또는 손절가 있는 것만
             rows = conn.execute(
-                """SELECT ticker, name, signal, target_price, stop_loss
+                """SELECT ticker, name, signal, target_price, stop_loss, created_at
                    FROM predictions
                    WHERE status = 'open'
+                     AND signal IN ('매수', '매도')
+                     AND created_at > datetime('now', '-7 days')
                      AND ((target_price IS NOT NULL AND target_price > 0)
-                       OR (stop_loss IS NOT NULL AND stop_loss > 0))"""
+                       OR (stop_loss IS NOT NULL AND stop_loss > 0))
+                   ORDER BY created_at DESC"""
             ).fetchall()
         except Exception as e:
             log.debug("목표가/손절가 조회 실패: %s", e)
             return triggers
 
-        checked: set[str] = set()  # 티커 중복 방지
+        checked: set[str] = set()  # 같은 종목은 최신 1건만
         for row in rows:
             ticker = row["ticker"]
             if ticker in checked:
                 continue
             checked.add(ticker)
 
-            # 실제 보유 종목이 아니면 스킵 (워치리스트 추천은 무시)
             if ticker not in held_tickers:
                 continue
 
