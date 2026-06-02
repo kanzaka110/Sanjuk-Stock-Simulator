@@ -944,6 +944,69 @@ def memory_to_text() -> str:
     return "\n".join(lines)
 
 
+def generate_open_positions_review(current_prices: dict[str, float]) -> str:
+    """미결 추천 상세 점검 — 매 브리핑마다 "이 포지션을 유지할 근거가 있는가?" 강제 점검.
+
+    Returns:
+        프롬프트 삽입용 텍스트. 미결 추천이 없으면 빈 문자열.
+    """
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM predictions WHERE status = 'open' ORDER BY created_at DESC"
+    ).fetchall()
+
+    if not rows:
+        return ""
+
+    lines = ["━━━ 📋 미결 포지션 점검 (반드시 각 포지션에 대해 유지/매도 판단 필수) ━━━"]
+    lines.append("아래는 이전 브리핑에서 추천한 미결 포지션입니다. **각 포지션마다 유지/매도 판단을 명시**하세요.\n")
+
+    for row in rows:
+        ticker = row["ticker"]
+        name = row["name"]
+        signal = row["signal"]
+        entry = row["entry_price"]
+        target = row["target_price"] or 0
+        stop = row["stop_loss"] or 0
+        reasoning = (row["reasoning"] or "")[:150]
+        created = row["created_at"][:10]
+        try:
+            invalidation = row["invalidation_condition"] or ""
+        except (IndexError, KeyError):
+            invalidation = ""
+
+        cur = current_prices.get(ticker, 0)
+        if cur and entry:
+            pnl = (cur - entry) / entry * 100
+            pnl_str = f"현재가 기준 {pnl:+.1f}%"
+        else:
+            pnl = 0
+            pnl_str = "현재가 미수집"
+
+        # 경고 레벨
+        if pnl <= -10:
+            alert = "🚨 손절 검토 필요"
+        elif pnl <= -5:
+            alert = "⚠️ 주의 구간"
+        elif target and cur >= target:
+            alert = "🎯 목표가 도달 — 익절 검토"
+        elif stop and cur <= stop:
+            alert = "🚨 손절가 이탈 — 즉시 매도 검토"
+        else:
+            alert = "✅ 정상"
+
+        lines.append(f"▸ {name} ({ticker}) — {signal} [{created}]")
+        lines.append(f"  진입: {entry:,.0f} | 목표: {target:,.0f} | 손절: {stop:,.0f} | {pnl_str} | {alert}")
+        if reasoning:
+            lines.append(f"  매수 근거: {reasoning}")
+        if invalidation:
+            lines.append(f"  무효화 조건: {invalidation}")
+        lines.append(f"  → **이 포지션 유지? 매도? 판단 필수.**\n")
+
+    lines.append("위 모든 미결 포지션에 대해 strategy_sell 또는 분석에 유지/매도 판단을 반드시 포함하세요.")
+    return "\n".join(lines)
+
+
 def generate_weekly_review() -> str:
     """지난 7일간 마감된 추천 분석 — 왜 맞았고 왜 틀렸는지."""
     conn = _get_conn()

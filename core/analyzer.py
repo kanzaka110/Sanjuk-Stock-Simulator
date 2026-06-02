@@ -286,6 +286,7 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
     )
     from core.memory import (
         evaluate_open_predictions,
+        generate_open_positions_review,
         memory_to_text,
         save_predictions_from_briefing,
     )
@@ -416,6 +417,14 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
 
     # 추가 컨텍스트
     extra_context = ""
+
+    # 미결 포지션 점검 (이전 브리핑 추천 → 현재 상태 → 유지/매도 강제 판단)
+    try:
+        positions_review = generate_open_positions_review(current_prices)
+        if positions_review:
+            extra_context += f"\n\n{positions_review}"
+    except Exception as e:
+        log.warning("미결 포지션 점검 실패: %s", e)
 
     # 실적 캘린더 경고 (D-7 이내 실적 발표 종목 강조)
     earnings_warnings = []
