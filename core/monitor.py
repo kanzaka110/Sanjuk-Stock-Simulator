@@ -385,46 +385,62 @@ class MarketMonitor:
     def _is_actionable(self, result: AlertResult) -> bool:
         """알림을 실제 전송할지 판단.
 
-        조건: CRITICAL이거나, AI가 매수/매도를 명확히 권고한 경우.
-        관망/홀딩 권고이면 억제.
+        핵심 원칙: 사용자가 즉시 행동해야 할 때만 전송.
+        - CRITICAL + AI가 [매수] 또는 [매도] → 전송
+        - CRITICAL + AI가 [관망] → 전송 (CRITICAL은 항상)
+        - WARNING + AI가 [매수] 또는 [매도] (첫 줄) → 전송
+        - WARNING + AI가 [관망] → 억제
+        - INFO → 억제
         """
-        # CRITICAL은 AI 권고와 무관하게 항상 전송
         if result.severity == Severity.CRITICAL:
             return True
 
-        # WARNING: AI가 매수 또는 매도를 권고한 경우만
         if result.severity == Severity.WARNING and result.ai_analysis:
-            analysis_lower = result.ai_analysis
-            has_action = any(
-                kw in analysis_lower
-                for kw in ("매수", "매도", "분할매수", "분할매도", "손절")
-            )
-            has_hold = any(
-                kw in analysis_lower
-                for kw in ("관망", "홀딩", "지켜보", "대기")
-            )
-            # 매수/매도 키워드가 있고, 관망 키워드가 없을 때만
-            return has_action and not has_hold
+            # AI 응답 첫 줄이 [매수] 또는 [매도]로 시작할 때만
+            first_line = result.ai_analysis.strip().split("\n")[0]
+            return first_line.startswith("[매수]") or first_line.startswith("[매도]")
 
-        # INFO는 전송하지 않음
         return False
 
     def _ai_analyze(self, trigger: AlertTrigger) -> str:
-        """Claude CLI로 AI 분석 — 매수/매도/관망 판정 (API 비용 $0)."""
+        """Claude CLI로 AI 분석 — 즉시 행동할 매수/매도만 판정 (API 비용 $0)."""
         import subprocess
 
+        # 보유 종목 정보 수집
+        from config.settings import (
+            HOLDINGS_GENERAL, HOLDINGS_ISA, HOLDINGS_IRP, HOLDINGS_PENSION,
+            DEFAULT_CASH, ISA_CASH,
+        )
+        holdings_info = ""
+        for label, holdings in [("[일반]", HOLDINGS_GENERAL), ("[ISA]", HOLDINGS_ISA)]:
+            for tk, info in holdings.items():
+                if tk == trigger.ticker:
+                    shares = info.get("shares", 0)
+                    avg = info.get("avg_cost_krw", info.get("avg_cost_usd", 0))
+                    holdings_info += f"\n보유: {label} {shares}주 (매수가 {avg:,.0f})"
+
         prompt = (
-            f"당신은 실전 주식 투자 시니어 어드바이저입니다. 긴급 시장 이벤트에 대한 고수준 분석을 제공합니다.\n\n"
+            f"당신은 실전 투자 어드바이저입니다. 사용자가 즉시 행동해야 하는 경우에만 매수/매도를 권고합니다.\n\n"
             f"종목: {trigger.name} ({trigger.ticker})\n"
             f"상황: {trigger.description}\n"
-            f"시각: {trigger.timestamp.strftime('%Y-%m-%d %H:%M KST')}\n\n"
-            f"아래 프레임워크로 분석하세요:\n"
-            f"1. 원인 분석 — 이 움직임의 근본 원인 (매크로/실적/수급/지정학)\n"
-            f"2. 과거 유사 사례 — 비슷한 상황에서 시장이 어떻게 반응했는지\n"
-            f"3. 대응 전략 — 구체적 액션 (진입가/손절가/목표가 포함)\n"
-            f"4. 리스크 — 이 판단이 틀릴 경우의 시나리오\n\n"
-            f"첫 줄에 [매수], [매도], 또는 [관망] 태그를 반드시 포함하세요.\n"
-            f"불필요한 알림을 줄이는 것이 목표입니다. 단순 변동성이면 반드시 [관망]으로 판단하세요."
+            f"시각: {trigger.timestamp.strftime('%Y-%m-%d %H:%M KST')}\n"
+            f"{holdings_info}\n"
+            f"일반 예수금: ₩{DEFAULT_CASH:,.0f} | ISA 예수금: ₩{ISA_CASH:,.0f}\n\n"
+            f"판단 규칙:\n"
+            f"- 지금 당장 사거나 팔아야 하는 상황이면 → [매수] 또는 [매도]\n"
+            f"- 단순 변동성·경고·모니터링이면 → [관망]\n"
+            f"- [관망]이 90% 이상이어야 정상. 진짜 급할 때만 [매수]/[매도].\n\n"
+            f"[매수] 또는 [매도] 판단 시 반드시 아래 형식으로 첫 3줄에 명시:\n"
+            f"[매수] 또는 [매도]\n"
+            f"계좌: [일반] 또는 [ISA] 또는 [IRP]\n"
+            f"주문: [종목명] [수량]주 × ₩[지정가] (또는 $[지정가])\n\n"
+            f"예시:\n"
+            f"[매도]\n"
+            f"계좌: [ISA]\n"
+            f"주문: 한화에어로 2주 × ₩1,130,000 이상 (시장가)\n"
+            f"사유: 손절가 ₩1,135,000 이탈, OBV 매도, 추가 하락 예상\n\n"
+            f"[관망] 판단이면 한 줄이면 됩니다: [관망] 단순 변동성, 추가 모니터링.\n"
+            f"실수가 있으면 안 됩니다. 확실할 때만 [매수]/[매도]를 내리세요."
         )
 
         try:
@@ -492,18 +508,28 @@ def _build_alert_message(result: AlertResult) -> str:
     lines.append(f"    {trigger.description}")
     lines.append("")
 
-    # AI 분석
+    # AI 분석 — 매수/매도 시 주문 정보 강조
     if result.ai_analysis:
-        lines.append("─" * 24)
-        lines.append("🤖 *AI 분석*")
-        lines.append("")
-        lines.append(result.ai_analysis)
+        analysis = result.ai_analysis
+        is_action = analysis.startswith("[매수]") or analysis.startswith("[매도]")
+
+        if is_action:
+            lines.append("─" * 24)
+            lines.append("🚨 *즉시 행동 필요*")
+            lines.append("")
+            # 첫 4줄(판단/계좌/주문/사유)을 강조
+            action_lines = analysis.split("\n")
+            for i, al in enumerate(action_lines[:5]):
+                lines.append(f"*{al}*" if i < 3 else al)
+            if len(action_lines) > 5:
+                lines.append("")
+                lines.append("\n".join(action_lines[5:]))
+        else:
+            # [관망] — 간략하게
+            lines.append("─" * 24)
+            lines.append(f"🤖 {analysis[:200]}")
         lines.append("")
 
-    # 안내
-    lines.append("─" * 24)
-    lines.append("💡 상세 분석이 필요하면:")
-    lines.append("    *전체 브리핑* 을 입력하세요")
     lines.append("━" * 24)
 
     return "\n".join(lines)
