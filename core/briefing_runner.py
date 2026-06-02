@@ -67,6 +67,7 @@ def _execute_briefing(briefing_type: str) -> BriefingRunResult:
 
         # Notion 저장 비활성화 — 메일로 충분 (2026-06-02)
         page_id = ""
+        notion_url = ""
 
         telegram_sent = send_briefing_telegram(result, page_id, briefing_type)
 
