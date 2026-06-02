@@ -90,6 +90,26 @@ def _migrate_phase2(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE predictions ADD COLUMN {col_name} {col_def}")
             log.info("Phase 2 마이그레이션: predictions.%s 추가", col_name)
     conn.commit()
+    # Phase 4 마이그레이션: 향후 축적용 컬럼 (과거 소급 없이 NULL 유지)
+    _migrate_phase4(conn)
+
+
+def _migrate_phase4(conn: sqlite3.Connection) -> None:
+    """Phase 4 컬럼 안전 추가 — 향후 데이터부터 축적."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(predictions)").fetchall()}
+    new_columns = [
+        ("action_grade", "TEXT"),        # IMMEDIATE/CONDITIONAL/WATCH/BLOCKED
+        ("action_type", "TEXT"),          # 즉시매수/조건부매수/즉시매도/조건부매도/관망
+        ("account_type", "TEXT"),         # 일반/ISA/RIA/IRP/연금
+        ("briefing_type", "TEXT"),        # KR_NIGHT/US_NIGHT/KR_BEFORE/US_BEFORE/MANUAL
+        ("original_signal", "TEXT"),      # AI 원본 signal (정규화 전)
+        ("data_quality", "TEXT"),         # good/suspect/error
+    ]
+    for col_name, col_def in new_columns:
+        if col_name not in existing:
+            conn.execute(f"ALTER TABLE predictions ADD COLUMN {col_name} {col_def}")
+            log.info("Phase 4 마이그레이션: predictions.%s 추가", col_name)
+    conn.commit()
 
 
 # ═══════════════════════════════════════════════════════
@@ -127,58 +147,49 @@ class Prediction:
 
 
 def calibrate_confidence(ticker: str, raw_confidence: int) -> int:
-    """종목별 과거 적중률 기반으로 확신도를 보정한다.
+    """종목별 기대값(expectancy) + profit_factor 기반 확신도 보정.
 
-    보정 공식:
-        최종 = raw + 종목 보정 + 샘플 보정
-        - 승률 70%+ & 양수 수익 → +10%
-        - 승률 30% 미만 → -30%
-        - 샘플 4건 미만 → 보정폭 절반
-        - evaluated_count < 3이면 보정 스킵 (샘플부족)
+    보정 기준 (Phase 4):
+        - evaluated_count < 3 → 보정 없음 (샘플부족)
+        - expectancy > 0 & profit_factor > 1.2 & evaluated >= 5 → +5~+10
+        - expectancy > 0 & profit_factor > 1.0 → +3~+5
+        - expectancy < 0 or profit_factor < 1.0 → -5~-15
+        - 심각한 음수 expectancy & evaluated >= 5 → -20
         - 결과: 10~95 범위로 클램프
     """
     ticker = normalize_ticker(ticker)
     stats = get_accuracy_summary()
     s = stats.get(ticker)
     if not s or s["total"] < 2:
-        return max(10, min(95, raw_confidence))  # 데이터 부족, 클램프만 적용
-
-    # 평가 완료 건수(win+loss) 기준 — 3건 미만이면 샘플부족, 보정 스킵
-    evaluated = s.get("evaluated_count", s.get("wins", 0) + s.get("losses", 0))
-    if evaluated < 3:
         return max(10, min(95, raw_confidence))
 
+    evaluated = s.get("evaluated_count", s.get("wins", 0) + s.get("losses", 0))
+    if evaluated < 3:
+        return max(10, min(95, raw_confidence))  # 샘플부족, 보정 스킵
+
+    exp = s.get("expectancy", 0) or 0
+    pf = s.get("profit_factor", 0) or 0
     adjustment = 0
-    wr = s["win_rate"] or 0
-    avg = s["avg_pnl"] or 0
-    total = s["total"]
 
-    # 위험 종목: 승률 30% 미만
-    if wr < 30:
-        adjustment = -30
-    # 저신뢰: 승률 30~50%
-    elif wr < 50:
-        adjustment = -15
-    # 보통: 승률 50~70%
-    elif wr < 70:
-        adjustment = 0
-    # 고신뢰: 승률 70%+ & 양수 수익
-    elif avg > 0:
+    if exp > 0 and pf > 1.2 and evaluated >= 5:
+        # 고신뢰: 양수 기대값 + 높은 profit_factor + 충분한 샘플
         adjustment = 10
-    else:
-        adjustment = 5
+    elif exp > 0 and pf > 1.0:
+        # 양호: 양수 기대값 + profit_factor > 1
+        adjustment = 5 if evaluated >= 5 else 3
+    elif exp < -3 and evaluated >= 5:
+        # 심각: 음수 기대값 + 충분한 샘플 → 강한 감점
+        adjustment = -20
+    elif exp < 0 or pf < 1.0:
+        # 부진: 음수 기대값 또는 profit_factor < 1
+        adjustment = -15 if evaluated >= 5 else -5
 
-    # 샘플 수 부족 시 과신 방지 (4건 미만이면 보정폭 절반)
-    if total < 4:
-        adjustment = adjustment // 2
-
-    calibrated = raw_confidence + adjustment
-    calibrated = max(10, min(95, calibrated))
+    calibrated = max(10, min(95, raw_confidence + adjustment))
 
     if adjustment != 0:
         log.info(
-            "확신도 보정: %s %d%% → %d%% (조정 %+d, 승률 %.0f%%, %d건)",
-            ticker, raw_confidence, calibrated, adjustment, wr, total,
+            "확신도 보정: %s %d%% → %d%% (조정 %+d, expectancy=%.1f%%, PF=%.2f, %d건)",
+            ticker, raw_confidence, calibrated, adjustment, exp, pf, evaluated,
         )
 
     return calibrated
@@ -470,6 +481,12 @@ def save_prediction(
     data_failures: int = 0,
     agreement_count: int = 0,
     current_price: float | None = None,
+    # Phase 4: 향후 축적용
+    action_grade: str = "",
+    action_type: str = "",
+    account_type: str = "",
+    briefing_type: str = "",
+    data_quality: str = "good",
 ) -> int:
     """새 추천 기록 저장. 품질 게이트 + 확신도 보정 + 중복 방지. Returns prediction ID."""
     # 티커 정규화 (AI 할루시네이션 방지)
@@ -506,17 +523,22 @@ def save_prediction(
 
     conn = _get_conn()
     now = datetime.now(KST).isoformat()
+    # action_grade를 품질 게이트 결과로 자동 설정 (명시 지정 없으면)
+    if not action_grade:
+        action_grade = grade
     cursor = conn.execute(
         """INSERT INTO predictions
            (created_at, ticker, name, signal, entry_price, target_price,
             stop_loss, confidence, reasoning, persona,
             strategy_type, strategy_tags, horizon_days, benchmark_ticker,
-            execution_condition, invalidation_condition, risk_reward, agreement_count)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            execution_condition, invalidation_condition, risk_reward, agreement_count,
+            action_grade, action_type, account_type, briefing_type, original_signal, data_quality)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (now, ticker, name, signal, entry_price, target_price,
          stop_loss, gated_conf, reasoning + f" [게이트:{grade}|{gate_reason}]", persona,
          strategy_type, strategy_tags, horizon_days, benchmark_ticker,
-         execution_condition, invalidation_condition, risk_reward, agreement_count),
+         execution_condition, invalidation_condition, risk_reward, agreement_count,
+         action_grade, action_type, account_type, briefing_type, signal, data_quality),
     )
     conn.commit()
 
@@ -777,7 +799,12 @@ def _update_accuracy_stats() -> None:
             wins INTEGER DEFAULT 0,
             losses INTEGER DEFAULT 0,
             neutral_count INTEGER DEFAULT 0,
+            invalid_count INTEGER DEFAULT 0,
             avg_pnl REAL DEFAULT 0,
+            avg_win REAL DEFAULT 0,
+            avg_loss REAL DEFAULT 0,
+            profit_factor REAL DEFAULT 0,
+            expectancy REAL DEFAULT 0,
             win_rate REAL DEFAULT 0,
             last_updated TEXT
         )
@@ -792,7 +819,8 @@ def _update_accuracy_stats() -> None:
     # 정규화된 티커별로 집계
     from collections import defaultdict
     stats: dict[str, dict] = defaultdict(lambda: {
-        "total": 0, "wins": 0, "losses": 0, "neutral": 0, "pnl_values": [],
+        "total": 0, "wins": 0, "losses": 0, "neutral": 0,
+        "invalid": 0, "win_pnls": [], "loss_pnls": [],
     })
 
     for row in rows:
@@ -802,33 +830,60 @@ def _update_accuracy_stats() -> None:
         s = stats[norm_ticker]
         s["total"] += 1
 
+        # 비현실 수익률 필터
+        threshold = _unrealistic_pnl_threshold(norm_ticker)
+        is_realistic = abs(pnl) <= threshold
+
         if outcome == "win":
             s["wins"] += 1
+            if is_realistic:
+                s["win_pnls"].append(pnl)
+            else:
+                log.info("비현실 수익률 제외: %s pnl=%.1f%%", norm_ticker, pnl)
         elif outcome == "loss":
             s["losses"] += 1
-        elif outcome in ("neutral", "expired", "invalid", "data_error"):
+            if is_realistic:
+                s["loss_pnls"].append(pnl)
+            else:
+                log.info("비현실 수익률 제외: %s pnl=%.1f%%", norm_ticker, pnl)
+        elif outcome in ("invalid", "data_error"):
+            s["invalid"] += 1
+        else:  # neutral, expired
             s["neutral"] += 1
-
-        # 비현실 수익률 필터 — avg_pnl 계산에서 제외
-        threshold = _unrealistic_pnl_threshold(norm_ticker)
-        if abs(pnl) > threshold:
-            log.info("비현실 수익률 제외: %s pnl=%.1f%%", norm_ticker, pnl)
-        else:
-            if outcome in ("win", "loss"):
-                s["pnl_values"].append(pnl)
 
     for ticker, s in stats.items():
         evaluated = s["wins"] + s["losses"]
         win_rate = (s["wins"] / evaluated * 100) if evaluated > 0 else 0
-        avg_pnl = (sum(s["pnl_values"]) / len(s["pnl_values"])) if s["pnl_values"] else 0
+
+        avg_win = (sum(s["win_pnls"]) / len(s["win_pnls"])) if s["win_pnls"] else 0
+        avg_loss = (sum(s["loss_pnls"]) / len(s["loss_pnls"])) if s["loss_pnls"] else 0
+        all_pnls = s["win_pnls"] + s["loss_pnls"]
+        avg_pnl = (sum(all_pnls) / len(all_pnls)) if all_pnls else 0
+
+        # profit_factor = gross_profit / abs(gross_loss)
+        gross_profit = sum(p for p in s["win_pnls"])
+        gross_loss = sum(abs(p) for p in s["loss_pnls"])
+        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (99.0 if gross_profit > 0 else 0)
+
+        # expectancy = (win_rate * avg_win) - (loss_rate * abs(avg_loss))
+        if evaluated > 0:
+            wr_frac = s["wins"] / evaluated
+            lr_frac = s["losses"] / evaluated
+            expectancy = (wr_frac * avg_win) - (lr_frac * abs(avg_loss))
+        else:
+            expectancy = 0
 
         conn.execute(
             """INSERT OR REPLACE INTO accuracy_stats
                (ticker, total_predictions, evaluated_count, wins, losses,
-                neutral_count, avg_pnl, win_rate, last_updated)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                neutral_count, invalid_count, avg_pnl, avg_win, avg_loss,
+                profit_factor, expectancy, win_rate, last_updated)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (ticker, s["total"], evaluated, s["wins"], s["losses"],
-             s["neutral"], round(avg_pnl, 2), round(win_rate, 1), now),
+             s["neutral"], s["invalid"], round(avg_pnl, 2),
+             round(avg_win, 2), round(avg_loss, 2),
+             round(profit_factor, 2), round(expectancy, 2),
+             round(win_rate, 1), now),
         )
     conn.commit()
 
@@ -891,9 +946,12 @@ def get_accuracy_summary() -> dict[str, dict]:
     has_new_schema = "evaluated_count" in col_names
     rows = conn.execute("SELECT * FROM accuracy_stats").fetchall()
     result = {}
+    col_names_set = {row[1] for row in conn.execute("PRAGMA table_info(accuracy_stats)").fetchall()}
+    has_expectancy = "expectancy" in col_names_set
+
     for r in rows:
         norm = normalize_ticker(r["ticker"])
-        if has_new_schema:
+        if has_new_schema and has_expectancy:
             result[norm] = {
                 "total": r["total_predictions"],
                 "evaluated_count": r["evaluated_count"],
@@ -901,6 +959,21 @@ def get_accuracy_summary() -> dict[str, dict]:
                 "losses": r["losses"],
                 "neutral_count": r["neutral_count"],
                 "avg_pnl": r["avg_pnl"],
+                "avg_win": r["avg_win"] if "avg_win" in col_names_set else 0,
+                "avg_loss": r["avg_loss"] if "avg_loss" in col_names_set else 0,
+                "profit_factor": r["profit_factor"] if "profit_factor" in col_names_set else 0,
+                "expectancy": r["expectancy"] if "expectancy" in col_names_set else 0,
+                "win_rate": r["win_rate"],
+            }
+        elif has_new_schema:
+            result[norm] = {
+                "total": r["total_predictions"],
+                "evaluated_count": r["evaluated_count"],
+                "wins": r["wins"],
+                "losses": r["losses"],
+                "neutral_count": r["neutral_count"],
+                "avg_pnl": r["avg_pnl"],
+                "avg_win": 0, "avg_loss": 0, "profit_factor": 0, "expectancy": 0,
                 "win_rate": r["win_rate"],
             }
         else:
@@ -912,6 +985,7 @@ def get_accuracy_summary() -> dict[str, dict]:
                 "losses": r["wrong"],
                 "neutral_count": 0,
                 "avg_pnl": r["avg_pnl"],
+                "avg_win": 0, "avg_loss": 0, "profit_factor": 0, "expectancy": 0,
                 "win_rate": r["win_rate"],
             }
     return result

@@ -25,7 +25,7 @@ def seed_accuracy():
     """위험/고신뢰 종목 통계 시드."""
     import core.memory as mem
     conn = mem._get_conn()
-    # 새 스키마에 맞춰 시드 데이터 삽입
+    # Phase 4 스키마에 맞춰 시드 데이터 삽입
     conn.execute("DROP TABLE IF EXISTS accuracy_stats")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS accuracy_stats (
@@ -35,21 +35,27 @@ def seed_accuracy():
             wins INTEGER DEFAULT 0,
             losses INTEGER DEFAULT 0,
             neutral_count INTEGER DEFAULT 0,
+            invalid_count INTEGER DEFAULT 0,
             avg_pnl REAL DEFAULT 0,
+            avg_win REAL DEFAULT 0,
+            avg_loss REAL DEFAULT 0,
+            profit_factor REAL DEFAULT 0,
+            expectancy REAL DEFAULT 0,
             win_rate REAL DEFAULT 0,
             last_updated TEXT
         )
     """)
     conn.executescript("""
         INSERT OR REPLACE INTO accuracy_stats
-            (ticker, total_predictions, evaluated_count, wins, losses, neutral_count, avg_pnl, win_rate)
+            (ticker, total_predictions, evaluated_count, wins, losses, neutral_count,
+             avg_pnl, avg_win, avg_loss, profit_factor, expectancy, win_rate)
         VALUES
-            ('NVDA', 3, 3, 0, 3, 0, -19.2, 0),
-            ('GOOGL', 2, 2, 0, 2, 0, -32.1, 0),
-            ('207940.KS', 7, 7, 2, 5, 0, -1.8, 28.6),
-            ('035720.KS', 4, 4, 1, 3, 0, 1.5, 25.0),
-            ('LMT', 4, 4, 4, 0, 0, 14.7, 100.0),
-            ('133690.KS', 2, 2, 2, 0, 0, 14.6, 100.0);
+            ('NVDA', 3, 3, 0, 3, 0, -19.2, 0, -19.2, 0, -19.2, 0),
+            ('GOOGL', 2, 2, 0, 2, 0, -32.1, 0, -32.1, 0, -32.1, 0),
+            ('207940.KS', 7, 7, 2, 5, 0, -1.8, 3.0, -3.7, 0.32, -1.8, 28.6),
+            ('035720.KS', 4, 4, 1, 3, 0, 1.5, 8.0, -0.7, 3.81, 1.5, 25.0),
+            ('LMT', 4, 4, 4, 0, 0, 14.7, 14.7, 0, 99.0, 14.7, 100.0),
+            ('133690.KS', 2, 2, 2, 0, 0, 14.6, 14.6, 0, 99.0, 14.6, 100.0);
     """)
 
 
@@ -607,3 +613,109 @@ class TestPhase3StatisticsCorrection:
             risk_reward=2.0,
         )
         assert pid == 0, "entry_price=0인 매수 추천은 차단되어야 함"
+
+
+class TestPhase4Expectancy:
+    """Phase 4: 기대값 기반 평가 테스트."""
+
+    def test_expectancy_calculation(self):
+        """expectancy = (wr * avg_win) - (lr * avg_loss) 검증."""
+        import core.memory as mem
+        conn = mem._get_conn()
+        now = "2026-06-01T00:00:00"
+        # win 3건 avg +10%, loss 2건 avg -5%
+        for outcome, pnl in [("win", 8), ("win", 12), ("win", 10), ("loss", -4), ("loss", -6)]:
+            conn.execute(
+                """INSERT INTO predictions
+                   (created_at, ticker, name, signal, entry_price, target_price,
+                    stop_loss, confidence, status, closed_at, pnl_pct, outcome)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (now, "TEST01.KS", "테스트", "매수", 100, 110, 90, 70,
+                 "closed", now, pnl, outcome),
+            )
+        conn.commit()
+        mem._update_accuracy_stats()
+        s = mem.get_accuracy_summary()["TEST01.KS"]
+        # wr=3/5=0.6, lr=2/5=0.4, avg_win=10, avg_loss=-5
+        # expectancy = 0.6*10 - 0.4*5 = 4.0
+        assert abs(s["expectancy"] - 4.0) < 0.5
+        assert abs(s["avg_win"] - 10.0) < 0.5
+        assert abs(s["avg_loss"] - (-5.0)) < 0.5
+
+    def test_profit_factor_calculation(self):
+        """profit_factor = gross_profit / abs(gross_loss) 검증."""
+        import core.memory as mem
+        conn = mem._get_conn()
+        now = "2026-06-01T00:00:00"
+        # gross_profit = 30, gross_loss = 10 → PF = 3.0
+        for outcome, pnl in [("win", 20), ("win", 10), ("loss", -10)]:
+            conn.execute(
+                """INSERT INTO predictions
+                   (created_at, ticker, name, signal, entry_price, target_price,
+                    stop_loss, confidence, status, closed_at, pnl_pct, outcome)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (now, "TEST02.KS", "테스트2", "매수", 100, 120, 90, 70,
+                 "closed", now, pnl, outcome),
+            )
+        conn.commit()
+        mem._update_accuracy_stats()
+        s = mem.get_accuracy_summary()["TEST02.KS"]
+        assert abs(s["profit_factor"] - 3.0) < 0.1
+
+    def test_expectancy_boosts_confidence(self):
+        """양수 expectancy + PF > 1.2 + 5건+ → 확신도 가점."""
+        import core.memory as mem
+        conn = mem._get_conn()
+        conn.execute("DROP TABLE IF EXISTS accuracy_stats")
+        conn.execute("""
+            CREATE TABLE accuracy_stats (
+                ticker TEXT PRIMARY KEY, total_predictions INTEGER DEFAULT 0,
+                evaluated_count INTEGER DEFAULT 0, wins INTEGER DEFAULT 0,
+                losses INTEGER DEFAULT 0, neutral_count INTEGER DEFAULT 0,
+                invalid_count INTEGER DEFAULT 0, avg_pnl REAL DEFAULT 0,
+                avg_win REAL DEFAULT 0, avg_loss REAL DEFAULT 0,
+                profit_factor REAL DEFAULT 0, expectancy REAL DEFAULT 0,
+                win_rate REAL DEFAULT 0, last_updated TEXT)
+        """)
+        conn.execute("""
+            INSERT INTO accuracy_stats
+            (ticker, total_predictions, evaluated_count, wins, losses,
+             avg_pnl, avg_win, avg_loss, profit_factor, expectancy, win_rate)
+            VALUES ('MU', 10, 8, 6, 2, 5.0, 8.0, -4.0, 3.0, 5.2, 75.0)
+        """)
+        conn.commit()
+        result = mem.calibrate_confidence("MU", 50)
+        assert result > 50, f"양수 expectancy → 가점, got {result}"
+
+    def test_negative_expectancy_penalizes(self):
+        """음수 expectancy + 5건+ → 확신도 감점."""
+        import core.memory as mem
+        conn = mem._get_conn()
+        conn.execute("DROP TABLE IF EXISTS accuracy_stats")
+        conn.execute("""
+            CREATE TABLE accuracy_stats (
+                ticker TEXT PRIMARY KEY, total_predictions INTEGER DEFAULT 0,
+                evaluated_count INTEGER DEFAULT 0, wins INTEGER DEFAULT 0,
+                losses INTEGER DEFAULT 0, neutral_count INTEGER DEFAULT 0,
+                invalid_count INTEGER DEFAULT 0, avg_pnl REAL DEFAULT 0,
+                avg_win REAL DEFAULT 0, avg_loss REAL DEFAULT 0,
+                profit_factor REAL DEFAULT 0, expectancy REAL DEFAULT 0,
+                win_rate REAL DEFAULT 0, last_updated TEXT)
+        """)
+        conn.execute("""
+            INSERT INTO accuracy_stats
+            (ticker, total_predictions, evaluated_count, wins, losses,
+             avg_pnl, avg_win, avg_loss, profit_factor, expectancy, win_rate)
+            VALUES ('NVDA', 10, 8, 2, 6, -5.0, 3.0, -8.0, 0.25, -5.5, 25.0)
+        """)
+        conn.commit()
+        result = mem.calibrate_confidence("NVDA", 50)
+        assert result < 50, f"음수 expectancy → 감점, got {result}"
+
+    def test_phase4_columns_exist(self):
+        """Phase 4 컬럼이 predictions 테이블에 존재하는지."""
+        import core.memory as mem
+        conn = mem._get_conn()
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(predictions)").fetchall()}
+        for col in ("action_grade", "action_type", "account_type", "briefing_type", "original_signal", "data_quality"):
+            assert col in cols, f"Phase 4 컬럼 {col} 누락"
