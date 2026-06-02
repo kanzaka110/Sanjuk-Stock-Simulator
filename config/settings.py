@@ -157,7 +157,7 @@ def get_market_config(briefing_type: str) -> tuple[dict[str, str], dict[str, str
 # 2026-05-12: NVDA 46주·GOOGL 9주를 RIA 계좌(7179429562-01)로 대체출고
 HOLDINGS_GENERAL: dict[str, dict] = {
     "005930.KS": {"shares": 90, "avg_cost_krw": 60_425},
-    "360750.KS": {"shares": 343, "avg_cost_krw": 24_800},
+    "360750.KS": {"shares": 243, "avg_cost_krw": 24_800},  # 343주 → 6/2 100주 매도 @ ₩28,500
     "MU": {"shares": 11, "avg_cost_usd": 408.8181, "ria_eligible": 0},
     # 012450.KS: 한화에어로 2주 → 2026-06-02 전량 매도 @ ₩1,085,000 (손절, -17.5%)
     "LMT": {"shares": 1, "avg_cost_usd": 639.0, "ria_eligible": 0},
@@ -224,14 +224,14 @@ HOLDINGS_ISA: dict[str, dict] = {
     "012450.KS": {"shares": 2, "avg_cost_krw": 1_285_000},    # 한화에어로스페이스 (5/11 1주@1,320,000 + 5/26 1주@1,250,000)
     "161510.KS": {"shares": 13, "avg_cost_krw": 28_100},      # PLUS 고배당주 (5/12)
     "251350.KS": {"shares": 11, "avg_cost_krw": 39_940},      # KODEX MSCI선진국 (5/12)
-    "035420.KS": {"shares": 3, "avg_cost_krw": 200_000},      # NAVER (5/26)
+    # 035420.KS: NAVER 3주 → 2026-06-02 전량 매도 @ ₩278,000 (익절, +39.0%)
 }
-# ISA_CASH: 3,275,360 - 855,000(5/27 시프트업 30주) = 2,420,360
-ISA_CASH: float = 2_420_360.0
+# ISA_CASH: 2,420,360 + 834,000(6/2 NAVER 3주 매도) = 3,254,360
+ISA_CASH: float = 3_254_360.0
 
 # ─── 예수금 ────────────────────────────────────────
-# DEFAULT_CASH: 3,539,839 + 2,170,000(6/2 한화에어로 2주 매도) = 5,709,839
-DEFAULT_CASH: float = 5_709_839.0
+# DEFAULT_CASH: 3,539,839 + 2,170,000(6/2 한화에어로 2주 매도) + 2,850,000(6/2 TIGER S&P500 100주 매도) = 8,559,839
+DEFAULT_CASH: float = 8_559_839.0
 
 # ─── 모니터링 설정 ─────────────────────────────────
 MONITOR_INTERVAL_SEC: int = int(os.environ.get("MONITOR_INTERVAL_SEC", "300"))
