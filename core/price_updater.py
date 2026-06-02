@@ -75,9 +75,14 @@ def _get_notion_pages() -> list[dict]:
 
 
 def _get_stock_price(ticker: str) -> float | None:
+    from core.memory import normalize_ticker
+
     yf_ticker = ticker
     if ticker.startswith("KRX:"):
         yf_ticker = ticker.replace("KRX:", "") + ".KS"
+    else:
+        # 한글명("KODEX 200" 등) → yfinance 코드로 변환
+        yf_ticker = normalize_ticker(ticker)
 
     try:
         hist = yf.Ticker(yf_ticker).history(period="1d")
@@ -117,21 +122,28 @@ def update_all_prices() -> int:
     pages = _get_notion_pages()
     updated = 0
 
+    failed: list[str] = []
     for page in pages:
         ticker = page["ticker"]
-        price = _get_stock_price(ticker)
+        try:
+            price = _get_stock_price(ticker)
 
-        if price is not None:
-            if ticker.startswith("KRX:"):
-                formatted = f"₩{int(price):,}"
-                krw = int(price)
-            else:
-                formatted = f"${round(price, 2):,.2f}"
-                krw = int(price * exchange_rate)
+            if price is not None:
+                if ticker.startswith("KRX:"):
+                    formatted = f"₩{int(price):,}"
+                    krw = int(price)
+                else:
+                    formatted = f"${round(price, 2):,.2f}"
+                    krw = int(price * exchange_rate)
 
-            _update_notion_page(page["id"], formatted, krw)
-            updated += 1
-            log.info(f"  ✅ {ticker}: {formatted}")
+                _update_notion_page(page["id"], formatted, krw)
+                updated += 1
+                log.info(f"  ✅ {ticker}: {formatted}")
+        except Exception as e:
+            failed.append(ticker)
+            log.warning(f"  ❌ {ticker}: 업데이트 실패 — {e}")
 
-    log.info(f"업데이트 완료: {updated}/{len(pages)} 종목")
+    if failed:
+        log.warning(f"실패 종목 {len(failed)}건: {', '.join(failed)}")
+    log.info(f"업데이트 완료: {updated}/{len(pages)} 종목 (실패: {len(failed)}건)")
     return updated

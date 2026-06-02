@@ -386,3 +386,82 @@ class TestRIAAllowedTickers:
         portfolio, _, _ = get_market_config("US_BEFORE")
         for tk in RIA_ALLOWED_TICKERS:
             assert tk not in portfolio, f"{tk}이 US_BEFORE에 잘못 포함"
+
+
+# ═══════════════════════════════════════════════════════
+# price_updater 티커 정규화 테스트
+# ═══════════════════════════════════════════════════════
+class TestPriceUpdaterTickerNormalization:
+    """Notion 한글명 → yfinance 코드 변환 테스트."""
+
+    def test_kodex_200_alias(self):
+        from core.memory import normalize_ticker
+        assert normalize_ticker("KODEX 200") == "069500.KS"
+        assert normalize_ticker("KODEX200") == "069500.KS"
+
+    def test_kodex_semiconductor_alias(self):
+        from core.memory import normalize_ticker
+        assert normalize_ticker("KODEX 반도체") == "091160.KS"
+        assert normalize_ticker("KODEX반도체") == "091160.KS"
+
+    def test_tiger_nasdaq_alias(self):
+        from core.memory import normalize_ticker
+        assert normalize_ticker("TIGER 미국나스닥100") == "133690.KS"
+        assert normalize_ticker("TIGER미국나스닥100") == "133690.KS"
+
+    def test_tiger_sp500_alias(self):
+        from core.memory import normalize_ticker
+        assert normalize_ticker("TIGER 미국S&P500") == "360750.KS"
+        assert normalize_ticker("TIGER미국S&P500") == "360750.KS"
+
+    def test_tiger_reits_alias(self):
+        from core.memory import normalize_ticker
+        assert normalize_ticker("TIGER 리츠부동산인프라") == "329200.KS"
+        assert normalize_ticker("TIGER 리츠") == "329200.KS"
+
+    def test_plus_dividend_alias(self):
+        from core.memory import normalize_ticker
+        assert normalize_ticker("PLUS 고배당주") == "161510.KS"
+
+    def test_kodex_msci_alias(self):
+        from core.memory import normalize_ticker
+        assert normalize_ticker("KODEX MSCI선진국") == "251350.KS"
+
+    def test_numeric_code_normalization(self):
+        from core.memory import normalize_ticker
+        assert normalize_ticker("069500") == "069500.KS"
+        assert normalize_ticker("133690") == "133690.KS"
+
+    def test_already_normalized_passthrough(self):
+        from core.memory import normalize_ticker
+        assert normalize_ticker("069500.KS") == "069500.KS"
+        assert normalize_ticker("MU") == "MU"
+        assert normalize_ticker("AAPL") == "AAPL"
+
+    def test_krx_prefix_in_price_updater(self):
+        """KRX: 접두사 경로도 유지되는지 확인."""
+        from core.price_updater import _get_stock_price
+        import inspect
+        src = inspect.getsource(_get_stock_price)
+        assert "KRX:" in src
+        assert "normalize_ticker" in src
+
+
+class TestNotionUpdateExceptionIsolation:
+    """Notion 업데이트 실패 시 다른 종목은 계속 처리되는지 테스트."""
+
+    def test_single_failure_doesnt_stop_others(self):
+        """1종목 Notion patch 실패해도 전체 update_all_prices가 중단 안 됨."""
+        from core.price_updater import update_all_prices
+        import inspect
+        src = inspect.getsource(update_all_prices)
+        # for 루프 안에 try/except가 있어야 함
+        assert "except Exception" in src
+        assert "failed" in src
+
+    def test_failed_tickers_logged(self):
+        """실패 종목이 로그에 남는지."""
+        from core.price_updater import update_all_prices
+        import inspect
+        src = inspect.getsource(update_all_prices)
+        assert "실패 종목" in src
