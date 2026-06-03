@@ -158,7 +158,7 @@ def get_market_config(briefing_type: str) -> tuple[dict[str, str], dict[str, str
 HOLDINGS_GENERAL: dict[str, dict] = {
     "005930.KS": {"shares": 90, "avg_cost_krw": 60_425},
     "360750.KS": {"shares": 243, "avg_cost_krw": 24_800},  # 343주 → 6/2 100주 매도 @ ₩28,500
-    "MU": {"shares": 11, "avg_cost_usd": 408.8181, "ria_eligible": 0},
+    "MU": {"shares": 8, "avg_cost_usd": 408.8181, "ria_eligible": 0},  # 11주 → 6/3 3주 매도 @ $1,080 (익절)
     # 012450.KS: 한화에어로 2주 → 2026-06-02 전량 매도 @ ₩1,085,000 (손절, -17.5%)
     "LMT": {"shares": 1, "avg_cost_usd": 639.0, "ria_eligible": 0},
 }
@@ -230,8 +230,9 @@ HOLDINGS_ISA: dict[str, dict] = {
 ISA_CASH: float = 3_254_360.0
 
 # ─── 예수금 ────────────────────────────────────────
-# DEFAULT_CASH: 3,539,839 + 2,170,000(6/2 한화에어로 2주 매도) + 2,850,000(6/2 TIGER S&P500 100주 매도) = 8,559,839
-DEFAULT_CASH: float = 8_559_839.0
+# DEFAULT_CASH: 8,559,839 + ~4,870,000(6/3 MU 3주 매도 $3,240 × ₩1,503) = ~13,429,839
+# USD 매도대금은 원화 환산 추정치 — 실제 환전/정산 후 조정 필요
+DEFAULT_CASH: float = 13_429_839.0
 
 # ─── 모니터링 설정 ─────────────────────────────────
 MONITOR_INTERVAL_SEC: int = int(os.environ.get("MONITOR_INTERVAL_SEC", "300"))
