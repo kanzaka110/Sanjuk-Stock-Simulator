@@ -371,8 +371,9 @@ def _quality_gate(
     """추천 품질 게이트. (action_grade, adjusted_confidence, gate_reason) 반환.
 
     룰:
-    1. 확신도 55 미만 → WATCH (매수/매도 관망 처리)
-    2. 위험 종목(승률 30% 미만) → BLOCKED (예외: 손절+무효화+손익비2.0++동의3/4)
+    1. 확신도 40 미만 → WATCH (매수만. 매도는 확신도 무관하게 통과)
+    2. 위험 종목(승률 30% 미만 & evaluated_count >= 5) → BLOCKED
+       (evaluated < 5면 샘플부족으로 차단 안 함)
     3. 손절가 없으면 → BLOCKED
     4. 손익비 1.5 미만 (0 포함) → BLOCKED
     5. 진입가 0 → BLOCKED (매수/매도)
@@ -391,10 +392,11 @@ def _quality_gate(
             grade = ACTION_BLOCKED
             reasons.append("데이터2+실패→신규매수금지")
 
-    # 위험 종목 체크
+    # 위험 종목 체크 — evaluated_count 5건 이상일 때만 적용 (샘플부족 차단 방지)
     stats = get_accuracy_summary()
     s = stats.get(ticker)
-    if s and s["total"] >= 2 and (s["win_rate"] or 0) < 30:
+    evaluated = s.get("evaluated_count", 0) if s else 0
+    if s and evaluated >= 5 and (s["win_rate"] or 0) < 30:
         # 예외 조건: 4개 모두 충족해야 허용
         has_stoploss = stop_loss > 0
         has_invalidation = bool(invalidation_condition and invalidation_condition.strip())
@@ -416,10 +418,10 @@ def _quality_gate(
             grade = ACTION_BLOCKED
             reasons.append(f"위험종목(승률{s['win_rate']:.0f}%)→차단(미충족:{','.join(missing)})")
 
-    # 확신도 기준
-    if adj_conf < 55 and signal in ("매수", "매도"):
+    # 확신도 기준 — 매수만 적용 (매도는 확신도 무관하게 통과, 손절 놓치면 안 됨)
+    if adj_conf < 40 and signal == "매수":
         grade = max_grade(grade, ACTION_WATCH)
-        reasons.append(f"확신도{adj_conf}<55→관망")
+        reasons.append(f"확신도{adj_conf}<40→관망")
 
     # 손절가 필수 (매수)
     if signal == "매수" and stop_loss <= 0:

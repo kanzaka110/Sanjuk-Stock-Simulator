@@ -50,7 +50,7 @@ def seed_accuracy():
             (ticker, total_predictions, evaluated_count, wins, losses, neutral_count,
              avg_pnl, avg_win, avg_loss, profit_factor, expectancy, win_rate)
         VALUES
-            ('NVDA', 3, 3, 0, 3, 0, -19.2, 0, -19.2, 0, -19.2, 0),
+            ('NVDA', 8, 6, 0, 6, 0, -19.2, 0, -19.2, 0, -19.2, 0),
             ('GOOGL', 2, 2, 0, 2, 0, -32.1, 0, -32.1, 0, -32.1, 0),
             ('207940.KS', 7, 7, 2, 5, 0, -1.8, 3.0, -3.7, 0.32, -1.8, 28.6),
             ('035720.KS', 4, 4, 1, 3, 0, 1.5, 8.0, -0.7, 3.81, 1.5, 25.0),
@@ -580,8 +580,11 @@ class TestPhase3StatisticsCorrection:
     def test_unrealistic_return_excluded(self):
         """abs(pnl_pct) > 100%인 한국 종목이 data_error로 처리."""
         import core.memory as mem
+        from datetime import datetime, timedelta
+        from config.settings import KST
         conn = mem._get_conn()
-        now = "2026-05-20T00:00:00"
+        # 14일 cutoff에 안 걸리도록 최근 날짜 사용
+        now = (datetime.now(KST) - timedelta(days=1)).isoformat()
         # pnl 500% — 한국 종목 기준 비현실적
         conn.execute(
             """INSERT INTO predictions
