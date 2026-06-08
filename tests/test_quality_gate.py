@@ -722,3 +722,62 @@ class TestPhase4Expectancy:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(predictions)").fetchall()}
         for col in ("action_grade", "action_type", "account_type", "briefing_type", "original_signal", "data_quality"):
             assert col in cols, f"Phase 4 컬럼 {col} 누락"
+
+
+class TestNightOrdersTelegram:
+    """야간 브리핑 예약 주문 텔레그램 표시 테스트."""
+
+    def _make_result(self, raw_json: dict, warnings=()):
+        from core.models import BriefingResult
+        return BriefingResult(raw_json=raw_json, quality_warnings=warnings)
+
+    def test_kr_night_empty_orders_shows_none(self):
+        """KR_NIGHT + night_orders=[] → '내일 예약 주문: 없음' 포함."""
+        from core.telegram import _build_impact_message
+        result = self._make_result({
+            "night_orders": [],
+            "advisor_oneliner": "전 종목 관망",
+            "investment_decision": "관망",
+        })
+        msg = _build_impact_message(result, result.raw_json, "🌙", "테스트", "KR_NIGHT")
+        assert "내일 예약 주문: 없음" in msg
+        assert "전 종목 관망" in msg
+
+    def test_us_night_empty_orders_shows_none(self):
+        """US_NIGHT + night_orders=[] → '오늘 밤 지정가 주문: 없음' 포함."""
+        from core.telegram import _build_impact_message
+        result = self._make_result({
+            "night_orders": [],
+            "advisor_oneliner": "MU 트레일링 스톱 유지",
+        })
+        msg = _build_impact_message(result, result.raw_json, "🌙", "테스트", "US_NIGHT")
+        assert "오늘 밤 지정가 주문: 없음" in msg
+
+    def test_night_orders_present_shows_orders(self):
+        """night_orders 존재 → 기존 주문 출력 유지."""
+        from core.telegram import _build_impact_message
+        result = self._make_result({
+            "night_orders": [{"구분": "매수", "종목": "삼성전자", "계좌": "[ISA]",
+                              "지정가": "₩300,000", "수량": "5주"}],
+        })
+        msg = _build_impact_message(result, result.raw_json, "🌙", "테스트", "KR_NIGHT")
+        assert "🟢매수" in msg
+        assert "삼성전자" in msg
+        assert "예약 주문: 없음" not in msg
+
+    def test_manual_no_night_section(self):
+        """MANUAL 브리핑에서는 night_orders 섹션 안 나옴."""
+        from core.telegram import _build_impact_message
+        result = self._make_result({"night_orders": []})
+        msg = _build_impact_message(result, result.raw_json, "📊", "테스트", "MANUAL")
+        assert "예약 주문" not in msg
+
+    def test_fallback_shows_warning(self):
+        """synthesis fallback 시 경고 표시."""
+        from core.telegram import _build_impact_message
+        result = self._make_result({
+            "title": "[FALLBACK] 종합 판단 실패",
+            "night_orders": [],
+        })
+        msg = _build_impact_message(result, result.raw_json, "🌙", "[FALLBACK] 테스트", "KR_NIGHT")
+        assert "종합 판단 실패" in msg

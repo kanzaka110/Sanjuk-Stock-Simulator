@@ -64,7 +64,7 @@ def send_briefing_telegram(
     raw = result.raw_json
     title = result.title or datetime.now(KST).strftime("%Y.%m.%d %H:%M 브리핑")
 
-    msg = _build_impact_message(result, raw, label, title)
+    msg = _build_impact_message(result, raw, label, title, briefing_type)
     return _send_message(msg)
 
 
@@ -84,6 +84,7 @@ def _build_impact_message(
     raw: dict,
     label: str,
     title: str,
+    briefing_type: str = "MANUAL",
 ) -> str:
     """텔레그램용 임팩트 메시지. 한눈에 보이되 핵심 정보만 — 중간 강도."""
     verdict = raw.get("advisor_verdict", "") or "—"
@@ -135,9 +136,12 @@ def _build_impact_message(
 
     # 야간 프리브리핑: 예약 주문 요약 (매수 + 매도)
     night_orders = raw.get("night_orders", []) or []
+    is_night = briefing_type in ("KR_NIGHT", "US_NIGHT")
+
     if night_orders:
         lines.append(SEP)
-        lines.append("🌙 *내일 예약 주문*")
+        night_label = "🌙 *오늘 밤 지정가 주문*" if briefing_type == "US_NIGHT" else "🌙 *내일 예약 주문*"
+        lines.append(night_label)
         for order in night_orders:
             side = order.get("구분", "")
             if not side:
@@ -164,6 +168,25 @@ def _build_impact_message(
             lines.append("📊 *갭 시나리오*")
             for scenario, action in gap.items():
                 lines.append(f"• {scenario}: {action}")
+        lines.append("")
+    elif is_night:
+        # 야간 브리핑인데 주문 없음 → 명시적으로 표시
+        lines.append(SEP)
+        if briefing_type == "US_NIGHT":
+            lines.append("🌙 *오늘 밤 지정가 주문: 없음*")
+        else:
+            lines.append("🌙 *내일 예약 주문: 없음*")
+        # 이유 표시
+        reason_text = (
+            raw.get("advisor_oneliner")
+            or raw.get("next_action")
+            or raw.get("investment_decision", "관망")
+        )
+        if reason_text:
+            lines.append(f"  💬 {reason_text[:150]}")
+        # fallback 여부
+        if "[FALLBACK]" in (raw.get("title", "") or ""):
+            lines.append("  ⚠️ 종합 판단 실패 — 페르소나 요약만 제공")
         lines.append("")
 
     # 매도 추천 (한 줄)
