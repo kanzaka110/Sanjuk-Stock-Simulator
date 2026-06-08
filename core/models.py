@@ -65,6 +65,9 @@ class BriefingResult:
     advisor_conclusion: str = ""
     strategy_summary: str = ""
     raw_json: dict = field(default_factory=dict)
+    # 품질 경고 (partial failure 추적)
+    quality_warnings: tuple[str, ...] = ()  # 실패한 보조분석 목록
+    data_failures: int = 0  # 실패한 데이터 소스 수
 
 
 @dataclass(frozen=True)

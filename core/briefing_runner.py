@@ -25,6 +25,8 @@ class BriefingRunResult:
     telegram_sent: bool = False
     email_sent: bool = False
     error: str = ""
+    status: str = "success"  # success / partial_success / failed
+    quality_warnings: tuple[str, ...] = ()
 
 
 def run_briefing(briefing_type: str = "MANUAL") -> BriefingRunResult:
@@ -77,13 +79,23 @@ def _execute_briefing(briefing_type: str) -> BriefingRunResult:
         except Exception as e:
             log.warning(f"메일 전송 실패: {e}")
 
-        log.info(f"브리핑 완료: {result.title}")
+        # 품질 상태 판정
+        warnings = result.quality_warnings
+        if warnings:
+            status = "partial_success"
+            log.warning(f"브리핑 partial_success: {', '.join(warnings)}")
+        else:
+            status = "success"
+
+        log.info(f"브리핑 완료 ({status}): {result.title}")
         return BriefingRunResult(
             success=True,
             title=result.title,
             notion_url=notion_url,
             telegram_sent=telegram_sent,
             email_sent=email_sent,
+            status=status,
+            quality_warnings=warnings,
         )
     except Exception as e:
         log.error(f"브리핑 실패: {e}")

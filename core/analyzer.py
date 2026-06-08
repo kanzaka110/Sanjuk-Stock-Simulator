@@ -530,18 +530,27 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
     data["regime"] = regime.regime
     data["regime_adjustment"] = regime.risk_adjustment
 
-    result = _build_briefing_result(data)
-
-    # 데이터 실패 집계 (품질 게이트에 전달)
+    # 데이터 실패 집계 + 품질 경고 수집
     _data_failures = 0
+    _quality_warnings: list[str] = []
     if not kr_text and briefing_type not in ("US_BEFORE", "US_NIGHT"):
-        _data_failures += 1  # KRX 데이터 실패
+        _data_failures += 1
+        _quality_warnings.append("KRX 기관/외국인 수급 제외")
     if not chart_analyses:
-        _data_failures += 1  # 차트 비전 실패
+        _data_failures += 1
+        _quality_warnings.append("Gemini 차트 비전 제외")
     if not sentiment_text or sentiment_text == "":
-        _data_failures += 1  # 감성 분석 실패
+        _data_failures += 1
+        _quality_warnings.append("Gemini 감성 분석 제외")
     failed_personas = 4 - len(persona_results)
-    _data_failures += failed_personas  # 페르소나 실패
+    if failed_personas > 0:
+        _data_failures += failed_personas
+        _quality_warnings.append(f"페르소나 {failed_personas}명 분석 실패")
+
+    result = _build_briefing_result(data)
+    # 품질 경고를 BriefingResult에 주입
+    object.__setattr__(result, "quality_warnings", tuple(_quality_warnings))
+    object.__setattr__(result, "data_failures", _data_failures)
 
     # 추천 기록을 메모리에 저장 (품질 게이트 + 가격 괴리 검증)
     saved = save_predictions_from_briefing(data, data_failures=_data_failures, current_prices=current_prices)

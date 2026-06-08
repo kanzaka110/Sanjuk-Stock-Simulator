@@ -103,6 +103,9 @@ def _build_impact_message(
     # 헤더 — 결론 강조
     lines.append(f"{label}")
     lines.append(f"📅 {title}")
+    # 품질 배지
+    if result.quality_warnings:
+        lines.append(f"⚠️ 부분 분석: {', '.join(result.quality_warnings)}")
     lines.append("")
     lines.append(f"🎯 *판단: {verdict}*")
     if oneliner:

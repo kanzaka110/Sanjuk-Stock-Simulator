@@ -13,6 +13,8 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
+import numpy as np
+
 import pandas as pd
 import yfinance as yf
 
@@ -67,7 +69,10 @@ def backtest_rsi(
         delta = close.diff()
         gain = delta.where(delta > 0, 0.0).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
-        rs = gain / loss.replace(0, float("inf"))
+        # division by zero 방어: loss가 0이면 RSI=100으로 처리
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rs = gain / loss.replace(0, np.nan)
+            rs = rs.fillna(100.0)
         rsi = 100 - (100 / (1 + rs))
 
         return _simulate(
