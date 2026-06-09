@@ -128,8 +128,19 @@ def is_us_market_open(now: datetime | None = None) -> bool:
 
 
 def is_any_market_open(now: datetime | None = None) -> bool:
-    """한국장 또는 미국장 개장 여부."""
+    """한국장 또는 미국장 개장 여부 (정규장만)."""
     return is_kr_market_open(now) or is_us_market_open(now)
+
+
+def is_any_market_tradeable(now: datetime | None = None) -> bool:
+    """주문 가능한 시간인지 (한국 정규장 + 미국 프리/정규/애프터).
+
+    모니터 run() 루프의 스캔 기준으로 사용.
+    """
+    session = get_market_session(now)
+    kr_tradeable = session["kr"] == KR_REGULAR
+    us_tradeable = session["us"] in (US_PREMARKET, US_REGULAR, US_AFTERMARKET)
+    return kr_tradeable or us_tradeable
 
 
 def next_market_open(now: datetime | None = None) -> datetime:
@@ -139,6 +150,21 @@ def next_market_open(now: datetime | None = None) -> datetime:
     for offset_min in range(0, 7 * 24 * 60, 5):
         candidate = kst_now + timedelta(minutes=offset_min)
         if is_any_market_open(candidate):
+            return candidate
+
+    # 폴백: 다음 월요일 09:00 KST
+    days_ahead = (7 - kst_now.weekday()) % 7 or 7
+    next_monday = kst_now.replace(hour=9, minute=0, second=0, microsecond=0)
+    return next_monday + timedelta(days=days_ahead)
+
+
+def next_tradeable_session(now: datetime | None = None) -> datetime:
+    """다음 주문 가능 시간 (KST) 반환. 미국 프리마켓 포함."""
+    kst_now = _to_kst(now or datetime.now(KST))
+
+    for offset_min in range(0, 7 * 24 * 60, 5):
+        candidate = kst_now + timedelta(minutes=offset_min)
+        if is_any_market_tradeable(candidate):
             return candidate
 
     # 폴백: 다음 월요일 09:00 KST

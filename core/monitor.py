@@ -36,8 +36,8 @@ class MarketMonitor:
         self._last_scan: datetime | None = None
 
     def run(self) -> None:
-        """메인 감시 루프."""
-        from core.market_hours import is_any_market_open, next_market_open
+        """메인 감시 루프 — 주문 가능 시간 기준 (미국 프리/애프터 포함)."""
+        from core.market_hours import is_any_market_tradeable, next_tradeable_session
 
         self._running = True
         log.info(f"시장 모니터 시작 (간격: {MONITOR_INTERVAL_SEC}초)")
@@ -46,11 +46,11 @@ class MarketMonitor:
             try:
                 now = datetime.now(KST)
 
-                if not is_any_market_open(now):
-                    next_open = next_market_open(now)
+                if not is_any_market_tradeable(now):
+                    next_open = next_tradeable_session(now)
                     wait_sec = (next_open - now).total_seconds()
                     wait_sec = max(60, min(wait_sec, 3600))  # 1분~1시간 대기
-                    log.info(f"장 마감 — {wait_sec:.0f}초 대기 (다음: {next_open.strftime('%H:%M')})")
+                    log.info(f"주문 가능 시간 아님 — {wait_sec:.0f}초 대기 (다음: {next_open.strftime('%H:%M')})")
                     self._sleep(wait_sec)
                     continue
 
@@ -365,6 +365,13 @@ class MarketMonitor:
             log.debug("목표가/손절가 조회 실패: %s", e)
             return triggers
 
+        # 현재 세션 — 주문 불가 시간이면 트리거 생성 금지
+        from core.market_hours import get_market_session, KR_REGULAR, US_PREMARKET, US_REGULAR, US_AFTERMARKET, CLOSED
+        session = get_market_session(now)
+
+        def _is_kr_ticker(tk: str) -> bool:
+            return tk.endswith((".KS", ".KQ"))
+
         checked: set[str] = set()  # 같은 종목은 최신 1건만
         for row in rows:
             ticker = row["ticker"]
@@ -374,6 +381,17 @@ class MarketMonitor:
 
             if ticker not in held_tickers:
                 continue
+
+            # 주문 가능 시간 체크
+            is_kr = _is_kr_ticker(ticker)
+            if is_kr:
+                if session["kr"] != KR_REGULAR:
+                    continue  # 한국 정규장 아니면 스킵
+                ticker_session = KR_REGULAR
+            else:
+                if session["us"] not in (US_PREMARKET, US_REGULAR, US_AFTERMARKET):
+                    continue  # 미국 주문 불가 시간이면 스킵
+                ticker_session = session["us"]
 
             quote = _get_quote_realtime(ticker)
             if quote is None or quote.price <= 0:
@@ -391,14 +409,14 @@ class MarketMonitor:
                         ticker=ticker, name=name,
                         trigger_type=TriggerType.TARGET_HIT,
                         current_value=quote.price, threshold=target,
-                        timestamp=now,
+                        timestamp=now, market_session=ticker_session,
                     ))
                 elif stop > 0 and quote.price <= stop:
                     triggers.append(AlertTrigger(
                         ticker=ticker, name=name,
                         trigger_type=TriggerType.STOP_LOSS_HIT,
                         current_value=quote.price, threshold=stop,
-                        timestamp=now,
+                        timestamp=now, market_session=ticker_session,
                     ))
             # 매도 추천: 현재가 ≤ 목표가 → 익절, 현재가 ≥ 손절가 → 손절
             elif signal == "매도":
@@ -407,14 +425,14 @@ class MarketMonitor:
                         ticker=ticker, name=name,
                         trigger_type=TriggerType.TARGET_HIT,
                         current_value=quote.price, threshold=target,
-                        timestamp=now,
+                        timestamp=now, market_session=ticker_session,
                     ))
                 elif stop > 0 and quote.price >= stop:
                     triggers.append(AlertTrigger(
                         ticker=ticker, name=name,
                         trigger_type=TriggerType.STOP_LOSS_HIT,
                         current_value=quote.price, threshold=stop,
-                        timestamp=now,
+                        timestamp=now, market_session=ticker_session,
                     ))
 
             time.sleep(0.1)  # rate limit

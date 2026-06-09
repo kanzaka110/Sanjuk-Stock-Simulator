@@ -879,3 +879,48 @@ class TestIsActionablePolicy:
         assert "스프레드" in msg
         assert "체결 리스크" in msg
         assert "프리마켓" in msg
+
+
+class TestMarketTradeableSession:
+    """주문 가능 시간 + 세션 기반 모니터 테스트."""
+
+    def test_us_premarket_tradeable(self):
+        """KST 18:00 (ET 05:00 써머타임) → 미국 프리마켓 → tradeable True."""
+        from core.market_hours import is_any_market_tradeable, get_market_session, US_PREMARKET
+        from datetime import datetime, timezone, timedelta
+        KST = timezone(timedelta(hours=9))
+        # 2026-06-09 화요일 KST 18:00 = ET 05:00 (써머타임)
+        dt = datetime(2026, 6, 9, 18, 0, tzinfo=KST)
+        assert is_any_market_tradeable(dt) is True
+        assert get_market_session(dt)["us"] == US_PREMARKET
+
+    def test_us_aftermarket_tradeable(self):
+        """KST 05:30 (ET 16:30 써머타임) → 미국 애프터마켓 → tradeable True."""
+        from core.market_hours import is_any_market_tradeable, get_market_session, US_AFTERMARKET
+        from datetime import datetime, timezone, timedelta
+        KST = timezone(timedelta(hours=9))
+        # 2026-06-10 수요일 KST 05:30 = ET 16:30
+        dt = datetime(2026, 6, 10, 5, 30, tzinfo=KST)
+        assert is_any_market_tradeable(dt) is True
+        assert get_market_session(dt)["us"] == US_AFTERMARKET
+
+    def test_closed_not_tradeable(self):
+        """주말 → tradeable False."""
+        from core.market_hours import is_any_market_tradeable
+        from datetime import datetime, timezone, timedelta
+        KST = timezone(timedelta(hours=9))
+        # 2026-06-07 일요일
+        dt = datetime(2026, 6, 7, 14, 0, tzinfo=KST)
+        assert is_any_market_tradeable(dt) is False
+
+    def test_next_tradeable_returns_premarket(self):
+        """다음 주문 가능 시간이 프리마켓 시작을 포함."""
+        from core.market_hours import next_tradeable_session, get_market_session, US_PREMARKET
+        from datetime import datetime, timezone, timedelta
+        KST = timezone(timedelta(hours=9))
+        # 2026-06-09 화요일 KST 16:00 — 한국 마감, 미국 프리마켓 전
+        dt = datetime(2026, 6, 9, 16, 0, tzinfo=KST)
+        next_sess = next_tradeable_session(dt)
+        sess = get_market_session(next_sess)
+        # 프리마켓 또는 정규장이어야 함
+        assert sess["us"] in (US_PREMARKET, "US_REGULAR") or sess["kr"] == "KR_REGULAR"
