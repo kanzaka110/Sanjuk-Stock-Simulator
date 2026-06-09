@@ -31,8 +31,11 @@ from core.news import gather_news
 log = logging.getLogger(__name__)
 
 
-def _fetch_watchlist_text() -> str:
-    """Watchlist 종목 가격 + RSI + MA를 텍스트로 변환. 보유 외 신규 후보."""
+def _fetch_watchlist_text(snapshot_prices: dict[str, float] | None = None) -> str:
+    """Watchlist 종목 가격 + RSI + MA를 텍스트로 변환. 보유 외 신규 후보.
+
+    snapshot_prices가 있으면 시세를 재조회하지 않고 활용 (API 호출 절약).
+    """
     if not WATCHLIST:
         return ""
 
@@ -41,9 +44,18 @@ def _fetch_watchlist_text() -> str:
     except ImportError:
         return ""
 
+    # 보유 종목은 제외 (Watchlist에 있지만 이미 보유 중인 종목)
+    from config.settings import HOLDINGS_GENERAL, HOLDINGS_ISA, HOLDINGS_RIA, HOLDINGS_IRP, HOLDINGS_PENSION
+    held: set[str] = set()
+    for h in (HOLDINGS_GENERAL, HOLDINGS_ISA, HOLDINGS_RIA, HOLDINGS_IRP, HOLDINGS_PENSION):
+        held.update(h.keys())
+
     lines = ["【신규 매수 후보 (Watchlist) — 보유 외, RSI/MA 기준 검토】"]
 
     for tk, name in WATCHLIST.items():
+        if tk in held:
+            continue  # 이미 보유 중이면 스킵
+
         try:
             ticker = yf.Ticker(tk)
             hist = ticker.history(period="60d")
@@ -52,7 +64,8 @@ def _fetch_watchlist_text() -> str:
                 continue
 
             close = hist["Close"]
-            price = float(close.iloc[-1])
+            # snapshot 가격 우선, 없으면 yfinance
+            price = snapshot_prices.get(tk, float(close.iloc[-1])) if snapshot_prices else float(close.iloc[-1])
             prev = float(close.iloc[-2]) if len(close) > 1 else price
             pct = (price - prev) / prev * 100 if prev > 0 else 0.0
 
@@ -60,7 +73,10 @@ def _fetch_watchlist_text() -> str:
             delta = close.diff()
             gain = delta.where(delta > 0, 0.0).rolling(14).mean()
             loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
-            rs = gain / loss.replace(0, float("inf"))
+            import numpy as np
+            with np.errstate(divide="ignore", invalid="ignore"):
+                rs = gain / loss.replace(0, np.nan)
+                rs = rs.fillna(100.0)
             rsi_series = 100 - (100 / (1 + rs))
             rsi = float(rsi_series.iloc[-1]) if len(rsi_series) > 0 else 50.0
 
@@ -465,7 +481,7 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
 
     log.info("[12.5/13] Watchlist 신규 후보 데이터 수집...")
     try:
-        watchlist_text = _fetch_watchlist_text()
+        watchlist_text = _fetch_watchlist_text(snapshot_prices=current_prices)
     except Exception as e:
         log.warning(f"Watchlist 수집 실패: {e}")
         watchlist_text = ""

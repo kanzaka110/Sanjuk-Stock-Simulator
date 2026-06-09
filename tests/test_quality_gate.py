@@ -924,3 +924,40 @@ class TestMarketTradeableSession:
         sess = get_market_session(next_sess)
         # 프리마켓 또는 정규장이어야 함
         assert sess["us"] in (US_PREMARKET, "US_REGULAR") or sess["kr"] == "KR_REGULAR"
+
+
+class TestWatchlistInSnapshot:
+    """Watchlist가 시세 수집 대상에 포함되는지 테스트."""
+
+    def test_us_watchlist_in_us_before(self):
+        """미국 Watchlist(MSFT, PLTR)가 US_BEFORE portfolio에 포함."""
+        from config.settings import get_market_config
+        portfolio, _, _ = get_market_config("US_BEFORE")
+        assert "MSFT" in portfolio, "MSFT가 US_BEFORE에 없음"
+        assert "PLTR" in portfolio, "PLTR이 US_BEFORE에 없음"
+
+    def test_kr_watchlist_in_kr_before(self):
+        """국내 Watchlist(SK하이닉스)가 KR_BEFORE portfolio에 포함."""
+        from config.settings import get_market_config
+        portfolio, _, _ = get_market_config("KR_BEFORE")
+        assert "000660.KS" in portfolio, "SK하이닉스가 KR_BEFORE에 없음"
+
+    def test_full_watchlist_in_manual(self):
+        """MANUAL에 전체 Watchlist 포함."""
+        from config.settings import get_market_config, WATCHLIST
+        portfolio, _, _ = get_market_config("MANUAL")
+        for tk in WATCHLIST:
+            assert tk in portfolio, f"{tk}가 MANUAL에 없음"
+
+    def test_us_watchlist_not_in_kr(self):
+        """미국 Watchlist는 KR_BEFORE에 포함되지 않음."""
+        from config.settings import get_market_config
+        portfolio, _, _ = get_market_config("KR_BEFORE")
+        assert "MSFT" not in portfolio
+        assert "PLTR" not in portfolio
+
+    def test_kr_watchlist_not_in_us(self):
+        """국내 Watchlist는 US_BEFORE에 포함되지 않음."""
+        from config.settings import get_market_config
+        portfolio, _, _ = get_market_config("US_BEFORE")
+        assert "000660.KS" not in portfolio

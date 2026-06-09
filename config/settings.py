@@ -137,19 +137,26 @@ US_INDICES: dict[str, str] = {
 }
 
 
+# ─── 시장별 워치리스트 분리 ──────────────────────────
+KR_WATCHLIST: dict[str, str] = {
+    tk: nm for tk, nm in WATCHLIST.items() if ".KS" in tk or ".KQ" in tk
+}
+US_WATCHLIST: dict[str, str] = {
+    tk: nm for tk, nm in WATCHLIST.items() if ".KS" not in tk and ".KQ" not in tk
+}
+
+
 def get_market_config(briefing_type: str) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
     """briefing_type에 따라 (portfolio, indices, macro) 반환.
 
-    KR_BEFORE: 한국 종목 + 한국 지수 중심 (미국 지수는 참고용 포함)
-    US_BEFORE: 미국 종목 + 미국 지수 중심 (한국 지수는 참고용 포함)
-    기타(MANUAL): 전체 포트폴리오 + RIA 허용 종목
-    RIA_ALLOWED_TICKERS는 KR 브리핑 및 MANUAL에 항상 포함 (시세 수집 대상).
+    포트폴리오 + 워치리스트 + RIA 허용 종목을 시장별로 분리.
+    워치리스트도 시세 수집 대상에 포함 (신규 매수 후보 추천용).
     """
     if briefing_type in ("KR_BEFORE", "KR_NIGHT"):
-        return {**KR_PORTFOLIO, **RIA_ALLOWED_TICKERS}, {**KR_INDICES, **US_INDICES}, MACRO
+        return {**KR_PORTFOLIO, **KR_WATCHLIST, **RIA_ALLOWED_TICKERS}, {**KR_INDICES, **US_INDICES}, MACRO
     if briefing_type in ("US_BEFORE", "US_NIGHT", "US_CLOSE"):
-        return US_PORTFOLIO, {**US_INDICES, **KR_INDICES}, MACRO
-    return {**PORTFOLIO, **RIA_ALLOWED_TICKERS}, INDICES, MACRO
+        return {**US_PORTFOLIO, **US_WATCHLIST}, {**US_INDICES, **KR_INDICES}, MACRO
+    return {**PORTFOLIO, **WATCHLIST, **RIA_ALLOWED_TICKERS}, INDICES, MACRO
 
 
 # ─── 실제 보유 수량 (삼성증권 실데이터 기준, 2026-04-07) ─────
