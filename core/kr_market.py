@@ -1,30 +1,131 @@
 """
-한국 시장 강화 — KRX/DART 직접 조회
+한국 시장 강화 — 네이버 금융 조회
 
-pykrx 대신 KRX/DART API를 직접 호출하여
-기관/외국인 매매, 펀더멘털(PER/PBR/배당률) 데이터를 수집한다.
+KRX data.krx.co.kr가 투자자별 매매/펀더멘털 데이터를 로그인 게이트로 막아
+(OTP 응답 "LOGOUT") 직접 호출이 불가능해졌다. 로그인 불필요한 네이버 금융을
+스크래핑하여 기관/외국인 순매매와 펀더멘털(PER/PBR/배당률)을 수집한다.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
 
 import requests
 
-from config.settings import KRW_TICKERS, KST
+from config.settings import KRW_TICKERS
 
 log = logging.getLogger(__name__)
 
-# KRX API (비공식, 공개 데이터)
-KRX_OTP_URL = "http://data.krx.co.kr/comm/fileDn/GenerateOTP/generate.cmd"
-KRX_DOWNLOAD_URL = "http://data.krx.co.kr/comm/fileDn/download_csv/download.cmd"
+# 네이버 금융 (로그인 불필요, 공개 데이터)
+NAVER_FRGN_URL = "https://finance.naver.com/item/frgn.naver"
+NAVER_MAIN_URL = "https://finance.naver.com/item/main.naver"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0",
-    "Referer": "http://data.krx.co.kr/contents/MDC/MDI/mdiLoader/index.cmd",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Referer": "https://finance.naver.com/",
 }
+
+# 종목코드 → 종목명 매핑 (네이버는 이름을 안 주므로 설정에서 보강)
+_NAME_MAP: dict[str, str] = {}
+
+
+def _name_for(code: str) -> str:
+    """KRX 종목코드(6자리)로 종목명 조회. 설정의 포트폴리오/관심/RIA 맵 통합."""
+    global _NAME_MAP
+    if not _NAME_MAP:
+        from config.settings import PORTFOLIO, RIA_ALLOWED_TICKERS, WATCHLIST
+
+        for src in (PORTFOLIO, WATCHLIST, RIA_ALLOWED_TICKERS):
+            for tk, nm in src.items():
+                _NAME_MAP[_krx_ticker(tk)] = nm
+    return _NAME_MAP.get(code, code)
+
+
+# 네이버 frgn 페이지 일별 시리즈 캐시 (프로세스 수명 동안 — 브리핑은 단명 프로세스)
+_FRGN_CACHE: dict[str, list[dict]] = {}
+
+
+def _fetch_naver_frgn(code: str) -> list[dict]:
+    """네이버 금융 외국인·기관 순매매 일별 시리즈 조회.
+
+    Returns:
+        최신순 dict 리스트: [{"date": "YYYYMMDD", "close": float,
+        "inst_shares": float, "foreign_shares": float}, ...]
+        실패 시 빈 리스트.
+    """
+    if code in _FRGN_CACHE:
+        return _FRGN_CACHE[code]
+
+    import io
+
+    import pandas as pd
+
+    result: list[dict] = []
+    try:
+        r = requests.get(
+            NAVER_FRGN_URL, params={"code": code}, headers=HEADERS, timeout=10
+        )
+        if r.status_code != 200:
+            log.warning(f"네이버 수급 조회 실패 ({code}): HTTP {r.status_code}")
+            return []
+
+        tables = pd.read_html(io.StringIO(r.text))
+        # 외국인/기관 일별 매매 테이블: 9개 컬럼(날짜·종가·전일비·등락률·거래량·기관순매매·외국인순매매·보유주수·보유율)
+        target = None
+        for t in tables:
+            if t.shape[1] == 9 and t.shape[0] > 3:
+                target = t
+                break
+        if target is None:
+            log.warning(f"네이버 수급 테이블 미발견 ({code})")
+            return []
+
+        for _, row in target.iterrows():
+            vals = list(row)
+            raw_date = str(vals[0]).strip()
+            m = re.match(r"(\d{4})\.(\d{2})\.(\d{2})", raw_date)
+            if not m:
+                continue
+            try:
+                close = float(str(vals[1]).replace(",", ""))
+                inst = float(str(vals[5]).replace(",", ""))
+                foreign = float(str(vals[6]).replace(",", ""))
+            except (ValueError, TypeError):
+                continue
+            result.append({
+                "date": f"{m.group(1)}{m.group(2)}{m.group(3)}",
+                "close": close,
+                "inst_shares": inst,
+                "foreign_shares": foreign,
+            })
+    except Exception as e:
+        log.warning(f"네이버 수급 파싱 실패 ({code}): {e}")
+        return []
+
+    _FRGN_CACHE[code] = result
+    return result
+
+
+def _flow_from_row(code: str, row: dict) -> "InstitutionalFlow":
+    """네이버 일별 행(주식수) → InstitutionalFlow(백만원 환산)."""
+    close = row["close"]
+    # 순매매량(주) × 종가(원) / 1e6 = 순매매대금(백만원)
+    foreign_won = row["foreign_shares"] * close / 1_000_000
+    inst_won = row["inst_shares"] * close / 1_000_000
+    return InstitutionalFlow(
+        ticker=f"{code}.KS",
+        name=_name_for(code),
+        foreign_net=foreign_won,
+        institution_net=inst_won,
+        individual_net=0.0,  # 네이버 frgn 페이지는 개인 순매매 미제공
+        foreign_label="매수" if foreign_won > 0 else "매도",
+        institution_label="매수" if inst_won > 0 else "매도",
+    )
 
 
 @dataclass(frozen=True)
@@ -60,196 +161,129 @@ def _krx_ticker(ticker: str) -> str:
 
 
 def fetch_institutional_flow(date: str | None = None) -> list[InstitutionalFlow]:
-    """KRX 투자자별 매매 동향 조회.
+    """네이버 금융 투자자별 매매 동향 조회 (포트폴리오 종목).
 
     Args:
-        date: 조회 날짜 (YYYYMMDD). None이면 직전 거래일.
+        date: 조회 날짜 (YYYYMMDD). None이면 각 종목의 최신 거래일.
 
     Returns:
-        InstitutionalFlow 리스트 (포트폴리오 종목만)
+        InstitutionalFlow 리스트 (외국인/기관 순매매를 백만원으로 환산)
     """
-    if date is None:
-        # 직전 거래일 추정 (주말 제외)
-        now = datetime.now(KST)
-        for offset in range(0, 5):
-            d = now - timedelta(days=offset)
-            if d.weekday() < 5:  # 월~금
-                date = d.strftime("%Y%m%d")
-                break
+    results: list[InstitutionalFlow] = []
+    codes = {_krx_ticker(tk) for tk in KRW_TICKERS}
 
-    # 최대 2회 시도 (당일 실패 시 전일 재시도)
-    dates_to_try = [date]
-    prev = datetime.now(KST) - timedelta(days=1)
-    while prev.weekday() >= 5:
-        prev -= timedelta(days=1)
-    prev_date = prev.strftime("%Y%m%d")
-    if prev_date != date:
-        dates_to_try.append(prev_date)
+    for code in codes:
+        series = _fetch_naver_frgn(code)
+        if not series:
+            continue
 
-    for try_date in dates_to_try:
-        try:
-            otp_params = {
-                "locale": "ko_KR",
-                "mktId": "STK",
-                "trdDd": try_date,
-                "money": "1",
-                "csvxls_is498No": "",
-                "name": "fileDown",
-                "url": "dbms/MDC/STAT/standard/MDCSTAT02203",
-            }
-            otp_res = requests.post(KRX_OTP_URL, data=otp_params, headers=HEADERS, timeout=10)
-            otp = otp_res.text
+        row = None
+        if date is not None:
+            row = next((r for r in series if r["date"] == date), None)
+        if row is None:
+            row = series[0]  # 최신 거래일
 
-            csv_res = requests.post(
-                KRX_DOWNLOAD_URL,
-                data={"code": otp},
-                headers=HEADERS,
-                timeout=10,
-            )
+        results.append(_flow_from_row(code, row))
 
-            if csv_res.status_code != 200 or len(csv_res.content) < 100:
-                log.warning(f"KRX 데이터 조회 실패 ({try_date}): {csv_res.status_code}")
-                continue
+    if not results:
+        log.warning("네이버 기관/외국인 매매 조회 실패 (전 종목)")
+    return results
 
-            import io
-            import pandas as pd
 
-            df = pd.read_csv(io.BytesIO(csv_res.content), encoding="euc-kr")
+def _fetch_naver_fundamental(code: str) -> Fundamental | None:
+    """네이버 금융 종목 페이지에서 PER/EPS/PBR/배당률 조회."""
+    try:
+        r = requests.get(
+            NAVER_MAIN_URL, params={"code": code}, headers=HEADERS, timeout=10
+        )
+        if r.status_code != 200:
+            return None
+        r.encoding = "euc-kr"
+        html = r.text
 
-            results: list[InstitutionalFlow] = []
-            portfolio_codes = {_krx_ticker(tk) for tk in KRW_TICKERS}
+        def from_id(eid: str) -> float:
+            m = re.search(rf'id="{eid}"[^>]*>([^<]+)<', html)
+            if not m:
+                return 0.0
+            try:
+                return float(m.group(1).replace(",", "").strip())
+            except ValueError:
+                return 0.0
 
-            for _, row in df.iterrows():
-                code = str(row.get("종목코드", "")).strip()
-                if code not in portfolio_codes:
-                    continue
+        def from_label(label: str) -> float:
+            # 투자정보 테이블의 "배당수익률 N.NN%" 형태
+            m = re.search(rf'{label}[^0-9\-]*?([\-]?[\d,]+\.?\d*)', html)
+            if not m:
+                return 0.0
+            try:
+                return float(m.group(1).replace(",", ""))
+            except ValueError:
+                return 0.0
 
-                name = str(row.get("종목명", "")).strip()
-                foreign = float(str(row.get("외국인합계", "0")).replace(",", "") or "0")
-                institution = float(str(row.get("기관합계", "0")).replace(",", "") or "0")
-                individual = float(str(row.get("개인", "0")).replace(",", "") or "0")
+        per = from_id("_per")
+        eps = from_id("_eps")
+        pbr = from_id("_pbr")
+        div_yield = from_label("배당수익률")
 
-                results.append(InstitutionalFlow(
-                    ticker=f"{code}.KS",
-                    name=name,
-                    foreign_net=foreign,
-                    institution_net=institution,
-                    individual_net=individual,
-                    foreign_label="매수" if foreign > 0 else "매도",
-                    institution_label="매수" if institution > 0 else "매도",
-                ))
+        if per == 0.0 and pbr == 0.0 and eps == 0.0:
+            return None  # 데이터 미확보 → 폴백 유도
 
-            if results:
-                if try_date != date:
-                    log.info(f"KRX 당일 데이터 없음 → 전일({try_date}) 데이터 활용")
-                return results
-        except Exception as e:
-            log.warning(f"기관/외국인 매매 조회 실패 ({try_date}): {e}")
-
-    log.warning("KRX 기관/외국인 매매 2회 시도 모두 실패")
-    return []
+        return Fundamental(
+            ticker=f"{code}.KS",
+            name=_name_for(code),
+            per=per,
+            pbr=pbr,
+            eps=eps,
+            bps=0.0,  # 네이버 메인 페이지 미제공
+            div_yield=div_yield,
+            market_cap=0.0,  # 네이버 메인 페이지 미제공
+        )
+    except Exception as e:
+        log.warning(f"네이버 펀더멘털 조회 실패 ({code}): {e}")
+        return None
 
 
 def fetch_fundamentals() -> list[Fundamental]:
-    """KRX 종목별 펀더멘털 데이터 조회 (PER/PBR/배당률).
+    """네이버 금융 종목별 펀더멘털 데이터 조회 (PER/PBR/배당률).
 
     Returns:
         Fundamental 리스트 (포트폴리오 종목만)
     """
-    now = datetime.now(KST)
-    date = now.strftime("%Y%m%d")
-
-    try:
-        otp_params = {
-            "locale": "ko_KR",
-            "mktId": "STK",
-            "trdDd": date,
-            "money": "1",
-            "csvxls_isNo": "",
-            "name": "fileDown",
-            "url": "dbms/MDC/STAT/standard/MDCSTAT03501",
-        }
-        otp_res = requests.post(KRX_OTP_URL, data=otp_params, headers=HEADERS, timeout=10)
-        otp = otp_res.text
-
-        csv_res = requests.post(
-            KRX_DOWNLOAD_URL,
-            data={"code": otp},
-            headers=HEADERS,
-            timeout=10,
-        )
-
-        if csv_res.status_code != 200 or len(csv_res.content) < 100:
-            return []
-
-        import io
-        import pandas as pd
-
-        df = pd.read_csv(io.BytesIO(csv_res.content), encoding="euc-kr")
-
-        results: list[Fundamental] = []
-        portfolio_codes = {_krx_ticker(tk) for tk in KRW_TICKERS}
-
-        for _, row in df.iterrows():
-            code = str(row.get("종목코드", "")).strip()
-            if code not in portfolio_codes:
-                continue
-
-            def safe_float(val: str | float, default: float = 0.0) -> float:
-                try:
-                    return float(str(val).replace(",", "").replace("-", "0"))
-                except (ValueError, TypeError):
-                    return default
-
-            results.append(Fundamental(
-                ticker=f"{code}.KS",
-                name=str(row.get("종목명", "")).strip(),
-                per=safe_float(row.get("PER", 0)),
-                pbr=safe_float(row.get("PBR", 0)),
-                eps=safe_float(row.get("EPS", 0)),
-                bps=safe_float(row.get("BPS", 0)),
-                div_yield=safe_float(row.get("DIV", 0)),
-                market_cap=safe_float(row.get("시가총액", 0)) / 100_000_000,
-            ))
-
-        return results
-    except Exception as e:
-        log.warning(f"펀더멘털 조회 실패: {e}")
-        return []
+    results: list[Fundamental] = []
+    codes = {_krx_ticker(tk) for tk in KRW_TICKERS}
+    for code in codes:
+        f = _fetch_naver_fundamental(code)
+        if f:
+            results.append(f)
+    return results
 
 
 def fetch_cumulative_flows(days: int = 5) -> dict[str, dict]:
-    """N일 누적 외국인/기관 순매수 데이터 — KRX API 다중 호출.
+    """N일 누적 외국인/기관 순매수 데이터 — 네이버 종목별 1회 조회.
 
     Returns:
         {ticker: {"foreign_5d": sum, "institution_5d": sum, "foreign_trend": "매수전환/매도지속/..."}}
     """
-    now = datetime.now(KST)
     cumulative: dict[str, dict] = {}
+    codes = {_krx_ticker(tk) for tk in KRW_TICKERS}
 
-    for offset in range(days):
-        d = now - timedelta(days=offset)
-        # 주말 건너뛰기
-        while d.weekday() >= 5:
-            d -= timedelta(days=1)
-        date_str = d.strftime("%Y%m%d")
-
-        try:
-            flows = fetch_institutional_flow(date=date_str)
-            for f in flows:
-                if f.ticker not in cumulative:
-                    cumulative[f.ticker] = {
-                        "name": f.name,
-                        "foreign_5d": 0.0,
-                        "institution_5d": 0.0,
-                        "daily_foreign": [],
-                    }
-                cumulative[f.ticker]["foreign_5d"] += f.foreign_net
-                cumulative[f.ticker]["institution_5d"] += f.institution_net
-                cumulative[f.ticker]["daily_foreign"].append(f.foreign_net)
-        except Exception as e:
-            log.debug("누적 수급 %s 조회 실패: %s", date_str, e)
+    for code in codes:
+        series = _fetch_naver_frgn(code)
+        if not series:
             continue
+
+        ticker = f"{code}.KS"
+        # 네이버는 최신순 → 최근 days일을 일별 환산(백만원)
+        recent = [_flow_from_row(code, r) for r in series[:days]]
+        if not recent:
+            continue
+
+        cumulative[ticker] = {
+            "name": recent[0].name,
+            "foreign_5d": sum(f.foreign_net for f in recent),
+            "institution_5d": sum(f.institution_net for f in recent),
+            "daily_foreign": [f.foreign_net for f in recent],  # 최신순
+        }
 
     # 추세 레이블 생성
     for ticker, data in cumulative.items():

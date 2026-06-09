@@ -37,6 +37,37 @@ class ChartAnalysis:
     confidence: int  # 0-100
 
 
+_CHART_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "patterns": {"type": "array", "items": {"type": "string"}},
+        "support_levels": {"type": "array", "items": {"type": "number"}},
+        "resistance_levels": {"type": "array", "items": {"type": "number"}},
+        "trend_description": {"type": "string"},
+        "action_suggestion": {"type": "string"},
+        "confidence": {"type": "integer"},
+    },
+    "required": [
+        "patterns", "support_levels", "resistance_levels",
+        "trend_description", "action_suggestion", "confidence",
+    ],
+}
+
+
+def _build_chart_analysis(data: dict, ticker: str, name: str) -> ChartAnalysis:
+    """파싱된 JSON dict를 ChartAnalysis로 변환."""
+    return ChartAnalysis(
+        ticker=ticker,
+        name=name,
+        patterns=tuple(data.get("patterns", [])),
+        support_levels=tuple(float(s) for s in data.get("support_levels", [])),
+        resistance_levels=tuple(float(r) for r in data.get("resistance_levels", [])),
+        trend_description=data.get("trend_description", ""),
+        action_suggestion=data.get("action_suggestion", ""),
+        confidence=int(data.get("confidence", 50)),
+    )
+
+
 def generate_chart_image(
     ticker: str, period: str = "6mo"
 ) -> bytes | None:
@@ -132,16 +163,24 @@ def generate_chart_image(
 def analyze_chart_with_vision(
     ticker: str, name: str = "", period: str = "6mo"
 ) -> ChartAnalysis | None:
-    """차트 이미지를 Gemini에 전송하여 패턴 분석.
+    """차트 이미지를 AI Vision으로 패턴 분석.
+
+    1차: Claude CLI(이미지 Read), 2차 폴백: Gemini.
 
     Returns:
         ChartAnalysis 또는 실패 시 None
     """
-    if not GEMINI_API_KEY:
-        return None
-
     image_bytes = generate_chart_image(ticker, period)
     if not image_bytes:
+        return None
+
+    # 1차: Claude CLI Vision (Max 구독 활용, API 비용 $0)
+    cli_result = _analyze_chart_cli(ticker, name, period, image_bytes)
+    if cli_result is not None:
+        return cli_result
+
+    # 2차 폴백: Gemini 2.5 Flash
+    if not GEMINI_API_KEY:
         return None
 
     try:
@@ -152,31 +191,7 @@ def analyze_chart_with_vision(
         client = genai.Client(api_key=GEMINI_API_KEY)
 
         image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/png")
-
-        chart_schema = {
-            "type": "object",
-            "properties": {
-                "patterns": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                },
-                "support_levels": {
-                    "type": "array",
-                    "items": {"type": "number"},
-                },
-                "resistance_levels": {
-                    "type": "array",
-                    "items": {"type": "number"},
-                },
-                "trend_description": {"type": "string"},
-                "action_suggestion": {"type": "string"},
-                "confidence": {"type": "integer"},
-            },
-            "required": [
-                "patterns", "support_levels", "resistance_levels",
-                "trend_description", "action_suggestion", "confidence",
-            ],
-        }
+        chart_schema = _CHART_SCHEMA
 
         prompt = f"""이 차트는 {name}({ticker})의 {period} 캔들차트다.
 SMA20, SMA50 이동평균과 볼린저밴드가 표시되어 있다.
@@ -239,19 +254,52 @@ SMA20, SMA50 이동평균과 볼린저밴드가 표시되어 있다.
                 confidence=0,
             )
 
-        return ChartAnalysis(
-            ticker=ticker,
-            name=name,
-            patterns=tuple(data.get("patterns", [])),
-            support_levels=tuple(float(s) for s in data.get("support_levels", [])),
-            resistance_levels=tuple(float(r) for r in data.get("resistance_levels", [])),
-            trend_description=data.get("trend_description", ""),
-            action_suggestion=data.get("action_suggestion", ""),
-            confidence=int(data.get("confidence", 50)),
-        )
+        return _build_chart_analysis(data, ticker, name)
     except Exception as e:
         log.warning(f"차트 비전 분석 실패 ({ticker}): {e}")
         return None
+
+
+def _analyze_chart_cli(
+    ticker: str, name: str, period: str, image_bytes: bytes
+) -> ChartAnalysis | None:
+    """Claude CLI(이미지 Read)로 차트 분석. 실패 시 None(폴백 유도)."""
+    import json
+    import os
+    import tempfile
+
+    from core.claude_cli import claude_cli
+
+    tmpdir = tempfile.mkdtemp(prefix="chartvision_")
+    img_path = os.path.join(tmpdir, "chart.png")
+    try:
+        with open(img_path, "wb") as f:
+            f.write(image_bytes)
+
+        prompt = f"""{img_path} 파일은 {name}({ticker})의 {period} 캔들차트다.
+SMA20, SMA50 이동평균과 볼린저밴드가 표시되어 있다.
+Read 툴로 이 이미지를 읽고 차트 패턴, 지지선/저항선, 추세, 매매 제안을 분석해줘."""
+
+        raw = claude_cli(
+            prompt,
+            model="sonnet",
+            timeout=180,
+            json_schema=json.dumps(_CHART_SCHEMA, ensure_ascii=False),
+            allowed_tools="Read",
+            add_dirs=[tmpdir],
+        )
+        if not raw:
+            return None
+        return _build_chart_analysis(json.loads(raw), ticker, name)
+    except Exception as e:  # noqa: BLE001 - CLI 실패는 폴백으로 흡수
+        log.warning(f"차트 비전 CLI 실패 ({ticker}): {e}")
+        return None
+    finally:
+        try:
+            os.remove(img_path)
+            os.rmdir(tmpdir)
+        except OSError:
+            pass
 
 
 def analyze_key_charts(

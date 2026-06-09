@@ -82,6 +82,14 @@ def gather_news(briefing_type: str = "MANUAL") -> str:
 
 각 항목별로 핵심 내용을 정리해서 텍스트로 반환해주세요. 출처도 포함해주세요."""
 
+    # 1차: Claude CLI + WebSearch (Max 구독 활용, API 비용 $0)
+    cli_text = _gather_news_cli(prompt)
+    if cli_text:
+        return cli_text
+
+    # 2차 폴백: Gemini 2.5 Pro + Google Search (CLI 실패 시)
+    if not GEMINI_API_KEY:
+        return "(뉴스 수집 실패: Claude CLI 빈 응답 + GEMINI_API_KEY 미설정)"
     try:
         client = _get_gemini_client()
         google_search_tool = types.Tool(google_search=types.GoogleSearch())
@@ -96,3 +104,25 @@ def gather_news(briefing_type: str = "MANUAL") -> str:
         return response.text.strip()
     except Exception as e:
         return f"(뉴스 수집 실패: {e})"
+
+
+def _gather_news_cli(prompt: str) -> str:
+    """Claude CLI + WebSearch로 뉴스 수집. 실패 시 빈 문자열."""
+    from core.claude_cli import claude_cli
+
+    instruction = (
+        "당신은 금융 뉴스 리서처입니다. WebSearch 툴로 아래 항목들을 검색해 "
+        "각 항목별 핵심을 한국어 텍스트로 정리하세요. 출처 링크도 포함하세요.\n\n"
+        + prompt
+    )
+    try:
+        return claude_cli(
+            instruction,
+            model="sonnet",
+            timeout=300,
+            allowed_tools="WebSearch",
+        ).strip()
+    except Exception as e:  # noqa: BLE001 - CLI 실패는 폴백으로 흡수
+        import logging
+        logging.getLogger(__name__).warning(f"뉴스 CLI 수집 실패: {e}")
+        return ""

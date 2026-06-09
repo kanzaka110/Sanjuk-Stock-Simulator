@@ -47,7 +47,7 @@ GMAIL_TO: str = os.environ.get("GMAIL_TO", "")  # 수신자 (미설정 시 GMAIL
 # ─── 포트폴리오 ─────────────────────────────────────
 PORTFOLIO: dict[str, str] = {
     "005930.KS": "삼성전자",
-    "012450.KS": "한화에어로스페이스",
+    # 012450.KS 한화에어로: 2026-06-02 일반 + 06-04 ISA 전량 매도 → WATCHLIST(재진입 후보)로 이동
     "133690.KS": "TIGER 미국나스닥100",
     "360750.KS": "TIGER 미국S&P500",
     "251350.KS": "KODEX MSCI선진국",
@@ -67,6 +67,7 @@ PORTFOLIO: dict[str, str] = {
 WATCHLIST: dict[str, str] = {
     # 한국 (KOSPI/KOSDAQ 시총·테마 상위)
     # "035420.KS": "NAVER",  # 2026-05-26 ISA 매수 → HOLDINGS_ISA로 이동
+    "012450.KS": "한화에어로스페이스",  # 2026-06-04 전량 매도, 재진입 후보로 모니터링
     "000660.KS": "SK하이닉스",
     "247540.KQ": "에코프로비엠",
     "086520.KQ": "에코프로",

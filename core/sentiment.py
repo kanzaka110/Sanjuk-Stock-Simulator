@@ -105,17 +105,40 @@ def _fear_greed_label(score: int) -> str:
     return "극도탐욕"
 
 
+def _build_sentiment(data: dict) -> MarketSentiment:
+    """파싱된 JSON dict를 MarketSentiment로 변환."""
+    overall = data.get("overall", {})
+    overall_score = int(overall.get("score", 0))
+
+    stock_scores: list[SentimentScore] = []
+    for item in data.get("stocks", []):
+        s = int(item.get("score", 0))
+        stock_scores.append(
+            SentimentScore(
+                ticker="",
+                name=item.get("name", ""),
+                score=s,
+                label=_score_to_label(s),
+                summary=item.get("summary", ""),
+            )
+        )
+
+    return MarketSentiment(
+        overall_score=overall_score,
+        overall_label=_score_to_label(overall_score),
+        stock_scores=tuple(stock_scores),
+        fear_greed=_fear_greed_label(overall_score),
+    )
+
+
 def analyze_sentiment(
     news_text: str,
     stock_names: list[str],
 ) -> MarketSentiment:
     """뉴스 텍스트에서 감성 점수 추출.
 
-    response_schema로 구조화된 JSON 출력을 강제한다.
+    1차: Claude CLI(json_schema), 2차 폴백: Gemini. 둘 다 실패 시 중립.
     """
-    if not GEMINI_API_KEY:
-        return MarketSentiment()
-
     stocks_str = ", ".join(stock_names)
     prompt = f"""다음 뉴스를 읽고 감성 점수를 매겨줘.
 점수: -100(극도 부정) ~ +100(극도 긍정).
@@ -126,6 +149,14 @@ overall은 시장 전체, stocks는 개별 종목별 감성.
 뉴스:
 {news_text[:8000]}"""
 
+    # 1차: Claude CLI (Max 구독 활용, API 비용 $0)
+    cli_result = _analyze_sentiment_cli(prompt)
+    if cli_result is not None:
+        return cli_result
+
+    # 2차 폴백: Gemini 2.5 Flash
+    if not GEMINI_API_KEY:
+        return MarketSentiment()
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
         response = client.models.generate_content(
@@ -141,31 +172,26 @@ overall은 시장 전체, stocks는 개별 종목별 감성.
         if not raw:
             log.warning("감성 분석: 빈 응답")
             return MarketSentiment()
-
-        data = json.loads(raw)
-
-        overall = data.get("overall", {})
-        overall_score = int(overall.get("score", 0))
-
-        stock_scores: list[SentimentScore] = []
-        for item in data.get("stocks", []):
-            s = int(item.get("score", 0))
-            stock_scores.append(
-                SentimentScore(
-                    ticker="",
-                    name=item.get("name", ""),
-                    score=s,
-                    label=_score_to_label(s),
-                    summary=item.get("summary", ""),
-                )
-            )
-
-        return MarketSentiment(
-            overall_score=overall_score,
-            overall_label=_score_to_label(overall_score),
-            stock_scores=tuple(stock_scores),
-            fear_greed=_fear_greed_label(overall_score),
-        )
+        return _build_sentiment(json.loads(raw))
     except Exception as e:
         log.warning(f"감성 분석 실패: {e}")
         return MarketSentiment()
+
+
+def _analyze_sentiment_cli(prompt: str) -> MarketSentiment | None:
+    """Claude CLI로 감성 분석. 성공 시 MarketSentiment, 실패 시 None(폴백 유도)."""
+    from core.claude_cli import claude_cli
+
+    try:
+        raw = claude_cli(
+            prompt,
+            model="haiku",
+            timeout=180,
+            json_schema=json.dumps(_SENTIMENT_SCHEMA, ensure_ascii=False),
+        )
+        if not raw:
+            return None
+        return _build_sentiment(json.loads(raw))
+    except Exception as e:  # noqa: BLE001 - CLI 실패는 폴백으로 흡수
+        log.warning(f"감성 분석 CLI 실패: {e}")
+        return None

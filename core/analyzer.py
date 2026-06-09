@@ -397,7 +397,7 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
         log.info("[8/13] 한국 시장 데이터 조회 중...")
         flows = fetch_institutional_flow()
         fundamentals = fetch_fundamentals()
-        # 5일 누적 수급 (KRX API 다중 호출)
+        # 5일 누적 수급 (네이버 금융 종목별 조회)
         try:
             cumulative = fetch_cumulative_flows(days=5)
         except Exception as e:
