@@ -179,7 +179,12 @@ def analyze_chart_with_vision(
     if cli_result is not None:
         return cli_result
 
-    # 2차 폴백: Gemini 2.5 Flash
+    # 2차 폴백: Gemini CLI Vision (OAuth 무료 모드, 크레딧 무관)
+    gem_cli_result = _analyze_chart_gemini_cli(ticker, name, period, image_bytes)
+    if gem_cli_result is not None:
+        return gem_cli_result
+
+    # 3차 폴백: Gemini SDK 2.5 Flash (API 키, 크레딧 필요)
     if not GEMINI_API_KEY:
         return None
 
@@ -302,20 +307,70 @@ Read 툴로 이 이미지를 읽고 차트 패턴, 지지선/저항선, 추세, 
             pass
 
 
+def _analyze_chart_gemini_cli(
+    ticker: str, name: str, period: str, image_bytes: bytes
+) -> "ChartAnalysis | None":
+    """Gemini CLI(OAuth) Vision으로 차트 분석. 실패 시 None(폴백 유도)."""
+    import json
+    import os
+    import tempfile
+
+    from core.gemini_cli import gemini_cli
+
+    tmpdir = tempfile.mkdtemp(prefix="chartvision_gem_")
+    img_path = os.path.join(tmpdir, "chart.png")
+    try:
+        with open(img_path, "wb") as f:
+            f.write(image_bytes)
+
+        prompt = (
+            f"이 차트는 {name}({ticker})의 {period} 캔들차트다. "
+            "SMA20, SMA50 이동평균과 볼린저밴드가 표시되어 있다. "
+            "차트 패턴, 지지선/저항선, 추세, 매매 제안을 분석해라.\n"
+            '반드시 다음 JSON만 출력: {"patterns":["문자열"],'
+            '"support_levels":[숫자],"resistance_levels":[숫자],'
+            '"trend_description":"문자열","action_suggestion":"문자열",'
+            '"confidence":정수}'
+        )
+        raw = gemini_cli(
+            prompt, timeout=120, want_json=True, image_paths=[img_path]
+        )
+        if not raw:
+            return None
+        return _build_chart_analysis(json.loads(raw), ticker, name)
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"차트 비전 Gemini CLI 실패 ({ticker}): {e}")
+        return None
+    finally:
+        try:
+            os.remove(img_path)
+            os.rmdir(tmpdir)
+        except OSError:
+            pass
+
+
 def analyze_key_charts(
-    tickers: dict[str, str], max_charts: int = 4
+    tickers: dict[str, str], max_charts: int = 2
 ) -> list[ChartAnalysis]:
-    """주요 종목 차트 분석 (비용 절감을 위해 최대 4개)."""
-    results: list[ChartAnalysis] = []
+    """주요 종목 차트 분석 (CLI 비용·시간 절감을 위해 최대 2개, 병렬 실행)."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     # 주요 종목 우선
     priority = ["NVDA", "005930.KS", "012450.KS", "MU"]
     ordered = [tk for tk in priority if tk in tickers]
     ordered += [tk for tk in tickers if tk not in ordered]
+    selected = ordered[:max_charts]
 
-    for tk in ordered[:max_charts]:
-        analysis = analyze_chart_with_vision(tk, tickers[tk])
-        if analysis:
-            results.append(analysis)
+    results: list[ChartAnalysis] = []
+    with ThreadPoolExecutor(max_workers=len(selected) or 1) as executor:
+        futures = {
+            executor.submit(analyze_chart_with_vision, tk, tickers[tk]): tk
+            for tk in selected
+        }
+        for future in as_completed(futures):
+            analysis = future.result()
+            if analysis:
+                results.append(analysis)
 
     return results
 

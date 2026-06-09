@@ -154,7 +154,12 @@ overall은 시장 전체, stocks는 개별 종목별 감성.
     if cli_result is not None:
         return cli_result
 
-    # 2차 폴백: Gemini 2.5 Flash
+    # 2차 폴백: Gemini CLI (OAuth 무료 모드, 크레딧 무관)
+    gem_cli_result = _analyze_sentiment_gemini_cli(prompt)
+    if gem_cli_result is not None:
+        return gem_cli_result
+
+    # 3차 폴백: Gemini SDK (API 키, 크레딧 필요)
     if not GEMINI_API_KEY:
         return MarketSentiment()
     try:
@@ -194,4 +199,23 @@ def _analyze_sentiment_cli(prompt: str) -> MarketSentiment | None:
         return _build_sentiment(json.loads(raw))
     except Exception as e:  # noqa: BLE001 - CLI 실패는 폴백으로 흡수
         log.warning(f"감성 분석 CLI 실패: {e}")
+        return None
+
+
+def _analyze_sentiment_gemini_cli(prompt: str) -> MarketSentiment | None:
+    """Gemini CLI(OAuth)로 감성 분석. 성공 시 MarketSentiment, 실패 시 None."""
+    from core.gemini_cli import gemini_cli
+
+    schema_hint = (
+        '\n\n반드시 다음 JSON 형식으로만 출력: '
+        '{"overall":{"score":정수,"summary":"문자열"},'
+        '"stocks":[{"name":"문자열","score":정수,"summary":"문자열"}]}'
+    )
+    try:
+        raw = gemini_cli(prompt + schema_hint, timeout=120, want_json=True)
+        if not raw:
+            return None
+        return _build_sentiment(json.loads(raw))
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"감성 분석 Gemini CLI 실패: {e}")
         return None

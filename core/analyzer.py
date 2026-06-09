@@ -194,6 +194,40 @@ def _parse_signals(raw: list[dict], kind: str) -> tuple[Signal, ...]:
     return tuple(signals)
 
 
+def _extract_balanced_object(text: str) -> str:
+    """텍스트에서 첫 균형 잡힌 최상위 {...} 객체를 추출.
+
+    문자열 리터럴과 이스케이프를 인식하여 문자열 내부의 중괄호는 무시한다.
+    모델이 JSON 앞뒤에 산문(예: "다음은 결과입니다:")을 붙인 경우 대응.
+    """
+    start = text.find("{")
+    if start == -1:
+        return ""
+    depth = 0
+    in_str = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return ""  # 닫히지 않음 (truncation 등)
+
+
 def _parse_json(raw_text: str) -> dict:
     """Claude/Gemini 응답에서 JSON 추출. 문법 오류 자동 복구."""
     data: dict = {}
@@ -205,6 +239,11 @@ def _parse_json(raw_text: str) -> dict:
             if part:
                 candidates.append(part)
     candidates.append(raw_text)
+
+    # 산문이 섞인 응답 대응: 균형 중괄호로 본체 추출한 후보 추가
+    balanced = _extract_balanced_object(raw_text)
+    if balanced:
+        candidates.append(balanced)
 
     for candidate in candidates:
         for text in [candidate, _fix_json(candidate)]:
@@ -311,9 +350,16 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
     from core.risk import generate_risk_report, risk_report_to_text
     from core.sentiment import analyze_sentiment
 
-    # 1단계: Gemini로 뉴스 수집 (시장별 초점)
-    log.info("[1/11] 뉴스 수집 중... (유형: %s)", briefing_type)
-    gathered_news = gather_news(briefing_type)
+    # CLI 기반 무거운 작업(뉴스 WebSearch, 차트 비전)을 백그라운드로 선제 실행 →
+    # 로컬 단계(레짐/지표/리스크/백테스트/재무)와 시간 겹침으로 전체 단축.
+    from concurrent.futures import ThreadPoolExecutor
+    _bg_executor = ThreadPoolExecutor(max_workers=2)
+
+    # 1단계: 뉴스 수집 (CLI WebSearch) — 백그라운드 시작
+    log.info("[1/11] 뉴스 수집 시작 (백그라운드)... (유형: %s)", briefing_type)
+    news_future = _bg_executor.submit(gather_news, briefing_type)
+    # 9단계 차트 비전(CLI)도 동시에 백그라운드 시작
+    charts_future = _bg_executor.submit(analyze_key_charts, portfolio)
 
     # 2단계: 시장 레짐 감지 (로컬)
     log.info("[2/11] 시장 레짐 감지 중...")
@@ -334,8 +380,9 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
         log.warning("섹터 모멘텀 계산 실패: %s", e)
         sector_momentum_text = ""
 
-    # 4단계: 감성 분석 (Gemini Flash)
-    log.info("[4/11] 감성 분석 중...")
+    # 4단계: 감성 분석 (뉴스 결과 수합 후) — 뉴스가 아직이면 여기서 대기
+    log.info("[4/11] 뉴스 수합 + 감성 분석 중...")
+    gathered_news = news_future.result()
     stock_names = list(portfolio.values())
     sentiment = analyze_sentiment(gathered_news, stock_names)
     sentiment_text = sentiment.to_text()
@@ -415,9 +462,14 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
         log.info(f"  {closed}건 미결 추천 종료 처리")
     mem_text = memory_to_text()
 
-    # 9단계: 멀티모달 차트 분석 (Gemini Vision)
-    log.info("[10/13] 차트 패턴 분석 중 (AI Vision)...")
-    chart_analyses = analyze_key_charts(portfolio, max_charts=4)
+    # 9단계: 멀티모달 차트 분석 (CLI Vision) — 백그라운드 결과 수합
+    log.info("[10/13] 차트 패턴 분석 수합 중 (AI Vision)...")
+    try:
+        chart_analyses = charts_future.result()
+    except Exception as e:
+        log.warning("차트 분석 백그라운드 실패: %s", e)
+        chart_analyses = []
+    _bg_executor.shutdown(wait=False)
     chart_text = chart_analyses_to_text(chart_analyses)
     if chart_analyses:
         log.info(f"  {len(chart_analyses)}종목 차트 분석 완료")
