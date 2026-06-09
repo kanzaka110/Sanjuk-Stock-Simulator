@@ -42,6 +42,7 @@ class AlertTrigger:
     current_value: float
     threshold: float
     timestamp: datetime
+    market_session: str = ""  # KR_REGULAR/US_PREMARKET/US_REGULAR/US_AFTERMARKET/CLOSED
 
     @property
     def description(self) -> str:

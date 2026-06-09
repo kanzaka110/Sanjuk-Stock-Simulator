@@ -243,6 +243,7 @@ RSI_HIGH_THRESHOLD: float = float(os.environ.get("RSI_HIGH_THRESHOLD", "999.0"))
 PRICE_CHANGE_THRESHOLD: float = float(os.environ.get("PRICE_CHANGE_THRESHOLD", "7.0"))
 CIRCUIT_BREAKER_DRAWDOWN: float = float(os.environ.get("CIRCUIT_BREAKER_DRAWDOWN", "-7.5"))
 FX_CHANGE_THRESHOLD: float = float(os.environ.get("FX_CHANGE_THRESHOLD", "0.8"))  # 0.8% 변동
+ALLOW_KR_AFTER_HOURS_ALERT: bool = os.environ.get("ALLOW_KR_AFTER_HOURS_ALERT", "false").lower() == "true"
 
 # ─── 경제 캘린더 (매크로 이벤트 수동 등록) ────────────────
 # 형식: (날짜, 이벤트명, 중요도)

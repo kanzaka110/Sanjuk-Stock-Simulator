@@ -106,50 +106,95 @@ class MarketMonitor:
     # ─── Tier 1: 무료 수치 체크 ───────────────────────
 
     def _scan_all(self) -> list[AlertTrigger]:
-        """개장 중인 시장의 종목만 스캔."""
-        from core.market_hours import is_kr_market_open, is_us_market_open
+        """주문 가능 시간 기준으로 스캔.
+
+        한국장: 정규장(09:00~15:30)에만 스캔 (ALLOW_KR_AFTER_HOURS_ALERT=false)
+        미국장: 프리마켓+정규장+애프터마켓 모두 스캔 (주문 가능)
+        """
+        from core.market_hours import get_market_session, KR_REGULAR, US_PREMARKET, US_REGULAR, US_AFTERMARKET, CLOSED
+        from config.settings import ALLOW_KR_AFTER_HOURS_ALERT
 
         triggers: list[AlertTrigger] = []
         now = datetime.now(KST)
+        session = get_market_session(now)
+        kr_session = session["kr"]
+        us_session = session["us"]
 
-        kr_open = is_kr_market_open(now)
-        us_open = is_us_market_open(now)
+        kr_tradeable = kr_session == KR_REGULAR or (ALLOW_KR_AFTER_HOURS_ALERT and kr_session != CLOSED)
+        us_tradeable = us_session in (US_PREMARKET, US_REGULAR, US_AFTERMARKET)
 
-        # VIX는 미국장 시간에만 의미 있음
-        if us_open:
+        # VIX — 미국 주문 가능 시간
+        if us_tradeable:
             vix_trigger = self._check_vix(now)
             if vix_trigger:
-                triggers.append(vix_trigger)
+                triggers.append(AlertTrigger(
+                    ticker=vix_trigger.ticker, name=vix_trigger.name,
+                    trigger_type=vix_trigger.trigger_type,
+                    current_value=vix_trigger.current_value,
+                    threshold=vix_trigger.threshold,
+                    timestamp=vix_trigger.timestamp,
+                    market_session=us_session,
+                ))
 
-        # 환율은 항상 체크 (미국장·한국장 모두 영향)
-        fx_trigger = self._check_fx_change(now)
-        if fx_trigger:
-            triggers.append(fx_trigger)
+        # 환율 — 어느 시장이든 주문 가능하면 체크
+        if kr_tradeable or us_tradeable:
+            fx_trigger = self._check_fx_change(now)
+            if fx_trigger:
+                triggers.append(AlertTrigger(
+                    ticker=fx_trigger.ticker, name=fx_trigger.name,
+                    trigger_type=fx_trigger.trigger_type,
+                    current_value=fx_trigger.current_value,
+                    threshold=fx_trigger.threshold,
+                    timestamp=fx_trigger.timestamp,
+                    market_session=kr_session if kr_tradeable else us_session,
+                ))
 
-        # 개장 중인 시장의 종목만 체크
+        # 종목 스캔
         scan_targets: dict[str, str] = {}
-        if kr_open:
-            scan_targets.update(KR_PORTFOLIO)
-        if us_open:
-            scan_targets.update(US_PORTFOLIO)
+        scan_sessions: dict[str, str] = {}  # ticker → session
+
+        if kr_tradeable:
+            for tk, nm in KR_PORTFOLIO.items():
+                scan_targets[tk] = nm
+                scan_sessions[tk] = kr_session
+        if us_tradeable:
+            for tk, nm in US_PORTFOLIO.items():
+                scan_targets[tk] = nm
+                scan_sessions[tk] = us_session
 
         for ticker, name in scan_targets.items():
+            sess = scan_sessions.get(ticker, CLOSED)
+
             rsi_trigger = self._check_rsi(ticker, name, now)
             if rsi_trigger:
-                triggers.append(rsi_trigger)
+                triggers.append(AlertTrigger(
+                    ticker=rsi_trigger.ticker, name=rsi_trigger.name,
+                    trigger_type=rsi_trigger.trigger_type,
+                    current_value=rsi_trigger.current_value,
+                    threshold=rsi_trigger.threshold,
+                    timestamp=rsi_trigger.timestamp,
+                    market_session=sess,
+                ))
 
             price_trigger = self._check_price_change(ticker, name, now)
             if price_trigger:
-                triggers.append(price_trigger)
+                triggers.append(AlertTrigger(
+                    ticker=price_trigger.ticker, name=price_trigger.name,
+                    trigger_type=price_trigger.trigger_type,
+                    current_value=price_trigger.current_value,
+                    threshold=price_trigger.threshold,
+                    timestamp=price_trigger.timestamp,
+                    market_session=sess,
+                ))
 
-            time.sleep(0.1)  # yfinance rate limit 방지
+            time.sleep(0.1)
 
-        # 목표가/손절가 체크 (미결 추천 기반)
+        # 목표가/손절가 체크
         target_triggers = self._check_price_targets(now)
         triggers.extend(target_triggers)
 
         if triggers:
-            log.info(f"트리거 {len(triggers)}건 감지")
+            log.info(f"트리거 {len(triggers)}건 감지 (KR={kr_session}, US={us_session})")
         return triggers
 
     def _check_fx_change(self, now: datetime) -> AlertTrigger | None:
@@ -473,26 +518,41 @@ class MarketMonitor:
                     avg = info.get("avg_cost_krw", info.get("avg_cost_usd", 0))
                     holdings_info += f"\n보유: {label} {shares}주 (매수가 {avg:,.0f})"
 
+        # 세션별 주문 주의사항
+        session = trigger.market_session
+        session_labels = {
+            "KR_REGULAR": "한국 정규장",
+            "US_PREMARKET": "미국 프리마켓",
+            "US_REGULAR": "미국 정규장",
+            "US_AFTERMARKET": "미국 애프터마켓",
+        }
+        session_label = session_labels.get(session, "")
+        session_warning = ""
+        if session in ("US_PREMARKET", "US_AFTERMARKET"):
+            session_warning = (
+                f"\n⚠️ 현재 {session_label} — 유동성 낮음, 스프레드 확대 주의.\n"
+                f"- 시장가 주문 금지 → 반드시 지정가\n"
+                f"- 수량 과도 금지 (정규장 대비 50% 이하 권장)\n"
+            )
+
         prompt = (
             f"당신은 실전 투자 어드바이저입니다. 사용자가 즉시 행동해야 하는 경우에만 매수/매도를 권고합니다.\n\n"
             f"종목: {trigger.name} ({trigger.ticker})\n"
             f"상황: {trigger.description}\n"
+            f"거래세션: {session_label or '확인 불가'}\n"
             f"시각: {trigger.timestamp.strftime('%Y-%m-%d %H:%M KST')}\n"
             f"{holdings_info}\n"
-            f"일반 예수금: ₩{DEFAULT_CASH:,.0f} | ISA 예수금: ₩{ISA_CASH:,.0f}\n\n"
+            f"일반 예수금: ₩{DEFAULT_CASH:,.0f} | ISA 예수금: ₩{ISA_CASH:,.0f}\n"
+            f"{session_warning}\n"
             f"판단 규칙:\n"
             f"- 지금 당장 사거나 팔아야 하는 상황이면 → [매수] 또는 [매도]\n"
             f"- 단순 변동성·경고·모니터링이면 → [관망]\n"
             f"- [관망]이 90% 이상이어야 정상. 진짜 급할 때만 [매수]/[매도].\n\n"
-            f"[매수] 또는 [매도] 판단 시 반드시 아래 형식으로 첫 3줄에 명시:\n"
+            f"[매수] 또는 [매도] 판단 시 반드시 아래 형식으로 첫 4줄에 명시:\n"
             f"[매수] 또는 [매도]\n"
+            f"거래세션: {session_label}\n"
             f"계좌: [일반] 또는 [ISA] 또는 [IRP]\n"
             f"주문: [종목명] [수량]주 × ₩[지정가] (또는 $[지정가])\n\n"
-            f"예시:\n"
-            f"[매도]\n"
-            f"계좌: [ISA]\n"
-            f"주문: 한화에어로 2주 × ₩1,130,000 이상 (시장가)\n"
-            f"사유: 손절가 ₩1,135,000 이탈, OBV 매도, 추가 하락 예상\n\n"
             f"[관망] 판단이면 한 줄이면 됩니다: [관망] 단순 변동성, 추가 모니터링.\n"
             f"실수가 있으면 안 됩니다. 확실할 때만 [매수]/[매도]를 내리세요."
         )
@@ -561,6 +621,18 @@ def _build_alert_message(result: AlertResult) -> str:
     icon = type_icons.get(trigger.trigger_type, "📢")
     lines.append(f"{icon} *{trigger.name}* ({trigger.ticker})")
     lines.append(f"    {trigger.description}")
+
+    # 거래세션 표시
+    session_labels = {
+        "KR_REGULAR": "🇰🇷 한국 정규장",
+        "US_PREMARKET": "🇺🇸 미국 프리마켓",
+        "US_REGULAR": "🇺🇸 미국 정규장",
+        "US_AFTERMARKET": "🇺🇸 미국 애프터마켓",
+    }
+    if trigger.market_session and trigger.market_session in session_labels:
+        lines.append(f"    거래세션: {session_labels[trigger.market_session]}")
+    if trigger.market_session in ("US_PREMARKET", "US_AFTERMARKET"):
+        lines.append("    ⚠️ 스프레드·체결 리스크 높음 — 지정가 필수")
     lines.append("")
 
     # AI 분석 — 매수/매도 시 주문 정보 강조

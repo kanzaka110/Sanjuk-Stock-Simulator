@@ -49,6 +49,53 @@ def is_weekday(dt: datetime) -> bool:
     return dt.weekday() < 5
 
 
+# 거래 세션 상수
+KR_REGULAR = "KR_REGULAR"
+US_PREMARKET = "US_PREMARKET"
+US_REGULAR = "US_REGULAR"
+US_AFTERMARKET = "US_AFTERMARKET"
+CLOSED = "CLOSED"
+
+
+def get_market_session(now: datetime | None = None) -> dict[str, str]:
+    """현재 시장 세션 판별. 한국/미국 각각 반환.
+
+    Returns:
+        {"kr": KR_REGULAR|CLOSED, "us": US_PREMARKET|US_REGULAR|US_AFTERMARKET|CLOSED}
+    """
+    kst_now = _to_kst(now or datetime.now(KST))
+    us_tz = _EDT if _is_us_dst(kst_now) else _EST
+    et_now = kst_now.astimezone(us_tz)
+
+    from datetime import time as dt_time
+
+    # 한국장: 09:00~15:30 KST, 평일
+    kr = CLOSED
+    if is_weekday(kst_now):
+        t = kst_now.time()
+        if dt_time(9, 0) <= t < dt_time(15, 30):
+            kr = KR_REGULAR
+
+    # 미국장: 평일 ET 기준
+    us = CLOSED
+    if is_weekday(et_now):
+        t = et_now.time()
+        if dt_time(4, 0) <= t < dt_time(9, 30):
+            us = US_PREMARKET
+        elif dt_time(9, 30) <= t < dt_time(16, 0):
+            us = US_REGULAR
+        elif dt_time(16, 0) <= t < dt_time(20, 0):
+            us = US_AFTERMARKET
+
+    return {"kr": kr, "us": us}
+
+
+def is_us_tradeable(now: datetime | None = None) -> bool:
+    """미국장 주문 가능 시간 (프리+정규+애프터)."""
+    session = get_market_session(now)
+    return session["us"] in (US_PREMARKET, US_REGULAR, US_AFTERMARKET)
+
+
 def is_kr_market_open(now: datetime | None = None) -> bool:
     """한국장 개장 여부 (09:00~15:30 KST, 평일)."""
     kst_now = _to_kst(now or datetime.now(KST))
