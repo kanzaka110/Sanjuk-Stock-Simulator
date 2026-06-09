@@ -460,7 +460,7 @@ class MarketMonitor:
         )
 
     def _classify_severity(self, trigger: AlertTrigger) -> Severity:
-        """트리거 심각도 분류 — CRITICAL만 알림 대상."""
+        """트리거 심각도 분류. 발송 여부는 _is_actionable()에서 별도 판단."""
         tt = trigger.trigger_type
         val = abs(trigger.current_value)
 
@@ -484,22 +484,53 @@ class MarketMonitor:
     def _is_actionable(self, result: AlertResult) -> bool:
         """알림을 실제 전송할지 판단.
 
-        핵심 원칙: 사용자가 즉시 행동해야 할 때만 전송.
-        - CRITICAL + AI가 [매수] 또는 [매도] → 전송
-        - CRITICAL + AI가 [관망] → 전송 (CRITICAL은 항상)
-        - WARNING + AI가 [매수] 또는 [매도] (첫 줄) → 전송
-        - WARNING + AI가 [관망] → 억제
-        - INFO → 억제
+        핵심 원칙: AI가 [매수]/[매도] + 거래세션/계좌/주문 정보가 모두 있을 때만 전송.
+        CRITICAL이라도 [관망]이거나 주문 정보 누락이면 억제.
         """
-        if result.severity == Severity.CRITICAL:
-            return True
+        # INFO → 항상 억제
+        if result.severity == Severity.INFO:
+            log.info("알림 억제: %s — INFO", result.trigger.ticker)
+            return False
 
-        if result.severity == Severity.WARNING and result.ai_analysis:
-            # AI 응답 첫 줄이 [매수] 또는 [매도]로 시작할 때만
-            first_line = result.ai_analysis.strip().split("\n")[0]
-            return first_line.startswith("[매수]") or first_line.startswith("[매도]")
+        # AI 응답 없으면 억제
+        if not result.ai_analysis or not result.ai_analysis.strip():
+            log.info("알림 억제: %s — ai_analysis_empty", result.trigger.ticker)
+            return False
 
-        return False
+        first_line = result.ai_analysis.strip().split("\n")[0]
+
+        # [관망]이면 CRITICAL이라도 억제
+        if first_line.startswith("[관망]"):
+            log.info("알림 억제: %s — watch_only (severity=%s)", result.trigger.ticker, result.severity.value)
+            return False
+
+        # [매수] 또는 [매도]인지 확인
+        if not (first_line.startswith("[매수]") or first_line.startswith("[매도]")):
+            log.info("알림 억제: %s — 매수/매도 아님 (first_line=%s)", result.trigger.ticker, first_line[:30])
+            return False
+
+        # 필수 필드 확인: 거래세션, 계좌, 주문
+        analysis = result.ai_analysis
+        has_session = "거래세션:" in analysis
+        has_account = "계좌:" in analysis
+        has_order = "주문:" in analysis
+
+        if not (has_session and has_account and has_order):
+            missing = []
+            if not has_session:
+                missing.append("거래세션")
+            if not has_account:
+                missing.append("계좌")
+            if not has_order:
+                missing.append("주문")
+            log.info(
+                "알림 억제: %s — missing_order_fields (%s)",
+                result.trigger.ticker, ", ".join(missing),
+            )
+            return False
+
+        log.info("알림 전송 결정: %s — actionable_order", result.trigger.ticker)
+        return True
 
     def _ai_analyze(self, trigger: AlertTrigger) -> str:
         """Claude CLI로 AI 분석 — 즉시 행동할 매수/매도만 판정 (API 비용 $0)."""

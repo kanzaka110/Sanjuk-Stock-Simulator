@@ -781,3 +781,101 @@ class TestNightOrdersTelegram:
         })
         msg = _build_impact_message(result, result.raw_json, "🌙", "[FALLBACK] 테스트", "KR_NIGHT")
         assert "종합 판단 실패" in msg
+
+
+class TestIsActionablePolicy:
+    """긴급알림 _is_actionable() 정책 테스트."""
+
+    def _make_result(self, severity, ai_analysis="", market_session=""):
+        from core.monitor_models import AlertResult, AlertTrigger, Severity, TriggerType
+        from datetime import datetime, timezone, timedelta
+        KST = timezone(timedelta(hours=9))
+        trigger = AlertTrigger(
+            ticker="MU", name="마이크론",
+            trigger_type=TriggerType.PRICE_DROP,
+            current_value=-8.0, threshold=7.0,
+            timestamp=datetime.now(KST),
+            market_session=market_session,
+        )
+        sev = {"CRITICAL": Severity.CRITICAL, "WARNING": Severity.WARNING, "INFO": Severity.INFO}[severity]
+        return AlertResult(trigger=trigger, severity=sev, ai_analysis=ai_analysis)
+
+    def _make_stop_result(self, severity, ai_analysis=""):
+        from core.monitor_models import AlertResult, AlertTrigger, Severity, TriggerType
+        from datetime import datetime, timezone, timedelta
+        KST = timezone(timedelta(hours=9))
+        trigger = AlertTrigger(
+            ticker="MU", name="마이크론",
+            trigger_type=TriggerType.STOP_LOSS_HIT,
+            current_value=900, threshold=950,
+            timestamp=datetime.now(KST),
+        )
+        sev = {"CRITICAL": Severity.CRITICAL, "WARNING": Severity.WARNING}[severity]
+        return AlertResult(trigger=trigger, severity=sev, ai_analysis=ai_analysis)
+
+    def test_critical_empty_analysis_false(self):
+        """CRITICAL + 빈 ai_analysis → False."""
+        from core.monitor import MarketMonitor
+        m = MarketMonitor()
+        assert m._is_actionable(self._make_result("CRITICAL", "")) is False
+
+    def test_critical_watch_false(self):
+        """CRITICAL + [관망] → False."""
+        from core.monitor import MarketMonitor
+        m = MarketMonitor()
+        assert m._is_actionable(self._make_result("CRITICAL", "[관망] 단순 변동성")) is False
+
+    def test_warning_buy_no_order_info_false(self):
+        """WARNING + [매수] but 주문정보 없음 → False."""
+        from core.monitor import MarketMonitor
+        m = MarketMonitor()
+        assert m._is_actionable(self._make_result("WARNING", "[매수]\n사유: RSI 과매도")) is False
+
+    def test_critical_stop_loss_watch_false(self):
+        """CRITICAL STOP_LOSS_HIT + [관망] → False."""
+        from core.monitor import MarketMonitor
+        m = MarketMonitor()
+        assert m._is_actionable(self._make_stop_result("CRITICAL", "[관망] 대기")) is False
+
+    def test_premarket_buy_with_full_info_true(self):
+        """US_PREMARKET + [매수] + 거래세션/계좌/주문 → True."""
+        from core.monitor import MarketMonitor
+        m = MarketMonitor()
+        analysis = "[매수]\n거래세션: 미국 프리마켓\n계좌: [일반]\n주문: MU 3주 × $950 지정가"
+        assert m._is_actionable(self._make_result("WARNING", analysis, "US_PREMARKET")) is True
+
+    def test_aftermarket_sell_with_full_info_true(self):
+        """US_AFTERMARKET + [매도] + 거래세션/계좌/주문 → True."""
+        from core.monitor import MarketMonitor
+        m = MarketMonitor()
+        analysis = "[매도]\n거래세션: 미국 애프터마켓\n계좌: [일반]\n주문: MU 8주 × $1,100 지정가"
+        assert m._is_actionable(self._make_result("WARNING", analysis, "US_AFTERMARKET")) is True
+
+    def test_aftermarket_missing_order_false(self):
+        """US_AFTERMARKET + [매도] + 주문정보 누락 → False."""
+        from core.monitor import MarketMonitor
+        m = MarketMonitor()
+        analysis = "[매도]\n거래세션: 미국 애프터마켓\n사유: 급락"
+        assert m._is_actionable(self._make_result("WARNING", analysis, "US_AFTERMARKET")) is False
+
+    def test_alert_message_contains_spread_warning(self):
+        """프리/애프터 알림 메시지에 스프레드·체결 리스크 문구 포함."""
+        from core.monitor import _build_alert_message
+        from core.monitor_models import AlertResult, AlertTrigger, Severity, TriggerType
+        from datetime import datetime, timezone, timedelta
+        KST = timezone(timedelta(hours=9))
+        trigger = AlertTrigger(
+            ticker="MU", name="마이크론",
+            trigger_type=TriggerType.PRICE_DROP,
+            current_value=-8.0, threshold=7.0,
+            timestamp=datetime.now(KST),
+            market_session="US_PREMARKET",
+        )
+        result = AlertResult(
+            trigger=trigger, severity=Severity.WARNING,
+            ai_analysis="[매도]\n거래세션: 미국 프리마켓\n계좌: [일반]\n주문: MU 3주",
+        )
+        msg = _build_alert_message(result)
+        assert "스프레드" in msg
+        assert "체결 리스크" in msg
+        assert "프리마켓" in msg
