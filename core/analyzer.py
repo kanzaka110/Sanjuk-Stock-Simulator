@@ -346,7 +346,7 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
     backtest_results = []
     if briefing_type in ("KR_BEFORE", "KR_NIGHT"):
         key_tickers = ["005930.KS", "012450.KS"]
-    elif briefing_type in ("US_BEFORE", "US_NIGHT"):
+    elif briefing_type in ("US_BEFORE", "US_NIGHT", "US_CLOSE"):
         key_tickers = ["NVDA", "MU", "GOOGL", "LMT"]
     else:
         key_tickers = ["NVDA", "005930.KS", "012450.KS", "MU"]
@@ -377,7 +377,7 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
 
     # 8단계: 한국 시장 심층 (KRX) — 미국장 브리핑에서는 스킵
     kr_text = ""
-    if briefing_type != "US_BEFORE":
+    if briefing_type not in ("US_BEFORE", "US_NIGHT", "US_CLOSE"):
         log.info("[8/13] 한국 시장 데이터 조회 중...")
         flows = fetch_institutional_flow()
         fundamentals = fetch_fundamentals()
@@ -434,6 +434,24 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
     if earnings_warnings:
         extra_context += "\n\n━━━ ⚠️ 실적 캘린더 경고 ━━━\n" + "\n".join(earnings_warnings)
         extra_context += "\n→ 실적 D-3 이내 종목은 이벤트 리스크 명시 필수. 신규 매수 시 실적 후 진입 검토."
+
+    # 경제 캘린더 경고 (D-3 이내 매크로 이벤트)
+    from config.settings import ECONOMIC_CALENDAR
+    from datetime import datetime as _dt
+    today = _dt.now(KST).date()
+    econ_warnings = []
+    for date_str, event_name, importance in ECONOMIC_CALENDAR:
+        try:
+            event_date = _dt.strptime(date_str, "%Y-%m-%d").date()
+            days_until = (event_date - today).days
+            if 0 <= days_until <= 3:
+                icon = "🔴" if importance == "HIGH" else "🟡"
+                econ_warnings.append(f"{icon} {event_name} D-{days_until} ({date_str})")
+        except ValueError:
+            continue
+    if econ_warnings:
+        extra_context += "\n\n━━━ 📅 경제 캘린더 경고 (D-3 이내) ━━━\n" + "\n".join(econ_warnings)
+        extra_context += "\n→ HIGH 이벤트 전 신규 포지션 진입 주의. 변동성 확대 예상."
 
     if sector_momentum_text:
         extra_context += f"\n\n━━━ 섹터 모멘텀 ━━━\n{sector_momentum_text}"

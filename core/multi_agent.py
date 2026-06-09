@@ -661,6 +661,30 @@ def synthesize(
   · 구분(매수/매도) | 종목명 | 계좌 | 지정가 | 수량 | 유효기간 | 사유
 - 매수도 매도도 없으면 night_orders를 빈 배열 []로.
 - 개장 전 2.5시간 여유가 있으므로 → **주문 넣고 자도 되는지** 명시"""
+    elif briefing_type == "US_CLOSE":
+        us_focus_tickers = "MU, LMT" if ria_nvda_shares == 0 else "NVDA, MU, LMT"
+        if ria_nvda_shares > 0:
+            ria_focus = (
+                f"⑨ **RIA NVDA {ria_nvda_shares}주(평단 ${ria_nvda_avg:.2f})는 5/31 100% 면제 데드라인 종목 "
+                f"— 매 브리핑마다 매도 타이밍 명시 필수. 누적 면제 차익 ${RIA_REALIZED_GAIN_USD:,.2f} 사용.**"
+            )
+        else:
+            ria_focus = (
+                f"⑨ RIA 잔존 0, 누적 면제 차익 ${RIA_REALIZED_GAIN_USD:,.2f} 확정. RIA 현금 ₩{RIA_CASH:,.0f} 활용처는 국내자산 편입 ETF·국내주식 위주 추천 (해외편입 ETF 불가, 1년 의무 보유).\n"
+                f"⑩ 일반/ISA에서 미국주·해외 ETF 매수 추천 시 B안 룰: 현재 가중치 {ria_weight_pct}% ({ria_weight_phase}). "
+                f"강세 신호 명확(VIX <18 + RSI 50+ + 5일+ 상승 추세, 또는 종목별 강력 매수 시그널)이면 절세 손실 약 ₩{ria_tax_loss_per_10m:,}/₩10M 명시 후 오버라이드 추천 OK. 모호하면 매수 자제."
+            )
+        market_focus = f"""
+⑥ 이 브리핑은 【미국장 마감 요약】입니다. 밤 동안 미국장에서 벌어진 일을 한국 아침에 전달합니다.
+⑦ 보유 미국 종목({us_focus_tickers})의 종가·등락·거래량 변화가 핵심입니다.
+⑧ 오늘 한국장에 미칠 영향 + 보유 포지션 조치 필요 여부를 간결하게 요약하세요.
+{ria_focus}
+
+━━━ 🌅 미국장 마감 요약 규칙 ━━━
+- 보유 종목 종가 + 등락률 + 밤새 주요 뉴스 핵심만
+- 보유 포지션에 즉각 행동 필요하면 night_orders에 포함 (한국장 시초가 ETF 매매 등)
+- 행동 불필요하면 night_orders 빈 배열 + 이유 한 줄
+- 간결하게 — 상세 분석은 저녁 US_NIGHT에서"""
     else:
         market_focus = ""
 
@@ -839,7 +863,7 @@ def synthesize(
     "보합": "기본 지정가 유지 여부",
     "갭다운_1pct_이상": "매수: 하향 지정가. 매도: 손절 지정가 하향 여부"
   }"""
-    elif briefing_type in ("US_NIGHT", "US_BEFORE"):
+    elif briefing_type in ("US_NIGHT", "US_BEFORE", "US_CLOSE"):
         night_orders_schema = """,
   "night_orders": [
     {

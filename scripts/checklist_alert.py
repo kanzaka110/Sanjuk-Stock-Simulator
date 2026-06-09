@@ -178,12 +178,42 @@ def build_alert(phase: str) -> str:
     return "\n".join(lines)
 
 
+def check_tomorrow_events():
+    """경제 캘린더 D-1 사전 알림."""
+    from datetime import timedelta
+    from config.settings import ECONOMIC_CALENDAR
+
+    tomorrow = (datetime.now(KST) + timedelta(days=1)).date()
+    events = []
+    for date_str, name, importance in ECONOMIC_CALENDAR:
+        try:
+            d = datetime.strptime(date_str, "%Y-%m-%d").date()
+            if d == tomorrow:
+                icon = "🔴" if importance == "HIGH" else "🟡"
+                events.append(f"{icon} {name}")
+        except ValueError:
+            continue
+
+    if events:
+        msg = f"📅 내일 경제 이벤트 알림\n{tomorrow.strftime('%Y-%m-%d')}\n\n"
+        msg += "\n".join(events)
+        msg += "\n\n→ 포지션 정리 또는 변동성 대비 필요"
+        send_simple_message(msg)
+        print(f"D-1 알림 전송: {len(events)}건")
+    else:
+        print("내일 이벤트 없음")
+
+
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python checklist_alert.py [open|mid_morning|afternoon|close]")
+        print("Usage: python checklist_alert.py [open|mid_morning|afternoon|close|econ]")
         sys.exit(1)
 
     phase = sys.argv[1]
+    if phase == "econ":
+        check_tomorrow_events()
+        return
+
     msg = build_alert(phase)
     print(msg)
     ok = send_simple_message(msg)

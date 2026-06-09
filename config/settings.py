@@ -147,7 +147,7 @@ def get_market_config(briefing_type: str) -> tuple[dict[str, str], dict[str, str
     """
     if briefing_type in ("KR_BEFORE", "KR_NIGHT"):
         return {**KR_PORTFOLIO, **RIA_ALLOWED_TICKERS}, {**KR_INDICES, **US_INDICES}, MACRO
-    if briefing_type in ("US_BEFORE", "US_NIGHT"):
+    if briefing_type in ("US_BEFORE", "US_NIGHT", "US_CLOSE"):
         return US_PORTFOLIO, {**US_INDICES, **KR_INDICES}, MACRO
     return {**PORTFOLIO, **RIA_ALLOWED_TICKERS}, INDICES, MACRO
 
@@ -169,19 +169,18 @@ HOLDINGS_GENERAL: dict[str, dict] = {
 #   - 2026-05-12: GOOGL 9주 @ $387.00 (전량), NVDA 23주 @ $219.00
 #   - 2026-05-14: NVDA 12주 @ $232.00
 #   - 2026-05-18: NVDA 11주 @ $228.30 (잔여 0주 — 면제 활용 종료)
-# 매수 이력:
-#   - 2026-06-02: TIGER 리츠부동산인프라 100주 @ ₩3,900 (RIA 국내자산 편입 시작)
-HOLDINGS_RIA: dict[str, dict] = {
-    "329200.KS": {"shares": 100, "avg_cost_krw": 3_900},    # TIGER 리츠부동산인프라 (6/2)
-}
+# 매수/매도 이력:
+#   - 2026-06-02: TIGER 리츠부동산인프라 100주 @ ₩3,900 매수
+#   - 2026-06-05: TIGER 리츠부동산인프라 100주 @ ₩3,850 매도 (손절, -1.3%)
+HOLDINGS_RIA: dict[str, dict] = {}
 
 # 매도대금 누적 (수수료 차감 후 추정):
 #   1차 ≈ ₩12,610,537
 #   2차 ≈ ₩4,136,287
 #   3차 ≈ ₩3,738,952 ($2,504.97 × ₩1,492.68, 수수료 추정 차감 후)
 #   합계 ≈ ₩20,485,776
-# RIA_CASH: 20,485,776 - 390,000(6/2 TIGER 리츠 100주) = 20,095,776
-RIA_CASH: float = 20_095_776.0
+# RIA_CASH: 20,095,776 + 385,000(6/5 TIGER 리츠 100주 매도) = 20,480,776
+RIA_CASH: float = 20_480_776.0
 
 # RIA 5/31 면제 누적 양도차익 (USD) — 최종 확정
 #   1차 5/12: GOOGL $620.73 + NVDA $1,980.06 = $2,600.79
@@ -194,10 +193,11 @@ RIA_REALIZED_GAIN_USD: float = 4_839.16
 HOLDINGS_IRP: dict[str, dict] = {
     "133690.KS": {"shares": 30, "avg_cost_krw": 111_077},   # TIGER 미국나스닥100
     "360750.KS": {"shares": 118, "avg_cost_krw": 16_838},   # TIGER 미국S&P500
-    "329200.KS": {"shares": 70, "avg_cost_krw": 4_600},     # TIGER 리츠부동산인프라
+    # 329200.KS: TIGER 리츠 70주 → 2026-06-05 전량 매도 @ ₩3,860 (-16.1%)
     "192090.KS": {"shares": 25, "avg_cost_krw": 13_130},    # TIGER 차이나CSI300
 }
-IRP_CASH: float = 2_780.0
+# IRP_CASH: 2,780 + 270,200(6/5 TIGER 리츠 70주 매도) = 272,980
+IRP_CASH: float = 272_980.0
 IRP_DEFAULT_OPTION: float = 4_784_915.0  # 디폴트옵션 안정투자형
 
 # [연금저축] CMA
@@ -220,14 +220,14 @@ PENSION_MMF: float = 6_880_513.0  # MMF 잔고
 HOLDINGS_ISA: dict[str, dict] = {
     "360750.KS": {"shares": 200, "avg_cost_krw": 24_900},     # TIGER 미국S&P500 (4/7)
     "133690.KS": {"shares": 30, "avg_cost_krw": 163_000},     # TIGER 미국나스닥100 (4/7)
-    "462870.KS": {"shares": 120, "avg_cost_krw": 30_100},     # 시프트업 (5/11+5/12+5/18 각30주 + 5/27 30주@28,500)
+    "462870.KS": {"shares": 160, "avg_cost_krw": 30_025},     # 시프트업 (120주@30,100 + 6/5 40주@29,800)
     # 012450.KS: 한화에어로 2주 → 2026-06-04 전량 매도 @ ₩1,080,000 (손절, -16.0%)
     "161510.KS": {"shares": 13, "avg_cost_krw": 28_100},      # PLUS 고배당주 (5/12)
     "251350.KS": {"shares": 11, "avg_cost_krw": 39_940},      # KODEX MSCI선진국 (5/12)
     # 035420.KS: NAVER 3주 → 2026-06-02 전량 매도 @ ₩278,000 (익절, +39.0%)
 }
-# ISA_CASH: 3,254,360 + 2,160,000(6/4 한화에어로 2주 매도) = 5,414,360
-ISA_CASH: float = 5_414_360.0
+# ISA_CASH: 5,414,360 - 1,192,000(6/5 시프트업 40주@29,800) = 4,222,360
+ISA_CASH: float = 4_222_360.0
 
 # ─── 예수금 ────────────────────────────────────────
 # DEFAULT_CASH: 8,559,839 + ~4,870,000(6/3 MU 3주 매도 $3,240 × ₩1,503) = ~13,429,839
@@ -242,3 +242,26 @@ RSI_LOW_THRESHOLD: float = float(os.environ.get("RSI_LOW_THRESHOLD", "25.0"))
 RSI_HIGH_THRESHOLD: float = float(os.environ.get("RSI_HIGH_THRESHOLD", "999.0"))  # 과매수 알림 비활성화
 PRICE_CHANGE_THRESHOLD: float = float(os.environ.get("PRICE_CHANGE_THRESHOLD", "7.0"))
 CIRCUIT_BREAKER_DRAWDOWN: float = float(os.environ.get("CIRCUIT_BREAKER_DRAWDOWN", "-7.5"))
+FX_CHANGE_THRESHOLD: float = float(os.environ.get("FX_CHANGE_THRESHOLD", "0.8"))  # 0.8% 변동
+
+# ─── 경제 캘린더 (매크로 이벤트 수동 등록) ────────────────
+# 형식: (날짜, 이벤트명, 중요도)
+# 중요도: HIGH(FOMC/CPI/고용), MEDIUM(PPI/ISM), LOW(기타)
+ECONOMIC_CALENDAR: list[tuple[str, str, str]] = [
+    # 2026 FOMC 일정 (연초 확정)
+    ("2026-06-18", "FOMC 금리 결정", "HIGH"),
+    ("2026-07-29", "FOMC 금리 결정", "HIGH"),
+    ("2026-09-16", "FOMC 금리 결정", "HIGH"),
+    ("2026-11-04", "FOMC 금리 결정", "HIGH"),
+    ("2026-12-16", "FOMC 금리 결정", "HIGH"),
+    # CPI (매월 둘째 주 화~수)
+    ("2026-06-11", "미국 CPI 발표", "HIGH"),
+    ("2026-07-15", "미국 CPI 발표", "HIGH"),
+    # 고용 (매월 첫째 금)
+    ("2026-07-02", "미국 고용보고서", "HIGH"),
+    # 한국
+    ("2026-07-17", "한국은행 금통위", "HIGH"),
+    ("2026-08-28", "한국은행 금통위", "HIGH"),
+    # 보유 종목 실적
+    ("2026-06-24", "MU 마이크론 실적 발표", "HIGH"),
+]

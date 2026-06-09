@@ -121,6 +121,11 @@ class MarketMonitor:
             if vix_trigger:
                 triggers.append(vix_trigger)
 
+        # 환율은 항상 체크 (미국장·한국장 모두 영향)
+        fx_trigger = self._check_fx_change(now)
+        if fx_trigger:
+            triggers.append(fx_trigger)
+
         # 개장 중인 시장의 종목만 체크
         scan_targets: dict[str, str] = {}
         if kr_open:
@@ -146,6 +151,26 @@ class MarketMonitor:
         if triggers:
             log.info(f"트리거 {len(triggers)}건 감지")
         return triggers
+
+    def _check_fx_change(self, now: datetime) -> AlertTrigger | None:
+        """원달러 환율 급변동 체크."""
+        from core.market import _get_quote_realtime
+        from config.settings import FX_CHANGE_THRESHOLD
+
+        quote = _get_quote_realtime("USDKRW=X")
+        if quote is None or not quote.pct:
+            return None
+
+        if abs(quote.pct) >= FX_CHANGE_THRESHOLD:
+            return AlertTrigger(
+                ticker="USDKRW=X",
+                name="원달러 환율",
+                trigger_type=TriggerType.FX_CHANGE,
+                current_value=quote.pct,
+                threshold=FX_CHANGE_THRESHOLD,
+                timestamp=now,
+            )
+        return None
 
     def _check_vix(self, now: datetime) -> AlertTrigger | None:
         """VIX 급등 체크 — 교차검증 포함."""
@@ -398,6 +423,8 @@ class MarketMonitor:
             return Severity.CRITICAL if val >= 40 else Severity.WARNING
         if tt in (TriggerType.PRICE_DROP, TriggerType.PRICE_SURGE):
             return Severity.CRITICAL if val >= 10 else Severity.WARNING
+        if tt == TriggerType.FX_CHANGE:
+            return Severity.CRITICAL if val >= 1.5 else Severity.WARNING
         if tt == TriggerType.RSI_OVERSOLD:
             return Severity.CRITICAL if val <= 20 else Severity.WARNING
         if tt == TriggerType.RSI_OVERBOUGHT:
@@ -529,6 +556,7 @@ def _build_alert_message(result: AlertResult) -> str:
         TriggerType.PRICE_SURGE: "🔺",
         TriggerType.TARGET_HIT: "🎯",
         TriggerType.STOP_LOSS_HIT: "🛑",
+        TriggerType.FX_CHANGE: "💱",
     }
     icon = type_icons.get(trigger.trigger_type, "📢")
     lines.append(f"{icon} *{trigger.name}* ({trigger.ticker})")

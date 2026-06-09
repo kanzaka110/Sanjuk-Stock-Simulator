@@ -21,6 +21,7 @@ class TriggerType(str, Enum):
     PRICE_SURGE = "PRICE_SURGE"
     TARGET_HIT = "TARGET_HIT"
     STOP_LOSS_HIT = "STOP_LOSS_HIT"
+    FX_CHANGE = "fx_change"
 
 
 class Severity(str, Enum):
@@ -54,6 +55,9 @@ class AlertTrigger:
             TriggerType.TARGET_HIT: f"목표가 도달 — 현재가 {self.current_value:,.0f} ≥ 목표 {self.threshold:,.0f} (익절 검토)",
             TriggerType.STOP_LOSS_HIT: f"손절가 이탈 — 현재가 {self.current_value:,.0f} ≤ 손절 {self.threshold:,.0f} (손절 검토)",
         }
+        if self.trigger_type == TriggerType.FX_CHANGE:
+            direction = "원화 약세(달러 강세)" if self.current_value > 0 else "원화 강세(달러 약세)"
+            return f"환율 {self.current_value:+.2f}% 변동 ({direction})"
         return descs.get(self.trigger_type, str(self.trigger_type))
 
 
