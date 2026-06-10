@@ -23,6 +23,7 @@ class MarketRegime:
 
     regime: str  # 강세장/약세장/횡보장/위기
     confidence: int  # 0-100
+    index_name: str = "S&P500"  # 기준 지수
 
     # VIX 관련
     vix: float = 0.0
@@ -45,7 +46,7 @@ class MarketRegime:
 
     def to_text(self) -> str:
         return (
-            f"【시장 레짐】 {self.regime} (확신도 {self.confidence}%)\n"
+            f"【시장 레짐 — {self.index_name} 기준】 {self.regime} (확신도 {self.confidence}%)\n"
             f"  VIX: {self.vix:.1f} [{self.vix_level}]\n"
             f"  모멘텀: 20일 {self.momentum_20d:+.1f}% | 60일 {self.momentum_60d:+.1f}%\n"
             f"  추세: {self.trend} | SMA50{'↑' if self.above_sma50 else '↓'} "
@@ -55,11 +56,18 @@ class MarketRegime:
         )
 
 
-def detect_regime() -> MarketRegime:
+def detect_regime(market: str = "US") -> MarketRegime:
     """현재 시장 레짐을 감지.
 
-    S&P500 + VIX 데이터를 분석하여 시장 상태를 자동 분류한다.
+    Args:
+        market: "US"(S&P500 기준) 또는 "KR"(KOSPI 기준).
+                VIX는 글로벌 공포 지표로 양쪽 모두 사용.
     """
+    if market == "KR":
+        index_ticker, index_name = "^KS11", "KOSPI"
+    else:
+        index_ticker, index_name = "^GSPC", "S&P500"
+
     try:
         # VIX 조회
         vix_hist = yf.Ticker("^VIX").history(period="5d")
@@ -74,11 +82,11 @@ def detect_regime() -> MarketRegime:
         else:
             vix_level = "안정"
 
-        # S&P500 모멘텀 + 이동평균
-        sp_hist = yf.Ticker("^GSPC").history(period="1y")
+        # 기준 지수 모멘텀 + 이동평균
+        sp_hist = yf.Ticker(index_ticker).history(period="1y")
         if len(sp_hist) < 200:
             return MarketRegime(
-                regime="판단불가", confidence=0,
+                regime="판단불가", confidence=0, index_name=index_name,
                 vix=vix, vix_level=vix_level,
                 strategy_guide="데이터 부족", risk_adjustment="중립",
             )
@@ -181,6 +189,7 @@ def detect_regime() -> MarketRegime:
         return MarketRegime(
             regime=regime,
             confidence=confidence,
+            index_name=index_name,
             vix=round(vix, 1),
             vix_level=vix_level,
             momentum_20d=round(mom_20, 1),
@@ -196,6 +205,6 @@ def detect_regime() -> MarketRegime:
     except Exception as e:
         log.warning(f"시장 레짐 감지 실패: {e}")
         return MarketRegime(
-            regime="판단불가", confidence=0,
+            regime="판단불가", confidence=0, index_name=index_name,
             strategy_guide="데이터 조회 실패", risk_adjustment="중립",
         )

@@ -698,14 +698,24 @@ def evaluate_open_predictions(current_prices: dict[str, float]) -> int:
         "SELECT * FROM predictions WHERE status = 'open'"
     ).fetchall()
 
+    # 크로스마켓 폴백: 이번 브리핑 스냅샷에 없는 미결 종목은 yfinance로 시세 보충
+    # (예: KR 브리핑 중 미국 종목 추천 평가 — 보충 실패 시 다음 기회로 이월)
+    prices = dict(current_prices)
+    for row in rows:
+        tk = row["ticker"]
+        if tk not in prices:
+            p = _fetch_price_fallback(tk)
+            if p is not None:
+                prices[tk] = p
+
     closed_count = 0
 
     for row in rows:
         ticker = row["ticker"]
-        if ticker not in current_prices:
+        if ticker not in prices:
             continue
 
-        current = current_prices[ticker]
+        current = prices[ticker]
         entry = row["entry_price"]
         target = row["target_price"]
         stop = row["stop_loss"]
@@ -725,10 +735,10 @@ def evaluate_open_predictions(current_prices: dict[str, float]) -> int:
             elif stop > 0 and current <= stop:
                 should_close = True
                 outcome = "loss"
-            # 7일 이상 경과 시 자동 평가
+            # 7일 이상 경과 시 자동 평가 (벤치마크 대비 알파 기준, 대칭 ±3% 밴드)
             elif _days_since(row["created_at"]) >= 7:
                 should_close = True
-                outcome = "win" if pnl > 0 else "loss" if pnl < -3 else "neutral"
+                outcome = _grade_horizon_pnl(pnl, row)
         elif signal == "매도":
             pnl = (entry - current) / entry * 100
             if target > 0 and current <= target:
@@ -739,7 +749,8 @@ def evaluate_open_predictions(current_prices: dict[str, float]) -> int:
                 outcome = "loss"
             elif _days_since(row["created_at"]) >= 7:
                 should_close = True
-                outcome = "win" if pnl > 0 else "loss" if pnl < -3 else "neutral"
+                # 매도는 절대 수익률 기준 대칭 밴드 (벤치마크 알파 부적합)
+                outcome = "win" if pnl > 3 else "loss" if pnl < -3 else "neutral"
         else:
             continue
 
@@ -765,6 +776,72 @@ def evaluate_open_predictions(current_prices: dict[str, float]) -> int:
         _update_accuracy_stats()
 
     return closed_count
+
+
+def _row_get(row, key, default=""):
+    """sqlite3.Row에서 컬럼 안전 조회 (마이그레이션 미적용 DB 호환)."""
+    try:
+        return row[key] if row[key] is not None else default
+    except (IndexError, KeyError):
+        return default
+
+
+def _grade_horizon_pnl(pnl: float, row) -> str:
+    """7일 경과 자동 평가 채점.
+
+    벤치마크 수익률을 차감한 알파 기준으로 대칭 ±3% 밴드 적용.
+    벤치마크 조회 실패 시 절대 수익률 기준으로 폴백.
+    """
+    benchmark = _row_get(row, "benchmark_ticker", "") or ""
+    bench_return = _benchmark_return_since(benchmark, row["created_at"])
+    ref = pnl - bench_return if bench_return is not None else pnl
+    return "win" if ref > 3 else "loss" if ref < -3 else "neutral"
+
+
+def _fetch_price_fallback(ticker: str) -> float | None:
+    """yfinance로 단일 종목 현재가 보충 조회. 실패 시 None."""
+    try:
+        import yfinance as yf
+
+        t = yf.Ticker(ticker)
+        try:
+            price = float(t.fast_info["last_price"])
+            if price > 0:
+                return price
+        except Exception:
+            pass
+        hist = t.history(period="2d")
+        if not hist.empty:
+            price = float(hist["Close"].iloc[-1])
+            return price if price > 0 else None
+    except Exception as e:
+        log.debug("시세 폴백 조회 실패 (%s): %s", ticker, e)
+    return None
+
+
+def _benchmark_return_since(benchmark: str, created_at: str) -> float | None:
+    """벤치마크 지수의 created_at 이후 수익률(%). 실패 시 None."""
+    if not benchmark:
+        return None
+    try:
+        import yfinance as yf
+
+        created = datetime.fromisoformat(created_at)
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=KST)
+        days = max((datetime.now(KST) - created).days + 5, 10)
+        hist = yf.Ticker(benchmark).history(period=f"{days}d")
+        if hist.empty:
+            return None
+        close = hist["Close"]
+        created_date = created.date()
+        base = close[[d.date() >= created_date for d in close.index]]
+        if len(base) < 2:
+            return None
+        return float((base.iloc[-1] / base.iloc[0] - 1) * 100)
+    except Exception as e:
+        log.debug("벤치마크 수익률 조회 실패 (%s): %s", benchmark, e)
+        return None
 
 
 def _days_since(iso_date: str) -> int:
@@ -901,12 +978,6 @@ def get_recent_predictions(limit: int = 20) -> list[Prediction]:
            ORDER BY created_at DESC LIMIT ?""",
         (limit,),
     ).fetchall()
-
-    def _row_get(row, key, default=""):
-        try:
-            return row[key] if row[key] is not None else default
-        except (IndexError, KeyError):
-            return default
 
     return [
         Prediction(

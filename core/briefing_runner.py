@@ -6,13 +6,17 @@ CLI와 텔레그램 봇이 동일한 브리핑 파이프라인을 공유한다.
 
 from __future__ import annotations
 
+import fcntl
 import logging
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 
 log = logging.getLogger(__name__)
 
 _briefing_lock = threading.Lock()
+# 프로세스 간 동시 실행 방지 (cron + 수동 실행 충돌 대비)
+_LOCK_FILE = Path("/tmp/sanjuk_briefing.lock")
 
 
 @dataclass(frozen=True)
@@ -44,9 +48,25 @@ def run_briefing(briefing_type: str = "MANUAL") -> BriefingRunResult:
             error="브리핑이 이미 진행 중입니다",
         )
 
+    lock_fh = None
     try:
+        # 프로세스 간 락 (cron 브리핑과 수동 브리핑 동시 실행 방지)
+        lock_fh = open(_LOCK_FILE, "w")
+        try:
+            fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return BriefingRunResult(
+                success=False,
+                error="브리핑이 다른 프로세스에서 이미 진행 중입니다",
+            )
         return _execute_briefing(briefing_type)
     finally:
+        if lock_fh is not None:
+            try:
+                fcntl.flock(lock_fh, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            lock_fh.close()
         _briefing_lock.release()
 
 

@@ -15,9 +15,7 @@ import json
 import logging
 from datetime import datetime
 
-import anthropic
-
-from config.settings import KST, PORTFOLIO, get_market_config
+from config.settings import KST, get_market_config
 
 try:
     from config.settings import WATCHLIST
@@ -69,16 +67,9 @@ def _fetch_watchlist_text(snapshot_prices: dict[str, float] | None = None) -> st
             prev = float(close.iloc[-2]) if len(close) > 1 else price
             pct = (price - prev) / prev * 100 if prev > 0 else 0.0
 
-            # RSI(14)
-            delta = close.diff()
-            gain = delta.where(delta > 0, 0.0).rolling(14).mean()
-            loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
-            import numpy as np
-            with np.errstate(divide="ignore", invalid="ignore"):
-                rs = gain / loss.replace(0, np.nan)
-                rs = rs.fillna(100.0)
-            rsi_series = 100 - (100 / (1 + rs))
-            rsi = float(rsi_series.iloc[-1]) if len(rsi_series) > 0 else 50.0
+            # RSI(14) — indicators.py 공용 로직 재사용
+            from core.indicators import compute_rsi
+            rsi = compute_rsi(close)
 
             # MA20 / MA60
             ma20 = float(close.tail(20).mean()) if len(close) >= 20 else price
@@ -95,6 +86,47 @@ def _fetch_watchlist_text(snapshot_prices: dict[str, float] | None = None) -> st
             lines.append(f"  {name}({tk}): 데이터 조회 실패 ({type(e).__name__})")
 
     return "\n".join(lines)
+
+
+def _backtest_targets(
+    briefing_type: str,
+    portfolio: dict[str, str],
+    max_targets: int = 4,
+) -> list[str]:
+    """백테스트 대상 종목을 실제 보유 종목에서 동적 생성.
+
+    보유 종목 우선, 부족하면 Watchlist에서 보충. briefing_type에 따라 시장 필터링.
+    """
+    from config.settings import (
+        HOLDINGS_GENERAL,
+        HOLDINGS_IRP,
+        HOLDINGS_ISA,
+        HOLDINGS_PENSION,
+        HOLDINGS_RIA,
+    )
+
+    def _is_kr(tk: str) -> bool:
+        return ".KS" in tk or ".KQ" in tk
+
+    if briefing_type in ("KR_BEFORE", "KR_NIGHT"):
+        market_ok = _is_kr
+    elif briefing_type in ("US_BEFORE", "US_NIGHT", "US_CLOSE"):
+        market_ok = lambda tk: not _is_kr(tk)  # noqa: E731
+    else:
+        market_ok = lambda tk: True  # noqa: E731
+
+    targets: list[str] = []
+    # 1순위: 보유 종목 (순서 유지 + 중복 제거)
+    for holdings in (HOLDINGS_GENERAL, HOLDINGS_ISA, HOLDINGS_RIA, HOLDINGS_IRP, HOLDINGS_PENSION):
+        for tk in holdings:
+            if tk not in targets and tk in portfolio and market_ok(tk):
+                targets.append(tk)
+    # 2순위: Watchlist 신규 후보
+    for tk in WATCHLIST:
+        if tk not in targets and tk in portfolio and market_ok(tk):
+            targets.append(tk)
+
+    return targets[:max_targets]
 
 
 def _build_full_context(
@@ -361,11 +393,17 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
     # 9단계 차트 비전(CLI)도 동시에 백그라운드 시작
     charts_future = _bg_executor.submit(analyze_key_charts, portfolio)
 
-    # 2단계: 시장 레짐 감지 (로컬)
+    # 2단계: 시장 레짐 감지 (로컬) — KR 브리핑은 KOSPI 기준, 그 외 S&P500 기준
     log.info("[2/11] 시장 레짐 감지 중...")
-    regime = detect_regime()
+    regime_market = "KR" if briefing_type in ("KR_BEFORE", "KR_NIGHT") else "US"
+    regime = detect_regime(regime_market)
     regime_text = regime.to_text()
-    log.info(f"  레짐: {regime.regime} ({regime.confidence}%) — {regime.risk_adjustment}")
+    if briefing_type == "MANUAL":
+        # 통합 브리핑: KOSPI 레짐도 병행 표시
+        kr_regime = detect_regime("KR")
+        if kr_regime.confidence > 0:
+            regime_text += f"\n{kr_regime.to_text()}"
+    log.info(f"  레짐: {regime.regime} ({regime.confidence}%, {regime.index_name}) — {regime.risk_adjustment}")
 
     # 3단계: 기술 지표 계산 (로컬)
     log.info("[3/11] 기술 지표 계산 중...")
@@ -384,8 +422,13 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
     log.info("[4/11] 뉴스 수합 + 감성 분석 중...")
     gathered_news = news_future.result()
     stock_names = list(portfolio.values())
-    sentiment = analyze_sentiment(gathered_news, stock_names)
-    sentiment_text = sentiment.to_text()
+    _news_failed = not gathered_news or gathered_news.startswith("(뉴스 수집 실패")
+    if _news_failed:
+        log.warning("뉴스 수집 실패 → 감성 분석 스킵")
+        sentiment_text = ""
+    else:
+        sentiment = analyze_sentiment(gathered_news, stock_names)
+        sentiment_text = sentiment.to_text()
 
     # 5단계: 리스크 분석 (변동성+상관관계+서킷브레이커, 로컬)
     log.info("[5/11] 리스크 분석 중 (변동성+상관관계+서킷브레이커)...")
@@ -407,12 +450,8 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
     # 6단계: 백테스트 (기본 + 레짐별 + 최적화, 로컬)
     log.info("[6/11] 백테스트 검증 중 (레짐별 + 파라미터 최적화)...")
     backtest_results = []
-    if briefing_type in ("KR_BEFORE", "KR_NIGHT"):
-        key_tickers = ["005930.KS", "012450.KS"]
-    elif briefing_type in ("US_BEFORE", "US_NIGHT", "US_CLOSE"):
-        key_tickers = ["NVDA", "MU", "GOOGL", "LMT"]
-    else:
-        key_tickers = ["NVDA", "005930.KS", "012450.KS", "MU"]
+    key_tickers = _backtest_targets(briefing_type, portfolio)
+    log.info("  백테스트 대상: %s", ", ".join(key_tickers) if key_tickers else "(없음)")
     for tk in key_tickers:
         if tk in portfolio:
             bt = backtest_all_strategies(tk, portfolio[tk], "1y")
@@ -619,13 +658,16 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
     # 데이터 실패 집계 + 품질 경고 수집
     _data_failures = 0
     _quality_warnings: list[str] = []
+    if _news_failed:
+        _data_failures += 1
+        _quality_warnings.append("뉴스 수집 실패 — 시황/감성 정보 제외")
     if not kr_text and briefing_type not in ("US_BEFORE", "US_NIGHT"):
         _data_failures += 1
         _quality_warnings.append("KRX 기관/외국인 수급 제외")
     if not chart_analyses:
         _data_failures += 1
         _quality_warnings.append("Gemini 차트 비전 제외")
-    if not sentiment_text or sentiment_text == "":
+    if not _news_failed and not sentiment_text:
         _data_failures += 1
         _quality_warnings.append("Gemini 감성 분석 제외")
     failed_personas = 4 - len(persona_results)

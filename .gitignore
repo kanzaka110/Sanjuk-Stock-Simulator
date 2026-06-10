@@ -13,6 +13,12 @@ venv/
 
 # Environment
 .env
+.env.*
+!.env.example
+
+# Backup files
+*.bak
+*.bak.*
 
 # Database
 *.db

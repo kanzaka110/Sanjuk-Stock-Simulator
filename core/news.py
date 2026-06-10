@@ -82,7 +82,14 @@ def gather_news(briefing_type: str = "MANUAL") -> str:
 
 각 항목별로 핵심 내용을 정리해서 텍스트로 반환해주세요. 출처도 포함해주세요."""
 
-    # 1차: Claude CLI + WebSearch (Max 구독 활용, API 비용 $0)
+    # 공통: 최신성 제약 (오래된 기사 혼입 방지)
+    prompt += (
+        "\n\n※ 최신성 규칙: 최근 24시간 이내 기사를 우선하세요. "
+        "그보다 오래된 정보를 인용할 때는 발행 날짜를 반드시 명시하고, "
+        "1주일 이상 지난 기사는 제외하세요 (정책/구조적 이슈 예외)."
+    )
+
+    # 1차: Claude CLI + WebSearch (Max 구독 활용, 비용 $0)
     cli_text = _gather_news_cli(prompt)
     if cli_text:
         return cli_text

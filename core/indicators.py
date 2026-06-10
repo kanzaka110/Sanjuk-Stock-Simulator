@@ -66,6 +66,26 @@ def _signal_str(sig: int) -> str:
     return "중립"
 
 
+def compute_rsi(close, period: int = 14) -> float:
+    """종가 시리즈에서 RSI 계산 (rolling mean 방식, 전 모듈 공용).
+
+    엣지 케이스: 손실 0(상승만) → 100, 데이터 부족/완전 횡보 → 50.
+    """
+    delta = close.diff()
+    gain = delta.where(delta > 0, 0.0).rolling(period).mean()
+    loss = (-delta.where(delta < 0, 0.0)).rolling(period).mean()
+    if len(gain) == 0:
+        return 50.0
+    g = float(gain.iloc[-1])
+    l = float(loss.iloc[-1])
+    if g != g or l != l:  # NaN — 기간 미달
+        return 50.0
+    if l == 0:
+        return 100.0 if g > 0 else 50.0
+    rs = g / l
+    return 100.0 - (100.0 / (1.0 + rs))
+
+
 def calculate_indicators(
     ticker: str, name: str = "", period: str = "3mo"
 ) -> IndicatorResult | None:
@@ -83,12 +103,7 @@ def calculate_indicators(
         volume = hist["Volume"]
 
         # ─── RSI (14일) ────────────────────────────
-        delta = close.diff()
-        gain = delta.where(delta > 0, 0.0).rolling(14).mean()
-        loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
-        rs = gain / loss.replace(0, float("inf"))
-        rsi_series = 100 - (100 / (1 + rs))
-        rsi = float(rsi_series.iloc[-1])
+        rsi = compute_rsi(close)
 
         rsi_signal = 0
         if rsi < 30:
@@ -246,12 +261,7 @@ def calculate_sector_momentum(period: str = "3mo") -> str:
             close = hist["Close"]
 
             # RSI (14일)
-            delta = close.diff()
-            gain = delta.where(delta > 0, 0.0).rolling(14).mean()
-            loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
-            rs = gain / loss.replace(0, float("inf"))
-            rsi_series = 100 - (100 / (1 + rs))
-            rsi = float(rsi_series.iloc[-1])
+            rsi = compute_rsi(close)
 
             # 20일 수익률
             if len(close) >= 20:
