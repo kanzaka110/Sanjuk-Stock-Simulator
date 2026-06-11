@@ -662,6 +662,7 @@ def synthesize(
         return holdings
 
     # 보유 종목 손익 계산 (current_prices 캐시 활용 — API 과호출 방지)
+    from config.settings import HOLDING_STRATEGY
     _prices = current_prices or {}
     _holding_alerts: list[str] = []
 
@@ -669,6 +670,9 @@ def synthesize(
         shares = info.get("shares", 0)
         ria = info.get("ria_eligible", 0)
         ria_tag = f" [RIA 적격 {ria}주]" if ria > 0 else ""
+        strat = HOLDING_STRATEGY.get(tk, {})
+        horizon_tag = f" 〔{strat['horizon']}〕" if strat.get("horizon") else ""
+        ria_tag += horizon_tag
         cur_price = _prices.get(tk, 0)
         if "avg_cost_usd" in info:
             avg = info['avg_cost_usd']
@@ -687,7 +691,7 @@ def synthesize(
                 _holding_alerts.append(f"🚨 {tk}: 매수 ₩{avg:,.0f} → 현재 ₩{cur_price:,.0f} ({pnl:+.1f}%) — 손절 검토 필요")
             elif pnl <= -5:
                 _holding_alerts.append(f"⚠️ {tk}: 매수 ₩{avg:,.0f} → 현재 ₩{cur_price:,.0f} ({pnl:+.1f}%) — 주의")
-            return f"  {tk}: {shares}주 (매수 ₩{avg:,.0f}{pnl_str})"
+            return f"  {tk}: {shares}주 (매수 ₩{avg:,.0f}{pnl_str}){ria_tag}"
 
     filtered_general = _filter_holdings(HOLDINGS_GENERAL, briefing_type)
     filtered_ria = _filter_holdings(HOLDINGS_RIA, briefing_type)
@@ -715,6 +719,20 @@ def synthesize(
 
 [연금저축] CMA (MMF ₩{PENSION_MMF:,.0f})
 {chr(10).join(pension_lines) if pension_lines else "  (해당 시장 보유 없음)"}"""
+
+    # 투자 시계별 보유 논지 (장기/중기/단기 구분 + 관리 전략)
+    _all_held: set[str] = set()
+    for _h in (filtered_general, filtered_ria, filtered_isa, filtered_irp, filtered_pension):
+        _all_held.update(_h.keys())
+    _horizon_lines: list[str] = []
+    for _hz in ("장기", "중기", "단기"):
+        entries = [
+            f"  〔{_hz}〕 {tk}: {HOLDING_STRATEGY[tk]['thesis']}"
+            for tk in _all_held
+            if HOLDING_STRATEGY.get(tk, {}).get("horizon") == _hz
+        ]
+        _horizon_lines.extend(entries)
+    horizon_text = "\n".join(_horizon_lines) if _horizon_lines else "  (정의된 시계 없음)"
 
     system = f"""당신은 최고 투자 전략가(CIO)입니다. 4명의 분석가 의견을 종합하여 최종 전략을 결정합니다.
 
@@ -770,13 +788,29 @@ def synthesize(
 
 【E. 리스크 관리】
 - 단일 종목 비중: 계좌당 최대 30% (초과 시 경고).
-- 전체 포트폴리오: 위험 종목(낙폭 -10%+) 3개 이상이면 신규 매수 중단.
+- 전체 포트폴리오: **평단 대비 -10%+ 손실** 종목 3개 이상이면 신규 매수 중단.
+  · 주의: [낙폭 현황]의 수치는 "6개월 고점 대비"라 수익 중인 종목도 크게 나옴 — 이 규칙에는 보유 포지션의 평단 대비 손익률(보유 포지션 섹션 참조)만 사용하라.
 - 실적 D-3 이내 종목: 신규 매수 금지, 보유 시 이벤트 리스크 명시.
 - 상관관계 높은 종목(0.8+) 동시 매수 금지.
 
-━━━ 실제 보유 포지션 (현재가 + 손익률 포함) ━━━
+━━━ 실제 보유 포지션 (현재가 + 손익률 + 투자 시계 포함) ━━━
 {holdings_text}
 예수금: ₩{DEFAULT_CASH:,.0f}
+
+━━━ 📐 투자 시계별 보유 논지 (매수/매도 판단의 기준 시계) ━━━
+{horizon_text}
+
+【F. 투자 시계 규칙 — 모든 판단에 시계를 명시하라】
+- 모든 보유 종목 평가(portfolio_rows)와 매수/매도 추천에 "horizon"(장기/중기/단기) 필수.
+- 〔장기〕 종목: 단기 등락·RSI로 매도 추천 금지. 보유 논지(thesis) 훼손 시에만 매도/교체 검토.
+  · 장기 적립 대상(S&P500·나스닥100 등)은 조정이 곧 "추가 적립 기회" — 하락 시 분할 적립 추천을 검토하라.
+- 〔단기〕 종목: 익절/손절 기계적 실행. 카탈리스트 소멸 시 보유 이유 없음 — 시계를 임의로 장기로 바꿔 손실 정당화 금지.
+- 〔중기〕 종목: 모멘텀/수주 사이클 유효성 점검. 무효화 조건 도달 시 매도.
+- **신규 매수 추천 시 시계 선언 필수**:
+  · 단기/중기 매수 → 기존 룰 (조건 2개 충족, 진입/손절/목표 구체화)
+  · 장기 매수 → 기술 조건 대신 ①왜 이 자산이 장기 코어인가(밸류에이션/구조적 성장) ②분할 적립 계획 (예: 3개월간 월 ₩N씩, 또는 -5%마다 N주) ③논지 무효화 조건 (손절가 대신) ④목표 보유 기간을 반드시 제시.
+- strategy_buy의 "strategy_type"에 장기 매수는 "장기적립"을 사용하라.
+- 계좌 특성 매칭: 연금/IRP/ISA 만기 자금 → 장기 적합. 일반 예수금 → 단기/중기 가능.
 
 ━━━ 🚨 보유 종목 손익 경고 (C항 매도 판단 기준 적용 필수) ━━━
 {chr(10).join(_holding_alerts) if _holding_alerts else "✅ 모든 보유 종목 정상 범위"}
@@ -870,7 +904,8 @@ def synthesize(
       "price_display": "₩201,000 또는 $178.56",
       "change_pct": "+0.25%",
       "signal": "매수|매도|홀딩|관망",
-      "reason": "수치+뉴스 기반 근거"
+      "horizon": "장기|중기|단기",
+      "reason": "수치+뉴스 기반 근거 (시계에 맞는 평가 — 장기 종목은 논지 유효성 중심)"
     }}
   ],
   "strategy_buy": [
@@ -887,7 +922,9 @@ def synthesize(
       "timing": "진입 타이밍",
       "risk_note": "리스크 요약",
       "reason": "매수 근거 상세",
-      "strategy_type": "단기매매|중기보유|리밸런싱|세금전략|일반",
+      "horizon": "장기|중기|단기",
+      "long_term_plan": "장기 매수일 때 필수: 분할 적립 계획 + 목표 보유 기간 + 논지 무효화 조건. 단기/중기는 빈 문자열",
+      "strategy_type": "장기적립|단기매매|중기보유|리밸런싱|세금전략|일반",
       "strategy_tags": ["RSI반등", "볼린저하단", "펀더멘털성장 등 해당하는 전략 태그"],
       "horizon_days": 7,
       "benchmark_ticker": "^KS11|^IXIC|^GSPC",

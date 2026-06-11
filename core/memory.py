@@ -282,7 +282,7 @@ def normalize_ticker(ticker: str) -> str:
 PRICE_DIVERGENCE_THRESHOLD = 0.10
 
 
-_VALID_STRATEGY_TYPES = {"단기매매", "중기보유", "리밸런싱", "세금전략", "관망", "일반"}
+_VALID_STRATEGY_TYPES = {"장기적립", "단기매매", "중기보유", "리밸런싱", "세금전략", "관망", "일반"}
 
 
 def _normalize_strategy_type(val) -> str:
@@ -423,13 +423,22 @@ def _quality_gate(
         grade = max_grade(grade, ACTION_WATCH)
         reasons.append(f"확신도{adj_conf}<40→관망")
 
-    # 손절가 필수 (매수)
-    if signal == "매수" and stop_loss <= 0:
-        grade = max_grade(grade, ACTION_BLOCKED)
-        reasons.append("손절가없음→저장금지")
+    # 장기 적립식 매수: 손절가/손익비 대신 무효화 조건으로 평가
+    # (장기 코어 적립은 단기 손절 개념이 부적합 — 논지 훼손 조건이 핵심)
+    is_long_term = strategy_type == "장기적립"
+    has_invalidation = bool(invalidation_condition and invalidation_condition.strip())
 
-    # 손익비 기준 (0 또는 누락도 차단)
-    if signal == "매수" and risk_reward < 1.5:
+    # 손절가 필수 (매수) — 장기적립은 무효화 조건으로 대체 가능
+    if signal == "매수" and stop_loss <= 0:
+        if is_long_term and has_invalidation:
+            grade = max_grade(grade, ACTION_CONDITIONAL)
+            reasons.append("장기적립: 손절가 대신 무효화조건 인정")
+        else:
+            grade = max_grade(grade, ACTION_BLOCKED)
+            reasons.append("손절가없음→저장금지")
+
+    # 손익비 기준 (0 또는 누락도 차단) — 장기적립은 면제
+    if signal == "매수" and risk_reward < 1.5 and not is_long_term:
         grade = max_grade(grade, ACTION_BLOCKED)
         reasons.append(f"손익비{risk_reward:.1f}<1.5→차단")
 
@@ -641,21 +650,40 @@ def save_predictions_from_briefing(
 
 
 def _parse_price(val: str | float) -> float:
-    """가격 문자열 파싱. '₩201,000' → 201000.0"""
+    """가격 문자열 파싱.
+
+    프롬프트가 강제하는 형식까지 모두 처리:
+      '₩201,000' → 201000.0
+      '₩58,000 이하' → 58000.0  (수식어 무시)
+      '$185.00 이하 분할' → 185.0
+      '198,000~202,000' → 200000.0  (범위 → 중간값)
+      '시세 확인 필요' → 0.0
+    """
     if isinstance(val, (int, float)):
         return float(val)
+
+    import re
+
     cleaned = str(val).replace("₩", "").replace("$", "").replace(",", "").replace("원", "").strip()
-    # 범위 표기 (예: "198,000~202,000") → 중간값
+
+    # 범위 표기 (예: "198000~202000", "58000 ~ 60000 이하") → 중간값
     if "~" in cleaned:
-        parts = cleaned.split("~")
+        nums = re.findall(r"\d+(?:\.\d+)?", cleaned)
+        if len(nums) >= 2:
+            try:
+                return (float(nums[0]) + float(nums[1])) / 2
+            except ValueError:
+                pass
+
+    # 단일 가격 + 수식어 ("58000 이하", "1차 58000 분할") → 최대 숫자 채택
+    # ("1차", "2회" 같은 서수가 섞여도 가격이 가장 큰 숫자)
+    nums = re.findall(r"\d+(?:\.\d+)?", cleaned)
+    if nums:
         try:
-            return (float(parts[0]) + float(parts[1])) / 2
-        except (ValueError, IndexError):
+            return max(float(n) for n in nums)
+        except ValueError:
             pass
-    try:
-        return float(cleaned) if cleaned else 0.0
-    except ValueError:
-        return 0.0
+    return 0.0
 
 
 # ═══════════════════════════════════════════════════════
@@ -673,12 +701,17 @@ def evaluate_open_predictions(current_prices: dict[str, float]) -> int:
     conn = _get_conn()
 
     # 14일 이상 된 미결 추천 자동 정리 (stale prediction 방지)
+    # 장기적립 추천은 90일 유예 (장기 시계를 14일에 만료시키면 평가 왜곡)
     now = datetime.now(KST).isoformat()
     cutoff_14d = (datetime.now(KST) - timedelta(days=14)).isoformat()
+    cutoff_90d = (datetime.now(KST) - timedelta(days=90)).isoformat()
     stale = conn.execute(
         """UPDATE predictions SET status = 'closed', closed_at = ?, outcome = 'expired'
-           WHERE status = 'open' AND created_at < ?""",
-        (now, cutoff_14d),
+           WHERE status = 'open' AND (
+               (created_at < ? AND COALESCE(strategy_type, '') != '장기적립')
+               OR created_at < ?
+           )""",
+        (now, cutoff_14d, cutoff_90d),
     ).rowcount
     if stale > 0:
         conn.commit()
@@ -735,8 +768,8 @@ def evaluate_open_predictions(current_prices: dict[str, float]) -> int:
             elif stop > 0 and current <= stop:
                 should_close = True
                 outcome = "loss"
-            # 7일 이상 경과 시 자동 평가 (벤치마크 대비 알파 기준, 대칭 ±3% 밴드)
-            elif _days_since(row["created_at"]) >= 7:
+            # horizon_days 경과 시 자동 평가 (벤치마크 대비 알파 기준, 대칭 ±3% 밴드)
+            elif _days_since(row["created_at"]) >= max(_row_get(row, "horizon_days", 7) or 7, 7):
                 should_close = True
                 outcome = _grade_horizon_pnl(pnl, row)
         elif signal == "매도":

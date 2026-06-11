@@ -61,12 +61,12 @@ def check_circuit_breaker(
     locked_tickers: list[str] = []
     portfolio_locked = False
 
-    # 포트폴리오 전체 낙폭 체크
+    # 포트폴리오 전체 손익 체크 (평단 대비 평균 손익률)
     if portfolio_drawdown_pct <= max_portfolio_drawdown:
         portfolio_locked = True
         reasons.append(
-            f"포트폴리오 낙폭 {portfolio_drawdown_pct:.1f}% "
-            f"(한도 {max_portfolio_drawdown}%) 초과 → 보수 관점 강화 (소량 선별 허용)"
+            f"보유 종목 평단 대비 평균 손익 {portfolio_drawdown_pct:.1f}% "
+            f"(한도 {max_portfolio_drawdown}%) 하회 → 보수 관점 강화 (소량 선별 허용)"
         )
 
     # 전체 연속 손실 체크
@@ -417,6 +417,34 @@ def calculate_drawdown(
         return None
 
 
+def calculate_holdings_pnl(drawdowns: list[DrawdownInfo]) -> float:
+    """보유 종목의 평단 대비 평균 손익률(%) — 서킷 브레이커 판정용.
+
+    포지션별 손익률(%)의 단순 평균 (KRW/USD 혼합 포트폴리오라 환율 없이 비율만 사용).
+    같은 종목을 여러 계좌에 보유하면 계좌별로 1포지션씩 집계.
+    drawdowns의 current_price를 재사용해 추가 API 호출 없음.
+    """
+    from config.settings import (
+        HOLDINGS_GENERAL, HOLDINGS_ISA, HOLDINGS_RIA,
+        HOLDINGS_IRP, HOLDINGS_PENSION,
+    )
+
+    prices = {d.ticker: d.current_price for d in drawdowns if d.current_price > 0}
+
+    pnls: list[float] = []
+    for holdings in (HOLDINGS_GENERAL, HOLDINGS_ISA, HOLDINGS_RIA, HOLDINGS_IRP, HOLDINGS_PENSION):
+        for tk, info in holdings.items():
+            cur = prices.get(tk, 0.0)
+            avg = info.get("avg_cost_usd") or info.get("avg_cost_krw") or 0.0
+            if cur <= 0 or avg <= 0 or info.get("shares", 0) <= 0:
+                continue
+            pnls.append((cur - avg) / avg * 100)
+
+    if not pnls:
+        return 0.0
+    return float(np.mean(pnls))
+
+
 # ═══════════════════════════════════════════════════════
 # 통합 리스크 리포트
 # ═══════════════════════════════════════════════════════
@@ -459,19 +487,12 @@ def generate_risk_report(
         if dd:
             drawdowns.append(dd)
 
-    # 서킷 브레이커 — 실제 보유 종목 낙폭만 반영 (워치리스트/RIA허용 제외)
-    from config.settings import (
-        HOLDINGS_GENERAL, HOLDINGS_ISA, HOLDINGS_RIA,
-        HOLDINGS_IRP, HOLDINGS_PENSION,
-    )
-    held_tickers: set[str] = set()
-    for holdings in (HOLDINGS_GENERAL, HOLDINGS_ISA, HOLDINGS_RIA, HOLDINGS_IRP, HOLDINGS_PENSION):
-        held_tickers.update(holdings.keys())
-    held_drawdowns = [d for d in drawdowns if d.ticker in held_tickers]
-    avg_drawdown = np.mean([d.current_drawdown_pct for d in held_drawdowns]) if held_drawdowns else 0
+    # 서킷 브레이커 — 실제 보유 종목의 "평단 대비 손익"으로 판정
+    # (6mo 고점 대비 낙폭은 수익 중인 종목도 '위험'으로 오판 → 5/25~ 상시 발동 버그)
+    avg_pnl = calculate_holdings_pnl(drawdowns)
     cb = check_circuit_breaker(
         recent_outcomes=recent_outcomes or [],
-        portfolio_drawdown_pct=avg_drawdown,
+        portfolio_drawdown_pct=avg_pnl,
     )
 
     # 전체 리스크 레벨
@@ -500,9 +521,17 @@ def risk_report_to_text(report: RiskReport) -> str:
     """리스크 리포트를 텍스트로 변환 (프롬프트 삽입용)."""
     lines = [f"【리스크 분석】 전체 리스크: {report.overall_risk}"]
 
-    # 서킷 브레이커
+    # 서킷 브레이커 — "전면 차단"이 아니라 "기준 강화"로 전달
+    # (AI가 신규매수를 일괄 포기하지 않도록 행동 지침을 명시)
     if report.circuit_breaker.is_locked:
         lines.append(f"\n  🚨 [서킷 브레이커 발동] {report.circuit_breaker.reason}")
+        lines.append(
+            "  → 해석 지침: 신규 매수 전면 금지가 아니다. 다음 기준을 적용하라:\n"
+            "    · 신규 매수는 확신도 70%+ 그리고 매수 조건 3개 이상 충족 시에만 추천 (평시 2개 → 강화)\n"
+            "    · 추천 시 1회 매수 금액을 평시의 절반 이하로 축소 (소량 분할 진입)\n"
+            "    · 매도/손절 추천은 평소처럼 — 절대 억제 금지\n"
+            "    · 기준 미달 후보는 '관망 + 진입 트리거'를 명시할 것"
+        )
 
     if report.position_sizes:
         lines.append("\n  [포지션 사이징 (변동성+상관관계+수수료 조정)]")
