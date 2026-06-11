@@ -47,6 +47,11 @@ COMMANDS: dict[str, str] = {
 HELP_TEXT = """📋 *사용 가능한 명령어*
 
 🔹 *보유종목 확인* — 현재 시세 + 수익률
+🔹 *매매 [종목] [매수/매도] [N]주 [가격] [계좌]* — 매매 기록
+    예: 매매 삼성전자 매수 10주 290000 일반
+    (다음 브리핑부터 AI가 미반영 매매를 감안)
+🔹 *매매내역* — 미반영 매매 목록
+🔹 *매매반영* — settings.py 갱신 후 기록 정리
 
 📊 브리핑은 매일 자동 전송됩니다.
   • 한국장: KST 08:30
@@ -129,6 +134,18 @@ class TelegramBot:
             return
 
         log.info(f"명령 수신: {text}")
+
+        # 매매 기록 명령 (prefix 매칭)
+        if text.startswith("매매반영"):
+            self._handle_trade_apply()
+            return
+        if text.startswith("매매내역"):
+            self._handle_trade_list()
+            return
+        if text.startswith("매매 "):
+            self._handle_trade_record(text)
+            return
+
         action = COMMANDS.get(text)
 
         if action is None:
@@ -139,6 +156,44 @@ class TelegramBot:
             self._reply(HELP_TEXT)
         elif action == "PORTFOLIO":
             self._handle_portfolio()
+
+    def _handle_trade_record(self, text: str) -> None:
+        """매매 기록 입력 처리."""
+        from core.trade_log import parse_trade_message, record_trade
+
+        trade = parse_trade_message(text)
+        if trade is None:
+            self._reply(
+                "❌ 형식 오류. 예시:\n"
+                "매매 삼성전자 매수 10주 290000 일반\n"
+                "매매 005930 매도 5주 295000 ISA\n"
+                "매매 MU 매도 3주 1080"
+            )
+            return
+        tid = record_trade(trade)
+        unit = "₩" if trade["ticker"].endswith((".KS", ".KQ")) else "$"
+        acct = f" [{trade['account']}]" if trade["account"] else ""
+        self._reply(
+            f"✅ 매매 기록 #{tid}\n"
+            f"{trade['name']}({trade['ticker']}){acct} "
+            f"{trade['side']} {trade['shares']}주 @ {unit}{trade['price']:,.0f}\n\n"
+            f"다음 브리핑부터 AI가 이 매매를 감안합니다.\n"
+            f"settings.py 갱신 후 '매매반영'을 입력하세요."
+        )
+
+    def _handle_trade_list(self) -> None:
+        """미반영 매매 목록."""
+        from core.trade_log import pending_trades_text
+
+        text = pending_trades_text()
+        self._reply(text if text else "✅ 미반영 매매 없음")
+
+    def _handle_trade_apply(self) -> None:
+        """매매 기록 반영 처리."""
+        from core.trade_log import mark_all_applied
+
+        n = mark_all_applied()
+        self._reply(f"✅ {n}건 매매 기록을 반영 처리했습니다." if n else "반영할 기록 없음")
 
     def _handle_portfolio(self) -> None:
         """보유종목 현재 시세 조회."""

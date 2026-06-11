@@ -256,13 +256,103 @@ def _simulate_from_signals(
 # ═══════════════════════════════════════════════════════
 # 종합 백테스트
 # ═══════════════════════════════════════════════════════
+def backtest_breakout(
+    ticker: str,
+    name: str = "",
+    period: str = "1y",
+    lookback: int = 50,
+    trail_pct: float = 10.0,
+) -> BacktestResult | None:
+    """신고가 돌파 + 트레일링 스탑 전략 백테스트 (추세추종).
+
+    스캐너 발굴 종목(모멘텀 주도주) 검증용 — 역추세(RSI/볼린저)와 달리
+    "오르는 것을 사서 추세가 꺾일 때까지 보유"를 검증한다.
+
+    매수: 종가가 직전 lookback일 최고가 돌파
+    매도: 매수 후 고점 대비 trail_pct% 하락 (트레일링 스탑)
+    """
+    try:
+        hist = yf.Ticker(ticker).history(period=period)
+        if len(hist) < lookback + 10:
+            return None
+
+        close = hist["Close"]
+        rolling_high = close.rolling(lookback).max().shift(1)  # 직전 N일 고점
+
+        positions = pd.Series(0, index=close.index)
+        in_position = False
+        peak = 0.0
+        for i in range(lookback, len(close)):
+            price = float(close.iloc[i])
+            if not in_position:
+                if price > float(rolling_high.iloc[i]):
+                    positions.iloc[i] = 1
+                    in_position = True
+                    peak = price
+            else:
+                peak = max(peak, price)
+                if price <= peak * (1 - trail_pct / 100):
+                    positions.iloc[i] = -1
+                    in_position = False
+
+        return _simulate_from_signals(
+            close, positions, ticker, name,
+            f"돌파({lookback}d)+트레일{trail_pct:.0f}%", period,
+        )
+    except Exception as e:
+        log.warning(f"돌파 백테스트 실패 ({ticker}): {e}")
+        return None
+
+
+def backtest_ma_trend(
+    ticker: str,
+    name: str = "",
+    period: str = "1y",
+) -> BacktestResult | None:
+    """MA 정배열 추세추종 백테스트.
+
+    매수: 종가 > MA20 > MA60 (정배열 형성)
+    매도: 종가 < MA20 (단기 추세 이탈)
+    """
+    try:
+        hist = yf.Ticker(ticker).history(period=period)
+        if len(hist) < 70:
+            return None
+
+        close = hist["Close"]
+        ma20 = close.rolling(20).mean()
+        ma60 = close.rolling(60).mean()
+
+        positions = pd.Series(0, index=close.index)
+        in_position = False
+        for i in range(60, len(close)):
+            price = float(close.iloc[i])
+            m20, m60 = float(ma20.iloc[i]), float(ma60.iloc[i])
+            if not in_position and price > m20 > m60:
+                positions.iloc[i] = 1
+                in_position = True
+            elif in_position and price < m20:
+                positions.iloc[i] = -1
+                in_position = False
+
+        return _simulate_from_signals(
+            close, positions, ticker, name, "MA정배열(20/60)", period,
+        )
+    except Exception as e:
+        log.warning(f"MA추세 백테스트 실패 ({ticker}): {e}")
+        return None
+
+
 def backtest_all_strategies(
     ticker: str, name: str = "", period: str = "1y"
 ) -> list[BacktestResult]:
-    """3개 전략(RSI, MACD, 볼린저) 백테스트 실행."""
+    """5개 전략(RSI, MACD, 볼린저 + 돌파, MA추세) 백테스트 실행.
+
+    역추세 3종 + 추세추종 2종 — 종목 성격(횡보 vs 추세)에 맞는 전략 식별.
+    """
     results: list[BacktestResult] = []
 
-    for fn in (backtest_rsi, backtest_macd, backtest_bollinger):
+    for fn in (backtest_rsi, backtest_macd, backtest_bollinger, backtest_breakout, backtest_ma_trend):
         r = fn(ticker, name, period)
         if r is not None:
             results.append(r)

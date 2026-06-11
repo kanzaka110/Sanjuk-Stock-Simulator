@@ -385,13 +385,16 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
     # CLI 기반 무거운 작업(뉴스 WebSearch, 차트 비전)을 백그라운드로 선제 실행 →
     # 로컬 단계(레짐/지표/리스크/백테스트/재무)와 시간 겹침으로 전체 단축.
     from concurrent.futures import ThreadPoolExecutor
-    _bg_executor = ThreadPoolExecutor(max_workers=2)
+    _bg_executor = ThreadPoolExecutor(max_workers=3)
 
     # 1단계: 뉴스 수집 (CLI WebSearch) — 백그라운드 시작
     log.info("[1/11] 뉴스 수집 시작 (백그라운드)... (유형: %s)", briefing_type)
     news_future = _bg_executor.submit(gather_news, briefing_type)
     # 9단계 차트 비전(CLI)도 동시에 백그라운드 시작
     charts_future = _bg_executor.submit(analyze_key_charts, portfolio)
+    # 시장 기회 스캐너 (워치리스트 밖 급등/주도주 탐지)도 백그라운드
+    from core.scanner import scan_to_text
+    scanner_future = _bg_executor.submit(scan_to_text, briefing_type)
 
     # 2단계: 시장 레짐 감지 (로컬) — KR 브리핑은 KOSPI 기준, 그 외 S&P500 기준
     log.info("[2/11] 시장 레짐 감지 중...")
@@ -559,6 +562,43 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
     if econ_warnings:
         extra_context += "\n\n━━━ 📅 경제 캘린더 경고 (D-3 이내) ━━━\n" + "\n".join(econ_warnings)
         extra_context += "\n→ HIGH 이벤트 전 신규 포지션 진입 주의. 변동성 확대 예상."
+
+    # 미반영 매매 경고 (텔레그램 '매매' 명령으로 기록된 settings 미반영분)
+    try:
+        from core.trade_log import pending_trades_text
+        pending = pending_trades_text()
+        if pending:
+            extra_context += f"\n\n━━━ ⚠️ 미반영 매매 기록 ━━━\n{pending}"
+    except Exception as e:
+        log.debug("매매 기록 확인 스킵: %s", e)
+
+    # KIS 실잔고 검증 (KIS 계좌에 잔고가 있을 때만 동작 — 현재 보유는 삼성증권)
+    try:
+        from core.kis_balance import compare_with_settings
+        balance_check = compare_with_settings()
+        if balance_check:
+            extra_context += f"\n\n━━━ 계좌 잔고 검증 ━━━\n{balance_check}"
+    except Exception as e:
+        log.debug("잔고 검증 스킵: %s", e)
+
+    # 시장 기회 스캐너 결과 수합 (백그라운드)
+    try:
+        scanner_text = scanner_future.result(timeout=120)
+    except Exception as e:
+        log.warning("시장 스캐너 실패: %s", e)
+        scanner_text = ""
+    if scanner_text:
+        extra_context += (
+            f"\n\n━━━ 🔭 시장 기회 스캐너 + 전시장 발굴 ━━━\n{scanner_text}"
+            "\n→ 해석 규칙 (사용자는 이 종목들을 모름 — 발굴과 가이드가 당신의 핵심 임무):"
+            "\n  1. 시그널/발굴 종목 중 상위 후보를 advisor_opportunities에 반드시 포함하고,"
+            " 각 종목이 '무슨 사업을 하는 회사이고 왜 오르는지' 한 줄로 설명하라."
+            "\n  2. 매수 매력이 충분한 종목은 strategy_buy에 정식 추천 — 진입가/손절/목표/수량/계좌까지 완결된 전략."
+            "\n  3. 이미 급등한 종목은 추격 금지 — 눌림목 진입 조건(가격/지표)을 구체화."
+            "\n  4. 보유 종목과 같은 섹터의 더 강한 주도주는 교체(스위칭) 검토를 제시."
+            "\n  5. 지속 추적 가치가 있는 종목은 next_action에 'WATCHLIST 등재 제안: 티커 — 사유'로 명시."
+            "\n  6. 모르는 종목이라는 이유로 기각하지 마라 — 데이터 기반으로 평가하되, 정보 부족 시 리스크로만 표기."
+        )
 
     if sector_momentum_text:
         extra_context += f"\n\n━━━ 섹터 모멘텀 ━━━\n{sector_momentum_text}"

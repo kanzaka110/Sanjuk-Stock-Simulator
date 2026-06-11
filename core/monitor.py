@@ -193,6 +193,10 @@ class MarketMonitor:
         target_triggers = self._check_price_targets(now)
         triggers.extend(target_triggers)
 
+        # 사용자 지정 가격 알림 (PRICE_ALERTS — 재진입/돌파 트리거)
+        alert_triggers = self._check_price_alerts(now, kr_tradeable, us_tradeable, kr_session, us_session)
+        triggers.extend(alert_triggers)
+
         if triggers:
             log.info(f"트리거 {len(triggers)}건 감지 (KR={kr_session}, US={us_session})")
         return triggers
@@ -439,6 +443,72 @@ class MarketMonitor:
 
         if triggers:
             log.info("목표가/손절가 트리거 %d건 감지", len(triggers))
+        return triggers
+
+    def _check_price_alerts(
+        self,
+        now: datetime,
+        kr_tradeable: bool,
+        us_tradeable: bool,
+        kr_session: str,
+        us_session: str,
+    ) -> list[AlertTrigger]:
+        """사용자 지정 가격 알림 (settings.PRICE_ALERTS).
+
+        브리핑의 재진입/돌파 트리거를 5분 간격 실시간 감시.
+        below: 가격 ≤ 기준 → 알림 (눌림목 매수 기회)
+        above: 가격 ≥ 기준 → 알림 (돌파 확인)
+        지수(^)는 한국/미국 어느 쪽이든 거래 가능 시간이면 체크.
+        """
+        from config.settings import PRICE_ALERTS
+        from core.market import _get_quote_realtime
+
+        triggers: list[AlertTrigger] = []
+        if not PRICE_ALERTS:
+            return triggers
+
+        for ticker, cfg in PRICE_ALERTS.items():
+            is_kr = ticker.endswith((".KS", ".KQ")) or ticker in ("^KS11", "^KQ11")
+            is_index = ticker.startswith("^")
+            if is_index:
+                if not (kr_tradeable or us_tradeable):
+                    continue
+                sess = kr_session if is_kr else us_session
+            elif is_kr:
+                if not kr_tradeable:
+                    continue
+                sess = kr_session
+            else:
+                if not us_tradeable:
+                    continue
+                sess = us_session
+
+            quote = _get_quote_realtime(ticker)
+            if quote is None or quote.price <= 0:
+                continue
+
+            name = cfg.get("name", ticker)
+            below = cfg.get("below", 0)
+            above = cfg.get("above", 0)
+
+            if below and quote.price <= below:
+                triggers.append(AlertTrigger(
+                    ticker=ticker, name=f"{name} (지정가 도달: {cfg.get('reason', '')[:40]})",
+                    trigger_type=TriggerType.TARGET_HIT,
+                    current_value=quote.price, threshold=below,
+                    timestamp=now, market_session=sess,
+                ))
+            elif above and quote.price >= above:
+                triggers.append(AlertTrigger(
+                    ticker=ticker, name=f"{name} (돌파 확인: {cfg.get('reason', '')[:40]})",
+                    trigger_type=TriggerType.TARGET_HIT,
+                    current_value=quote.price, threshold=above,
+                    timestamp=now, market_session=sess,
+                ))
+            time.sleep(0.1)
+
+        if triggers:
+            log.info("가격 알림 트리거 %d건 (PRICE_ALERTS)", len(triggers))
         return triggers
 
     def _cross_verify_price(self, ticker: str) -> float | None:
