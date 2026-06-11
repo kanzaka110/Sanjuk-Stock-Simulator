@@ -179,6 +179,14 @@ def _simulate(
     return _simulate_from_signals(close, positions, ticker, name, strategy, period)
 
 
+def _round_trip_cost_pct(ticker: str) -> float:
+    """왕복 거래비용(%) — 한국: 매도세 0.18% + 수수료 ~0.05%, 미국: 수수료+SEC fee ~0.1%.
+
+    백테스트에 비용 미반영 시 단타 전략 성과가 과대평가됨 (거래 많을수록 심각).
+    """
+    return 0.23 if ticker.endswith((".KS", ".KQ")) else 0.10
+
+
 def _simulate_from_signals(
     close: pd.Series,
     signals: pd.Series,
@@ -187,11 +195,13 @@ def _simulate_from_signals(
     strategy: str,
     period: str,
 ) -> BacktestResult:
-    """시그널 시리즈로 매매 시뮬레이션."""
+    """시그널 시리즈로 매매 시뮬레이션 (왕복 거래비용 차감)."""
+    cost = _round_trip_cost_pct(ticker)
+
     # 포지션 상태 추적
     holding = False
     entry_price = 0.0
-    trades: list[float] = []  # 각 거래의 수익률
+    trades: list[float] = []  # 각 거래의 수익률 (비용 차감 후)
 
     for i in range(len(close)):
         if signals.iloc[i] == 1 and not holding:
@@ -201,13 +211,13 @@ def _simulate_from_signals(
             holding = False
             exit_price = float(close.iloc[i])
             if entry_price > 0:
-                pnl_pct = (exit_price - entry_price) / entry_price * 100
+                pnl_pct = (exit_price - entry_price) / entry_price * 100 - cost
                 trades.append(pnl_pct)
 
     # 미청산 포지션 처리
     if holding and entry_price > 0:
         exit_price = float(close.iloc[-1])
-        pnl_pct = (exit_price - entry_price) / entry_price * 100
+        pnl_pct = (exit_price - entry_price) / entry_price * 100 - cost
         trades.append(pnl_pct)
 
     # 바이앤홀드
@@ -360,29 +370,80 @@ def backtest_all_strategies(
     return results
 
 
+def _rsi_simulate_on(
+    close: pd.Series, buy_th: float, sell_th: float,
+    ticker: str, name: str, strategy: str, period: str,
+) -> BacktestResult | None:
+    """주어진 종가 시리즈에 RSI 전략 시뮬레이션 (데이터 재다운로드 없음)."""
+    if len(close) < 30:
+        return None
+    delta = close.diff()
+    gain = delta.where(delta > 0, 0.0).rolling(14).mean()
+    loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rs = gain / loss.replace(0, np.nan)
+        rs = rs.fillna(100.0)
+    rsi = 100 - (100 / (1 + rs))
+    return _simulate(close, rsi, buy_th, sell_th, ticker, name, strategy, period)
+
+
 def optimize_rsi_params(
     ticker: str, name: str = "", period: str = "1y",
     buy_range: tuple[int, ...] = (20, 25, 30, 35),
     sell_range: tuple[int, ...] = (65, 70, 75, 80),
 ) -> BacktestResult | None:
-    """RSI 파라미터 최적화 — 그리드 탐색으로 최적 매수/매도 임계치 발견."""
-    best: BacktestResult | None = None
+    """RSI 파라미터 워크포워드 최적화 — 과적합 방지.
 
+    이전 방식(같은 기간에 최적화+평가)은 항상 좋아 보이는 과적합 함정.
+    수정: 앞 75% (in-sample)에서 그리드 탐색 → 뒤 25% (out-of-sample)에서 평가.
+    반환 결과의 수익률/승률은 **미래 구간 성과** — 실전 기대치에 근접.
+    """
+    try:
+        hist = yf.Ticker(ticker).history(period=period)
+        if len(hist) < 120:  # 워크포워드에 최소 ~6개월 필요
+            return None
+        close = hist["Close"]
+    except Exception as e:
+        log.warning(f"RSI 최적화 데이터 실패 ({ticker}): {e}")
+        return None
+
+    split = int(len(close) * 0.75)
+    in_sample = close.iloc[:split]
+    out_sample = close.iloc[split - 14:]  # RSI 워밍업 14일 겹침
+
+    # 1) in-sample 그리드 탐색
+    best_params: tuple[float, float] | None = None
+    best_sharpe = float("-inf")
     for buy_th in buy_range:
         for sell_th in sell_range:
             if buy_th >= sell_th:
                 continue
-            r = backtest_rsi(ticker, name, period, float(buy_th), float(sell_th))
-            if r is None:
-                continue
-            if best is None or r.sharpe_ratio > best.sharpe_ratio:
-                from dataclasses import replace
-                best = replace(
-                    r,
-                    strategy=f"RSI최적({buy_th}/{sell_th})",
-                    optimized_params={"rsi_buy": buy_th, "rsi_sell": sell_th},
-                )
-    return best
+            r = _rsi_simulate_on(in_sample, float(buy_th), float(sell_th),
+                                 ticker, name, "tmp", period)
+            if r is not None and r.total_trades > 0 and r.sharpe_ratio > best_sharpe:
+                best_sharpe = r.sharpe_ratio
+                best_params = (float(buy_th), float(sell_th))
+
+    if best_params is None:
+        return None
+
+    # 2) out-of-sample 평가 — 이 성과가 보고됨
+    buy_th, sell_th = best_params
+    result = _rsi_simulate_on(
+        out_sample, buy_th, sell_th, ticker, name,
+        f"RSI워크포워드({buy_th:.0f}/{sell_th:.0f})", period,
+    )
+    if result is None:
+        return None
+
+    from dataclasses import replace
+    return replace(
+        result,
+        optimized_params={
+            "rsi_buy": buy_th, "rsi_sell": sell_th,
+            "validation": "walk_forward_75_25",
+        },
+    )
 
 
 def backtest_regime_aware(

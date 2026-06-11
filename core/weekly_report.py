@@ -196,6 +196,101 @@ def _recommendations_weekly() -> str:
     return "\n".join(lines)
 
 
+def _calibration_curve() -> str:
+    """확신도 구간별 실제 승률 — AI 캘리브레이션 점검 (최근 90일)."""
+    conn = _get_conn()
+    cutoff = (datetime.now(KST) - timedelta(days=90)).isoformat()
+    rows = conn.execute(
+        """SELECT confidence, outcome FROM predictions
+           WHERE status='closed' AND outcome IN ('win','loss') AND closed_at >= ?""",
+        (cutoff,),
+    ).fetchall()
+    if len(rows) < 10:
+        return "  표본 부족 (10건 미만)"
+
+    buckets: dict[int, list[str]] = {}
+    for r in rows:
+        b = (r["confidence"] // 20) * 20  # 0/20/40/60/80 구간
+        buckets.setdefault(b, []).append(r["outcome"])
+
+    lines = []
+    for b in sorted(buckets):
+        outs = buckets[b]
+        wr = sum(1 for o in outs if o == "win") / len(outs) * 100
+        # 잘 캘리브레이션됐으면 확신도 ≈ 승률
+        gap = wr - (b + 10)
+        flag = "✅" if abs(gap) < 15 else "⚠️"
+        lines.append(f"  {flag} 확신도 {b}~{b+19}: 실제 승률 {wr:.0f}% (n={len(outs)})")
+    return "\n".join(lines)
+
+
+def _quality_kpi() -> str:
+    """추천 품질 KPI — neutral율(엣지 부족)·data_error율 (최근 30일)."""
+    conn = _get_conn()
+    cutoff = (datetime.now(KST) - timedelta(days=30)).isoformat()
+    rows = conn.execute(
+        """SELECT outcome, COUNT(*) c FROM predictions
+           WHERE status='closed' AND closed_at >= ? GROUP BY outcome""",
+        (cutoff,),
+    ).fetchall()
+    counts = {r["outcome"]: r["c"] for r in rows}
+    total = sum(counts.values())
+    if total == 0:
+        return "  최근 30일 종료 기록 없음"
+    decided = counts.get("win", 0) + counts.get("loss", 0)
+    neutral = counts.get("neutral", 0)
+    bad = counts.get("data_error", 0) + counts.get("invalid", 0) + counts.get("expired", 0)
+    neutral_rate = neutral / total * 100
+    flag = "✅" if neutral_rate < 35 else "⚠️ 추천 엣지 부족 — 목표가가 너무 멀거나 미지근한 추천"
+    return (
+        f"  승부 결정 {decided}건 | 무승부 {neutral}건 ({neutral_rate:.0f}%) {flag}\n"
+        f"  데이터 손실(error/invalid/expired): {bad}건 ({bad/total*100:.0f}%)"
+    )
+
+
+def _adoption_tracking() -> str:
+    """추천 채택 추적 — 매매 기록(trades)과 추천(predictions) 조인.
+
+    "AI 추천을 따른 매매 vs 독자 매매"를 구분 — 협업 알파의 직접 증거.
+    매매 시점 ±3일 내 같은 종목·같은 방향 추천이 있으면 '채택'으로 간주.
+    """
+    conn = _get_conn()
+    cutoff = (datetime.now(KST) - timedelta(days=30)).isoformat()
+    try:
+        trades = conn.execute(
+            "SELECT * FROM trades WHERE created_at >= ? ORDER BY created_at",
+            (cutoff,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return "  매매 기록 없음 (텔레그램 '매매' 명령으로 기록 시작)"
+    if not trades:
+        return "  최근 30일 매매 기록 없음 (텔레그램 '매매' 명령으로 기록하면 추적 시작)"
+
+    adopted = independent = 0
+    lines = []
+    for t in trades:
+        t_time = datetime.fromisoformat(t["created_at"])
+        lo = (t_time - timedelta(days=3)).isoformat()
+        hi = t_time.isoformat()
+        match = conn.execute(
+            """SELECT id FROM predictions
+               WHERE ticker = ? AND signal = ? AND created_at BETWEEN ? AND ?
+               LIMIT 1""",
+            (t["ticker"], t["side"], lo, hi),
+        ).fetchone()
+        tag = "🤝채택" if match else "🙋독자"
+        if match:
+            adopted += 1
+        else:
+            independent += 1
+        unit = "₩" if t["ticker"].endswith((".KS", ".KQ")) else "$"
+        lines.append(
+            f"  {tag} {t['name'][:12]} {t['side']} {t['shares']}주 @ {unit}{t['price']:,.0f}"
+        )
+    summary = f"  매매 {len(trades)}건 — AI 추천 채택 {adopted} / 독자 판단 {independent}"
+    return summary + "\n" + "\n".join(lines[:8])
+
+
 def _discoveries_followup() -> str:
     """1~4주 전 발굴 종목의 이후 수익률 추적."""
     import yfinance as yf
@@ -270,6 +365,15 @@ def generate_weekly_report() -> str:
 
 🤖 AI 추천 성과 (최근 7일)
 {_recommendations_weekly()}
+
+🎯 확신도 캘리브레이션 (90일 — 확신도≈승률이 목표)
+{_calibration_curve()}
+
+📐 추천 품질 KPI (30일)
+{_quality_kpi()}
+
+🤝 추천 채택 추적 (30일)
+{_adoption_tracking()}
 
 🔭 발굴 종목 사후 추적 (1~4주 전 발굴분)
 {_discoveries_followup()}

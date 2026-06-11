@@ -428,6 +428,13 @@ def _quality_gate(
     is_long_term = strategy_type == "장기적립"
     has_invalidation = bool(invalidation_condition and invalidation_condition.strip())
 
+    # 메타데이터 누락 감점 — 채점 인프라(벤치마크 알파/무효화 추적) 가동률 확보
+    # (과거 기록 85%가 누락 → 정확도 측정 불가였음. 누락 시 confidence -5씩)
+    if signal in ("매수", "매도"):
+        if not has_invalidation:
+            adj_conf -= 5
+            reasons.append("무효화조건누락(-5)")
+
     # 손절가 필수 (매수) — 장기적립은 무효화 조건으로 대체 가능
     if signal == "매수" and stop_loss <= 0:
         if is_long_term and has_invalidation:
@@ -582,6 +589,12 @@ def save_predictions_from_briefing(
         # 정규화된 코드 또는 원본 코드로 조회, 둘 다 없으면 0.0 (시세 미수집)
         return prices.get(normalized, prices.get(ticker, 0.0))
 
+    def _default_benchmark(ticker: str, provided: str) -> str:
+        """benchmark_ticker 누락 시 시장별 기본값 자동 채움 (알파 채점 가동률 확보)."""
+        if provided and provided.strip():
+            return provided.strip()
+        return "^KS11" if normalize_ticker(ticker).endswith((".KS", ".KQ")) else "^GSPC"
+
     for row in raw_json.get("strategy_buy", []):
         try:
             raw_ticker = row.get("ticker", "")
@@ -601,7 +614,7 @@ def save_predictions_from_briefing(
                 strategy_type=_normalize_strategy_type(row.get("strategy_type")),
                 strategy_tags=_extract_tags(row),
                 horizon_days=_safe_int(row.get("horizon_days"), 7),
-                benchmark_ticker=str(row.get("benchmark_ticker", "") or ""),
+                benchmark_ticker=_default_benchmark(raw_ticker, str(row.get("benchmark_ticker", "") or "")),
                 execution_condition=str(row.get("execution_condition", "") or "")[:200],
                 invalidation_condition=str(row.get("invalidation_condition", "") or "")[:200],
                 risk_reward=_safe_float(row.get("risk_reward"), 0),
@@ -633,7 +646,7 @@ def save_predictions_from_briefing(
                 strategy_type=_normalize_strategy_type(row.get("strategy_type")),
                 strategy_tags=_extract_tags(row),
                 horizon_days=_safe_int(row.get("horizon_days"), 7),
-                benchmark_ticker=str(row.get("benchmark_ticker", "") or ""),
+                benchmark_ticker=_default_benchmark(raw_ticker, str(row.get("benchmark_ticker", "") or "")),
                 execution_condition=str(row.get("execution_condition", "") or "")[:200],
                 invalidation_condition=str(row.get("invalidation_condition", "") or "")[:200],
                 risk_reward=_safe_float(row.get("risk_reward"), 0),
