@@ -113,8 +113,48 @@ def _build_impact_message(
         lines.append(f"💬 {oneliner}")
     lines.append("")
 
-    # 매수 추천 (한 줄에 핵심만)
-    if buy_recs:
+    # ⚡ 통합 액션 (최우선 — 사용자는 이 섹션만 보고 실행)
+    actions = raw.get("actions", None)
+    if actions:
+        lines.append(SEP)
+        lines.append("⚡ *액션 (그대로 실행)*")
+        type_icon = {"매수·즉시": "🟢", "매도·즉시": "🔴", "예약매수": "🕐🟢", "예약매도": "🕐🔴"}
+        for i, a in enumerate(actions[:5], 1):
+            icon = type_icon.get(a.get("type", ""), "▸")
+            hz = a.get("horizon", "")
+            hz_tag = f" 〔{hz}〕" if hz else ""
+            lines.append(
+                f"{icon} *{a.get('type','')}* {a.get('account','')} "
+                f"*{a.get('name') or a.get('ticker','')}*{hz_tag}"
+            )
+            order_parts = []
+            if a.get("order_method"):
+                order_parts.append(a["order_method"])
+            if a.get("price"):
+                order_parts.append(a["price"])
+            if a.get("qty"):
+                order_parts.append(f"× {a['qty']}")
+            if order_parts:
+                lines.append(f"  주문: {' '.join(order_parts)}" + (f" | 유효 {a['validity']}" if a.get("validity") else ""))
+            if a.get("target"):
+                lines.append(f"  🎯 {a['target']}")
+            if a.get("stop"):
+                lines.append(f"  🛑 {a['stop']}")
+            if a.get("cancel_if"):
+                lines.append(f"  ⛔ {a['cancel_if']}")
+            if a.get("long_term_plan"):
+                lines.append(f"  📐 {a['long_term_plan']}")
+        lines.append("")
+    elif actions is not None:
+        # actions가 빈 배열로 명시됨 → 실행할 것 없음을 분명히
+        lines.append(SEP)
+        lines.append("⚡ *오늘 실행할 액션 없음*")
+        if next_action:
+            lines.append(f"  ⏳ 대기: {next_action[:150]}")
+        lines.append("")
+
+    # 매수 추천 (구버전 호환 — actions 없을 때만)
+    if buy_recs and not actions:
         lines.append(SEP)
         lines.append("💰 *매수 추천*")
         for rec in buy_recs[:3]:
@@ -134,9 +174,9 @@ def _build_impact_message(
             lines.append(" · ".join(parts))
         lines.append("")
 
-    # 야간 프리브리핑: 예약 주문 요약 (매수 + 매도)
-    night_orders = raw.get("night_orders", []) or []
-    is_night = briefing_type in ("KR_NIGHT", "US_NIGHT")
+    # 야간 프리브리핑: 예약 주문 요약 (actions가 있으면 중복이므로 스킵)
+    night_orders = ([] if actions else (raw.get("night_orders", []) or []))
+    is_night = briefing_type in ("KR_NIGHT", "US_NIGHT") and not actions
 
     if night_orders:
         lines.append(SEP)
