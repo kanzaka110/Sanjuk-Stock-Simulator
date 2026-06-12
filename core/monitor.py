@@ -597,25 +597,33 @@ class MarketMonitor:
             log.info("알림 억제: %s — 매수/매도 아님 (first_line=%s)", result.trigger.ticker, first_line[:30])
             return False
 
-        # 필수 필드 확인: 거래세션, 계좌, 주문
+        # 필수 필드 확인: 거래세션/계좌/주문/목표/시계/사유 — 전부 있어야 발송
+        # (긴급 액션은 받자마자 주문 입력 가능해야 함 — 하나라도 빠지면 실행 불가)
         analysis = result.ai_analysis
-        has_session = "거래세션:" in analysis
-        has_account = "계좌:" in analysis
-        has_order = "주문:" in analysis
+        required = ["거래세션:", "계좌:", "주문:", "목표:", "시계:", "사유:"]
+        missing = [f.rstrip(":") for f in required if f not in analysis]
 
-        if not (has_session and has_account and has_order):
-            missing = []
-            if not has_session:
-                missing.append("거래세션")
-            if not has_account:
-                missing.append("계좌")
-            if not has_order:
-                missing.append("주문")
+        if missing:
             log.info(
                 "알림 억제: %s — missing_order_fields (%s)",
                 result.trigger.ticker, ", ".join(missing),
             )
             return False
+
+        # 시계 값 검증 (장기/중기/단기 중 하나)
+        import re
+        m = re.search(r"시계:\s*(\S+)", analysis)
+        if m and not any(h in m.group(1) for h in ("단기", "중기", "장기")):
+            log.info("알림 억제: %s — 시계 값 불명 (%s)", result.trigger.ticker, m.group(1)[:10])
+            return False
+
+        # 주문에 수량(주)과 가격 기호가 실제로 있는지
+        order_m = re.search(r"주문:\s*(.+)", analysis)
+        if order_m:
+            order_line = order_m.group(1)
+            if "주" not in order_line or not re.search(r"[₩$]\s*[\d,]+", order_line):
+                log.info("알림 억제: %s — 주문 라인에 수량/가격 누락 (%s)", result.trigger.ticker, order_line[:40])
+                return False
 
         log.info("알림 전송 결정: %s — actionable_order", result.trigger.ticker)
         return True
@@ -627,7 +635,7 @@ class MarketMonitor:
         # 보유 종목 정보 수집
         from config.settings import (
             HOLDINGS_GENERAL, HOLDINGS_ISA, HOLDINGS_IRP, HOLDINGS_PENSION,
-            DEFAULT_CASH, ISA_CASH,
+            DEFAULT_CASH, ISA_CASH, HOLDING_STRATEGY,
         )
         holdings_info = ""
         for label, holdings in [("[일반]", HOLDINGS_GENERAL), ("[ISA]", HOLDINGS_ISA)]:
@@ -636,6 +644,19 @@ class MarketMonitor:
                     shares = info.get("shares", 0)
                     avg = info.get("avg_cost_krw", info.get("avg_cost_usd", 0))
                     holdings_info += f"\n보유: {label} {shares}주 (매수가 {avg:,.0f})"
+
+        # 투자 시계 (장기 종목은 단기 트리거로 매도 금지)
+        strat = HOLDING_STRATEGY.get(trigger.ticker, {})
+        horizon_info = ""
+        if strat:
+            horizon_info = (
+                f"\n투자 시계: 〔{strat.get('horizon', '?')}〕 — {strat.get('thesis', '')[:120]}"
+            )
+            if strat.get("horizon") == "장기":
+                horizon_info += (
+                    "\n⚠️ 장기 보유 종목 — 단기 등락/RSI만으로 매도 권고 금지. "
+                    "보유 논지(thesis) 자체가 훼손된 경우에만 매도. 급락은 오히려 추가 매수 기회로 평가."
+                )
 
         # 세션별 주문 주의사항
         session = trigger.market_session
@@ -654,24 +675,34 @@ class MarketMonitor:
                 f"- 수량 과도 금지 (정규장 대비 50% 이하 권장)\n"
             )
 
+        unit = "₩" if trigger.ticker.endswith((".KS", ".KQ")) else "$"
         prompt = (
-            f"당신은 실전 투자 어드바이저입니다. 사용자가 즉시 행동해야 하는 경우에만 매수/매도를 권고합니다.\n\n"
+            f"당신은 실전 투자 어드바이저입니다. 이 알림은 사용자가 받자마자 HTS에 주문을 입력하는 "
+            f"'긴급 액션 명령'입니다 — 즉시 행동해야 하는 경우에만 발동합니다.\n\n"
             f"종목: {trigger.name} ({trigger.ticker})\n"
             f"상황: {trigger.description}\n"
+            f"현재가: {unit}{trigger.current_value:,.2f}\n"
             f"거래세션: {session_label or '확인 불가'}\n"
             f"시각: {trigger.timestamp.strftime('%Y-%m-%d %H:%M KST')}\n"
-            f"{holdings_info}\n"
+            f"{holdings_info}{horizon_info}\n"
             f"일반 예수금: ₩{DEFAULT_CASH:,.0f} | ISA 예수금: ₩{ISA_CASH:,.0f}\n"
             f"{session_warning}\n"
             f"판단 규칙:\n"
             f"- 지금 당장 사거나 팔아야 하는 상황이면 → [매수] 또는 [매도]\n"
             f"- 단순 변동성·경고·모니터링이면 → [관망]\n"
-            f"- [관망]이 90% 이상이어야 정상. 진짜 급할 때만 [매수]/[매도].\n\n"
-            f"[매수] 또는 [매도] 판단 시 반드시 아래 형식으로 첫 4줄에 명시:\n"
+            f"- [관망]이 90% 이상이어야 정상. 진짜 급할 때만 [매수]/[매도].\n"
+            f"- 장기 보유 종목의 단기 등락 매도 금지 (위 투자 시계 참조).\n"
+            f"- ISA 계좌는 국내주식/국내 ETF만 가능. 매수 금액은 해당 계좌 예수금의 30% 이내.\n\n"
+            f"[매수] 또는 [매도] 판단 시 반드시 아래 7줄 형식 그대로 출력 (필드명·순서 변경 금지):\n"
             f"[매수] 또는 [매도]\n"
             f"거래세션: {session_label}\n"
             f"계좌: [일반] 또는 [ISA] 또는 [IRP]\n"
-            f"주문: [종목명] [수량]주 × ₩[지정가] (또는 $[지정가])\n\n"
+            f"주문: 지정가 {unit}[단일가] × [수량]주 ([금액], 예수금의 [N]%)\n"
+            f"목표: {unit}[목표가] ([±N%]) 도달 시 [전량/절반] 매도 — 또는 손절 회피 목적이면 '즉시 청산'\n"
+            f"시계: 단기 또는 중기 또는 장기\n"
+            f"사유: 왜 지금 즉시 행동해야 하는가 — 트리거 + 핵심 근거 한 줄\n\n"
+            f"주의: 주문 가격은 현재가에서 체결 가능한 단일가 (범위 금지). "
+            f"목표는 가격 또는 '며칠 내 [조건]' 형태로 반드시 구체화.\n"
             f"[관망] 판단이면 한 줄이면 됩니다: [관망] 단순 변동성, 추가 모니터링.\n"
             f"실수가 있으면 안 됩니다. 확실할 때만 [매수]/[매도]를 내리세요."
         )
@@ -716,13 +747,22 @@ class MarketMonitor:
 # ─── 알림 메시지 포매터 ───────────────────────────────
 
 def _build_alert_message(result: AlertResult) -> str:
-    """텔레그램 알림 메시지 생성."""
+    """텔레그램 알림 메시지 생성 — 받자마자 주문 입력 가능한 액션 카드."""
     trigger = result.trigger
-    lines: list[str] = []
+    analysis = result.ai_analysis or ""
 
+    # 액션 방향 (게이트 통과 시 [매수]/[매도] 보장)
+    if analysis.startswith("[매수]"):
+        action_title = "🟢 매수 긴급 액션"
+    elif analysis.startswith("[매도]"):
+        action_title = "🔴 매도 긴급 액션"
+    else:
+        action_title = "긴급 액션"
+
+    lines: list[str] = []
     lines.append("━" * 24)
-    lines.append(f"{result.icon}  *긴급 시장 알림*")
-    lines.append(f"_{trigger.timestamp.strftime('%Y.%m.%d %H:%M')}_")
+    lines.append(f"⚡  *{action_title}*")
+    lines.append(f"_{trigger.timestamp.strftime('%Y.%m.%d %H:%M')} KST — 장중, 즉시 실행_")
     lines.append("━" * 24)
     lines.append("")
 
@@ -754,24 +794,49 @@ def _build_alert_message(result: AlertResult) -> str:
         lines.append("    ⚠️ 스프레드·체결 리스크 높음 — 지정가 필수")
     lines.append("")
 
-    # AI 분석 — 매수/매도 시 주문 정보 강조
-    if result.ai_analysis:
-        analysis = result.ai_analysis
+    # AI 분석 — 액션 카드 (필드별 구조화 출력)
+    if analysis:
         is_action = analysis.startswith("[매수]") or analysis.startswith("[매도]")
 
         if is_action:
+            import re
+
+            def _field(name: str) -> str:
+                m = re.search(rf"{name}:\s*(.+)", analysis)
+                return m.group(1).strip() if m else ""
+
             lines.append("─" * 24)
-            lines.append("🚨 *즉시 행동 필요*")
+            account = _field("계좌")
+            order = _field("주문")
+            target = _field("목표")
+            horizon = _field("시계")
+            reason = _field("사유")
+
+            lines.append(f"*{account}  {trigger.name}*  〔{horizon}〕")
             lines.append("")
-            # 첫 4줄(판단/계좌/주문/사유)을 강조
-            action_lines = analysis.split("\n")
-            for i, al in enumerate(action_lines[:5]):
-                lines.append(f"*{al}*" if i < 3 else al)
-            if len(action_lines) > 5:
+            lines.append(f"📋 *주문: {order}*")
+            lines.append(f"🎯 목표: {target}")
+            lines.append(f"💬 사유: {reason}")
+            lines.append("")
+            # 실행 후 매매 기록 명령을 구체 값으로 미리 구성
+            side = "매수" if analysis.startswith("[매수]") else "매도"
+            qty_m = re.search(r"×\s*(\d+)\s*주", order)
+            price_m = re.search(r"[₩$]\s*([\d,]+(?:\.\d+)?)", order)
+            acct_clean = account.strip("[]")
+            qty_s = qty_m.group(1) if qty_m else "N"
+            price_s = price_m.group(1).replace(",", "") if price_m else "체결가"
+            lines.append(
+                f"✅ 체결 후 입력: `매매 {trigger.name} {side} {qty_s}주 {price_s} {acct_clean}`"
+            )
+
+            # 형식 외 추가 분석이 있으면 뒤에 (7줄 이후)
+            extra_lines = analysis.split("\n")[7:]
+            extra = "\n".join(l for l in extra_lines if l.strip())
+            if extra:
                 lines.append("")
-                lines.append("\n".join(action_lines[5:]))
+                lines.append(extra[:400])
         else:
-            # [관망] — 간략하게
+            # [관망] — 게이트에서 억제되므로 도달하지 않지만 방어
             lines.append("─" * 24)
             lines.append(f"🤖 {analysis[:200]}")
         lines.append("")

@@ -838,18 +838,45 @@ class TestIsActionablePolicy:
         assert m._is_actionable(self._make_stop_result("CRITICAL", "[관망] 대기")) is False
 
     def test_premarket_buy_with_full_info_true(self):
-        """US_PREMARKET + [매수] + 거래세션/계좌/주문 → True."""
+        """US_PREMARKET + [매수] + 7필드 완비 → True."""
         from core.monitor import MarketMonitor
         m = MarketMonitor()
-        analysis = "[매수]\n거래세션: 미국 프리마켓\n계좌: [일반]\n주문: MU 3주 × $950 지정가"
+        analysis = (
+            "[매수]\n거래세션: 미국 프리마켓\n계좌: [일반]\n"
+            "주문: 지정가 $950 × 3주 ($2,850, 예수금의 20%)\n"
+            "목표: $1,050 (+10.5%) 도달 시 전량 매도\n시계: 단기\n"
+            "사유: HBM 급락 과매도 반등 — RSI 25 + 거래량 급증"
+        )
         assert m._is_actionable(self._make_result("WARNING", analysis, "US_PREMARKET")) is True
 
     def test_aftermarket_sell_with_full_info_true(self):
-        """US_AFTERMARKET + [매도] + 거래세션/계좌/주문 → True."""
+        """US_AFTERMARKET + [매도] + 7필드 완비 → True."""
         from core.monitor import MarketMonitor
         m = MarketMonitor()
-        analysis = "[매도]\n거래세션: 미국 애프터마켓\n계좌: [일반]\n주문: MU 8주 × $1,100 지정가"
+        analysis = (
+            "[매도]\n거래세션: 미국 애프터마켓\n계좌: [일반]\n"
+            "주문: 지정가 $1,100 × 8주 ($8,800)\n"
+            "목표: 즉시 청산 — 손절선 이탈 방어\n시계: 단기\n"
+            "사유: 실적 쇼크 -12% 손절선 이탈"
+        )
         assert m._is_actionable(self._make_result("WARNING", analysis, "US_AFTERMARKET")) is True
+
+    def test_missing_target_horizon_false(self):
+        """[매수]인데 목표/시계/사유 누락 → False (7필드 정책)."""
+        from core.monitor import MarketMonitor
+        m = MarketMonitor()
+        analysis = "[매수]\n거래세션: 미국 프리마켓\n계좌: [일반]\n주문: 지정가 $950 × 3주"
+        assert m._is_actionable(self._make_result("WARNING", analysis, "US_PREMARKET")) is False
+
+    def test_invalid_horizon_value_false(self):
+        """시계 값이 장기/중기/단기가 아니면 → False."""
+        from core.monitor import MarketMonitor
+        m = MarketMonitor()
+        analysis = (
+            "[매수]\n거래세션: 한국 정규장\n계좌: [ISA]\n"
+            "주문: 지정가 ₩28,500 × 20주\n목표: ₩31,500 (+10%)\n시계: 미정\n사유: 급락"
+        )
+        assert m._is_actionable(self._make_result("WARNING", analysis, "KR_REGULAR")) is False
 
     def test_aftermarket_missing_order_false(self):
         """US_AFTERMARKET + [매도] + 주문정보 누락 → False."""
