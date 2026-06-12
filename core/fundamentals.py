@@ -93,7 +93,9 @@ def fetch_financial_data(ticker: str, name: str = "") -> FinancialData | None:
             if earnings_date:
                 try:
                     ed_dt = datetime.strptime(earnings_date[:10], "%Y-%m-%d")
-                    now = datetime.now()
+                    # 서버는 UTC — naive now()는 KST보다 9시간 늦어 D-day 오차 발생
+                    from config.settings import KST
+                    now = datetime.now(KST).replace(tzinfo=None)
                     days_to = (ed_dt - now).days
                 except ValueError:
                     pass
