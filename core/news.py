@@ -34,7 +34,7 @@ def gather_news(briefing_type: str = "MANUAL") -> str:
     portfolio, _, _ = get_market_config(briefing_type)
     stock_names = ", ".join(f"{nm}({tk})" for tk, nm in portfolio.items())
 
-    if briefing_type in ("KR_BEFORE", "KR_NIGHT"):
+    if briefing_type in ("KR_BEFORE", "KR_NIGHT", "KR_OPEN"):
         prompt = f"""현재 시각: {now}
 
 【한국 시장 중심 브리핑】 다음 항목을 Google Search로 검색하여 최신 정보를 수집해주세요:

@@ -57,10 +57,10 @@ Sanjuk-Stock-Simulator/
 
 ```text
 전략 논의 / 분석 대화  →  Claude Code 터미널 ($0)
-자동 브리핑 (한국장)   →  KST 08:30, Claude Code 스케줄 트리거 ($0)
-야간 프리브리핑 (한국)  →  KST 23:00, 내일 한국장 지정가 주문용 ($0)
-미국장 프리브리핑       →  KST 20:00, 오늘 밤 미국장 지정가 주문용 ($0)
-자동 브리핑 (미국장)   →  KST 21:00, Claude Code 스케줄 트리거 ($0)
+야간 프리브리핑 (한국)  →  KST 23:00, 내일 한국장 지정가 주문용 (KR_NIGHT, $0)
+개장 직전 액션 브리핑   →  KST 08:50, 동시호가 갭 반영 + 09~10시 액션 확정 (KR_OPEN, $0)
+미국장 프리브리핑       →  KST 20:00, 오늘 밤 미국장 지정가 주문용 (US_NIGHT, $0)
+미국장 마감 요약        →  KST 07:00, 밤새 결과 + 보유 조치 (US_CLOSE, $0)
 수시 브리핑 (PC)       →  /한국장, /미국장, /통합 커맨드 ($0)
 긴급 시장 알림         →  시장 모니터 Tier1 교차검증 + Tier2 Opus CLI ($0)
 보유종목 확인 (폰)     →  텔레그램에서 "보유종목 확인" 입력
@@ -202,10 +202,11 @@ BRIEFING_TYPE=MANUAL  # 브리핑 유형 (KR_BEFORE / US_BEFORE / MANUAL)
 - venv: `/home/kanzaka110/Sanjuk-Stock-Simulator/venv/`
 - 서비스: `stock-bot` (텔레그램 봇 + 모니터, systemd 상시 실행)
 - 로그: `sudo journalctl -u stock-bot -f`
-- 한국장 브리핑: KST 08:30 (UTC 23:30) — cron
-- 야간 프리브리핑: KST 23:00 (UTC 14:00) — cron (내일 한국장 지정가 주문용)
-- 미국장 프리브리핑: KST 20:00 (UTC 11:00) — cron (오늘 밤 미국장 지정가 주문용)
-- 미국장 브리핑: KST 21:00 (UTC 12:00) — cron
+- 야간 프리브리핑(KR_NIGHT): KST 23:00 (UTC 14:00) — cron
+- 개장 직전 브리핑(KR_OPEN): KST 08:50 (UTC 23:50) — cron (동시호가 갭 + 최종 액션)
+- 미국장 프리브리핑(US_NIGHT): KST 20:00 (UTC 11:00) — cron
+- 미국장 마감 요약(US_CLOSE): KST 07:00 (UTC 22:00) — cron
+- 주간 성과 리포트: 토 KST 09:00 (UTC 00:00) — cron
 - 주가 업데이트: 비활성화 (Notion 사용 중단, 메일로 대체)
 
 ## 모바일 접근

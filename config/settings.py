@@ -255,7 +255,7 @@ def get_market_config(briefing_type: str) -> tuple[dict[str, str], dict[str, str
     포트폴리오 + 워치리스트 + RIA 허용 종목을 시장별로 분리.
     워치리스트도 시세 수집 대상에 포함 (신규 매수 후보 추천용).
     """
-    if briefing_type in ("KR_BEFORE", "KR_NIGHT"):
+    if briefing_type in ("KR_BEFORE", "KR_NIGHT", "KR_OPEN"):
         return {**KR_PORTFOLIO, **KR_WATCHLIST, **RIA_ALLOWED_TICKERS}, {**KR_INDICES, **US_INDICES}, MACRO
     if briefing_type in ("US_BEFORE", "US_NIGHT", "US_CLOSE"):
         return {**US_PORTFOLIO, **US_WATCHLIST}, {**US_INDICES, **KR_INDICES}, MACRO

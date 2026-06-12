@@ -465,6 +465,7 @@ def _section_footer() -> list[dict]:
 LABEL_MAP = {
     "KR_BEFORE": "🇰🇷 국내장 시작 전",
     "KR_NIGHT": "🌙 내일 한국장 프리브리핑",
+    "KR_OPEN": "🔔 한국장 개장 직전 액션",
     "US_BEFORE": "🇺🇸 미국장 시작 전",
     "US_NIGHT": "🌙 오늘 밤 미국장 프리브리핑",
     "US_CLOSE": "🌅 미국장 마감 요약",

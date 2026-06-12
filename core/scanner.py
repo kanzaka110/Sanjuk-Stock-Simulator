@@ -436,7 +436,7 @@ def discovery_to_text(market: str) -> str:
 def scan_to_text(briefing_type: str = "MANUAL") -> str:
     """briefing_type에 맞는 시장 스캔 + 전시장 발굴 텍스트 (프롬프트 주입용)."""
     parts: list[str] = []
-    if briefing_type in ("KR_BEFORE", "KR_NIGHT"):
+    if briefing_type in ("KR_BEFORE", "KR_NIGHT", "KR_OPEN"):
         markets = ["KR"]
     elif briefing_type in ("US_BEFORE", "US_NIGHT", "US_CLOSE"):
         markets = ["US"]

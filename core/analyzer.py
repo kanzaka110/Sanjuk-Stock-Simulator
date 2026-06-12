@@ -108,7 +108,7 @@ def _backtest_targets(
     def _is_kr(tk: str) -> bool:
         return ".KS" in tk or ".KQ" in tk
 
-    if briefing_type in ("KR_BEFORE", "KR_NIGHT"):
+    if briefing_type in ("KR_BEFORE", "KR_NIGHT", "KR_OPEN"):
         market_ok = _is_kr
     elif briefing_type in ("US_BEFORE", "US_NIGHT", "US_CLOSE"):
         market_ok = lambda tk: not _is_kr(tk)  # noqa: E731
@@ -398,7 +398,7 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
 
     # 2단계: 시장 레짐 감지 (로컬) — KR 브리핑은 KOSPI 기준, 그 외 S&P500 기준
     log.info("[2/11] 시장 레짐 감지 중...")
-    regime_market = "KR" if briefing_type in ("KR_BEFORE", "KR_NIGHT") else "US"
+    regime_market = "KR" if briefing_type in ("KR_BEFORE", "KR_NIGHT", "KR_OPEN") else "US"
     regime = detect_regime(regime_market)
     regime_text = regime.to_text()
     if briefing_type == "MANUAL":
