@@ -257,7 +257,7 @@ def get_market_config(briefing_type: str) -> tuple[dict[str, str], dict[str, str
     """
     if briefing_type in ("KR_BEFORE", "KR_NIGHT", "KR_OPEN"):
         return {**KR_PORTFOLIO, **KR_WATCHLIST, **RIA_ALLOWED_TICKERS}, {**KR_INDICES, **US_INDICES}, MACRO
-    if briefing_type in ("US_BEFORE", "US_NIGHT", "US_CLOSE"):
+    if briefing_type in ("US_BEFORE", "US_NIGHT"):
         return {**US_PORTFOLIO, **US_WATCHLIST}, {**US_INDICES, **KR_INDICES}, MACRO
     return {**PORTFOLIO, **WATCHLIST, **RIA_ALLOWED_TICKERS}, INDICES, MACRO
 

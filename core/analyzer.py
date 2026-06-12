@@ -110,7 +110,7 @@ def _backtest_targets(
 
     if briefing_type in ("KR_BEFORE", "KR_NIGHT", "KR_OPEN"):
         market_ok = _is_kr
-    elif briefing_type in ("US_BEFORE", "US_NIGHT", "US_CLOSE"):
+    elif briefing_type in ("US_BEFORE", "US_NIGHT"):
         market_ok = lambda tk: not _is_kr(tk)  # noqa: E731
     else:
         market_ok = lambda tk: True  # noqa: E731
@@ -401,8 +401,8 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
     regime_market = "KR" if briefing_type in ("KR_BEFORE", "KR_NIGHT", "KR_OPEN") else "US"
     regime = detect_regime(regime_market)
     regime_text = regime.to_text()
-    if briefing_type == "MANUAL":
-        # 통합 브리핑: KOSPI 레짐도 병행 표시
+    if briefing_type in ("MANUAL", "US_CLOSE"):
+        # 통합/데일리리뷰: KOSPI 레짐도 병행 표시
         kr_regime = detect_regime("KR")
         if kr_regime.confidence > 0:
             regime_text += f"\n{kr_regime.to_text()}"
@@ -480,9 +480,9 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
         for d in upcoming:
             log.warning(f"  !! {d.name} 실적 발표 {d.days_to_earnings}일 후 ({d.earnings_date})")
 
-    # 8단계: 한국 시장 심층 (KRX) — 미국장 브리핑에서는 스킵
+    # 8단계: 한국 시장 심층 (KRX) — 미국장 브리핑에서는 스킵 (US_CLOSE는 데일리 리뷰라 포함)
     kr_text = ""
-    if briefing_type not in ("US_BEFORE", "US_NIGHT", "US_CLOSE"):
+    if briefing_type not in ("US_BEFORE", "US_NIGHT"):
         log.info("[8/13] 한국 시장 데이터 조회 중...")
         flows = fetch_institutional_flow()
         fundamentals = fetch_fundamentals()
@@ -562,6 +562,34 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
     if econ_warnings:
         extra_context += "\n\n━━━ 📅 경제 캘린더 경고 (D-3 이내) ━━━\n" + "\n".join(econ_warnings)
         extra_context += "\n→ HIGH 이벤트 전 신규 포지션 진입 주의. 변동성 확대 예상."
+
+    # US_CLOSE (데일리 리뷰): 어제 사용자의 매매 + 종료된 추천 결과 주입
+    if briefing_type == "US_CLOSE":
+        try:
+            from core.trade_log import daily_review_text
+            review = daily_review_text()
+            if review:
+                extra_context += f"\n\n━━━ 📒 어제의 매매 리뷰 (실현손익 포함) ━━━\n{review}"
+        except Exception as e:
+            log.debug("매매 리뷰 스킵: %s", e)
+        try:
+            from core.memory import _get_conn as _mem_conn
+            from datetime import timedelta as _td
+            _cut = (_dt.now(KST) - _td(hours=26)).isoformat()
+            closed_rows = _mem_conn().execute(
+                """SELECT name, ticker, signal, pnl_pct, outcome FROM predictions
+                   WHERE closed_at >= ? AND outcome IN ('win','loss','neutral')
+                   ORDER BY closed_at DESC LIMIT 10""",
+                (_cut,),
+            ).fetchall()
+            if closed_rows:
+                _cl = ["어제 종료된 AI 추천 결과:"]
+                for r in closed_rows:
+                    icon = "✅" if r["outcome"] == "win" else "❌" if r["outcome"] == "loss" else "➖"
+                    _cl.append(f"  {icon} {r['name']}({r['ticker']}) {r['signal']}: {r['pnl_pct']:+.1f}% [{r['outcome']}]")
+                extra_context += "\n\n━━━ 어제 종료된 추천 ━━━\n" + "\n".join(_cl)
+        except Exception as e:
+            log.debug("종료 추천 조회 스킵: %s", e)
 
     # 미반영 매매 경고 (텔레그램 '매매' 명령으로 기록된 settings 미반영분)
     try:

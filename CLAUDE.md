@@ -60,7 +60,7 @@ Sanjuk-Stock-Simulator/
 야간 프리브리핑 (한국)  →  KST 23:00, 내일 한국장 지정가 주문용 (KR_NIGHT, $0)
 개장 직전 액션 브리핑   →  KST 08:50, 동시호가 갭 반영 + 09~10시 액션 확정 (KR_OPEN, $0)
 미국장 프리브리핑       →  KST 20:00, 오늘 밤 미국장 지정가 주문용 (US_NIGHT, $0)
-미국장 마감 요약        →  KST 07:00, 밤새 결과 + 보유 조치 (US_CLOSE, $0)
+데일리 리뷰             →  KST 07:00, 전날 한국+미국 결산 + 내 액션·실현손익 + 보유 조치 (US_CLOSE, $0)
 수시 브리핑 (PC)       →  /한국장, /미국장, /통합 커맨드 ($0)
 긴급 시장 알림         →  시장 모니터 Tier1 교차검증 + Tier2 Opus CLI ($0)
 보유종목 확인 (폰)     →  텔레그램에서 "보유종목 확인" 입력
@@ -205,7 +205,7 @@ BRIEFING_TYPE=MANUAL  # 브리핑 유형 (KR_BEFORE / US_BEFORE / MANUAL)
 - 야간 프리브리핑(KR_NIGHT): KST 23:00 (UTC 14:00) — cron
 - 개장 직전 브리핑(KR_OPEN): KST 08:50 (UTC 23:50) — cron (동시호가 갭 + 최종 액션)
 - 미국장 프리브리핑(US_NIGHT): KST 20:00 (UTC 11:00) — cron
-- 미국장 마감 요약(US_CLOSE): KST 07:00 (UTC 22:00) — cron
+- 데일리 리뷰(US_CLOSE): KST 07:00 (UTC 22:00) — cron (양 시장 결산+액션 리뷰)
 - 주간 성과 리포트: 토 KST 09:00 (UTC 00:00) — cron
 - 주가 업데이트: 비활성화 (Notion 사용 중단, 메일로 대체)
 

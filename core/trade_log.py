@@ -129,6 +129,54 @@ def mark_all_applied() -> int:
     return n
 
 
+def daily_review_text(hours: int = 26) -> str:
+    """최근 N시간 매매 리뷰 — 데일리 리뷰(US_CLOSE) 브리핑용.
+
+    사용자가 취한 액션 + 매도는 평단 대비 실현손익 추정 포함.
+    applied 여부 무관 (반영됐어도 어제 액션은 리뷰 대상).
+    """
+    from datetime import timedelta
+
+    conn = _get_conn()
+    cutoff = (datetime.now(KST) - timedelta(hours=hours)).isoformat()
+    rows = conn.execute(
+        "SELECT * FROM trades WHERE created_at >= ? ORDER BY created_at",
+        (cutoff,),
+    ).fetchall()
+    if not rows:
+        return ""
+
+    from config.settings import (
+        HOLDINGS_GENERAL, HOLDINGS_IRP, HOLDINGS_ISA,
+        HOLDINGS_PENSION, HOLDINGS_RIA,
+    )
+    avg_costs: dict[str, float] = {}
+    for h in (HOLDINGS_GENERAL, HOLDINGS_ISA, HOLDINGS_RIA, HOLDINGS_IRP, HOLDINGS_PENSION):
+        for tk, info in h.items():
+            avg_costs[tk] = info.get("avg_cost_usd") or info.get("avg_cost_krw") or 0.0
+
+    lines = [f"사용자가 최근 {hours}시간 내 실행한 매매 ({len(rows)}건):"]
+    for r in rows:
+        unit = "₩" if r["ticker"].endswith((".KS", ".KQ")) else "$"
+        acct = f" [{r['account']}]" if r["account"] else ""
+        base = (
+            f"  {r['created_at'][5:16]} {r['name']}({r['ticker']}){acct} "
+            f"{r['side']} {r['shares']}주 @ {unit}{r['price']:,.0f}"
+        )
+        if r["side"] == "매도":
+            avg = avg_costs.get(r["ticker"], 0.0)
+            if avg > 0:
+                pnl_each = r["price"] - avg
+                pnl_pct = pnl_each / avg * 100
+                base += (
+                    f" → 실현손익 {unit}{pnl_each * r['shares']:+,.0f} "
+                    f"({pnl_pct:+.1f}%, 평단 {unit}{avg:,.0f})"
+                )
+        lines.append(base)
+    lines.append("→ 위 매매의 적절성을 평가하고, 잔여 포지션의 다음 조치를 제시하라.")
+    return "\n".join(lines)
+
+
 def pending_trades_text() -> str:
     """미반영 매매 목록 (브리핑 프롬프트 주입 + 텔레그램 응답용)."""
     conn = _get_conn()
