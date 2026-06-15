@@ -1185,11 +1185,17 @@ def memory_to_text() -> str:
         lines.append("\n  [정확도 통계]")
         for ticker, stats in accuracy.items():
             evaluated = stats.get("evaluated_count", stats["wins"] + stats["losses"])
-            sample_note = " [샘플부족]" if evaluated < 3 else ""
-            lines.append(
-                f"  {ticker}: {stats['total']}건 중 {stats['wins']}적중 "
-                f"(승률 {stats['win_rate']:.0f}%, 평균 {stats['avg_pnl']:+.1f}%){sample_note}"
-            )
+            if evaluated < 3:
+                # 평가 표본 부족 — "0% 승률"은 통계적으로 무의미. 위험 신호로 오인 금지.
+                lines.append(
+                    f"  {ticker}: {stats['total']}건 기록, 평가 {evaluated}건 "
+                    f"[데이터부족 — 승률 판단 불가]"
+                )
+            else:
+                lines.append(
+                    f"  {ticker}: {stats['total']}건 중 {stats['wins']}적중 "
+                    f"(승률 {stats['win_rate']:.0f}%, 평균 {stats['avg_pnl']:+.1f}%, 평가 {evaluated}건)"
+                )
 
     if predictions:
         open_preds = [p for p in predictions if p.status == "open"]
@@ -1214,17 +1220,21 @@ def memory_to_text() -> str:
                     f"  {icon} {p.name} {p.signal}{tag_suffix}: {p.pnl_pct:+.1f}% [{p.outcome}]"
                 )
 
-    # 신뢰도 기반 피드백 주입
+    # 신뢰도 기반 피드백 주입 — 평가 표본(evaluated_count) 기준 (total은 invalid/neutral 포함이라 부적합)
+    # 게이트(평가≥5 차단)·보정(평가≥3)과 일관. 평가 0건짜리 "0% 승률"을 위험으로 낙인찍던 버그 수정.
+    def _eval_cnt(s: dict) -> int:
+        return s.get("evaluated_count", s["wins"] + s["losses"])
+
     if accuracy:
-        high = [t for t, s in accuracy.items() if s["total"] >= 2 and s["win_rate"] >= 70 and s["avg_pnl"] > 0]
-        danger = [t for t, s in accuracy.items() if s["total"] >= 2 and s["win_rate"] < 30]
+        high = [t for t, s in accuracy.items() if _eval_cnt(s) >= 5 and s["win_rate"] >= 70 and s["avg_pnl"] > 0]
+        danger = [t for t, s in accuracy.items() if _eval_cnt(s) >= 5 and s["win_rate"] < 30]
         if high or danger:
             lines.append("\n  [⚡ 신뢰도 기반 판단 보정]")
         if danger:
             conn = _get_conn()
             for t in danger:
                 s = accuracy[t]
-                penalty = -30 if s["total"] >= 4 else -15
+                penalty = -30 if _eval_cnt(s) >= 8 else -15
                 lines.append(
                     f"  🔴 {t}: 승률 {s['win_rate']:.0f}% 평균 {s['avg_pnl']:+.1f}% ({s['total']}건) "
                     f"→ 확신도 {penalty:+d}% 자동 보정됨."
@@ -1241,7 +1251,7 @@ def memory_to_text() -> str:
         if high:
             for t in high:
                 s = accuracy[t]
-                bonus = 10 if s["total"] >= 4 else 5
+                bonus = 10 if _eval_cnt(s) >= 8 else 5
                 lines.append(
                     f"  🟢 {t}: 승률 {s['win_rate']:.0f}% 평균 {s['avg_pnl']:+.1f}% ({s['total']}건) "
                     f"→ 확신도 +{bonus}% 자동 가중됨."
