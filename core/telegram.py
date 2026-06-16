@@ -113,8 +113,16 @@ def _build_impact_message(
         lines.append(f"💬 {oneliner}")
     lines.append("")
 
+    # 데일리 리뷰(US_CLOSE)는 결산·복기 전용 — 신규 액션 섹션을 띄우지 않는다
+    is_daily_review = briefing_type == "US_CLOSE"
+
     # ⚡ 통합 액션 (최우선 — 사용자는 이 섹션만 보고 실행)
-    actions = raw.get("actions", None)
+    actions = None if is_daily_review else raw.get("actions", None)
+    if is_daily_review:
+        lines.append(SEP)
+        lines.append("📒 *데일리 리뷰 — 결산·복기 전용*")
+        lines.append("  (신규 매매 판단은 08:50 개장 직전 브리핑에서)")
+        lines.append("")
     if actions:
         lines.append(SEP)
         lines.append("⚡ *액션 (그대로 실행)*")
@@ -153,8 +161,8 @@ def _build_impact_message(
             lines.append(f"  ⏳ 대기: {next_action[:150]}")
         lines.append("")
 
-    # 매수 추천 (구버전 호환 — actions 없을 때만)
-    if buy_recs and not actions:
+    # 매수 추천 (구버전 호환 — actions 없을 때만, 데일리 리뷰 제외)
+    if buy_recs and not actions and not is_daily_review:
         lines.append(SEP)
         lines.append("💰 *매수 추천*")
         for rec in buy_recs[:3]:
@@ -175,7 +183,7 @@ def _build_impact_message(
         lines.append("")
 
     # 야간 프리브리핑: 예약 주문 요약 (actions가 있으면 중복이므로 스킵)
-    night_orders = ([] if actions else (raw.get("night_orders", []) or []))
+    night_orders = ([] if (actions or is_daily_review) else (raw.get("night_orders", []) or []))
     is_night = briefing_type in ("KR_NIGHT", "US_NIGHT") and not actions
 
     if night_orders:
@@ -229,8 +237,8 @@ def _build_impact_message(
             lines.append("  ⚠️ 종합 판단 실패 — 페르소나 요약만 제공")
         lines.append("")
 
-    # 매도 추천 (한 줄)
-    if sell_recs:
+    # 매도 추천 (한 줄, 데일리 리뷰 제외)
+    if sell_recs and not is_daily_review:
         lines.append(SEP)
         lines.append("📉 *매도 추천*")
         for rec in sell_recs[:3]:
