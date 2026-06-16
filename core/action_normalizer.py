@@ -115,8 +115,36 @@ def _price_gap_fields(entry: float, cur: float) -> dict:
     }
 
 
+def _suggest_qty(account: str, entry: float, confidence: int, is_held: bool) -> dict:
+    """조건부 매수 수량/총액 산정 (예산 규칙 기반).
+
+    예산: RIA 1차 ETF 진입 기본 50~100만, 확신도 50+ 코어 ETF 최대 100~150만,
+          확신도 40 미만/타계좌 보유 중이면 30~60만. 수량=floor(예산/지정가).
+    수량 0이면 shortage 플래그. AI가 shares를 명시했으면 그쪽을 우선.
+    """
+    if entry <= 0:
+        return {}
+    # 예산 결정 (보수적으로 하한 사용 — 1차 진입은 소액 분할 원칙)
+    if confidence < 40 or is_held:
+        budget = 600_000
+    elif confidence >= 50:
+        budget = 1_000_000
+    else:
+        budget = 800_000
+    qty = int(budget // entry)
+    if qty <= 0:
+        return {"qty_num": 0, "budget": budget, "shortage": True}
+    return {
+        "qty_num": qty,
+        "budget": budget,
+        "order_total": qty * entry,
+        "shortage": False,
+    }
+
+
 def _build_action(row: dict, action_type: str, side: str, briefing_type: str,
-                  current_prices: dict | None = None) -> dict:
+                  current_prices: dict | None = None, confidence: int = 50,
+                  is_held: bool = False) -> dict:
     """정규화된 액션 dict 생성 (텔레그램 렌더 + 메모리 저장 공용)."""
     is_night = briefing_type in ("KR_NIGHT", "US_NIGHT")
     if side == "buy":
@@ -138,8 +166,21 @@ def _build_action(row: dict, action_type: str, side: str, briefing_type: str,
         cur = current_prices.get(tk, current_prices.get(tk.replace(".KS", "").replace(".KQ", ""), 0))
         gap = _price_gap_fields(_num(price), _num(cur))
 
+    # 조건부 매수: 수량/총액 산정 (실제 주문에 바로 쓸 수 있게)
+    qty_fields = {}
+    if side == "buy" and action_type == CONDITIONAL_NEW_BUY:
+        entry_num = _num(price)
+        ai_shares = _num(row.get("shares", ""))  # AI 명시 수량 우선
+        if ai_shares > 0 and entry_num > 0:
+            qty_fields = {"qty_num": int(ai_shares), "order_total": int(ai_shares) * entry_num,
+                          "shortage": False, "qty_source": "ai"}
+        else:
+            qty_fields = {**_suggest_qty(row.get("account", ""), entry_num, confidence, is_held),
+                          "qty_source": "budget"}
+
     return {
         **gap,
+        **qty_fields,
         "action_type": action_type,
         "type": disp_type,
         "side": side,
@@ -211,13 +252,16 @@ def normalize_actions(
         blocker = _has_phrase(text, BUY_NOT_NOW_PHRASES)
         is_pullback = strat == "신규진입" or "눌림목" in text
 
+        held = _is_held(ticker, name, holdings)
+        conf = int(_num(row.get("confidence", row.get("urgency_score", "50"))) or 50)
         if blocker or is_pullback:
             # 조건 미충족/눌림목 → 조건부 후보 (즉시 실행 금지)
-            act = _build_action(row, CONDITIONAL_NEW_BUY, "buy", briefing_type, current_prices)
+            act = _build_action(row, CONDITIONAL_NEW_BUY, "buy", briefing_type,
+                                current_prices, confidence=conf, is_held=held)
             act["block_reason"] = blocker or "눌림목 예약"
             conditional_buy.append(act)
         else:
-            atype = AI_ADD_BUY if _is_held(ticker, name, holdings) else AI_NEW_BUY
+            atype = AI_ADD_BUY if held else AI_NEW_BUY
             executable.append(_build_action(row, atype, "buy", briefing_type, current_prices))
 
     # ── 매도 분류 ──

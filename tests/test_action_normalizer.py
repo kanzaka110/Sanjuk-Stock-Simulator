@@ -214,9 +214,9 @@ class TestPriceGapNote:
     def test_pullback_shows_negative_gap(self):
         # current=139550, entry=138000 → -1.1% 눌림목
         msg = self._gap_msg("069500.KS", "₩138,000", 139550)
-        assert "현재가 대비 -1.1%" in msg
+        assert "현재가 대비: -1.1%" in msg
         assert "미체결 가능" in msg
-        assert "현재가 139,550" in msg
+        assert "현재가: 139,550" in msg
 
     def test_chase_warns_immediate_fill(self):
         # entry > current → 즉시 체결 가능성 경고
@@ -236,6 +236,59 @@ class TestPriceGapNote:
                "strategy_sell": []}
         n = normalize_actions(raw, "KR_BEFORE", {}, {})
         assert "gap_note" not in n["conditional_buy_candidates"][0]
+
+
+class TestConditionalBuyCard:
+    """조건부 매수 8필드 주문 카드 (계좌/지정가/수량/총액/괴리/조건/미체결)."""
+
+    def _card(self, account="[RIA]", entry="₩138,000", cur=139550, conf="55"):
+        from core.models import BriefingResult
+        from core.telegram import _build_impact_message
+        raw = {"strategy_buy": [{"ticker": "069500.KS", "name": "KODEX 200",
+                                 "account": account, "entry_price": entry,
+                                 "target_price": "₩145,000", "confidence": conf,
+                                 "reason": "눌림목 대기"}],
+               "strategy_sell": []}
+        raw["normalized"] = normalize_actions(raw, "KR_BEFORE", {"069500.KS": cur}, {})
+        msg = _build_impact_message(BriefingResult(title="t", raw_json=raw),
+                                    raw, "🇰🇷", "t", "KR_BEFORE")
+        return raw["normalized"]["conditional_buy_candidates"][0], msg
+
+    def test_card_has_all_fields(self):
+        c, msg = self._card()
+        # 계좌/종목/지정가/수량/총액/괴리율/조건/미체결
+        assert "[RIA]" in msg and "KODEX 200" in msg
+        assert "지정가: 138,000원" in msg
+        assert "수량: 7주" in msg
+        assert "총액: 966,000원" in msg
+        assert "현재가 대비: -1.1%" in msg
+        assert "이하 눌림목 도달 시만 체결" in msg
+        assert "미체결 가능" in msg
+
+    def test_qty_from_budget_conf55(self):
+        c, _ = self._card(conf="55")
+        assert c["qty_num"] == 7  # 100만 / 138000 = 7
+
+    def test_qty_low_conf_smaller_budget(self):
+        c, _ = self._card(conf="35")
+        assert c["qty_num"] == 4  # 60만 / 138000 = 4
+
+    def test_ai_shares_respected(self):
+        from core.models import BriefingResult
+        from core.telegram import _build_impact_message
+        raw = {"strategy_buy": [{"ticker": "069500.KS", "name": "KODEX 200",
+                                 "account": "[RIA]", "entry_price": "₩138,000",
+                                 "shares": "10주", "reason": "눌림목"}],
+               "strategy_sell": []}
+        raw["normalized"] = normalize_actions(raw, "KR_BEFORE", {"069500.KS": 139550}, {})
+        c = raw["normalized"]["conditional_buy_candidates"][0]
+        assert c["qty_num"] == 10 and c["qty_source"] == "ai"
+
+    def test_shortage_when_qty_zero(self):
+        # 고가주 → 예산 부족
+        c, msg = self._card(entry="₩700,000", cur=710000, conf="35")
+        assert c["shortage"] is True
+        assert "예산 부족/가격 과대" in msg
 
 
 class TestBuyFocusMode:

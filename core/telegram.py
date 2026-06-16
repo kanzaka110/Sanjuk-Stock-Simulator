@@ -79,6 +79,15 @@ def _persona_short(name: str) -> str:
     }.get(name, name)
 
 
+def _num_safe(val) -> float:
+    """가격 문자열에서 숫자 추출 (렌더 폴백용)."""
+    if isinstance(val, (int, float)):
+        return float(val)
+    import re
+    nums = re.findall(r"\d+(?:\.\d+)?", str(val).replace(",", ""))
+    return float(nums[0]) if nums else 0.0
+
+
 def _append_gap_note(lines: list, action: dict) -> None:
     """매수 액션의 현재가 대비 예약가 괴리 안내 한 줄 추가.
 
@@ -127,22 +136,41 @@ def _render_normalized_sections(lines: list, normalized: dict, sep: str, next_ac
         lines.append("⚡ *오늘 실제 실행: 없음*")
         lines.append("")
 
-    # 🕐 조건부 매수 후보 (눌림목/대기/조건 미충족)
+    # 🕐 조건부 매수 후보 — 8필드 주문 카드 (계좌/지정가/수량/총액/괴리/조건/미체결)
     if conditional:
         lines.append(sep)
-        lines.append("🕐 *조건부 매수 후보* (조건 충족 시)")
+        lines.append("🕐 *조건부 매수 후보* (조건 충족 시 체결)")
         for a in conditional[:5]:
+            tk = a.get("ticker", "")
+            is_kr = tk.endswith((".KS", ".KQ")) or tk.startswith(("0", "1", "2", "3"))
+            unit = "원" if is_kr else "$"
             hz = f" 〔{a['horizon']}〕" if a.get("horizon") else ""
-            lines.append(f"🕐🟢 {a.get('account','')} *{a.get('name') or a.get('ticker','')}*{hz}")
-            # 현재가 vs 예약가 명시 (가격 오류 오인 방지)
+            lines.append(f"🕐🟢 {a.get('account','')} *{a.get('name') or tk}*{hz}")
+            entry = a.get("entry_price_num") or _num_safe(a.get("price"))
+            if entry:
+                lines.append(f"  지정가: {entry:,.0f}{unit}")
+            # 수량/총액
+            if a.get("shortage"):
+                lines.append("  수량: — (예산 부족/가격 과대)")
+            elif a.get("qty_num"):
+                lines.append(f"  수량: {a['qty_num']}주")
+                if a.get("order_total"):
+                    lines.append(f"  총액: {a['order_total']:,.0f}{unit}")
             if a.get("current_price_num"):
-                lines.append(f"  현재가 {a['current_price_num']:,.0f}")
-            if a.get("price"):
-                lines.append(f"  예약가 {a['price']}" + (f" | 목표 {a['target']}" if a.get("target") else ""))
-            _append_gap_note(lines, a)
-            cond = a.get("block_reason") or a.get("cancel_if") or a.get("reason", "")
-            if cond:
-                lines.append(f"  ⏳ 조건: {str(cond)[:80]}")
+                lines.append(f"  현재가: {a['current_price_num']:,.0f}{unit}")
+            if a.get("gap_pct") is not None:
+                lines.append(f"  현재가 대비: {a['gap_pct']:+.1f}%")
+            # 체결 조건
+            if entry:
+                lines.append(f"  조건: {entry:,.0f}{unit} 이하 눌림목 도달 시만 체결")
+            # 메모: 괴리 단계별 경고 (pullback=미체결 가능 / chase=즉시체결·추격 / wide=데이터 확인)
+            stage = a.get("gap_stage", "")
+            if stage == "chase":
+                lines.append(f"  메모: ⚠️ {a.get('gap_note', '즉시 체결 가능성 높음 — 추격매수 여부 재검토')}")
+            elif stage == "wide":
+                lines.append(f"  메모: 🚨 {a.get('gap_note', '가격 괴리 큼 — 데이터/가격 단위 확인 필요')}")
+            else:
+                lines.append("  메모: 추격매수 아님 — 미체결 가능 (즉시 실행 아님)")
         lines.append("")
 
     # 🟡 매도 취소·홀딩 전환
