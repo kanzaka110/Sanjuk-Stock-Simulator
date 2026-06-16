@@ -995,10 +995,13 @@ def _update_accuracy_stats() -> None:
         )
     """)
 
+    # 성과 집계 대상: 실행성 추천만. CANCEL_SELL/HOLD_REVIEW/WATCH_ONLY는
+    # 사용자가 실제 실행하지 않은 건이라 승률·정확도에서 제외 (요청 3).
     rows = conn.execute(
         """SELECT ticker, outcome, pnl_pct
            FROM predictions
-           WHERE status='closed'"""
+           WHERE status='closed'
+             AND COALESCE(action_type,'') NOT IN ('CANCEL_SELL','HOLD_REVIEW','WATCH_ONLY')"""
     ).fetchall()
 
     # 정규화된 티커별로 집계
@@ -1181,6 +1184,7 @@ def get_strategy_accuracy_summary() -> dict[str, dict]:
                AVG(pnl_pct) as avg_pnl
         FROM predictions
         WHERE status = 'closed' AND strategy_type != ''
+          AND COALESCE(action_type,'') NOT IN ('CANCEL_SELL','HOLD_REVIEW','WATCH_ONLY')
         GROUP BY strategy_type
         HAVING total >= 2
         ORDER BY total DESC
@@ -1207,6 +1211,7 @@ def get_tag_accuracy_summary() -> dict[str, dict]:
         SELECT strategy_tags, outcome, pnl_pct
         FROM predictions
         WHERE status = 'closed' AND strategy_tags != ''
+          AND COALESCE(action_type,'') NOT IN ('CANCEL_SELL','HOLD_REVIEW','WATCH_ONLY')
     """).fetchall()
 
     # 태그별 집계 (콤마 구분 태그를 개별로 분리)

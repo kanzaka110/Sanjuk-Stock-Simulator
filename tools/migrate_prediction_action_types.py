@@ -29,10 +29,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config.settings import DB_DIR  # noqa: E402
 from core.action_normalizer import (  # noqa: E402
-    CANCEL_SELL, HOLD_REVIEW, classify_row,
+    CANCEL_SELL, CONDITIONAL_NEW_BUY, HOLD_REVIEW, WATCH_ONLY, classify_row,
 )
 
 DB_PATH = DB_DIR / "memory.db"
+
+# action_type → action_grade 보정 (legacy 모순 제거).
+# 실행성(AI_NEW_BUY/AI_ADD_BUY/AI_SELL_MANAGEMENT)은 기존 품질게이트 결과 유지(None).
+_GRADE_FIX = {
+    CONDITIONAL_NEW_BUY: "CONDITIONAL_ACTION",
+    CANCEL_SELL: "WATCH",
+    HOLD_REVIEW: "WATCH",
+    WATCH_ONLY: "WATCH",
+}
 
 
 def _is_held(ticker: str) -> bool:
@@ -56,7 +65,8 @@ def migrate(apply: bool) -> dict:
         conn.commit()
 
     rows = conn.execute(
-        """SELECT id, signal, original_signal, reasoning, strategy_type, ticker, action_type, normalizer_version
+        """SELECT id, signal, original_signal, reasoning, strategy_type, ticker,
+                  action_type, action_grade, normalizer_version
            FROM predictions
            WHERE COALESCE(normalizer_version,'') != 'v1'"""
     ).fetchall()
@@ -64,6 +74,7 @@ def migrate(apply: bool) -> dict:
     stats = {
         "scanned": len(rows), "updated": 0,
         "by_type": {}, "sell_to_watch": 0, "original_signal_filled": 0,
+        "grade_fixed": 0,
     }
     changes = []
 
@@ -78,23 +89,28 @@ def migrate(apply: bool) -> dict:
         if atype in (CANCEL_SELL, HOLD_REVIEW):
             new_signal = "관망"
         new_original = r["original_signal"] or signal  # 비면 현재 signal 보존
+        # action_grade 보정: 비실행 타입은 결정론적 등급으로 (실행 타입은 기존 유지)
+        new_grade = _GRADE_FIX.get(atype, r["action_grade"] or "")
 
         stats["by_type"][atype] = stats["by_type"].get(atype, 0) + 1
         if new_signal != signal:
             stats["sell_to_watch"] += 1
         if not r["original_signal"]:
             stats["original_signal_filled"] += 1
+        if new_grade != (r["action_grade"] or ""):
+            stats["grade_fixed"] += 1
         stats["updated"] += 1
 
-        changes.append((r["id"], atype, new_signal, new_original))
+        changes.append((r["id"], atype, new_signal, new_original, new_grade))
 
     if apply:
-        for pid, atype, new_signal, new_original in changes:
+        for pid, atype, new_signal, new_original, new_grade in changes:
             conn.execute(
                 """UPDATE predictions
-                   SET action_type=?, signal=?, original_signal=?, normalizer_version='legacy'
+                   SET action_type=?, signal=?, original_signal=?, action_grade=?,
+                       normalizer_version='legacy'
                    WHERE id=?""",
-                (atype, new_signal, new_original, pid),
+                (atype, new_signal, new_original, new_grade, pid),
             )
         conn.commit()
 
@@ -120,6 +136,7 @@ def main():
     print(f"분류 처리: {stats['updated']}")
     print(f"  original_signal 보존: {stats['original_signal_filled']}건")
     print(f"  매도→관망(취소/홀딩): {stats['sell_to_watch']}건")
+    print(f"  action_grade 보정: {stats['grade_fixed']}건")
     print("  action_type 분포:")
     for k, v in sorted(stats["by_type"].items()):
         print(f"    {k}: {v}")
