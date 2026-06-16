@@ -197,6 +197,47 @@ class TestTelegram4Sections:
         assert "🔍 *매수 후보 없음 사유*" in msg
 
 
+class TestPriceGapNote:
+    """예약매수 현재가 대비 괴리율 안내 (가격 오류 오인 방지)."""
+
+    def _gap_msg(self, ticker, entry, cur, reason="눌림목 대기"):
+        from core.models import BriefingResult
+        from core.telegram import _build_impact_message
+        raw = {"strategy_buy": [{"ticker": ticker, "name": "테스트종목",
+                                 "account": "[RIA]", "entry_price": entry,
+                                 "target_price": "₩145,000", "reason": reason}],
+               "strategy_sell": []}
+        raw["normalized"] = normalize_actions(raw, "KR_BEFORE", {ticker: cur}, {})
+        return _build_impact_message(BriefingResult(title="t", raw_json=raw),
+                                     raw, "🇰🇷", "t", "KR_BEFORE")
+
+    def test_pullback_shows_negative_gap(self):
+        # current=139550, entry=138000 → -1.1% 눌림목
+        msg = self._gap_msg("069500.KS", "₩138,000", 139550)
+        assert "현재가 대비 -1.1%" in msg
+        assert "미체결 가능" in msg
+        assert "현재가 139,550" in msg
+
+    def test_chase_warns_immediate_fill(self):
+        # entry > current → 즉시 체결 가능성 경고
+        msg = self._gap_msg("069500.KS", "₩141,000", 139550)
+        assert "즉시 체결 가능성" in msg
+
+    def test_wide_gap_warns_data_check(self):
+        # 괴리율 3% 이상 → 데이터 확인 경고
+        msg = self._gap_msg("069500.KS", "₩135,000", 139550)
+        assert "가격 괴리 큼" in msg
+
+    def test_no_price_no_gap_note(self):
+        # 현재가 없으면 괴리 안내 생략 (에러 없이)
+        from core.action_normalizer import normalize_actions
+        raw = {"strategy_buy": [{"ticker": "X", "name": "Y",
+                                 "entry_price": "₩100", "reason": "눌림목"}],
+               "strategy_sell": []}
+        n = normalize_actions(raw, "KR_BEFORE", {}, {})
+        assert "gap_note" not in n["conditional_buy_candidates"][0]
+
+
 class TestBuyFocusMode:
     """BUY_FOCUS_MODE는 매도 차단 플래그가 아니다."""
 

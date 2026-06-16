@@ -77,7 +77,46 @@ def _is_held(ticker: str, name: str, holdings: dict | None) -> bool:
     return False
 
 
-def _build_action(row: dict, action_type: str, side: str, briefing_type: str) -> dict:
+def _num(val) -> float:
+    """가격 문자열에서 숫자 추출. '₩138,000 이하' → 138000.0, 실패 시 0."""
+    if isinstance(val, (int, float)):
+        return float(val)
+    import re
+    s = str(val).replace(",", "")
+    nums = re.findall(r"\d+(?:\.\d+)?", s)
+    return float(nums[0]) if nums else 0.0
+
+
+def _price_gap_fields(entry: float, cur: float) -> dict:
+    """예약가-현재가 괴리율 + 안내 단계 산출.
+
+    단계: pullback(현재가보다 낮음·미체결 가능) / chase(같거나 높음·추격 재검토) /
+          wide(괴리 3%+·데이터 확인). cur/entry 없으면 빈 dict.
+    """
+    if entry <= 0 or cur <= 0:
+        return {}
+    gap_pct = (entry - cur) / cur * 100
+    abs_gap = abs(gap_pct)
+    if abs_gap >= 3.0:
+        stage = "wide"
+        note = f"가격 괴리 큼({gap_pct:+.1f}%) — 데이터/가격 단위 확인 필요"
+    elif gap_pct < 0:
+        stage = "pullback"
+        note = f"현재가 대비 {gap_pct:.1f}% 눌림목 지정가 — 미체결 가능"
+    else:
+        stage = "chase"
+        note = f"현재가 대비 {gap_pct:+.1f}% — 즉시 체결 가능성 높음, 추격매수 여부 재검토"
+    return {
+        "current_price_num": cur,
+        "entry_price_num": entry,
+        "gap_pct": round(gap_pct, 1),
+        "gap_stage": stage,
+        "gap_note": note,
+    }
+
+
+def _build_action(row: dict, action_type: str, side: str, briefing_type: str,
+                  current_prices: dict | None = None) -> dict:
     """정규화된 액션 dict 생성 (텔레그램 렌더 + 메모리 저장 공용)."""
     is_night = briefing_type in ("KR_NIGHT", "US_NIGHT")
     if side == "buy":
@@ -91,7 +130,16 @@ def _build_action(row: dict, action_type: str, side: str, briefing_type: str) ->
         disp_type = "예약매도" if is_night else "매도·즉시"
         price = row.get("current_price", "") or row.get("take_profit", "")
         target = row.get("take_profit", "")
+
+    # 매수 액션: 현재가 대비 예약가 괴리율 안내 (가격 오류 오인 방지)
+    gap = {}
+    if side == "buy" and current_prices:
+        tk = row.get("ticker", "")
+        cur = current_prices.get(tk, current_prices.get(tk.replace(".KS", "").replace(".KQ", ""), 0))
+        gap = _price_gap_fields(_num(price), _num(cur))
+
     return {
+        **gap,
         "action_type": action_type,
         "type": disp_type,
         "side": side,
@@ -165,12 +213,12 @@ def normalize_actions(
 
         if blocker or is_pullback:
             # 조건 미충족/눌림목 → 조건부 후보 (즉시 실행 금지)
-            act = _build_action(row, CONDITIONAL_NEW_BUY, "buy", briefing_type)
+            act = _build_action(row, CONDITIONAL_NEW_BUY, "buy", briefing_type, current_prices)
             act["block_reason"] = blocker or "눌림목 예약"
             conditional_buy.append(act)
         else:
             atype = AI_ADD_BUY if _is_held(ticker, name, holdings) else AI_NEW_BUY
-            executable.append(_build_action(row, atype, "buy", briefing_type))
+            executable.append(_build_action(row, atype, "buy", briefing_type, current_prices))
 
     # ── 매도 분류 ──
     for row in raw.get("strategy_sell", []) or []:

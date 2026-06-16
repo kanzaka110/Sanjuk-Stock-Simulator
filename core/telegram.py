@@ -79,6 +79,19 @@ def _persona_short(name: str) -> str:
     }.get(name, name)
 
 
+def _append_gap_note(lines: list, action: dict) -> None:
+    """매수 액션의 현재가 대비 예약가 괴리 안내 한 줄 추가.
+
+    pullback(미체결 가능) / chase(즉시체결·추격 재검토) / wide(가격 괴리 큼) 단계별 아이콘.
+    """
+    note = action.get("gap_note")
+    if not note:
+        return
+    stage = action.get("gap_stage", "")
+    icon = {"pullback": "📉", "chase": "⚠️", "wide": "🚨"}.get(stage, "ℹ️")
+    lines.append(f"  {icon} {note}")
+
+
 def _render_normalized_sections(lines: list, normalized: dict, sep: str, next_action: str) -> None:
     """정규화 분류 결과를 4섹션으로 렌더 (결정론적).
 
@@ -103,6 +116,7 @@ def _render_normalized_sections(lines: list, normalized: dict, sep: str, next_ac
                               (f"× {a['qty']}" if a.get("qty") else "")) if x]
             if op:
                 lines.append(f"  주문: {' '.join(op)}" + (f" | 유효 {a['validity']}" if a.get("validity") else ""))
+            _append_gap_note(lines, a)
             if a.get("target"):
                 lines.append(f"  🎯 {a['target']}")
             if a.get("stop"):
@@ -120,8 +134,12 @@ def _render_normalized_sections(lines: list, normalized: dict, sep: str, next_ac
         for a in conditional[:5]:
             hz = f" 〔{a['horizon']}〕" if a.get("horizon") else ""
             lines.append(f"🕐🟢 {a.get('account','')} *{a.get('name') or a.get('ticker','')}*{hz}")
+            # 현재가 vs 예약가 명시 (가격 오류 오인 방지)
+            if a.get("current_price_num"):
+                lines.append(f"  현재가 {a['current_price_num']:,.0f}")
             if a.get("price"):
-                lines.append(f"  진입가 {a['price']}" + (f" | 목표 {a['target']}" if a.get("target") else ""))
+                lines.append(f"  예약가 {a['price']}" + (f" | 목표 {a['target']}" if a.get("target") else ""))
+            _append_gap_note(lines, a)
             cond = a.get("block_reason") or a.get("cancel_if") or a.get("reason", "")
             if cond:
                 lines.append(f"  ⏳ 조건: {str(cond)[:80]}")
