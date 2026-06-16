@@ -153,8 +153,8 @@ def _build_impact_message(
             if a.get("long_term_plan"):
                 lines.append(f"  📐 {a['long_term_plan']}")
         lines.append("")
-    elif actions is not None:
-        # actions가 빈 배열로 명시됨 → 실행할 것 없음을 분명히
+    elif actions is not None and not buy_recs and not sell_recs:
+        # actions 빈 배열 + 매수/매도 추천도 없음 → 진짜 실행할 것 없음
         lines.append(SEP)
         lines.append("⚡ *오늘 실행할 액션 없음*")
         if next_action:

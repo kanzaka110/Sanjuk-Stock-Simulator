@@ -881,6 +881,56 @@ class TestDailyReviewGuard:
             assert _detect_daily_review_violations(txt) == [], f"과거 복기 오탐: {txt}"
 
 
+class TestActionsPromotion:
+    """strategy_buy/sell → actions 자동 승격 (액션 미표시 버그 방지)."""
+
+    def _make_result(self, raw_json: dict):
+        from core.models import BriefingResult
+        return BriefingResult(raw_json=raw_json)
+
+    def test_promote_buy_when_actions_empty(self):
+        from core.analyzer import _promote_to_actions
+        data = {
+            "strategy_buy": [{"name": "KODEX 반도체", "ticker": "091160.KS",
+                              "account": "[RIA]", "entry_price": "₩166,500",
+                              "target_price": "₩185,000", "stop_loss": "₩155,000",
+                              "shares": "10주", "horizon": "중기"}],
+            "strategy_sell": [],
+        }
+        n = _promote_to_actions(data, "KR_BEFORE")
+        assert n == 1
+        assert data["actions"][0]["type"] == "매수·즉시"
+        assert data["actions"][0]["name"] == "KODEX 반도체"
+
+    def test_promote_night_uses_reserve_type(self):
+        from core.analyzer import _promote_to_actions
+        data = {"strategy_buy": [{"name": "삼성전자", "ticker": "005930.KS"}], "strategy_sell": []}
+        _promote_to_actions(data, "KR_NIGHT")
+        assert data["actions"][0]["type"] == "예약매수"
+
+    def test_existing_actions_respected(self):
+        from core.analyzer import _promote_to_actions
+        data = {"actions": [{"type": "예약매수", "name": "카카오"}],
+                "strategy_buy": [{"name": "X"}]}
+        assert _promote_to_actions(data, "KR_BEFORE") == 0
+        assert len(data["actions"]) == 1
+
+    def test_telegram_shows_promoted_buy(self):
+        from core.telegram import _build_impact_message
+        data = {
+            "strategy_buy": [{"name": "KODEX 반도체", "ticker": "091160.KS",
+                              "account": "[RIA]", "entry_price": "₩166,500", "shares": "10주"}],
+            "strategy_sell": [],
+        }
+        from core.analyzer import _promote_to_actions
+        _promote_to_actions(data, "KR_BEFORE")
+        result = self._make_result(data)
+        msg = _build_impact_message(result, data, "🇰🇷", "테스트", "KR_BEFORE")
+        assert "액션 (그대로 실행)" in msg
+        assert "KODEX 반도체" in msg
+        assert "오늘 실행할 액션 없음" not in msg
+
+
 class TestIsActionablePolicy:
     """긴급알림 _is_actionable() 정책 테스트."""
 

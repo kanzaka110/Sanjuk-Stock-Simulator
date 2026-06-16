@@ -801,7 +801,12 @@ def synthesize(
   · "검토할 신규 후보 없음"은 금지 — Watchlist에 종목이 있으므로 최소 1개는 언급.
 - 매수 추천은 구분 표시:
   · "추가매수" — 이미 보유 종목 추가 매수
-  · "신규진입" — 비보유 Watchlist/RIA ETF에서 새로 진입
+  · "신규진입" — 비보유 Watchlist/RIA ETF/발굴 종목에서 새로 진입
+- **strategy_buy/strategy_sell에 넣은 종목은 actions에도 반드시 동일하게 넣어라.**
+  actions가 비어 있고 strategy_buy만 채우면 사용자에게 실행 지시가 전달되지 않는다. actions = 실행 마스터.
+- **비상장 종목(SpaceX, OpenAI 등)은 직접 매수 불가** — 티커가 없으므로 추천 대상 아님.
+  사용자가 비상장 종목을 언급하면: ①직접 투자 불가임을 명시 ②상장된 대체 노출 경로 제시
+  (예: SpaceX → 직접 불가, 우주/위성 노출은 RKLB·ASTS·ARKX ETF 등 / OpenAI → MSFT 지분 노출).
 
 【C. 매도 판단 — 매수만큼 중요. 매 브리핑마다 전 보유종목 점검 필수】
 - 아래 보유 종목 손익 경고(🚨/⚠️)를 반드시 읽고 strategy_sell에 반영할 것.
