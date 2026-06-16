@@ -282,7 +282,7 @@ def normalize_ticker(ticker: str) -> str:
 PRICE_DIVERGENCE_THRESHOLD = 0.10
 
 
-_VALID_STRATEGY_TYPES = {"장기적립", "단기매매", "중기보유", "리밸런싱", "세금전략", "관망", "일반"}
+_VALID_STRATEGY_TYPES = {"신규진입", "장기적립", "단기매매", "중기보유", "리밸런싱", "세금전략", "관망", "일반"}
 
 
 def _normalize_strategy_type(val) -> str:
@@ -291,6 +291,33 @@ def _normalize_strategy_type(val) -> str:
         return "일반"
     cleaned = val.strip()
     return cleaned if cleaned in _VALID_STRATEGY_TYPES else "일반"
+
+
+_VALID_ACCOUNTS = {"일반", "ISA", "RIA", "IRP", "연금저축"}
+
+
+def _normalize_account(val, ticker: str = "") -> str:
+    """계좌 태그 정규화. '[ISA]'/'isa'/'ISA' → 'ISA'. 누락 시 시장 기반 추정.
+
+    AI가 strategy_buy의 account 필드를 누락하던 버그로 account_type이 비던 문제 방어.
+    """
+    if isinstance(val, str) and val.strip():
+        cleaned = val.strip().strip("[]").strip()
+        upper = cleaned.upper()
+        # 연금/연금저축 동의어
+        if cleaned in ("연금", "연금저축") or upper == "CMA":
+            return "연금저축"
+        if upper in ("ISA", "RIA", "IRP"):
+            return upper
+        if cleaned == "일반":
+            return "일반"
+    # 누락 시 시장 기반 기본값 추정 (RIA는 국내 ETF 한정이라 자동 추정 제외)
+    if ticker:
+        norm = normalize_ticker(ticker)
+        if norm.endswith((".KS", ".KQ")):
+            return "ISA"  # 국내주식 → ISA 우선 (세제 혜택)
+        return "일반"     # 미국주식 → 일반
+    return ""
 
 
 def _safe_int(val, default: int = 7) -> int:
@@ -455,15 +482,25 @@ def _quality_gate(
         reasons.append("진입가0→저장금지")
 
     # 가격 괴리 검증 (current_price가 명시적으로 전달된 경우만 적용)
+    # 단 신규진입 눌림목 예약(매수): 진입가가 현재가보다 낮은 건 의도된 것 — 차단 예외.
+    # (발굴주가 급등 후 눌림목 대기인데 괴리 게이트에 막혀 매수로 못 가던 숨은 버그)
+    is_pullback_buy = signal == "매수" and strategy_type == "신규진입"
     if current_price is not None and signal in ("매수", "매도"):
         if current_price > 0 and entry_price > 0:
             divergence = abs(entry_price - current_price) / current_price
-            if divergence > PRICE_DIVERGENCE_THRESHOLD:
+            # 눌림목 예약은 "현재가보다 낮은 진입가"를 더 넓게 허용 (최대 -30%)
+            pullback_below = is_pullback_buy and entry_price < current_price
+            threshold = 0.30 if pullback_below else PRICE_DIVERGENCE_THRESHOLD
+            if divergence > threshold:
                 grade = max_grade(grade, ACTION_BLOCKED)
                 reasons.append(
                     f"진입가-현재가 괴리 초과(현재가={current_price:,.0f}, "
                     f"진입가={entry_price:,.0f}, 괴리율={divergence:.1%})"
                 )
+            elif pullback_below:
+                # 눌림목 예약은 매수로 보존하되 '조건부(예약 대기)' 등급으로 표시
+                grade = max_grade(grade, ACTION_CONDITIONAL)
+                reasons.append(f"눌림목 예약(진입가 {entry_price:,.0f}, 현재 {current_price:,.0f}) → 예약 대기")
         elif current_price == 0 and entry_price > 0:
             # 현재가 없는 신규 매수/매도 → 차단 (시세 미수집 종목)
             grade = max_grade(grade, ACTION_BLOCKED)
@@ -621,6 +658,7 @@ def save_predictions_from_briefing(
                 data_failures=data_failures,
                 agreement_count=_safe_int(row.get("agreement_count") or row.get("consensus_count"), 0),
                 current_price=cur_price,
+                account_type=_normalize_account(row.get("account", ""), raw_ticker),
             )
             if pid > 0:
                 count += 1
@@ -653,6 +691,7 @@ def save_predictions_from_briefing(
                 data_failures=data_failures,
                 agreement_count=_safe_int(row.get("agreement_count") or row.get("consensus_count"), 0),
                 current_price=cur_price,
+                account_type=_normalize_account(row.get("account", ""), raw_ticker),
             )
             if pid > 0:
                 count += 1
