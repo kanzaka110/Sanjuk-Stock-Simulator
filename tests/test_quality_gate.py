@@ -182,6 +182,7 @@ class TestBriefingIntegration:
 
     def test_nvda_danger_agreement_3_conditional(self, seed_accuracy):
         """위험 종목 + 동의 3명 + 조건 충족 → CONDITIONAL 저장."""
+        from core.action_normalizer import normalize_actions
         from core.memory import save_predictions_from_briefing, _get_conn
         data = {
             "strategy_sell": [{
@@ -190,14 +191,15 @@ class TestBriefingIntegration:
                 "current_price": "200",
                 "take_profit": "180",
                 "stop_loss": "220",
-                "reason": "테스트",
+                "reason": "과열 부분 익절",
                 "strategy_type": "세금전략",
                 "risk_reward": "2.5",
                 "invalidation_condition": "세금이벤트종료",
                 "agreement_count": 3,
             }],
         }
-        saved = save_predictions_from_briefing(data)
+        norm = normalize_actions(data, "US_BEFORE", {"NVDA": 200}, {})
+        saved = save_predictions_from_briefing(data, normalized=norm, briefing_type="US_BEFORE")
         assert saved == 1, "동의 3명+조건 충족이면 저장되어야 함"
         # 저장된 레코드 확인
         conn = _get_conn()
@@ -355,6 +357,7 @@ class TestTickerNormalization:
 
     def test_normalization_in_briefing_save(self):
         """save_predictions_from_briefing에서 정규화 + 현재가 조회가 작동하는지."""
+        from core.action_normalizer import normalize_actions
         from core.memory import save_predictions_from_briefing, _get_conn
         data = {
             "strategy_buy": [{
@@ -363,7 +366,7 @@ class TestTickerNormalization:
                 "entry_price": "₩123,000",
                 "target_price": "₩130,000",
                 "stop_loss": "₩118,000",
-                "reason": "테스트",
+                "reason": "지지선 반등 진입",
                 "strategy_type": "중기보유",
                 "risk_reward": "2.5",
                 "invalidation_condition": "하락시",
@@ -371,8 +374,10 @@ class TestTickerNormalization:
             }],
         }
         # current_prices에 정규화된 코드로 등록
+        prices = {"069500.KS": 123350}
+        norm = normalize_actions(data, "KR_BEFORE", prices, {})
         saved = save_predictions_from_briefing(
-            data, current_prices={"069500.KS": 123350},
+            data, current_prices=prices, normalized=norm, briefing_type="KR_BEFORE",
         )
         assert saved == 1, "정규화된 티커로 현재가 조회 성공 → 괴리 없으면 저장"
         conn = _get_conn()
@@ -849,15 +854,19 @@ class TestDailyReviewGuard:
 
     # ── 테스트 D: KR_OPEN 등 다른 브리핑의 액션은 정상 ──
     def test_d_kr_open_actions_still_render(self):
+        from core.action_normalizer import normalize_actions
         from core.telegram import _build_impact_message
-        result = self._make_result({
-            "actions": [{"type": "예약매수", "account": "[ISA]", "name": "카카오",
-                         "horizon": "중기", "order_method": "지정가",
-                         "price": "₩40,500", "qty": "15주", "validity": "당일",
-                         "target": "₩43,500 도달 시 절반", "stop": "₩38,800 이탈 시 매도"}],
-        })
-        msg = _build_impact_message(result, result.raw_json, "🔔 개장", "테스트", "KR_OPEN")
-        assert "액션 (그대로 실행)" in msg
+        raw = {
+            "strategy_buy": [{"account": "[ISA]", "name": "카카오", "ticker": "035720.KS",
+                              "horizon": "중기", "entry_price": "₩40,500", "shares": "15주",
+                              "target_price": "₩43,500", "stop_loss": "₩38,800",
+                              "reason": "RSI 35 과매도 반등 즉시 진입"}],
+            "strategy_sell": [],
+        }
+        raw["normalized"] = normalize_actions(raw, "KR_OPEN", {}, {})
+        result = self._make_result(raw)
+        msg = _build_impact_message(result, raw, "🔔 개장", "테스트", "KR_OPEN")
+        assert "오늘 실제 실행" in msg
         assert "카카오" in msg and "₩40,500" in msg
 
     def test_d_us_close_guard_does_not_touch_kr_open_data(self):
@@ -881,54 +890,40 @@ class TestDailyReviewGuard:
             assert _detect_daily_review_violations(txt) == [], f"과거 복기 오탐: {txt}"
 
 
-class TestActionsPromotion:
-    """strategy_buy/sell → actions 자동 승격 (액션 미표시 버그 방지)."""
+class TestActionsTelegramRender:
+    """정규화 결과의 텔레그램 4섹션 렌더 (구 _promote_to_actions 대체)."""
 
     def _make_result(self, raw_json: dict):
         from core.models import BriefingResult
         return BriefingResult(raw_json=raw_json)
 
-    def test_promote_buy_when_actions_empty(self):
-        from core.analyzer import _promote_to_actions
-        data = {
-            "strategy_buy": [{"name": "KODEX 반도체", "ticker": "091160.KS",
-                              "account": "[RIA]", "entry_price": "₩166,500",
-                              "target_price": "₩185,000", "stop_loss": "₩155,000",
-                              "shares": "10주", "horizon": "중기"}],
-            "strategy_sell": [],
-        }
-        n = _promote_to_actions(data, "KR_BEFORE")
-        assert n == 1
-        assert data["actions"][0]["type"] == "매수·즉시"
-        assert data["actions"][0]["name"] == "KODEX 반도체"
-
-    def test_promote_night_uses_reserve_type(self):
-        from core.analyzer import _promote_to_actions
-        data = {"strategy_buy": [{"name": "삼성전자", "ticker": "005930.KS"}], "strategy_sell": []}
-        _promote_to_actions(data, "KR_NIGHT")
-        assert data["actions"][0]["type"] == "예약매수"
-
-    def test_existing_actions_respected(self):
-        from core.analyzer import _promote_to_actions
-        data = {"actions": [{"type": "예약매수", "name": "카카오"}],
-                "strategy_buy": [{"name": "X"}]}
-        assert _promote_to_actions(data, "KR_BEFORE") == 0
-        assert len(data["actions"]) == 1
-
-    def test_telegram_shows_promoted_buy(self):
+    def test_telegram_shows_executable_and_conditional(self):
+        from core.action_normalizer import normalize_actions
         from core.telegram import _build_impact_message
-        data = {
-            "strategy_buy": [{"name": "KODEX 반도체", "ticker": "091160.KS",
-                              "account": "[RIA]", "entry_price": "₩166,500", "shares": "10주"}],
+        raw = {
+            "strategy_buy": [
+                {"name": "카카오", "ticker": "035720.KS", "account": "[ISA]",
+                 "entry_price": "₩40,000", "reason": "즉시 진입"},
+                {"name": "KODEX 반도체", "ticker": "091160.KS", "account": "[RIA]",
+                 "entry_price": "₩166,500", "reason": "추격 금지 눌림목"},
+            ],
             "strategy_sell": [],
         }
-        from core.analyzer import _promote_to_actions
-        _promote_to_actions(data, "KR_BEFORE")
-        result = self._make_result(data)
-        msg = _build_impact_message(result, data, "🇰🇷", "테스트", "KR_BEFORE")
-        assert "액션 (그대로 실행)" in msg
-        assert "KODEX 반도체" in msg
-        assert "오늘 실행할 액션 없음" not in msg
+        raw["normalized"] = normalize_actions(raw, "KR_BEFORE", {}, {})
+        result = self._make_result(raw)
+        msg = _build_impact_message(result, raw, "🇰🇷", "테스트", "KR_BEFORE")
+        assert "오늘 실제 실행" in msg and "카카오" in msg
+        assert "조건부 매수 후보" in msg and "KODEX 반도체" in msg
+
+    def test_telegram_no_executable_shows_none(self):
+        from core.action_normalizer import normalize_actions
+        from core.telegram import _build_impact_message
+        raw = {"strategy_buy": [], "strategy_sell": [], "next_action": "관망 — FOMC 대기"}
+        raw["normalized"] = normalize_actions(raw, "KR_BEFORE", {}, {})
+        result = self._make_result(raw)
+        msg = _build_impact_message(result, raw, "🇰🇷", "테스트", "KR_BEFORE")
+        assert "오늘 실제 실행: 없음" in msg
+        assert "매수 후보 없음 사유" in msg
 
 
 class TestIsActionablePolicy:

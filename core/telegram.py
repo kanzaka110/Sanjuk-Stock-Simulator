@@ -79,6 +79,74 @@ def _persona_short(name: str) -> str:
     }.get(name, name)
 
 
+def _render_normalized_sections(lines: list, normalized: dict, sep: str, next_action: str) -> None:
+    """정규화 분류 결과를 4섹션으로 렌더 (결정론적).
+
+    ⚡ 오늘 실제 실행 / 🕐 조건부 매수 후보 / 🟡 매도 취소·홀딩 전환 / 🔍 매수 후보 없음 사유.
+    actions 유무와 무관하게 각 섹션을 독립 표시 — 조건부/취소를 숨기지 않는다.
+    """
+    type_icon = {"매수·즉시": "🟢", "매도·즉시": "🔴", "예약매수": "🕐🟢", "예약매도": "🕐🔴"}
+    executable = normalized.get("executable_actions", [])
+    conditional = normalized.get("conditional_buy_candidates", [])
+    cancelled = normalized.get("cancelled_sells", [])
+    no_buy = normalized.get("no_buy_reason", "")
+
+    # ⚡ 오늘 실제 실행
+    if executable:
+        lines.append(sep)
+        lines.append("⚡ *오늘 실제 실행*")
+        for a in executable[:5]:
+            icon = type_icon.get(a.get("type", ""), "▸")
+            hz = f" 〔{a['horizon']}〕" if a.get("horizon") else ""
+            lines.append(f"{icon} *{a.get('type','')}* {a.get('account','')} *{a.get('name') or a.get('ticker','')}*{hz}")
+            op = [x for x in (a.get("order_method"), a.get("price"),
+                              (f"× {a['qty']}" if a.get("qty") else "")) if x]
+            if op:
+                lines.append(f"  주문: {' '.join(op)}" + (f" | 유효 {a['validity']}" if a.get("validity") else ""))
+            if a.get("target"):
+                lines.append(f"  🎯 {a['target']}")
+            if a.get("stop"):
+                lines.append(f"  🛑 {a['stop']}")
+        lines.append("")
+    else:
+        lines.append(sep)
+        lines.append("⚡ *오늘 실제 실행: 없음*")
+        lines.append("")
+
+    # 🕐 조건부 매수 후보 (눌림목/대기/조건 미충족)
+    if conditional:
+        lines.append(sep)
+        lines.append("🕐 *조건부 매수 후보* (조건 충족 시)")
+        for a in conditional[:5]:
+            hz = f" 〔{a['horizon']}〕" if a.get("horizon") else ""
+            lines.append(f"🕐🟢 {a.get('account','')} *{a.get('name') or a.get('ticker','')}*{hz}")
+            if a.get("price"):
+                lines.append(f"  진입가 {a['price']}" + (f" | 목표 {a['target']}" if a.get("target") else ""))
+            cond = a.get("block_reason") or a.get("cancel_if") or a.get("reason", "")
+            if cond:
+                lines.append(f"  ⏳ 조건: {str(cond)[:80]}")
+        lines.append("")
+
+    # 🟡 매도 취소·홀딩 전환
+    if cancelled:
+        lines.append(sep)
+        lines.append("🟡 *매도 취소·홀딩 전환*")
+        for a in cancelled[:5]:
+            tag = "홀딩 전환" if a.get("action_type") == "HOLD_REVIEW" else "매도 취소"
+            lines.append(f"🟡 {a.get('account','')} *{a.get('name') or a.get('ticker','')}* — {tag}")
+            why = a.get("cancel_reason") or a.get("reason", "")
+            if why:
+                lines.append(f"  💬 {str(why)[:80]}")
+        lines.append("")
+
+    # 🔍 매수 후보 없음 사유
+    if not executable and not conditional and no_buy:
+        lines.append(sep)
+        lines.append("🔍 *매수 후보 없음 사유*")
+        lines.append(f"  {no_buy[:200]}")
+        lines.append("")
+
+
 def _build_impact_message(
     result: BriefingResult,
     raw: dict,
@@ -115,75 +183,22 @@ def _build_impact_message(
 
     # 데일리 리뷰(US_CLOSE)는 결산·복기 전용 — 신규 액션 섹션을 띄우지 않는다
     is_daily_review = briefing_type == "US_CLOSE"
+    normalized = raw.get("normalized") if not is_daily_review else None
 
-    # ⚡ 통합 액션 (최우선 — 사용자는 이 섹션만 보고 실행)
-    actions = None if is_daily_review else raw.get("actions", None)
     if is_daily_review:
         lines.append(SEP)
         lines.append("📒 *데일리 리뷰 — 결산·복기 전용*")
         lines.append("  (신규 매매 판단은 08:50 개장 직전 브리핑에서)")
         lines.append("")
-    if actions:
-        lines.append(SEP)
-        lines.append("⚡ *액션 (그대로 실행)*")
-        type_icon = {"매수·즉시": "🟢", "매도·즉시": "🔴", "예약매수": "🕐🟢", "예약매도": "🕐🔴"}
-        for i, a in enumerate(actions[:5], 1):
-            icon = type_icon.get(a.get("type", ""), "▸")
-            hz = a.get("horizon", "")
-            hz_tag = f" 〔{hz}〕" if hz else ""
-            lines.append(
-                f"{icon} *{a.get('type','')}* {a.get('account','')} "
-                f"*{a.get('name') or a.get('ticker','')}*{hz_tag}"
-            )
-            order_parts = []
-            if a.get("order_method"):
-                order_parts.append(a["order_method"])
-            if a.get("price"):
-                order_parts.append(a["price"])
-            if a.get("qty"):
-                order_parts.append(f"× {a['qty']}")
-            if order_parts:
-                lines.append(f"  주문: {' '.join(order_parts)}" + (f" | 유효 {a['validity']}" if a.get("validity") else ""))
-            if a.get("target"):
-                lines.append(f"  🎯 {a['target']}")
-            if a.get("stop"):
-                lines.append(f"  🛑 {a['stop']}")
-            if a.get("cancel_if"):
-                lines.append(f"  ⛔ {a['cancel_if']}")
-            if a.get("long_term_plan"):
-                lines.append(f"  📐 {a['long_term_plan']}")
-        lines.append("")
-    elif actions is not None and not buy_recs and not sell_recs:
-        # actions 빈 배열 + 매수/매도 추천도 없음 → 진짜 실행할 것 없음
-        lines.append(SEP)
-        lines.append("⚡ *오늘 실행할 액션 없음*")
-        if next_action:
-            lines.append(f"  ⏳ 대기: {next_action[:150]}")
-        lines.append("")
 
-    # 매수 추천 (구버전 호환 — actions 없을 때만, 데일리 리뷰 제외)
-    if buy_recs and not actions and not is_daily_review:
-        lines.append(SEP)
-        lines.append("💰 *매수 추천*")
-        for rec in buy_recs[:3]:
-            ticker = rec.get("ticker", "")
-            name = rec.get("name", "")
-            account = rec.get("account", "")
-            entry = rec.get("entry_price", "")
-            shares = rec.get("shares", "")
-            display = name or ticker
-            parts = [f"▸ *{display}*"]
-            if account:
-                parts.append(account)
-            if shares:
-                parts.append(shares)
-            if entry:
-                parts.append(f"진입 {entry}")
-            lines.append(" · ".join(parts))
-        lines.append("")
+    # ── 정규화된 4섹션 (결정론적 분류 — actions가 있다고 조건부/취소를 숨기지 않음) ──
+    actions = None
+    if normalized is not None:
+        actions = normalized.get("executable_actions", [])
+        _render_normalized_sections(lines, normalized, SEP, next_action)
 
-    # 야간 프리브리핑: 예약 주문 요약 (actions가 있으면 중복이므로 스킵)
-    night_orders = ([] if (actions or is_daily_review) else (raw.get("night_orders", []) or []))
+    # 야간 프리브리핑: 예약 주문 요약 (정규화 결과 있으면 스킵 — executable에 포함됨)
+    night_orders = ([] if (normalized is not None or is_daily_review) else (raw.get("night_orders", []) or []))
     is_night = briefing_type in ("KR_NIGHT", "US_NIGHT") and not actions
 
     if night_orders:
@@ -237,8 +252,8 @@ def _build_impact_message(
             lines.append("  ⚠️ 종합 판단 실패 — 페르소나 요약만 제공")
         lines.append("")
 
-    # 매도 추천 (한 줄, 데일리 리뷰 제외)
-    if sell_recs and not is_daily_review:
+    # 매도 추천 (구버전 폴백 — 정규화/데일리리뷰 시 스킵, 매도는 4섹션에서 처리)
+    if sell_recs and not is_daily_review and normalized is None:
         lines.append(SEP)
         lines.append("📉 *매도 추천*")
         for rec in sell_recs[:3]:

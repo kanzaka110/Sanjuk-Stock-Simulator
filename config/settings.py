@@ -350,6 +350,14 @@ ISA_CASH: float = 4_222_360.0
 # USD 매도대금은 원화 환산 추정치 — 실제 환전/정산 후 조정 필요
 DEFAULT_CASH: float = 17_729_839.0
 
+# ─── 매수 후보 강조 모드 (사용자 전략, 2026-06-16) ──────
+# 사용자 피드백: "매도만 반복되고 매수가 안 나와 수익 기회를 놓친다."
+# 주의: 매도를 전체 차단하지 않는다. 위험 손절/익절 관리는 계속 표시.
+# 실제 분류는 core/action_normalizer가 결정론적으로 수행 — 실행 매도와
+# 매도 취소/홀딩 전환을 분리하므로, 이 플래그는 '매수 후보 섹션 강조'에만 쓴다.
+# True일 때: 브리핑/텔레그램에서 조건부 매수 후보·매수 후보 없음 사유를 더 부각.
+BUY_FOCUS_MODE: bool = os.environ.get("BUY_FOCUS_MODE", "true").lower() == "true"
+
 # ─── 모니터링 설정 ─────────────────────────────────
 MONITOR_INTERVAL_SEC: int = int(os.environ.get("MONITOR_INTERVAL_SEC", "300"))
 ALERT_COOLDOWN_SEC: int = int(os.environ.get("ALERT_COOLDOWN_SEC", "3600"))

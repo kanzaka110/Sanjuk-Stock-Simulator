@@ -136,68 +136,6 @@ def _enforce_daily_review(data: dict) -> tuple[dict, list[str]]:
     return data, warnings
 
 
-def _promote_to_actions(data: dict, briefing_type: str) -> int:
-    """strategy_buy/strategy_sell를 actions로 자동 승격.
-
-    AI가 분석 기록(strategy_buy)에는 매수를 넣으면서 실행 지시(actions)는 비우는
-    경우가 잦음 → 텔레그램이 actions 우선이라 "액션 없음"으로 표시되어 매수 추천이
-    사용자에게 안 보이던 버그. actions가 이미 있으면 그대로 두고, 비었을 때만 승격.
-
-    Returns: 승격된 액션 수.
-    """
-    existing = data.get("actions")
-    if existing:  # AI가 직접 채웠으면 존중
-        return 0
-
-    is_night = briefing_type in ("KR_NIGHT", "US_NIGHT")
-    buy_type = "예약매수" if is_night else "매수·즉시"
-    sell_type = "예약매도" if is_night else "매도·즉시"
-
-    actions: list[dict] = []
-    for row in data.get("strategy_buy", []) or []:
-        if not row.get("ticker") and not row.get("name"):
-            continue
-        actions.append({
-            "type": buy_type,
-            "account": row.get("account", ""),
-            "ticker": row.get("ticker", ""),
-            "name": row.get("name", ""),
-            "horizon": row.get("horizon", ""),
-            "order_method": "지정가",
-            "price": row.get("entry_price", ""),
-            "qty": row.get("shares", ""),
-            "validity": "당일" if not is_night else "예약",
-            "target": row.get("target_price", ""),
-            "stop": row.get("stop_loss", ""),
-            "cancel_if": row.get("invalidation_condition", ""),
-            "long_term_plan": row.get("long_term_plan", ""),
-            "reason": row.get("reason", ""),
-        })
-    for row in data.get("strategy_sell", []) or []:
-        if not row.get("ticker") and not row.get("name"):
-            continue
-        actions.append({
-            "type": sell_type,
-            "account": row.get("account", ""),
-            "ticker": row.get("ticker", ""),
-            "name": row.get("name", ""),
-            "horizon": row.get("horizon", ""),
-            "order_method": "지정가",
-            "price": row.get("current_price", "") or row.get("take_profit", ""),
-            "qty": row.get("shares", ""),
-            "validity": "당일" if not is_night else "예약",
-            "target": row.get("take_profit", ""),
-            "stop": row.get("stop_loss", ""),
-            "cancel_if": row.get("invalidation_condition", ""),
-            "long_term_plan": "",
-            "reason": row.get("reason", ""),
-        })
-
-    if actions:
-        data["actions"] = actions
-    return len(actions)
-
-
 def _fetch_watchlist_text(snapshot_prices: dict[str, float] | None = None) -> str:
     """Watchlist 종목 가격 + RSI + MA를 텍스트로 변환. 보유 외 신규 후보.
 
@@ -904,12 +842,27 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
         data, _dr_warnings = _enforce_daily_review(data)
         for w in _dr_warnings:
             log.info("  %s", w)
+        normalized = None
     else:
-        # actions 자동 승격: AI가 strategy_buy/sell만 채우고 actions를 비운 경우,
-        # 텔레그램이 "액션 없음"으로 표시해 매수 추천이 사용자에게 안 보이던 버그 방지.
-        _promoted = _promote_to_actions(data, briefing_type)
-        if _promoted:
-            log.info("  actions 자동 승격: strategy_buy/sell → %d건", _promoted)
+        # 결정론적 정규화: LLM의 raw strategy_buy/sell를 신호어 기반으로 분류.
+        # raw actions는 신뢰하지 않고 normalize 결과의 executable_actions만 실행 섹션으로.
+        from core.action_normalizer import normalize_actions
+        from config.settings import (
+            HOLDINGS_GENERAL, HOLDINGS_ISA, HOLDINGS_RIA, HOLDINGS_IRP, HOLDINGS_PENSION,
+        )
+        _holdings_all: dict = {}
+        for _hh in (HOLDINGS_GENERAL, HOLDINGS_ISA, HOLDINGS_RIA, HOLDINGS_IRP, HOLDINGS_PENSION):
+            _holdings_all.update(_hh)
+        normalized = normalize_actions(data, briefing_type, current_prices, _holdings_all)
+        # 텔레그램이 쓰도록 raw에 주입 + 실행 actions를 normalize 결과로 덮어씀
+        data["normalized"] = normalized
+        data["actions"] = normalized["executable_actions"]
+        log.info(
+            "  정규화: 실행 %d / 조건부매수 %d / 매도취소 %d",
+            len(normalized["executable_actions"]),
+            len(normalized["conditional_buy_candidates"]),
+            len(normalized["cancelled_sells"]),
+        )
     if _news_failed:
         _data_failures += 1
         _quality_warnings.append("뉴스 수집 실패 — 시황/감성 정보 제외")
@@ -932,8 +885,11 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
     object.__setattr__(result, "quality_warnings", tuple(_quality_warnings))
     object.__setattr__(result, "data_failures", _data_failures)
 
-    # 추천 기록을 메모리에 저장 (품질 게이트 + 가격 괴리 검증)
-    saved = save_predictions_from_briefing(data, data_failures=_data_failures, current_prices=current_prices)
+    # 추천 기록을 메모리에 저장 (정규화 결과 기반 — action_type/briefing_type 포함)
+    saved = save_predictions_from_briefing(
+        data, data_failures=_data_failures, current_prices=current_prices,
+        briefing_type=briefing_type, normalized=normalized,
+    )
     if saved > 0:
         log.info(f"  {saved}건 추천 기록 메모리에 저장 (데이터실패: {_data_failures}건)")
     elif _data_failures > 0:

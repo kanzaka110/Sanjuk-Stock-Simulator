@@ -1,0 +1,182 @@
+"""
+action_normalizer 결정론적 분류 테스트 + 운영 DB 무결성 테스트.
+
+핵심 불변식 (Hermes 검증 기준):
+- 매수 reason에 "추격 금지/대기/조건 미충족/FOMC 후/눌림목" → executable 금지(조건부로)
+- 매도 reason에 "매도 취소/홀딩 전환" → 실행 매도 금지(CANCEL/HOLD로)
+- 저장 시 action_type/briefing_type/account_type 채워짐, original_signal 보존
+- DB: IMMEDIATE_ACTION인데 reasoning에 '추격 금지/조건 미충족' = 0
+- DB: signal='매도'인데 reasoning에 '매도 취소/홀딩 전환' = 0
+"""
+
+import sqlite3
+
+import pytest
+
+from core.action_normalizer import (
+    AI_NEW_BUY, AI_ADD_BUY, CONDITIONAL_NEW_BUY, AI_SELL_MANAGEMENT,
+    CANCEL_SELL, HOLD_REVIEW, normalize_actions,
+)
+
+
+class TestNormalizeBuy:
+    @pytest.mark.parametrize("phrase", [
+        "추격 금지", "대기", "조건 미충족", "FOMC 후", "눌림목",
+        "현재 진입 조건 미충족", "즉시 진입은 부적절", "검토",
+    ])
+    def test_buy_block_phrases_go_conditional(self, phrase):
+        raw = {"strategy_buy": [
+            {"ticker": "091160.KS", "name": "X", "account": "[RIA]",
+             "entry_price": "₩100", "reason": f"강세지만 {phrase}"}], "strategy_sell": []}
+        n = normalize_actions(raw, "KR_BEFORE", {}, {})
+        assert len(n["executable_actions"]) == 0
+        assert len(n["conditional_buy_candidates"]) == 1
+        assert n["conditional_buy_candidates"][0]["action_type"] == CONDITIONAL_NEW_BUY
+
+    def test_clean_buy_executable_new(self):
+        raw = {"strategy_buy": [
+            {"ticker": "035720.KS", "name": "카카오", "account": "[ISA]",
+             "entry_price": "₩40,000", "reason": "RSI 30 과매도 반등 + 거래량 급증"}],
+            "strategy_sell": []}
+        n = normalize_actions(raw, "KR_BEFORE", {}, {})
+        assert len(n["executable_actions"]) == 1
+        assert n["executable_actions"][0]["action_type"] == AI_NEW_BUY
+
+    def test_held_buy_is_add(self):
+        raw = {"strategy_buy": [
+            {"ticker": "005930.KS", "name": "삼성전자", "account": "[일반]",
+             "entry_price": "₩60,000", "reason": "추가 매집 적기"}],
+            "strategy_sell": []}
+        n = normalize_actions(raw, "KR_BEFORE", {}, {"005930.KS": {"shares": 10}})
+        assert n["executable_actions"][0]["action_type"] == AI_ADD_BUY
+
+    def test_pullback_strategy_type_conditional(self):
+        raw = {"strategy_buy": [
+            {"ticker": "183300.KQ", "name": "코미코", "account": "[ISA]",
+             "entry_price": "₩110,000", "strategy_type": "신규진입", "reason": "발굴주"}],
+            "strategy_sell": []}
+        n = normalize_actions(raw, "KR_BEFORE", {}, {})
+        assert len(n["conditional_buy_candidates"]) == 1
+
+
+class TestNormalizeSell:
+    @pytest.mark.parametrize("phrase,expect", [
+        ("매도 취소", CANCEL_SELL), ("홀딩 전환", HOLD_REVIEW),
+        ("매도 보류", CANCEL_SELL), ("홀딩 유지", HOLD_REVIEW),
+        ("무효화 조건 충족", CANCEL_SELL), ("전량 매도 부적절", CANCEL_SELL),
+        ("잔여 보유", HOLD_REVIEW),
+    ])
+    def test_sell_cancel_phrases(self, phrase, expect):
+        raw = {"strategy_buy": [], "strategy_sell": [
+            {"ticker": "MU", "name": "마이크론", "current_price": "$900",
+             "reason": f"기존 포지션 {phrase}"}]}
+        n = normalize_actions(raw, "KR_BEFORE", {}, {})
+        assert len(n["executable_actions"]) == 0
+        assert len(n["cancelled_sells"]) == 1
+        assert n["cancelled_sells"][0]["action_type"] == expect
+
+    def test_clean_sell_executable(self):
+        raw = {"strategy_buy": [], "strategy_sell": [
+            {"ticker": "LMT", "name": "록히드", "current_price": "$540",
+             "take_profit": "$560", "reason": "RSI 75 과열 부분 익절"}]}
+        n = normalize_actions(raw, "KR_BEFORE", {}, {})
+        assert len(n["executable_actions"]) == 1
+        assert n["executable_actions"][0]["action_type"] == AI_SELL_MANAGEMENT
+
+
+class TestNoBuyReason:
+    def test_no_buy_reason_populated(self):
+        raw = {"strategy_buy": [], "strategy_sell": [],
+               "next_action": "FOMC 통과 후 재검토"}
+        n = normalize_actions(raw, "KR_BEFORE", {}, {})
+        assert n["no_buy_reason"] == "FOMC 통과 후 재검토"
+
+    def test_conditional_buy_suppresses_no_buy_reason(self):
+        raw = {"strategy_buy": [
+            {"ticker": "X", "name": "Y", "entry_price": "₩1", "reason": "눌림목 대기"}],
+            "strategy_sell": []}
+        n = normalize_actions(raw, "KR_BEFORE", {}, {})
+        assert n["no_buy_reason"] == ""  # 조건부 후보 있으면 사유 비움
+
+
+class TestSaveIntegration:
+    """저장 시 action_type/briefing_type/original_signal 무결성."""
+
+    def _cleanup(self, tickers):
+        from core.memory import _get_conn
+        conn = _get_conn()
+        for tk in tickers:
+            conn.execute(
+                "DELETE FROM predictions WHERE ticker=? AND created_at >= datetime('now','-2 minutes')",
+                (tk,))
+        conn.commit()
+
+    def test_save_fills_required_fields(self):
+        from core.action_normalizer import normalize_actions
+        from core.memory import save_predictions_from_briefing, _get_conn
+        raw = {
+            "strategy_buy": [
+                {"ticker": "035720.KS", "name": "카카오", "account": "[ISA]",
+                 "entry_price": "₩40,000", "target_price": "₩44,000", "stop_loss": "₩38,000",
+                 "risk_reward": 2.0, "invalidation_condition": "OBV매도", "reason": "즉시 진입"}],
+            "strategy_sell": [
+                {"ticker": "MU", "name": "마이크론", "current_price": "$900",
+                 "reason": "홀딩 전환"}],
+        }
+        prices = {"035720.KS": 40500, "MU": 880}
+        norm = normalize_actions(raw, "KR_BEFORE", prices, {})
+        save_predictions_from_briefing(raw, current_prices=prices,
+                                       briefing_type="KR_BEFORE", normalized=norm)
+        conn = _get_conn()
+        rows = conn.execute(
+            """SELECT name, signal, original_signal, action_type, briefing_type, account_type
+               FROM predictions WHERE ticker IN ('035720.KS','MU')
+               AND created_at >= datetime('now','-2 minutes')"""
+        ).fetchall()
+        by_name = {r[0]: r for r in rows}
+        # 카카오: 매수 실행
+        k = by_name.get("카카오")
+        assert k and k[3] == "AI_NEW_BUY" and k[4] == "KR_BEFORE" and k[5] == "ISA"
+        assert k[1] == "매수" and k[2] == "매수"
+        # MU: 홀딩 전환 → signal=관망 (매도로 저장 안 됨)
+        m = by_name.get("마이크론")
+        assert m and m[3] == "HOLD_REVIEW" and m[1] == "관망"
+        self._cleanup(["035720.KS", "MU"])
+
+    def test_no_normalized_saves_nothing(self):
+        from core.memory import save_predictions_from_briefing
+        raw = {"strategy_buy": [{"ticker": "X", "name": "Y"}]}
+        assert save_predictions_from_briefing(raw, normalized=None) == 0
+
+
+class TestDBIntegrity:
+    """운영 DB 무결성 — 최근 24시간 신규 저장 기준 모순 0건.
+
+    과거 오염 데이터는 제외하고, normalizer 도입 이후 저장(briefing_type 채워진 건)만 검사.
+    """
+
+    def _conn(self):
+        from config.settings import DB_DIR
+        c = sqlite3.connect(DB_DIR / "memory.db")
+        c.row_factory = sqlite3.Row
+        return c
+
+    def test_immediate_action_no_block_phrase(self):
+        """IMMEDIATE_ACTION인데 reasoning에 '추격 금지/조건 미충족' (briefing_type 있는 신규분)."""
+        conn = self._conn()
+        for phrase in ("추격 금지", "조건 미충족"):
+            n = conn.execute(
+                """SELECT COUNT(*) FROM predictions
+                   WHERE action_grade='IMMEDIATE_ACTION' AND briefing_type != ''
+                     AND reasoning LIKE ?""", (f"%{phrase}%",)).fetchone()[0]
+            assert n == 0, f"IMMEDIATE_ACTION + '{phrase}' {n}건"
+
+    def test_sell_signal_no_cancel_phrase(self):
+        """signal='매도'인데 reasoning에 '매도 취소/홀딩 전환' (briefing_type 있는 신규분)."""
+        conn = self._conn()
+        for phrase in ("매도 취소", "홀딩 전환"):
+            n = conn.execute(
+                """SELECT COUNT(*) FROM predictions
+                   WHERE signal='매도' AND briefing_type != ''
+                     AND reasoning LIKE ?""", (f"%{phrase}%",)).fetchone()[0]
+            assert n == 0, f"signal=매도 + '{phrase}' {n}건"

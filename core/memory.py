@@ -548,6 +548,8 @@ def save_prediction(
     ticker = normalize_ticker(ticker)
     # 전략 정규화
     strategy_type = _normalize_strategy_type(strategy_type)
+    # original_signal은 WATCH 변환(관망) 전 원본을 보존 (이후 signal이 바뀌어도 유지)
+    original_signal = signal
 
     # 중복 예측 방지 (원래 signal + 관망 변환 모두 체크)
     if _is_duplicate_prediction(ticker, signal, strategy_type):
@@ -593,7 +595,7 @@ def save_prediction(
          stop_loss, gated_conf, reasoning + f" [게이트:{grade}|{gate_reason}]", persona,
          strategy_type, strategy_tags, horizon_days, benchmark_ticker,
          execution_condition, invalidation_condition, risk_reward, agreement_count,
-         action_grade, action_type, account_type, briefing_type, signal, data_quality),
+         action_grade, action_type, account_type, briefing_type, original_signal, data_quality),
     )
     conn.commit()
 
@@ -603,12 +605,32 @@ def save_prediction(
     return cursor.lastrowid or 0
 
 
+# action_type → 저장 signal 매핑 (CANCEL/HOLD는 매도 실행으로 저장하지 않음)
+_ACTION_TYPE_SIGNAL = {
+    "AI_NEW_BUY": "매수",
+    "AI_ADD_BUY": "매수",
+    "CONDITIONAL_NEW_BUY": "매수",
+    "AI_SELL_MANAGEMENT": "매도",
+    "CANCEL_SELL": "관망",
+    "HOLD_REVIEW": "관망",
+    "WATCH_ONLY": "관망",
+}
+
+
 def save_predictions_from_briefing(
     raw_json: dict,
     data_failures: int = 0,
     current_prices: dict[str, float] | None = None,
+    briefing_type: str = "",
+    normalized: dict | None = None,
 ) -> int:
-    """브리핑 결과에서 추천 기록 자동 저장. 품질 게이트 + 가격 괴리 검증. Returns 저장된 건수."""
+    """브리핑 결과를 정규화 분류(normalized) 기반으로 저장. Returns 저장 건수.
+
+    normalized가 있으면 그 분류(executable/conditional/cancelled)를 신뢰해 각 액션을
+    action_type/briefing_type과 함께 저장한다. CANCEL_SELL/HOLD_REVIEW는 signal='관망'으로
+    저장되어 'signal=매도인데 매도 취소 reason' 모순이 구조적으로 발생하지 않는다.
+    normalized가 없으면(데일리 리뷰 등) 저장하지 않는다.
+    """
     count = 0
     prices = current_prices
 
@@ -619,35 +641,59 @@ def save_predictions_from_briefing(
         return str(tags) if tags else ""
 
     def _resolve_current_price(ticker: str) -> float | None:
-        """정규화된 티커로 현재가 조회. prices 미전달이면 None (검증 스킵)."""
         if prices is None:
             return None
-        normalized = normalize_ticker(ticker)
-        # 정규화된 코드 또는 원본 코드로 조회, 둘 다 없으면 0.0 (시세 미수집)
-        return prices.get(normalized, prices.get(ticker, 0.0))
+        norm = normalize_ticker(ticker)
+        return prices.get(norm, prices.get(ticker, 0.0))
 
     def _default_benchmark(ticker: str, provided: str) -> str:
-        """benchmark_ticker 누락 시 시장별 기본값 자동 채움 (알파 채점 가동률 확보)."""
         if provided and provided.strip():
             return provided.strip()
         return "^KS11" if normalize_ticker(ticker).endswith((".KS", ".KQ")) else "^GSPC"
 
-    for row in raw_json.get("strategy_buy", []):
+    if normalized is None:
+        return 0  # 정규화 결과 없는 브리핑(데일리 리뷰)은 추천 저장 안 함
+
+    # 실행/조건부/취소 액션을 한 묶음으로 저장 (각자의 action_type 보존)
+    all_actions = (
+        list(normalized.get("executable_actions", []))
+        + list(normalized.get("conditional_buy_candidates", []))
+        + list(normalized.get("cancelled_sells", []))
+    )
+
+    # action_type → action_grade 강제 (결정론적 — DB 모순 방지)
+    # 조건부 매수는 IMMEDIATE 금지, 취소/홀딩은 실행 등급 금지
+    _grade_override = {
+        "CONDITIONAL_NEW_BUY": ACTION_CONDITIONAL,
+        "CANCEL_SELL": ACTION_WATCH,
+        "HOLD_REVIEW": ACTION_WATCH,
+        "WATCH_ONLY": ACTION_WATCH,
+    }
+
+    for act in all_actions:
         try:
-            raw_ticker = row.get("ticker", "")
-            entry = _parse_price(row.get("entry_price", "0"))
-            target = _parse_price(row.get("target_price", "0"))
+            row = act.get("_raw", {})
+            action_type = act.get("action_type", "")
+            signal = _ACTION_TYPE_SIGNAL.get(action_type, "관망")
+            raw_ticker = act.get("ticker", "") or row.get("ticker", "")
+
+            if act.get("side") == "sell":
+                entry = _parse_price(row.get("current_price", "0"))
+                target = _parse_price(row.get("take_profit", "0"))
+            else:
+                entry = _parse_price(row.get("entry_price", "0"))
+                target = _parse_price(row.get("target_price", "0"))
             stop = _parse_price(row.get("stop_loss", "0"))
             cur_price = _resolve_current_price(raw_ticker)
 
             pid = save_prediction(
                 ticker=raw_ticker,
-                name=row.get("name", ""),
-                signal="매수",
+                name=act.get("name", "") or row.get("name", ""),
+                signal=signal,
                 entry_price=entry,
                 target_price=target,
                 stop_loss=stop,
-                reasoning=row.get("reason", "")[:200],
+                reasoning=str(row.get("reason", ""))[:200],
                 strategy_type=_normalize_strategy_type(row.get("strategy_type")),
                 strategy_tags=_extract_tags(row),
                 horizon_days=_safe_int(row.get("horizon_days"), 7),
@@ -658,45 +704,15 @@ def save_predictions_from_briefing(
                 data_failures=data_failures,
                 agreement_count=_safe_int(row.get("agreement_count") or row.get("consensus_count"), 0),
                 current_price=cur_price,
-                account_type=_normalize_account(row.get("account", ""), raw_ticker),
+                account_type=_normalize_account(act.get("account", "") or row.get("account", ""), raw_ticker),
+                action_type=action_type,
+                briefing_type=briefing_type,
+                action_grade=_grade_override.get(action_type, ""),
             )
             if pid > 0:
                 count += 1
         except Exception as e:
-            log.debug(f"매수 추천 저장 실패: {e}")
-
-    for row in raw_json.get("strategy_sell", []):
-        try:
-            raw_ticker = row.get("ticker", "")
-            entry = _parse_price(row.get("current_price", "0"))
-            target = _parse_price(row.get("take_profit", "0"))
-            stop = _parse_price(row.get("stop_loss", "0"))
-            cur_price = _resolve_current_price(raw_ticker)
-
-            pid = save_prediction(
-                ticker=raw_ticker,
-                name=row.get("name", ""),
-                signal="매도",
-                entry_price=entry,
-                target_price=target,
-                stop_loss=stop,
-                reasoning=row.get("reason", "")[:200],
-                strategy_type=_normalize_strategy_type(row.get("strategy_type")),
-                strategy_tags=_extract_tags(row),
-                horizon_days=_safe_int(row.get("horizon_days"), 7),
-                benchmark_ticker=_default_benchmark(raw_ticker, str(row.get("benchmark_ticker", "") or "")),
-                execution_condition=str(row.get("execution_condition", "") or "")[:200],
-                invalidation_condition=str(row.get("invalidation_condition", "") or "")[:200],
-                risk_reward=_safe_float(row.get("risk_reward"), 0),
-                data_failures=data_failures,
-                agreement_count=_safe_int(row.get("agreement_count") or row.get("consensus_count"), 0),
-                current_price=cur_price,
-                account_type=_normalize_account(row.get("account", ""), raw_ticker),
-            )
-            if pid > 0:
-                count += 1
-        except Exception as e:
-            log.debug(f"매도 추천 저장 실패: {e}")
+            log.debug(f"추천 저장 실패({act.get('action_type','?')}): {e}")
 
     return count
 
