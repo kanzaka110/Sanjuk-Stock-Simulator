@@ -463,11 +463,14 @@ class MarketMonitor:
         from config.settings import PRICE_ALERTS
         from core.market import _get_quote_realtime
 
+        # 정적 PRICE_ALERTS + 동적 눌림목 예약(신규진입 미결 추천)을 병합 감시
+        alerts = {**PRICE_ALERTS, **_load_pullback_alerts()}
+
         triggers: list[AlertTrigger] = []
-        if not PRICE_ALERTS:
+        if not alerts:
             return triggers
 
-        for ticker, cfg in PRICE_ALERTS.items():
+        for ticker, cfg in alerts.items():
             is_kr = ticker.endswith((".KS", ".KQ")) or ticker in ("^KS11", "^KQ11")
             is_index = ticker.startswith("^")
             if is_index:
@@ -742,6 +745,45 @@ class MarketMonitor:
         end = time.time() + seconds
         while self._running and time.time() < end:
             time.sleep(min(1.0, end - time.time()))
+
+
+# ─── 동적 눌림목 알림 (신규진입 미결 추천 → 진입가 도달 감시) ───
+
+def _load_pullback_alerts() -> dict:
+    """미결 신규진입(눌림목 예약) 추천을 PRICE_ALERTS 형식으로 로드.
+
+    발굴주가 눌림목 예약으로 strategy_buy에 등재되면 predictions에 status=open으로 저장됨.
+    그 entry_price(눌림목 지정가)에 현재가가 도달하면 매수 알림 → 발굴이 실제 매수로 완결.
+    14일 이내 미결 건만 (오래된 예약은 만료). 실패 시 빈 dict (모니터 중단 없이).
+    """
+    try:
+        from datetime import datetime, timedelta
+
+        from config.settings import KST
+        from core.memory import _get_conn
+
+        cutoff = (datetime.now(KST) - timedelta(days=14)).isoformat()
+        rows = _get_conn().execute(
+            """SELECT ticker, name, entry_price, account_type FROM predictions
+               WHERE status='open' AND signal='매수' AND strategy_type='신규진입'
+                 AND entry_price > 0 AND created_at >= ?""",
+            (cutoff,),
+        ).fetchall()
+        out: dict = {}
+        for r in rows:
+            tk = r["ticker"]
+            if tk in out:
+                continue
+            acct = f"[{r['account_type']}] " if r["account_type"] else ""
+            out[tk] = {
+                "name": r["name"],
+                "below": float(r["entry_price"]),  # 눌림목 도달 = 매수 기회
+                "reason": f"{acct}눌림목 예약 진입가 도달 — 발굴주 신규진입 검토",
+            }
+        return out
+    except Exception as e:
+        log.debug("눌림목 알림 로드 실패: %s", e)
+        return {}
 
 
 # ─── 알림 메시지 포매터 ───────────────────────────────
