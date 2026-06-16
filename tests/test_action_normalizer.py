@@ -149,6 +149,78 @@ class TestSaveIntegration:
         assert save_predictions_from_briefing(raw, normalized=None) == 0
 
 
+class TestTelegram4Sections:
+    """텔레그램 4섹션 — 실행 매도가 있어도 조건부 매수 섹션이 숨지 않음."""
+
+    def _msg(self, raw, briefing_type="KR_BEFORE"):
+        from core.models import BriefingResult
+        from core.telegram import _build_impact_message
+        raw["normalized"] = normalize_actions(raw, briefing_type, {}, {})
+        result = BriefingResult(title="t", raw_json=raw)
+        return _build_impact_message(result, raw, "🇰🇷", "테스트", briefing_type)
+
+    def test_all_four_sections_present(self):
+        raw = {
+            "strategy_buy": [
+                {"ticker": "035720.KS", "name": "카카오", "account": "[ISA]",
+                 "entry_price": "₩40,000", "reason": "즉시 진입"},
+                {"ticker": "091160.KS", "name": "KODEX 반도체", "account": "[RIA]",
+                 "entry_price": "₩166,500", "reason": "추격 금지 눌림목"},
+            ],
+            "strategy_sell": [
+                {"ticker": "MU", "name": "마이크론", "current_price": "$900",
+                 "reason": "홀딩 전환"}],
+            "next_action": "관망",
+        }
+        msg = self._msg(raw)
+        assert "⚡ *오늘 실제 실행*" in msg
+        assert "🕐 *조건부 매수 후보*" in msg
+        assert "🟡 *매도 취소·홀딩 전환*" in msg
+
+    def test_conditional_not_hidden_by_executable_sell(self):
+        """실행 매도가 있어도 조건부 매수 후보 섹션이 보여야 함."""
+        raw = {
+            "strategy_buy": [
+                {"ticker": "091160.KS", "name": "KODEX 반도체", "account": "[RIA]",
+                 "entry_price": "₩166,500", "reason": "눌림목 대기"}],
+            "strategy_sell": [
+                {"ticker": "LMT", "name": "록히드", "current_price": "$540",
+                 "take_profit": "$560", "reason": "RSI 75 과열 부분 익절"}],
+        }
+        msg = self._msg(raw)
+        assert "🕐 *조건부 매수 후보*" in msg and "KODEX 반도체" in msg
+        assert "오늘 실제 실행" in msg and "록히드" in msg
+
+    def test_no_buy_reason_section(self):
+        raw = {"strategy_buy": [], "strategy_sell": [], "next_action": "FOMC 대기"}
+        msg = self._msg(raw)
+        assert "🔍 *매수 후보 없음 사유*" in msg
+
+
+class TestBuyFocusMode:
+    """BUY_FOCUS_MODE는 매도 차단 플래그가 아니다."""
+
+    def test_clean_sell_stays_management_under_buy_focus(self, monkeypatch):
+        import config.settings as st
+        monkeypatch.setattr(st, "BUY_FOCUS_MODE", True, raising=False)
+        raw = {"strategy_buy": [], "strategy_sell": [
+            {"ticker": "LMT", "name": "록히드", "current_price": "$540",
+             "take_profit": "$560", "reason": "과열 부분 익절"}]}
+        n = normalize_actions(raw, "KR_BEFORE", {}, {})
+        assert len(n["executable_actions"]) == 1
+        assert n["executable_actions"][0]["action_type"] == AI_SELL_MANAGEMENT
+
+    def test_cancel_sell_classified_under_buy_focus(self, monkeypatch):
+        import config.settings as st
+        monkeypatch.setattr(st, "BUY_FOCUS_MODE", True, raising=False)
+        raw = {"strategy_buy": [], "strategy_sell": [
+            {"ticker": "MU", "name": "마이크론", "current_price": "$900",
+             "reason": "홀딩 전환"}]}
+        n = normalize_actions(raw, "KR_BEFORE", {}, {})
+        assert len(n["cancelled_sells"]) == 1
+        assert n["cancelled_sells"][0]["action_type"] == HOLD_REVIEW
+
+
 class TestDBIntegrity:
     """운영 DB 무결성 — 최근 24시간 신규 저장 기준 모순 0건.
 

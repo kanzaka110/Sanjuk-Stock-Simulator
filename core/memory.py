@@ -104,6 +104,7 @@ def _migrate_phase4(conn: sqlite3.Connection) -> None:
         ("briefing_type", "TEXT"),        # KR_NIGHT/US_NIGHT/KR_BEFORE/US_BEFORE/MANUAL
         ("original_signal", "TEXT"),      # AI 원본 signal (정규화 전)
         ("data_quality", "TEXT"),         # good/suspect/error
+        ("normalizer_version", "TEXT DEFAULT ''"),  # v1=normalizer 경유 / legacy=과거 / ''=미분류
     ]
     for col_name, col_def in new_columns:
         if col_name not in existing:
@@ -542,6 +543,7 @@ def save_prediction(
     account_type: str = "",
     briefing_type: str = "",
     data_quality: str = "good",
+    normalizer_version: str = "",
 ) -> int:
     """새 추천 기록 저장. 품질 게이트 + 확신도 보정 + 중복 방지. Returns prediction ID."""
     # 티커 정규화 (AI 할루시네이션 방지)
@@ -589,13 +591,15 @@ def save_prediction(
             stop_loss, confidence, reasoning, persona,
             strategy_type, strategy_tags, horizon_days, benchmark_ticker,
             execution_condition, invalidation_condition, risk_reward, agreement_count,
-            action_grade, action_type, account_type, briefing_type, original_signal, data_quality)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            action_grade, action_type, account_type, briefing_type, original_signal, data_quality,
+            normalizer_version)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (now, ticker, name, signal, entry_price, target_price,
          stop_loss, gated_conf, reasoning + f" [게이트:{grade}|{gate_reason}]", persona,
          strategy_type, strategy_tags, horizon_days, benchmark_ticker,
          execution_condition, invalidation_condition, risk_reward, agreement_count,
-         action_grade, action_type, account_type, briefing_type, original_signal, data_quality),
+         action_grade, action_type, account_type, briefing_type, original_signal, data_quality,
+         normalizer_version),
     )
     conn.commit()
 
@@ -708,6 +712,7 @@ def save_predictions_from_briefing(
                 action_type=action_type,
                 briefing_type=briefing_type,
                 action_grade=_grade_override.get(action_type, ""),
+                normalizer_version="v1",
             )
             if pid > 0:
                 count += 1

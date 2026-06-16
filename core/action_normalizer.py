@@ -113,6 +113,25 @@ def _build_action(row: dict, action_type: str, side: str, briefing_type: str) ->
     }
 
 
+def classify_row(signal: str, reason: str, strategy_type: str = "",
+                 is_held: bool = False) -> str:
+    """단일 row를 action_type으로 분류 (마이그레이션/감사 공용 — 결정론적).
+
+    normalize_actions와 동일한 신호어 규칙. raw row의 signal+reason만으로 판정.
+    """
+    text = reason or ""
+    if signal == "매수":
+        if _has_phrase(text, BUY_NOT_NOW_PHRASES) or strategy_type == "신규진입" or "눌림목" in text:
+            return CONDITIONAL_NEW_BUY
+        return AI_ADD_BUY if is_held else AI_NEW_BUY
+    if signal == "매도":
+        canceller = _has_phrase(text, SELL_CANCEL_PHRASES)
+        if canceller:
+            return HOLD_REVIEW if ("홀딩" in canceller or "보유" in canceller) else CANCEL_SELL
+        return AI_SELL_MANAGEMENT
+    return WATCH_ONLY
+
+
 def normalize_actions(
     raw: dict,
     briefing_type: str,
