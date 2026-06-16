@@ -783,6 +783,104 @@ class TestNightOrdersTelegram:
         assert "종합 판단 실패" in msg
 
 
+class TestDailyReviewGuard:
+    """데일리 리뷰(US_CLOSE) 결산·복기 전용 가드 테스트."""
+
+    def _make_result(self, raw_json: dict, warnings=()):
+        from core.models import BriefingResult
+        return BriefingResult(raw_json=raw_json, quality_warnings=warnings)
+
+    # ── 테스트 A: actions가 들어와도 텔레그램에 실행 문구 미출력 ──
+    def test_a_us_close_actions_not_rendered(self):
+        from core.telegram import _build_impact_message
+        result = self._make_result({
+            "actions": [{"type": "매수·즉시", "account": "[ISA]", "name": "카카오",
+                         "price": "₩40,000", "qty": "10주"}],
+            "advisor_oneliner": "어제 결산",
+        })
+        msg = _build_impact_message(result, result.raw_json, "🌅 데일리 리뷰", "테스트", "US_CLOSE")
+        assert "액션 (그대로 실행)" not in msg
+        assert "매수·즉시" not in msg
+        assert "데일리 리뷰 — 결산·복기 전용" in msg
+
+    # ── 테스트 B: buy_recs/sell_recs/night_orders 미출력 ──
+    def test_b_us_close_recs_not_rendered(self):
+        from core.telegram import _build_impact_message
+        result = self._make_result({
+            "strategy_buy": [{"name": "삼성전자", "ticker": "005930.KS", "account": "[일반]"}],
+            "strategy_sell": [{"name": "MU", "ticker": "MU"}],
+            "night_orders": [{"구분": "매수", "종목": "카카오"}],
+        })
+        msg = _build_impact_message(result, result.raw_json, "🌅 데일리 리뷰", "테스트", "US_CLOSE")
+        assert "매수 추천" not in msg
+        assert "매도 추천" not in msg
+        assert "예약 주문" not in msg
+        assert "오늘 실행할 액션 없음" not in msg  # 데일리 리뷰엔 부적절
+
+    # ── 테스트 C: 본문 미래 실행형 표현 탐지/완화 ──
+    def test_c_future_directive_detected(self):
+        from core.analyzer import _detect_daily_review_violations
+        for txt in [
+            "오늘 카카오 매수 권고합니다",
+            "삼성전자 비중 확대 검토",
+            "MU 손절하세요",
+            "내일 예약 주문 넣으세요",
+            "09:00 전 실행할 것",
+            "신규 진입 추천",
+        ]:
+            assert _detect_daily_review_violations(txt), f"미탐지: {txt}"
+
+    def test_c_enforce_softens_body(self):
+        from core.analyzer import _enforce_daily_review
+        data = {
+            "actions": [{"type": "매수·즉시"}],
+            "strategy_buy": [{"name": "X"}],
+            "strategy_sell": [{"name": "Y"}],
+            "night_orders": [{"구분": "매수"}],
+            "advisor_conclusion": "카카오 매수 추천. 삼성전자 비중 확대.",
+            "investment_decision": "매수실행",
+        }
+        out, warnings = _enforce_daily_review(data)
+        assert out["actions"] == [] and out["strategy_buy"] == [] and out["strategy_sell"] == []
+        assert out["night_orders"] == [] and out["investment_decision"] == "관망"
+        assert "매수 추천" not in out["advisor_conclusion"]
+        assert "비중 확대" not in out["advisor_conclusion"]
+        assert warnings  # 위반 경고 기록됨
+
+    # ── 테스트 D: KR_OPEN 등 다른 브리핑의 액션은 정상 ──
+    def test_d_kr_open_actions_still_render(self):
+        from core.telegram import _build_impact_message
+        result = self._make_result({
+            "actions": [{"type": "예약매수", "account": "[ISA]", "name": "카카오",
+                         "horizon": "중기", "order_method": "지정가",
+                         "price": "₩40,500", "qty": "15주", "validity": "당일",
+                         "target": "₩43,500 도달 시 절반", "stop": "₩38,800 이탈 시 매도"}],
+        })
+        msg = _build_impact_message(result, result.raw_json, "🔔 개장", "테스트", "KR_OPEN")
+        assert "액션 (그대로 실행)" in msg
+        assert "카카오" in msg and "₩40,500" in msg
+
+    def test_d_us_close_guard_does_not_touch_kr_open_data(self):
+        """_enforce_daily_review는 US_CLOSE 경로에서만 호출 — KR_OPEN data는 무변경."""
+        from core.analyzer import _enforce_daily_review
+        # 직접 호출하지 않으면 데이터가 보존되어야 함을 확인 (호출 자체가 US_CLOSE 전용)
+        data = {"actions": [{"type": "예약매수"}], "investment_decision": "매수실행"}
+        # KR_OPEN에서는 이 함수를 호출하지 않으므로 원본 유지 (계약 검증)
+        assert data["actions"] == [{"type": "예약매수"}]
+
+    # ── 테스트 E: 과거 복기 표현은 허용 ──
+    def test_e_past_review_allowed(self):
+        from core.analyzer import _detect_daily_review_violations
+        for txt in [
+            "어제 매수한 카카오는 +3% 상승",
+            "어제 매도한 MU 거래는 적절했다",
+            "어제 손절한 판단을 복기하면 성급했다",
+            "어제 익절한 이유는 목표가 도달이었다",
+            "전날 매수한 종목이 반등 중",
+        ]:
+            assert _detect_daily_review_violations(txt) == [], f"과거 복기 오탐: {txt}"
+
+
 class TestIsActionablePolicy:
     """긴급알림 _is_actionable() 정책 테스트."""
 

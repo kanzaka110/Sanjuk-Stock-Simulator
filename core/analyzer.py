@@ -29,6 +29,113 @@ from core.news import gather_news
 log = logging.getLogger(__name__)
 
 
+# ═══════════════════════════════════════════════════════
+# 데일리 리뷰(US_CLOSE) 가드 — 신규 거래 지시 차단
+# ═══════════════════════════════════════════════════════
+# 데일리 리뷰는 결산·복기·현황 진단 전용. 구조화 필드를 비우는 것만으론 부족하고,
+# 본문 자연어에 들어가는 "미래 실행 지시"도 차단한다. 단 과거 거래 복기는 허용.
+
+import re as _re
+
+# 항상 금지 — 과거 복기형이 없는 명백한 미래 실행 지시/권고
+_DR_HARD_BANNED: tuple[str, ...] = (
+    "매수하세요", "매도하세요", "매수 권고", "매도 권고", "매수 추천", "매도 추천",
+    "신규 진입", "추가매수", "추가 매수", "비중 확대", "비중 축소", "예약 주문",
+    "오늘 실행", "09:00 전 실행", "오늘의 액션", "매수 후보", "매도 후보",
+)
+
+# 문맥 의존 — 미래형 동사와 결합할 때만 금지 (익절/손절/청산 그 자체는 복기에서 허용)
+_DR_FUTURE_DIRECTIVE = _re.compile(
+    r"(익절|손절|청산|매수|매도)\s*\S{0,3}?(하라|하세요|하자|하시|해야|할\s|할까|"
+    r"권고|추천|검토하|실행하|들어가|진입하|담으|받으세요)"
+)
+
+# 과거 복기 문맥 — 위 매칭이라도 이 패턴이면 허용 (어제/지난/전날 + 과거형)
+_DR_PAST_REVIEW = _re.compile(
+    r"(어제|지난|전날|간밤|앞서)\s*\S{0,6}?(익절|손절|청산|매수|매도)\s*\S{0,2}?(한|했|하던|함)"
+)
+
+
+def _detect_daily_review_violations(text: str) -> list[str]:
+    """데일리 리뷰 본문에서 미래 실행 지시 표현을 탐지. 과거 복기는 제외.
+
+    Returns: 위반 표현 리스트 (없으면 빈 리스트).
+    """
+    if not text:
+        return []
+    violations: list[str] = []
+    for phrase in _DR_HARD_BANNED:
+        if phrase in text:
+            violations.append(phrase)
+    # 문맥 의존: 미래 지시 매칭 중, 과거 복기 범위에 속하지 않는 것만
+    past_spans = [m.span() for m in _DR_PAST_REVIEW.finditer(text)]
+    for m in _DR_FUTURE_DIRECTIVE.finditer(text):
+        s, e = m.span()
+        in_past = any(ps <= s and e <= pe + 6 for ps, pe in past_spans)
+        if not in_past:
+            violations.append(m.group(0).strip())
+    return violations
+
+
+def _soften_daily_review_text(text: str) -> str:
+    """탐지된 미래 실행 지시를 '관찰 포인트' 톤으로 완화. 과거 복기는 보존."""
+    if not text:
+        return text
+    out = text
+    # 하드 금지어 → 중립 표현으로 치환
+    replacements = {
+        "매수하세요": "매수는 KR_OPEN에서 재확인", "매도하세요": "매도는 KR_OPEN에서 재확인",
+        "매수 권고": "매수 관찰 포인트", "매도 권고": "매도 관찰 포인트",
+        "매수 추천": "매수 관찰 포인트", "매도 추천": "매도 관찰 포인트",
+        "신규 진입": "신규 진입 여부는 KR_OPEN 확인", "추가매수": "추가 매수 여부는 KR_OPEN 확인",
+        "추가 매수": "추가 매수 여부는 KR_OPEN 확인",
+        "비중 확대": "비중 조정은 KR_OPEN 확인", "비중 축소": "비중 조정은 KR_OPEN 확인",
+        "예약 주문": "예약 주문은 KR_OPEN/US_NIGHT에서",
+        "오늘 실행": "KR_OPEN에서 재확인", "09:00 전 실행": "KR_OPEN에서 재확인",
+        "오늘의 액션": "관찰 포인트", "매수 후보": "관찰 종목", "매도 후보": "관찰 종목",
+    }
+    for bad, good in replacements.items():
+        out = out.replace(bad, good)
+    return out
+
+
+_DR_TEXT_FIELDS = (
+    "market_summary", "strategy_summary", "advisor_oneliner",
+    "advisor_conclusion", "advisor_verdict", "next_action",
+)
+
+
+def _enforce_daily_review(data: dict) -> tuple[dict, list[str]]:
+    """US_CLOSE 데일리 리뷰 강제: 구조화 필드 비우기 + 본문 미래지시 완화.
+
+    Returns: (정리된 data, 위반 경고 리스트)
+    """
+    warnings: list[str] = []
+
+    # 1) 구조화 거래 필드 강제 제거 (이중 안전장치)
+    for f in ("actions", "strategy_buy", "strategy_sell", "night_orders"):
+        if data.get(f):
+            warnings.append(f"데일리 리뷰: {f} 제거됨")
+        data[f] = []
+    data["investment_decision"] = "관망"
+
+    # 2) 본문 자연어 미래 실행 지시 탐지 + 완화
+    for field in _DR_TEXT_FIELDS:
+        val = data.get(field)
+        if not isinstance(val, str) or not val:
+            continue
+        viol = _detect_daily_review_violations(val)
+        if viol:
+            warnings.append(f"데일리 리뷰 본문 실행지시 완화({field}): {', '.join(dict.fromkeys(viol))[:80]}")
+            data[field] = _soften_daily_review_text(val)
+
+    # advisor_verdict는 의사결정 단어 자체가 부적절 → 결산 톤으로 고정
+    if data.get("advisor_verdict") not in ("", "결산 완료", "복기"):
+        data["advisor_verdict"] = "결산 완료"
+
+    return data, warnings
+
+
 def _fetch_watchlist_text(snapshot_prices: dict[str, float] | None = None) -> str:
     """Watchlist 종목 가격 + RSI + MA를 텍스트로 변환. 보유 외 신규 후보.
 
@@ -726,6 +833,12 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
     # 데이터 실패 집계 + 품질 경고 수집
     _data_failures = 0
     _quality_warnings: list[str] = []
+
+    # 데일리 리뷰(US_CLOSE): 신규 거래 지시 전면 차단 (구조화 + 자연어)
+    if briefing_type == "US_CLOSE":
+        data, _dr_warnings = _enforce_daily_review(data)
+        for w in _dr_warnings:
+            log.info("  %s", w)
     if _news_failed:
         _data_failures += 1
         _quality_warnings.append("뉴스 수집 실패 — 시황/감성 정보 제외")
