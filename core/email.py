@@ -303,7 +303,56 @@ def _build_briefing_html(
         for p in _split_into_paragraphs(advisor_conclusion):
             parts.append(f"<p>{_esc(p)}</p>")
 
-    if buy_recs:
+    # ── normalizer 결과 우선 표시 (raw buy_recommendations 직접 노출 금지) ──
+    normalized = raw.get("normalized")
+    if normalized:
+        exec_buys = [a for a in (normalized.get("executable_actions") or []) if a.get("side") == "buy"]
+        cond_buys = normalized.get("conditional_buy_candidates") or []
+        blocked = normalized.get("blocked_buys") or []
+
+        if exec_buys:
+            section += 1
+            parts.append(f"<h2>{section}. ⚡ 실행 매수</h2>")
+            parts.append("<table><tr><th>종목</th><th>계좌</th><th>수량</th><th>매수가</th><th>손절</th><th>근거</th></tr>")
+            for a in exec_buys:
+                parts.append(f"<tr><td><b>{_esc(a.get('name', ''))}</b></td>")
+                parts.append(f"<td>{_esc(a.get('account_type', ''))}</td>")
+                parts.append(f"<td>{_esc(a.get('shares', ''))}</td>")
+                parts.append(f"<td>{_esc(a.get('entry_price', ''))}</td>")
+                parts.append(f"<td>{_esc(a.get('stop_loss', ''))}</td>")
+                parts.append(f"<td>{_esc(a.get('reason', ''))}</td></tr>")
+            parts.append("</table>")
+
+        if cond_buys:
+            section += 1
+            parts.append(f"<h2>{section}. 🕐 조건부 매수 후보</h2>")
+            parts.append("<table><tr><th>종목</th><th>계좌</th><th>수량</th><th>지정가</th><th>무효화</th><th>조건</th></tr>")
+            for a in cond_buys:
+                parts.append(f"<tr><td><b>{_esc(a.get('name', ''))}</b></td>")
+                parts.append(f"<td>{_esc(a.get('account_type', ''))}</td>")
+                parts.append(f"<td>{_esc(a.get('shares', ''))}</td>")
+                parts.append(f"<td>{_esc(a.get('entry_price', ''))}</td>")
+                parts.append(f"<td>{_esc(a.get('invalidation_note', ''))}</td>")
+                parts.append(f"<td>{_esc(a.get('block_reason', ''))}</td></tr>")
+            parts.append("</table>")
+
+        if blocked:
+            section += 1
+            parts.append(f"<h2>{section}. 🚫 주문 차단 / 실행 금지</h2>")
+            parts.append("<table><tr><th>종목</th><th>차단 사유</th></tr>")
+            for a in blocked:
+                parts.append(f"<tr><td><b>{_esc(a.get('name', ''))}</b></td>")
+                parts.append(f"<td>{_esc(a.get('block_reason', ''))}</td></tr>")
+            parts.append("</table>")
+
+        if not exec_buys and not cond_buys:
+            no_reason = normalized.get("no_buy_reason", "")
+            if no_reason:
+                section += 1
+                parts.append(f"<h2>{section}. 매수 후보 없음</h2>")
+                parts.append(f"<p>{_esc(no_reason)}</p>")
+    elif buy_recs:
+        # fallback: normalized 없는 구버전 호환 (raw 직접 표시)
         section += 1
         parts.append(f"<h2>{section}. 매수 추천</h2>")
         parts.append("<table><tr><th>종목</th><th>계좌</th><th>수량</th><th>매수가</th><th>손절</th><th>익절</th><th>근거</th></tr>")

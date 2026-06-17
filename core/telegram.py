@@ -600,8 +600,8 @@ def _build_briefing_message(
         lines.append(f"{'━' * 24}")
         lines.append("")
 
-    # ── 매수 전략 ──
-    if result.buy_signals:
+    # ── 매수 전략 (normalized 있으면 raw buy_signals 직접 노출 금지) ──
+    if result.buy_signals and not raw.get("normalized"):
         lines.append("")
         lines.append(f"{'─' * 24}")
         lines.append("🟢  *매수 액션*")
@@ -618,8 +618,8 @@ def _build_briefing_message(
                 lines.append(f"    ⏰ {sig.timing[:50]}")
             lines.append("")
 
-    # ── 매도 전략 ──
-    if result.sell_signals:
+    # ── 매도 전략 (normalized 있으면 raw sell_signals 직접 노출 금지) ──
+    if result.sell_signals and not raw.get("normalized"):
         lines.append("")
         lines.append(f"{'─' * 24}")
         lines.append("🔴  *매도 / 주의*")

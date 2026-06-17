@@ -15,7 +15,7 @@ import pytest
 
 from core.action_normalizer import (
     AI_NEW_BUY, AI_ADD_BUY, CONDITIONAL_NEW_BUY, AI_SELL_MANAGEMENT,
-    CANCEL_SELL, HOLD_REVIEW, normalize_actions,
+    CANCEL_SELL, HOLD_REVIEW, BLOCKED_BUY, normalize_actions,
 )
 
 
@@ -356,6 +356,75 @@ class TestOrderIntegrityGates:
         # 67000 ≤ 70000×0.97=67900 → 눌림목. 총액 469만 ≥ 400만 → large + event_wait → blocked
         assert len(n["blocked_buys"]) == 1
         assert "대량주문" in n["blocked_buys"][0]["block_reason"]
+
+
+class TestChaseBlockGate:
+    """현재가 초과/+3% 추격 지정가 → 무조건 BLOCKED_BUY (2026-06-17 HPSP/한화엔진 사례)."""
+
+    def _buy(self, ticker, name, entry, cur, reason="눌림목 대기", summary="", inval=""):
+        row = {"ticker": ticker, "name": name, "account": "[일반]",
+               "entry_price": entry, "strategy_type": "신규진입", "reason": reason}
+        if inval:
+            row["invalidation_price"] = inval
+        raw = {"strategy_buy": [row], "strategy_sell": []}
+        if summary:
+            raw["market_summary"] = summary
+        return normalize_actions(raw, "KR_NIGHT", {ticker: cur}, {})
+
+    # HPSP: 현재가 62,800, 지정가 70,000 (+11.5%) → BLOCKED
+    def test_hpsp_chase_blocked(self):
+        """HPSP 현재가 62,800 / 지정가 70,000 → 현재가 초과 추격, 무조건 차단."""
+        n = self._buy("403870.KS", "HPSP", "₩70,000", 62800,
+                      reason="FOMC 대기 / 내일장 눌림목", summary="FOMC 대기")
+        assert len(n["executable_actions"]) == 0, "executable에 HPSP 있으면 안 됨"
+        assert len(n["conditional_buy_candidates"]) == 0, "conditional에 HPSP 있으면 안 됨"
+        assert len(n["blocked_buys"]) == 1
+        blk = n["blocked_buys"][0]
+        assert blk["action_type"] == BLOCKED_BUY
+        assert blk.get("chase_blocked") is True
+        assert "현재가 초과" in blk["block_reason"]
+        assert n["integrity_errors"]
+
+    # HPSP 지정가가 현재가 약간 위 (+1%) → 여전히 BLOCKED
+    def test_hpsp_slightly_above_blocked(self):
+        """지정가가 현재가보다 1%만 높아도 차단."""
+        n = self._buy("403870.KS", "HPSP", "₩63,400", 62800)
+        assert len(n["executable_actions"]) == 0
+        assert len(n["conditional_buy_candidates"]) == 0
+        assert len(n["blocked_buys"]) == 1
+
+    # HPSP 지정가가 현재가 이하 (-5%) → 정상 조건부 통과
+    def test_hpsp_real_pullback_allowed(self):
+        """지정가 59,660 (현재가 -5%) → 진짜 눌림목, conditional 허용."""
+        n = self._buy("403870.KS", "HPSP", "₩59,660", 62800,
+                      reason="눌림목 대기", inval="₩57,000")
+        assert len(n["conditional_buy_candidates"]) == 1
+        assert len(n["blocked_buys"]) == 0
+
+    # 한화엔진: 현재가 65,500, 전일대비 +10.46%, 지정가가 현재가 이상 → BLOCKED
+    def test_hanwha_engine_chase_after_surge_blocked(self):
+        """한화엔진 급등 후 현재가 65,500, 지정가 66,000 → 추격 차단."""
+        n = self._buy("082740.KS", "한화엔진", "₩66,000", 65500,
+                      reason="급등 후 추격 금지")
+        assert len(n["executable_actions"]) == 0
+        assert len(n["conditional_buy_candidates"]) == 0
+        assert len(n["blocked_buys"]) == 1
+        assert n["blocked_buys"][0].get("chase_blocked") is True
+
+    # 한화엔진: 현재가 65,500, 지정가 70,000 (+6.9%) → +3% 이상 추격 차단
+    def test_hanwha_engine_large_gap_blocked(self):
+        """지정가가 현재가 대비 +6.9% → 무조건 BLOCKED."""
+        n = self._buy("082740.KS", "한화엔진", "₩70,000", 65500)
+        assert len(n["blocked_buys"]) == 1
+        assert "+6.9%" in n["blocked_buys"][0]["block_reason"] or "+6" in n["blocked_buys"][0]["block_reason"]
+
+    # 한화엔진: 현재가 65,500, 지정가 60,000 (-8.4%) → 진짜 눌림목
+    def test_hanwha_engine_real_pullback(self):
+        """지정가 60,000 (현재가 -8.4%) → 정상 conditional."""
+        n = self._buy("082740.KS", "한화엔진", "₩60,000", 65500,
+                      reason="눌림목 대기", inval="₩58,000")
+        assert len(n["conditional_buy_candidates"]) == 1
+        assert len(n["blocked_buys"]) == 0
 
 
 class TestBuyFocusMode:
