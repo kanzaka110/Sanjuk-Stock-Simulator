@@ -560,11 +560,18 @@ def _build_urgent_alert(
             lines.append("")
 
     # investment_decision이 매수실행/매도실행인데 위에서 안 잡힌 경우
+    # normalized가 있고 executable 매수가 0건이면 매수실행 fallback 금지
     decision = result.investment_decision
     if not lines and decision in ("매수실행", "매도실행"):
-        icon = "🟢" if decision == "매수실행" else "🔴"
-        lines.append(f"{icon} *{decision}* — Notion 상세 확인 필요")
-        lines.append("")
+        suppress = False
+        if normalized and decision == "매수실행":
+            exec_buys = [a for a in (normalized.get("executable_actions") or []) if a.get("side") == "buy"]
+            if not exec_buys:
+                suppress = True  # blocked만 있는데 매수실행 신호 → 억제
+        if not suppress:
+            icon = "🟢" if decision == "매수실행" else "🔴"
+            lines.append(f"{icon} *{decision}* — Notion 상세 확인 필요")
+            lines.append("")
 
     return lines
 
@@ -646,6 +653,19 @@ def _build_briefing_message(
             lines.append(f"    익절 {sig.target_price}  |  손절 {sig.stop_loss}")
             if shares:
                 lines.append(f"    수량 {shares}")
+            lines.append("")
+
+    # ── 차단된 매수 후보 (normalized 결과, old path에서도 표시) ──
+    _normalized = raw.get("normalized")
+    if _normalized:
+        _blocked = _normalized.get("blocked_buys") or []
+        if _blocked:
+            lines.append("")
+            lines.append(f"{'─' * 24}")
+            lines.append("🚫  *차단된 매수 후보*")
+            lines.append("")
+            for blk in _blocked:
+                lines.append(f"  • {blk.get('name', '')} — {blk.get('block_reason', '조건 불일치로 주문 제외')}")
             lines.append("")
 
     # ── 매수도 매도도 없으면 ──

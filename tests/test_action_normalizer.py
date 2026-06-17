@@ -239,6 +239,40 @@ class TestUrgentAlertBlockedBuyFilter:
         assert "매수 액션" not in msg or "HPSP" not in msg.split("매수 액션")[-1].split("━")[0], \
             "blocked HPSP가 매수 액션 섹션에 노출됨"
 
+    def test_hpsp_blocked_decision_fallback_suppressed(self):
+        """HPSP blocked + investment_decision='매수실행' → fallback '매수실행' 미표시."""
+        raw = {
+            "strategy_buy": [
+                {"ticker": "403870.KS", "name": "HPSP", "account": "[일반]",
+                 "entry_price": "₩70,000", "strategy_type": "신규진입",
+                 "reason": "FOMC 대기 눌림목", "shares": "70주"},
+            ],
+            "strategy_sell": [],
+            "market_summary": "FOMC 대기",
+        }
+        from core.models import BriefingResult, Signal
+        raw["normalized"] = normalize_actions(raw, "KR_NIGHT", {"403870.KS": 62800}, {})
+        buy_sigs = [Signal(
+            ticker="403870.KS", name="HPSP", signal="매수", urgency="강력 매수",
+            entry_price="₩70,000", target_price="₩80,000", stop_loss="₩55,000", shares="70주",
+        )]
+        result = BriefingResult(
+            title="t", raw_json=raw, buy_signals=tuple(buy_sigs),
+            investment_decision="매수실행",
+        )
+        from core.telegram import _build_briefing_message
+        ret = _build_briefing_message(result, raw, "🇰🇷", "테스트", "KR_NIGHT")
+        msg = ret if isinstance(ret, str) else "\n".join(ret)
+        # 매수실행 fallback 미표시
+        assert "매수실행 — Notion 상세 확인 필요" not in msg, \
+            "blocked만 있는데 매수실행 fallback이 표시됨"
+        # HPSP가 매수 실행 / 적극 매수에 안 나옴
+        assert "매수 실행:  HPSP" not in msg
+        assert "적극 매수:  HPSP" not in msg
+        # 차단 섹션에는 HPSP 포함
+        assert "차단된 매수 후보" in msg
+        assert "HPSP" in msg
+
     def test_non_blocked_buy_still_shows_in_urgent(self):
         """정상 매수(지정가 < 현재가)는 긴급 알림에 여전히 노출."""
         raw = {
