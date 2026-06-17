@@ -149,7 +149,7 @@ def _render_normalized_sections(lines: list, normalized: dict, sep: str, next_ac
     cancelled = normalized.get("cancelled_sells", [])
     blocked = normalized.get("blocked_buys", [])
     integrity_errors = normalized.get("integrity_errors", [])
-    no_buy = normalized.get("no_buy_reason", "")
+    no_buy = _filter_blocked_from_text(normalized.get("no_buy_reason", ""), normalized)
 
     # 🚫 정합성 충돌로 제외된 주문 (최우선 — 실행 전 경고)
     if integrity_errors:
@@ -279,6 +279,9 @@ def _build_impact_message(
         lines.append(f"⚠️ 부분 분석: {', '.join(result.quality_warnings)}")
     lines.append("")
     lines.append(f"🎯 *판단: {verdict}*")
+    # oneliner에서 blocked ticker 매수 문맥 필터
+    _norm_for_filter = raw.get("normalized")
+    oneliner = _filter_blocked_from_text(oneliner, _norm_for_filter)
     if oneliner:
         lines.append(f"💬 {oneliner}")
     lines.append("")
@@ -341,10 +344,10 @@ def _build_impact_message(
             lines.append("🌙 *오늘 밤 지정가 주문: 없음*")
         else:
             lines.append("🌙 *내일 예약 주문: 없음*")
-        # 이유 표시
+        # 이유 표시 (blocked ticker 매수 문맥 필터 적용)
         reason_text = (
-            raw.get("advisor_oneliner")
-            or raw.get("next_action")
+            _filter_blocked_from_text(raw.get("advisor_oneliner", "") or "", normalized)
+            or _filter_blocked_from_text(raw.get("next_action", "") or "", normalized)
             or raw.get("investment_decision", "관망")
         )
         if reason_text:
@@ -447,6 +450,7 @@ def _build_summary_message(
     lines.append(f"📌 {title}")
     lines.append("")
     lines.append(f"🎯 판단: *{verdict}*")
+    oneliner = _filter_blocked_from_text(oneliner, raw.get("normalized"))
     if oneliner:
         lines.append(f"💬 {oneliner}")
     lines.append("")
@@ -642,8 +646,9 @@ def _build_briefing_message(
     }.get(result.advisor_verdict, "💡")
     lines.append(f"{verdict_icon}  *AI 판단:  {result.advisor_verdict}*")
     lines.append("")
-    if result.advisor_oneliner:
-        oneliner_lines = _wrap_text(result.advisor_oneliner, 38)
+    _ol_filtered = _filter_blocked_from_text(result.advisor_oneliner or "", raw.get("normalized"))
+    if _ol_filtered:
+        oneliner_lines = _wrap_text(_ol_filtered, 38)
         lines.append(f"💬  {oneliner_lines[0]}")
         for ol in oneliner_lines[1:]:
             lines.append(f"      {ol}")

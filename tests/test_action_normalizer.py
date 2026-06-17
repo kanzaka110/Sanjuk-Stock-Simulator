@@ -344,6 +344,26 @@ class TestUrgentAlertBlockedBuyFilter:
         assert not result.endswith("/")
         assert not result.endswith(" /")
 
+    def test_hpsp_blocked_night_reason_fallback_filtered(self):
+        """KR_NIGHT + HPSP blocked + next_action='HPSP 매수 검토' → reason fallback 미노출."""
+        raw = {
+            "strategy_buy": [
+                {"ticker": "403870.KS", "name": "HPSP", "account": "[일반]",
+                 "entry_price": "₩70,000", "strategy_type": "신규진입",
+                 "reason": "FOMC 대기 눌림목", "shares": "70주"},
+            ],
+            "strategy_sell": [],
+            "next_action": "HPSP 매수 검토",
+            "advisor_oneliner": "HPSP 진입 검토 필요",
+        }
+        raw["normalized"] = normalize_actions(raw, "KR_NIGHT", {"403870.KS": 62800}, {})
+        from core.models import BriefingResult
+        result = BriefingResult(title="t", raw_json=raw)
+        from core.telegram import _build_impact_message
+        msg = _build_impact_message(result, raw, "🇰🇷", "테스트", "KR_NIGHT")
+        assert "HPSP 매수 검토" not in msg, "blocked HPSP가 야간 reason fallback에 노출됨"
+        assert "HPSP 진입 검토" not in msg, "blocked HPSP가 oneliner fallback에 노출됨"
+
     def test_non_blocked_buy_still_shows_in_urgent(self):
         """정상 매수(지정가 < 현재가)는 긴급 알림에 여전히 노출."""
         raw = {
