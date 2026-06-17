@@ -24,6 +24,42 @@ log = logging.getLogger(__name__)
 
 import re as _re
 
+_BUY_CONTEXT_WORDS = ("매수", "진입", "주문", "실행", "검토", "추가 매수", "분할 매수",
+                       "buy", "entry", "order")
+
+
+def _filter_blocked_from_text(text: str, normalized: dict | None) -> str:
+    """blocked_buys ticker/name이 매수 문맥으로 등장하는 문장을 제거/치환."""
+    if not normalized or not text:
+        return text
+    blocked = normalized.get("blocked_buys") or []
+    if not blocked:
+        return text
+    # blocked ticker/name 집합
+    names: set[str] = set()
+    for blk in blocked:
+        if blk.get("ticker"):
+            names.add(blk["ticker"])
+        if blk.get("name"):
+            names.add(blk["name"])
+    if not names:
+        return text
+    # 문장 단위 분리 (줄바꿈, 마침표, ①②③ 번호, / 구분자)
+    parts = _re.split(r'(\n|(?=①|②|③|④|⑤|⑥|⑦|⑧|⑨|⑩)|(?<=[.] )|\s*/\s*)', text)
+    parts = [p for p in parts if p and p.strip()]
+    result = []
+    for part in parts:
+        part_lower = part.lower()
+        has_blocked_name = any(n.lower() in part_lower or n in part for n in names)
+        has_buy_context = any(w in part_lower for w in _BUY_CONTEXT_WORDS)
+        if has_blocked_name and has_buy_context:
+            continue  # 해당 문장 제거
+        result.append(part)
+    filtered = " ".join(result).strip()
+    # 선행 구분자 정리
+    filtered = _re.sub(r'^[\s/·,]+', '', filtered).strip()
+    return filtered if filtered else text  # 전부 제거되면 원문 유지
+
 
 def _sanitize_markdown(text: str) -> str:
     """Telegram Markdown 파싱 오류 방지를 위한 정제.
@@ -371,6 +407,7 @@ def _build_impact_message(
 
     # 다음 액션
     if next_action:
+        next_action = _filter_blocked_from_text(next_action, normalized)
         lines.append(SEP)
         lines.append(f"⏭️ *다음 액션*\n{next_action}")
         lines.append("")
@@ -422,6 +459,8 @@ def _build_summary_message(
         lines.append("")
 
     if next_action:
+        _norm = raw.get("normalized")
+        next_action = _filter_blocked_from_text(next_action, _norm)
         lines.append(f"⏭ 다음 액션: {next_action}")
         lines.append("")
 
@@ -721,6 +760,7 @@ def _build_briefing_message(
     # ── 다음 액션 ──
     next_action = raw.get("next_action", "")
     if next_action:
+        next_action = _filter_blocked_from_text(next_action, raw.get("normalized"))
         lines.append("")
         lines.append(f"{'─' * 24}")
         lines.append(f"🎯  *다음 액션*")
