@@ -295,6 +295,55 @@ class TestUrgentAlertBlockedBuyFilter:
         # KODEX 200은 blocked가 아니므로 표시되어야 함
         assert "KODEX 200" in msg
 
+    def test_hpsp_blocked_solo_next_action_omitted(self):
+        """next_action='HPSP 매수 검토' 단독 → 다음 액션 섹션 자체 생략."""
+        raw = {
+            "strategy_buy": [
+                {"ticker": "403870.KS", "name": "HPSP", "account": "[일반]",
+                 "entry_price": "₩70,000", "strategy_type": "신규진입",
+                 "reason": "FOMC 대기 눌림목", "shares": "70주"},
+            ],
+            "strategy_sell": [],
+            "next_action": "HPSP 매수 검토",
+        }
+        from core.models import BriefingResult
+        raw["normalized"] = normalize_actions(raw, "KR_NIGHT", {"403870.KS": 62800}, {})
+        result = BriefingResult(title="t", raw_json=raw)
+        from core.telegram import _build_briefing_message
+        ret = _build_briefing_message(result, raw, "🇰🇷", "테스트", "KR_NIGHT")
+        msg = ret if isinstance(ret, str) else "\n".join(ret)
+        assert "HPSP 매수 검토" not in msg
+        assert "다음 액션" not in msg, "빈 다음 액션 섹션이 표시됨"
+
+    def test_hpsp_blocked_numbered_solo(self):
+        """next_action='①HPSP 매수 검토' → 미포함."""
+        raw = {
+            "strategy_buy": [
+                {"ticker": "403870.KS", "name": "HPSP", "account": "[일반]",
+                 "entry_price": "₩70,000", "strategy_type": "신규진입",
+                 "reason": "눌림목", "shares": "70주"},
+            ],
+            "strategy_sell": [],
+            "next_action": "①HPSP 매수 검토",
+        }
+        from core.models import BriefingResult
+        raw["normalized"] = normalize_actions(raw, "KR_NIGHT", {"403870.KS": 62800}, {})
+        result = BriefingResult(title="t", raw_json=raw)
+        from core.telegram import _build_briefing_message
+        ret = _build_briefing_message(result, raw, "🇰🇷", "테스트", "KR_NIGHT")
+        msg = ret if isinstance(ret, str) else "\n".join(ret)
+        assert "HPSP 매수 검토" not in msg
+
+    def test_slash_trailing_cleanup(self):
+        """'KODEX 200 적립 / HPSP 매수 검토' → 'KODEX 200 적립' trailing / 없음."""
+        from core.telegram import _filter_blocked_from_text
+        normalized = {"blocked_buys": [{"ticker": "403870.KS", "name": "HPSP"}]}
+        result = _filter_blocked_from_text("KODEX 200 적립 / HPSP 매수 검토", normalized)
+        assert "KODEX 200 적립" in result
+        assert "HPSP" not in result
+        assert not result.endswith("/")
+        assert not result.endswith(" /")
+
     def test_non_blocked_buy_still_shows_in_urgent(self):
         """정상 매수(지정가 < 현재가)는 긴급 알림에 여전히 노출."""
         raw = {

@@ -56,9 +56,9 @@ def _filter_blocked_from_text(text: str, normalized: dict | None) -> str:
             continue  # 해당 문장 제거
         result.append(part)
     filtered = " ".join(result).strip()
-    # 선행 구분자 정리
-    filtered = _re.sub(r'^[\s/·,]+', '', filtered).strip()
-    return filtered if filtered else text  # 전부 제거되면 원문 유지
+    # 선행/후행 구분자 정리
+    filtered = _re.sub(r'^[\s/·,]+|[\s/·,]+$', '', filtered).strip()
+    return filtered  # 전부 제거되면 "" → 호출부에서 섹션 생략
 
 
 def _sanitize_markdown(text: str) -> str:
@@ -408,6 +408,7 @@ def _build_impact_message(
     # 다음 액션
     if next_action:
         next_action = _filter_blocked_from_text(next_action, normalized)
+    if next_action:
         lines.append(SEP)
         lines.append(f"⏭️ *다음 액션*\n{next_action}")
         lines.append("")
@@ -459,8 +460,8 @@ def _build_summary_message(
         lines.append("")
 
     if next_action:
-        _norm = raw.get("normalized")
-        next_action = _filter_blocked_from_text(next_action, _norm)
+        next_action = _filter_blocked_from_text(next_action, raw.get("normalized"))
+    if next_action:
         lines.append(f"⏭ 다음 액션: {next_action}")
         lines.append("")
 
@@ -761,6 +762,7 @@ def _build_briefing_message(
     next_action = raw.get("next_action", "")
     if next_action:
         next_action = _filter_blocked_from_text(next_action, raw.get("normalized"))
+    if next_action:
         lines.append("")
         lines.append(f"{'─' * 24}")
         lines.append(f"🎯  *다음 액션*")
