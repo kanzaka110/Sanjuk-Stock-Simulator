@@ -345,10 +345,17 @@ def _build_impact_message(
         else:
             lines.append("🌙 *내일 예약 주문: 없음*")
         # 이유 표시 (blocked ticker 매수 문맥 필터 적용)
+        _decision = raw.get("investment_decision", "관망")
+        # normalized가 있고 executable 매수가 없으면 "매수실행" fallback 억제
+        if normalized and _decision == "매수실행":
+            _exec_buys = [a for a in (normalized.get("executable_actions") or [])
+                          if a.get("side") == "buy"]
+            if not _exec_buys:
+                _decision = ""
         reason_text = (
             _filter_blocked_from_text(raw.get("advisor_oneliner", "") or "", normalized)
             or _filter_blocked_from_text(raw.get("next_action", "") or "", normalized)
-            or raw.get("investment_decision", "관망")
+            or _decision
         )
         if reason_text:
             lines.append(f"  💬 {reason_text[:150]}")

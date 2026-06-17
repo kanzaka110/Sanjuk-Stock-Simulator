@@ -364,6 +364,32 @@ class TestUrgentAlertBlockedBuyFilter:
         assert "HPSP 매수 검토" not in msg, "blocked HPSP가 야간 reason fallback에 노출됨"
         assert "HPSP 진입 검토" not in msg, "blocked HPSP가 oneliner fallback에 노출됨"
 
+    def test_hpsp_blocked_only_night_decision_fallback_suppressed(self):
+        """KR_NIGHT + HPSP blocked만 존재 + investment_decision='매수실행' → 💬 매수실행 미표시."""
+        raw = {
+            "strategy_buy": [
+                {"ticker": "403870.KS", "name": "HPSP", "account": "[일반]",
+                 "entry_price": "₩70,000", "strategy_type": "신규진입",
+                 "reason": "FOMC 대기 눌림목", "shares": "70주"},
+            ],
+            "strategy_sell": [],
+            "investment_decision": "매수실행",
+        }
+        raw["normalized"] = normalize_actions(raw, "KR_NIGHT", {"403870.KS": 62800}, {})
+        # blocked만 존재, executable 없음 확인
+        assert len(raw["normalized"]["blocked_buys"]) == 1
+        assert len(raw["normalized"]["executable_actions"]) == 0
+        from core.models import BriefingResult
+        result = BriefingResult(title="t", raw_json=raw)
+        from core.telegram import _build_impact_message
+        msg = _build_impact_message(result, raw, "🇰🇷", "테스트", "KR_NIGHT")
+        # 💬 매수실행 fallback 미표시
+        assert "💬 매수실행" not in msg, "blocked만 있는데 💬 매수실행 fallback이 표시됨"
+        # 내일 예약 주문: 없음은 허용
+        assert "내일 예약 주문" in msg
+        # HPSP는 차단 섹션에서만 허용
+        assert "HPSP" in msg  # 차단 섹션에는 있어야 함
+
     def test_non_blocked_buy_still_shows_in_urgent(self):
         """정상 매수(지정가 < 현재가)는 긴급 알림에 여전히 노출."""
         raw = {
