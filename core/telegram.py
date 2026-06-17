@@ -495,14 +495,26 @@ def _build_urgent_alert(
     result: BriefingResult,
     raw: dict,
 ) -> list[str]:
-    """🔥강력 매수 / 🔴즉시 매도 / 매수실행·매도실행 판단 시 긴급 알림 생성."""
+    """🔥강력 매수 / 🔴즉시 매도 / 매수실행·매도실행 판단 시 긴급 알림 생성.
+
+    normalized 결과가 있으면 blocked_buys 포함 ticker는 매수 긴급 알림에서 제외.
+    """
     lines: list[str] = []
     raw_buy = raw.get("strategy_buy", [])
     raw_sell = raw.get("strategy_sell", [])
 
-    # 🔥강력 매수
+    # normalized 결과에서 blocked ticker 집합 추출
+    normalized = raw.get("normalized")
+    blocked_tickers: set[str] = set()
+    if normalized:
+        for blk in (normalized.get("blocked_buys") or []):
+            tk = blk.get("ticker", "")
+            if tk:
+                blocked_tickers.add(tk)
+
+    # 🔥강력 매수 (blocked ticker 제외)
     for sig in result.buy_signals:
-        if "강력" in sig.urgency:
+        if "강력" in sig.urgency and sig.ticker not in blocked_tickers:
             matching = next((r for r in raw_buy if r.get("ticker") == sig.ticker), {})
             account = matching.get("account", "")
             acct_tag = f" {account}" if account else ""
@@ -513,9 +525,9 @@ def _build_urgent_alert(
                 lines.append(f"    ⏰ {sig.timing[:40]}")
             lines.append("")
 
-    # ⚡적극 매수
+    # ⚡적극 매수 (blocked ticker 제외)
     for sig in result.buy_signals:
-        if "적극" in sig.urgency:
+        if "적극" in sig.urgency and sig.ticker not in blocked_tickers:
             matching = next((r for r in raw_buy if r.get("ticker") == sig.ticker), {})
             account = matching.get("account", "")
             acct_tag = f" {account}" if account else ""

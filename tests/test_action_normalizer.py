@@ -197,6 +197,64 @@ class TestTelegram4Sections:
         assert "🔍 *매수 후보 없음 사유*" in msg
 
 
+class TestUrgentAlertBlockedBuyFilter:
+    """긴급 알림에서 BLOCKED_BUY ticker가 노출되지 않음 (HPSP 실측)."""
+
+    def _build_msg(self, raw, prices, briefing_type="KR_NIGHT"):
+        from core.models import BriefingResult, Signal
+        raw["normalized"] = normalize_actions(raw, briefing_type, prices, {})
+        # 강력 매수 urgency로 buy_signals 생성 (LLM이 "강력 매수"로 태깅한 경우 시뮬레이션)
+        buy_sigs = []
+        for row in raw.get("strategy_buy", []):
+            buy_sigs.append(Signal(
+                ticker=row.get("ticker", ""), name=row.get("name", ""),
+                signal="매수", urgency="강력 매수",
+                entry_price=row.get("entry_price", ""),
+                target_price=row.get("target_price", "₩80,000"),
+                stop_loss=row.get("stop_loss", "₩55,000"),
+                shares=row.get("shares", "70주"),
+            ))
+        result = BriefingResult(
+            title="t", raw_json=raw, buy_signals=tuple(buy_sigs),
+        )
+        from core.telegram import _build_briefing_message
+        ret = _build_briefing_message(result, raw, "🇰🇷", "테스트", briefing_type)
+        return ret if isinstance(ret, str) else "\n".join(ret)
+
+    def test_hpsp_blocked_not_in_urgent_alert(self):
+        """HPSP 현재가 62,800 / 지정가 70,000 / urgency 강력 매수 → 긴급 알림 미노출."""
+        raw = {
+            "strategy_buy": [
+                {"ticker": "403870.KS", "name": "HPSP", "account": "[일반]",
+                 "entry_price": "₩70,000", "strategy_type": "신규진입",
+                 "reason": "FOMC 대기 눌림목", "shares": "70주"},
+            ],
+            "strategy_sell": [],
+            "market_summary": "FOMC 대기",
+        }
+        msg = self._build_msg(raw, {"403870.KS": 62800})
+        # HPSP가 매수 실행 / 적극 매수 / 매수 액션 어디에도 나오면 안 됨
+        assert "매수 실행:  HPSP" not in msg, "blocked HPSP가 긴급 매수 실행에 노출됨"
+        assert "적극 매수:  HPSP" not in msg, "blocked HPSP가 적극 매수에 노출됨"
+        assert "매수 액션" not in msg or "HPSP" not in msg.split("매수 액션")[-1].split("━")[0], \
+            "blocked HPSP가 매수 액션 섹션에 노출됨"
+
+    def test_non_blocked_buy_still_shows_in_urgent(self):
+        """정상 매수(지정가 < 현재가)는 긴급 알림에 여전히 노출."""
+        raw = {
+            "strategy_buy": [
+                {"ticker": "005930.KS", "name": "삼성전자", "account": "[일반]",
+                 "entry_price": "₩55,000", "strategy_type": "신규진입",
+                 "reason": "즉시 진입", "shares": "10주"},
+            ],
+            "strategy_sell": [],
+        }
+        msg = self._build_msg(raw, {"005930.KS": 60000})
+        # 55,000 < 60,000 → ok_pullback → conditional (강력 매수 urgency가 있어도 normalizer가 conditional로 분류)
+        # 또는 executable로 갈 수 있음. 어쨌든 blocked가 아니므로 urgent에 나올 수 있음
+        assert "삼성전자" in msg
+
+
 class TestPriceGapNote:
     """예약매수 현재가 대비 괴리율 안내 (가격 오류 오인 방지)."""
 

@@ -316,10 +316,10 @@ def _build_briefing_html(
             parts.append("<table><tr><th>종목</th><th>계좌</th><th>수량</th><th>매수가</th><th>손절</th><th>근거</th></tr>")
             for a in exec_buys:
                 parts.append(f"<tr><td><b>{_esc(a.get('name', ''))}</b></td>")
-                parts.append(f"<td>{_esc(a.get('account_type', ''))}</td>")
-                parts.append(f"<td>{_esc(a.get('shares', ''))}</td>")
-                parts.append(f"<td>{_esc(a.get('entry_price', ''))}</td>")
-                parts.append(f"<td>{_esc(a.get('stop_loss', ''))}</td>")
+                parts.append(f"<td>{_esc(a.get('account', ''))}</td>")
+                parts.append(f"<td>{_esc(a.get('qty', ''))}</td>")
+                parts.append(f"<td>{_esc(a.get('price', ''))}</td>")
+                parts.append(f"<td>{_esc(a.get('stop', ''))}</td>")
                 parts.append(f"<td>{_esc(a.get('reason', ''))}</td></tr>")
             parts.append("</table>")
 
@@ -329,9 +329,9 @@ def _build_briefing_html(
             parts.append("<table><tr><th>종목</th><th>계좌</th><th>수량</th><th>지정가</th><th>무효화</th><th>조건</th></tr>")
             for a in cond_buys:
                 parts.append(f"<tr><td><b>{_esc(a.get('name', ''))}</b></td>")
-                parts.append(f"<td>{_esc(a.get('account_type', ''))}</td>")
-                parts.append(f"<td>{_esc(a.get('shares', ''))}</td>")
-                parts.append(f"<td>{_esc(a.get('entry_price', ''))}</td>")
+                parts.append(f"<td>{_esc(a.get('account', ''))}</td>")
+                parts.append(f"<td>{_esc(a.get('qty', ''))}</td>")
+                parts.append(f"<td>{_esc(a.get('price', ''))}</td>")
                 parts.append(f"<td>{_esc(a.get('invalidation_note', ''))}</td>")
                 parts.append(f"<td>{_esc(a.get('block_reason', ''))}</td></tr>")
             parts.append("</table>")
