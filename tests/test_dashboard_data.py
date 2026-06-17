@@ -1,0 +1,156 @@
+"""대시보드 데이터 레이어 (조회 전용) 테스트.
+
+DB가 없거나 비어 있어도 예외 없이 안전한 빈 구조를 반환하는지 검증한다.
+"""
+
+import sqlite3
+
+import pytest
+
+from core import dashboard_data as dd
+
+
+@pytest.fixture
+def no_db(monkeypatch, tmp_path):
+    """DB 파일이 존재하지 않는 상황."""
+    monkeypatch.setattr(dd, "_db_path", lambda: tmp_path / "nope.db")
+    return tmp_path
+
+
+@pytest.fixture
+def empty_db(monkeypatch, tmp_path):
+    """predictions/accuracy_stats 테이블이 비어 있는 DB."""
+    p = tmp_path / "memory.db"
+    conn = sqlite3.connect(p)
+    conn.executescript(
+        """
+        CREATE TABLE predictions (
+            created_at TEXT, closed_at TEXT, ticker TEXT, name TEXT,
+            signal TEXT, original_signal TEXT, action_type TEXT,
+            action_grade TEXT, account_type TEXT, briefing_type TEXT,
+            entry_price REAL, target_price REAL, stop_loss REAL,
+            confidence REAL, status TEXT, outcome TEXT, pnl_pct REAL,
+            normalizer_version TEXT
+        );
+        CREATE TABLE accuracy_stats (
+            ticker TEXT, total_predictions INTEGER, evaluated_count INTEGER,
+            wins INTEGER, losses INTEGER, win_rate REAL, avg_pnl REAL,
+            profit_factor REAL, expectancy REAL
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(dd, "_db_path", lambda: p)
+    return p
+
+
+# ─── health: DB 유무와 무관하게 항상 ok ────────────────
+def test_health_without_db(no_db):
+    h = dd.health()
+    assert h["status"] == "ok"
+    assert h["db_available"] is False
+    assert "now" in h
+
+
+def test_health_with_db(empty_db):
+    h = dd.health()
+    assert h["status"] == "ok"
+    assert h["db_available"] is True
+
+
+# ─── DB 없음: 모든 조회가 빈 구조 반환 (예외 없음) ─────
+def test_queries_safe_without_db(no_db):
+    assert dd.recent_predictions() == []
+    assert dd.open_predictions() == []
+    assert dd.accuracy_by_ticker() == []
+
+    closed = dd.closed_summary()
+    assert closed["total"] == 0
+    assert closed["recent"] == []
+
+    lb = dd.latest_briefing_actions()
+    assert lb["day"] == ""
+    assert lb["by_type"] == {}
+    assert lb["rows"] == []
+
+    stats = dd.db_stats()
+    assert stats["db_exists"] is False
+    assert stats["predictions"] == 0
+
+
+# ─── 빈 DB: 테이블은 있으나 행이 없음 ──────────────────
+def test_queries_safe_with_empty_db(empty_db):
+    assert dd.recent_predictions() == []
+    assert dd.open_predictions() == []
+    assert dd.accuracy_by_ticker() == []
+
+    closed = dd.closed_summary()
+    assert closed["total"] == 0
+    assert closed["win"] == 0
+    assert closed["avg_pnl"] == 0.0
+
+    lb = dd.latest_briefing_actions()
+    assert lb["day"] == ""
+
+    stats = dd.db_stats()
+    assert stats["db_exists"] is True
+    assert stats["predictions"] == 0
+    assert stats["open"] == 0
+
+
+# ─── system_status: 전체 구조가 항상 채워짐 ────────────
+def test_system_status_structure(empty_db):
+    st = dd.system_status()
+    assert "now" in st
+    assert "db" in st and st["db"]["db_exists"] is True
+    assert "service" in st and "active" in st["service"]
+    assert "latest_briefing" in st
+
+
+# ─── 행이 있는 DB: 집계가 정상 동작 ────────────────────
+def test_with_sample_rows(empty_db):
+    conn = sqlite3.connect(empty_db)
+    conn.execute(
+        """INSERT INTO predictions
+           (created_at, closed_at, ticker, name, signal, action_type,
+            account_type, entry_price, target_price, status, outcome,
+            pnl_pct, normalizer_version, briefing_type)
+           VALUES
+           ('2026-06-10T08:30:00', '', '005930.KS', '삼성전자', '매수',
+            'AI_NEW_BUY', '일반', 70000, 80000, 'open', '', 0, 'v1', 'KR_BEFORE')""",
+    )
+    conn.execute(
+        """INSERT INTO predictions
+           (created_at, closed_at, ticker, name, signal, action_type,
+            account_type, entry_price, target_price, status, outcome,
+            pnl_pct, normalizer_version, briefing_type)
+           VALUES
+           ('2026-06-09T08:30:00', '2026-06-10T15:30:00', '012450.KS', '한화에어로',
+            '매도', 'AI_SELL_MANAGEMENT', '일반', 300000, 330000, 'closed', 'win',
+            10.0, 'v1', 'KR_BEFORE')""",
+    )
+    conn.commit()
+    conn.close()
+
+    recent = dd.recent_predictions()
+    assert len(recent) == 2
+    assert recent[0]["ticker"] == "005930.KS"  # 최신순
+
+    opens = dd.open_predictions()
+    assert len(opens) == 1
+    assert opens[0]["ticker"] == "005930.KS"
+
+    closed = dd.closed_summary()
+    assert closed["total"] == 1
+    assert closed["win"] == 1
+
+    stats = dd.db_stats()
+    assert stats["predictions"] == 2
+    assert stats["open"] == 1
+    assert stats["closed"] == 1
+    assert stats["v1"] == 2
+
+    lb = dd.latest_briefing_actions()
+    assert lb["day"] == "2026-06-10"
+    assert lb["by_type"].get("AI_NEW_BUY") == 1
