@@ -18,6 +18,9 @@ DB_PATH = DB_DIR / "memory.db"
 
 BUY_BLOCK = ("추격 금지", "조건 미충족", "FOMC 후", "눌림목", "대기")
 SELL_CANCEL = ("매도 취소", "홀딩 전환", "홀딩 유지", "잔여 보유")
+# 상단 판단 보류 표현 — IMMEDIATE 매수와 충돌
+EVENT_WAIT = ("오늘 실행 없음", "신규 진입 보류", "FOMC 대기", "확인 후 진입",
+              "이벤트 대기", "진입 보류", "매수 보류")
 
 
 def main():
@@ -61,6 +64,7 @@ def main():
 
     # 모순 (v1만)
     bad = 0
+    conflict = 0
     for r in rows:
         if (r["normalizer_version"] or "") != "v1":
             continue
@@ -69,7 +73,12 @@ def main():
             bad += 1
         if r["signal"] == "매도" and any(p in reason for p in SELL_CANCEL):
             bad += 1
+        # 상단판단 충돌: 즉시실행 매수인데 보류성 reason
+        if (r["signal"] == "매수" and r["action_grade"] == "IMMEDIATE_ACTION"
+                and any(p in reason for p in EVENT_WAIT)):
+            conflict += 1
     print(f"v1 모순: {'✅ 0건' if bad == 0 else f'⚠️ {bad}건'}")
+    print(f"상단판단 충돌(즉시매수+보류성 reason): {'✅ 0건' if conflict == 0 else f'⚠️ {conflict}건'}")
     print()
 
     print("[최근 row 10개]")
@@ -80,7 +89,7 @@ def main():
               f"ver={r['normalizer_version'] or '-'}")
 
     conn.close()
-    return 0 if bad == 0 else 1
+    return 0 if (bad == 0 and conflict == 0) else 1
 
 
 if __name__ == "__main__":

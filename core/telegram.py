@@ -111,7 +111,17 @@ def _render_normalized_sections(lines: list, normalized: dict, sep: str, next_ac
     executable = normalized.get("executable_actions", [])
     conditional = normalized.get("conditional_buy_candidates", [])
     cancelled = normalized.get("cancelled_sells", [])
+    blocked = normalized.get("blocked_buys", [])
+    integrity_errors = normalized.get("integrity_errors", [])
     no_buy = normalized.get("no_buy_reason", "")
+
+    # 🚫 정합성 충돌로 제외된 주문 (최우선 — 실행 전 경고)
+    if integrity_errors:
+        lines.append(sep)
+        lines.append("🚫 *조건 불일치로 주문 제외*")
+        for e in integrity_errors[:5]:
+            lines.append(f"  • {e}")
+        lines.append("")
 
     # ⚡ 오늘 실제 실행
     if executable:
@@ -163,14 +173,24 @@ def _render_normalized_sections(lines: list, normalized: dict, sep: str, next_ac
             # 체결 조건
             if entry:
                 lines.append(f"  조건: {entry:,.0f}{unit} 이하 눌림목 도달 시만 체결")
-            # 메모: 괴리 단계별 경고 (pullback=미체결 가능 / chase=즉시체결·추격 / wide=데이터 확인)
-            stage = a.get("gap_stage", "")
-            if stage == "chase":
-                lines.append(f"  메모: ⚠️ {a.get('gap_note', '즉시 체결 가능성 높음 — 추격매수 여부 재검토')}")
-            elif stage == "wide":
-                lines.append(f"  메모: 🚨 {a.get('gap_note', '가격 괴리 큼 — 데이터/가격 단위 확인 필요')}")
-            else:
-                lines.append("  메모: 추격매수 아님 — 미체결 가능 (즉시 실행 아님)")
+            # 무효화 조건 (필수)
+            if a.get("invalidation_note"):
+                lines.append(f"  ⛔ 무효화: {a['invalidation_note']}")
+            # 대량주문 경고
+            if a.get("large_order_note"):
+                lines.append(f"  {a['large_order_note']}")
+            lines.append("  메모: 추격매수 아님 — 미체결 가능 (즉시 실행 아님)")
+        lines.append("")
+
+    # 🚫 게이트 차단 매수 (즉시체결/무효화/대량주문 + 충돌)
+    if blocked:
+        lines.append(sep)
+        lines.append("🚫 *차단된 매수 후보* (실행 금지)")
+        for a in blocked[:5]:
+            lines.append(f"🚫 {a.get('account','')} *{a.get('name') or a.get('ticker','')}*")
+            br = a.get("block_reason", "")
+            if br:
+                lines.append(f"  사유: {str(br)[:120]}")
         lines.append("")
 
     # 🟡 매도 취소·홀딩 전환

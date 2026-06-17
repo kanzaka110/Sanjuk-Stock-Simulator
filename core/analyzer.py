@@ -849,11 +849,23 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
         from core.action_normalizer import normalize_actions
         from config.settings import (
             HOLDINGS_GENERAL, HOLDINGS_ISA, HOLDINGS_RIA, HOLDINGS_IRP, HOLDINGS_PENSION,
+            DEFAULT_CASH, RIA_CASH, ISA_CASH, IRP_CASH, IRP_DEFAULT_OPTION, PENSION_MMF,
         )
         _holdings_all: dict = {}
         for _hh in (HOLDINGS_GENERAL, HOLDINGS_ISA, HOLDINGS_RIA, HOLDINGS_IRP, HOLDINGS_PENSION):
             _holdings_all.update(_hh)
-        normalized = normalize_actions(data, briefing_type, current_prices, _holdings_all)
+        # 총자산 추정 (현금 + 보유 평가액) — large_order % 게이트용
+        _total_assets = DEFAULT_CASH + RIA_CASH + ISA_CASH + IRP_CASH + IRP_DEFAULT_OPTION + PENSION_MMF
+        _fx = (current_prices or {}).get("USDKRW=X", 1450.0)
+        for _tk, _info in _holdings_all.items():
+            _p = (current_prices or {}).get(_tk, 0) or 0
+            _sh = _info.get("shares", 0)
+            if "avg_cost_usd" in _info:
+                _total_assets += _p * _sh * _fx
+            else:
+                _total_assets += _p * _sh
+        normalized = normalize_actions(data, briefing_type, current_prices, _holdings_all,
+                                       total_assets=_total_assets)
         # 텔레그램이 쓰도록 raw에 주입 + 실행 actions를 normalize 결과로 덮어씀
         data["normalized"] = normalized
         data["actions"] = normalized["executable_actions"]

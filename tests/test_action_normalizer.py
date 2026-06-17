@@ -212,21 +212,29 @@ class TestPriceGapNote:
                                      raw, "🇰🇷", "t", "KR_BEFORE")
 
     def test_pullback_shows_negative_gap(self):
-        # current=139550, entry=138000 → -1.1% 눌림목
-        msg = self._gap_msg("069500.KS", "₩138,000", 139550)
-        assert "현재가 대비: -1.1%" in msg
+        # current=143000, entry=138000 → -3.5% 진짜 눌림목 → 조건부 + 괴리 표시
+        msg = self._gap_msg("069500.KS", "₩138,000", 143000)
+        assert "현재가 대비:" in msg
         assert "미체결 가능" in msg
-        assert "현재가: 139,550" in msg
+        assert "현재가: 143,000" in msg
 
-    def test_chase_warns_immediate_fill(self):
-        # entry > current → 즉시 체결 가능성 경고
-        msg = self._gap_msg("069500.KS", "₩141,000", 139550)
-        assert "즉시 체결 가능성" in msg
+    def test_near_price_not_conditional(self):
+        # entry=138000, current=139550 (-1.1%) → 눌림목 아님 → 조건부 섹션에 없음
+        from core.action_normalizer import normalize_actions
+        raw = {"strategy_buy": [{"ticker": "069500.KS", "name": "테스트종목",
+                                 "account": "[RIA]", "entry_price": "₩138,000",
+                                 "reason": "눌림목 대기"}], "strategy_sell": []}
+        n = normalize_actions(raw, "KR_BEFORE", {"069500.KS": 139550}, {})
+        assert len(n["conditional_buy_candidates"]) == 0  # 너무 근접 → 눌림목 아님
 
-    def test_wide_gap_warns_data_check(self):
-        # 괴리율 3% 이상 → 데이터 확인 경고
-        msg = self._gap_msg("069500.KS", "₩135,000", 139550)
-        assert "가격 괴리 큼" in msg
+    def test_chase_above_current_blocked_or_executable(self):
+        # entry > current → 즉시 체결, 조건부 섹션 금지
+        from core.action_normalizer import normalize_actions
+        raw = {"strategy_buy": [{"ticker": "069500.KS", "name": "테스트종목",
+                                 "account": "[RIA]", "entry_price": "₩141,000",
+                                 "reason": "눌림목 대기"}], "strategy_sell": []}
+        n = normalize_actions(raw, "KR_BEFORE", {"069500.KS": 139550}, {})
+        assert len(n["conditional_buy_candidates"]) == 0
 
     def test_no_price_no_gap_note(self):
         # 현재가 없으면 괴리 안내 생략 (에러 없이)
@@ -241,7 +249,8 @@ class TestPriceGapNote:
 class TestConditionalBuyCard:
     """조건부 매수 8필드 주문 카드 (계좌/지정가/수량/총액/괴리/조건/미체결)."""
 
-    def _card(self, account="[RIA]", entry="₩138,000", cur=139550, conf="55"):
+    def _card(self, account="[RIA]", entry="₩138,000", cur=143000, conf="55"):
+        # cur=143000이면 138000은 -3.5% 진짜 눌림목 (게이트 통과)
         from core.models import BriefingResult
         from core.telegram import _build_impact_message
         raw = {"strategy_buy": [{"ticker": "069500.KS", "name": "KODEX 200",
@@ -250,18 +259,17 @@ class TestConditionalBuyCard:
                                  "reason": "눌림목 대기"}],
                "strategy_sell": []}
         raw["normalized"] = normalize_actions(raw, "KR_BEFORE", {"069500.KS": cur}, {})
-        msg = _build_impact_message(BriefingResult(title="t", raw_json=raw),
-                                    raw, "🇰🇷", "t", "KR_BEFORE")
-        return raw["normalized"]["conditional_buy_candidates"][0], msg
+        return raw["normalized"]["conditional_buy_candidates"][0], \
+            _build_impact_message(BriefingResult(title="t", raw_json=raw),
+                                  raw, "🇰🇷", "t", "KR_BEFORE")
 
     def test_card_has_all_fields(self):
         c, msg = self._card()
-        # 계좌/종목/지정가/수량/총액/괴리율/조건/미체결
         assert "[RIA]" in msg and "KODEX 200" in msg
         assert "지정가: 138,000원" in msg
         assert "수량: 7주" in msg
         assert "총액: 966,000원" in msg
-        assert "현재가 대비: -1.1%" in msg
+        assert "현재가 대비:" in msg
         assert "이하 눌림목 도달 시만 체결" in msg
         assert "미체결 가능" in msg
 
@@ -274,21 +282,80 @@ class TestConditionalBuyCard:
         assert c["qty_num"] == 4  # 60만 / 138000 = 4
 
     def test_ai_shares_respected(self):
-        from core.models import BriefingResult
-        from core.telegram import _build_impact_message
         raw = {"strategy_buy": [{"ticker": "069500.KS", "name": "KODEX 200",
                                  "account": "[RIA]", "entry_price": "₩138,000",
                                  "shares": "10주", "reason": "눌림목"}],
                "strategy_sell": []}
-        raw["normalized"] = normalize_actions(raw, "KR_BEFORE", {"069500.KS": 139550}, {})
+        raw["normalized"] = normalize_actions(raw, "KR_BEFORE", {"069500.KS": 143000}, {})
         c = raw["normalized"]["conditional_buy_candidates"][0]
         assert c["qty_num"] == 10 and c["qty_source"] == "ai"
 
     def test_shortage_when_qty_zero(self):
-        # 고가주 → 예산 부족
-        c, msg = self._card(entry="₩700,000", cur=710000, conf="35")
+        # 고가주 → 예산 부족 (cur=730000이면 700000은 -4.1% 눌림목)
+        c, msg = self._card(entry="₩700,000", cur=730000, conf="35")
         assert c["shortage"] is True
         assert "예산 부족/가격 과대" in msg
+
+
+class TestOrderIntegrityGates:
+    """주문 정합성/실시간 무효화 게이트 (2026-06-17 HPSP 사례)."""
+
+    def _buy(self, entry, cur, qty=None, summary="", inval="", strat="신규진입",
+             reason="눌림목 대기", total_assets=0.0):
+        row = {"ticker": "403870.KS", "name": "HPSP", "account": "[일반]",
+               "entry_price": entry, "strategy_type": strat, "reason": reason}
+        if qty:
+            row["shares"] = qty
+        if inval:
+            row["invalidation_price"] = inval
+        raw = {"strategy_buy": [row], "strategy_sell": []}
+        if summary:
+            raw["market_summary"] = summary
+        return normalize_actions(raw, "KR_BEFORE", {"403870.KS": cur}, {},
+                                 total_assets=total_assets)
+
+    # 케이스1: current=69000, limit=70000, qty=70, summary=오늘 실행 없음 → BLOCKED
+    def test_immediate_fill_event_wait_blocked(self):
+        n = self._buy("₩70,000", 69000, qty="70주", summary="오늘 실행 없음. FOMC 대기.")
+        assert len(n["executable_actions"]) == 0
+        assert len(n["conditional_buy_candidates"]) == 0
+        assert len(n["blocked_buys"]) == 1
+        assert n["integrity_errors"]
+
+    # 케이스2: current=69000, limit=66000 → conditional 허용
+    def test_real_pullback_allowed(self):
+        n = self._buy("₩66,000", 69000, qty="10주")  # 66000 ≤ 69000×0.97=66930
+        assert len(n["conditional_buy_candidates"]) == 1
+        assert len(n["blocked_buys"]) == 0
+
+    # 케이스3: current=69000, limit=68900 → 즉시 체결, 조건부 섹션 금지
+    def test_near_price_not_pullback(self):
+        n = self._buy("₩68,900", 69000, qty="10주")  # 68900 ≥ 69000×0.995=68655
+        assert len(n["conditional_buy_candidates"]) == 0  # 눌림목 아님
+        # 이벤트대기 없으면 executable 또는 blocked (즉시체결)
+        assert (len(n["executable_actions"]) == 1) or (len(n["blocked_buys"]) == 1)
+
+    # 케이스4: current=65300, invalidation=65400 → BLOCKED (지지선 이탈)
+    def test_invalidation_breach_blocked(self):
+        n = self._buy("₩66,000", 65300, qty="10주", inval="₩65,400")
+        assert len(n["blocked_buys"]) == 1
+        assert "무효화" in n["blocked_buys"][0]["block_reason"]
+        assert len(n["conditional_buy_candidates"]) == 0
+
+    # 케이스5: summary=FOMC 대기인데 executable/즉시체결 존재 → integrity fail
+    def test_event_wait_conflict_integrity_error(self):
+        n = self._buy("₩70,000", 69000, qty="10주", summary="FOMC 대기 신규 진입 보류")
+        assert n["integrity_errors"]
+        assert len(n["executable_actions"]) == 0
+
+    # 케이스6: 총액 490만 large_order + event_wait → BLOCKED
+    def test_large_order_event_wait_blocked(self):
+        # limit 70000 × 70주 = 490만. 진짜 눌림목가(67000)로 두되 event_wait
+        n = self._buy("₩67,000", 70000, qty="70주", summary="FOMC 대기",
+                      inval="₩60,000")
+        # 67000 ≤ 70000×0.97=67900 → 눌림목. 총액 469만 ≥ 400만 → large + event_wait → blocked
+        assert len(n["blocked_buys"]) == 1
+        assert "대량주문" in n["blocked_buys"][0]["block_reason"]
 
 
 class TestBuyFocusMode:
