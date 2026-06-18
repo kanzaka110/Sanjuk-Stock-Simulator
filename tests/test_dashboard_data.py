@@ -230,3 +230,27 @@ def test_simulator_tab_in_html():
     assert html.count("</html>") == 1
     assert html.count("<body") == 1
     assert html.count("</body>") == 1
+
+
+def test_pc_html_exists_and_valid():
+    """index_pc.html이 존재하고 주요 구조를 갖춤."""
+    from pathlib import Path
+    pc = Path(__file__).parent.parent / "web" / "index_pc.html"
+    assert pc.exists(), "index_pc.html 미존재"
+    html = pc.read_text(encoding="utf-8")
+    assert 'class="gnb"' in html, "글로벌 내비 없음"
+    assert 'id="p-home"' in html, "홈 페이지 없음"
+    assert 'id="p-portfolio"' in html, "포트폴리오 페이지 없음"
+    assert "POST" not in html, "POST 금지 위반"
+    assert "실제 주문" not in html or "실행되지 않습니다" not in html, \
+        "PC에서 주문 실행 버튼 존재"
+    assert html.count("<html") == 1
+
+
+def test_view_query_routing():
+    """app.py의 / 라우트가 view 파라미터를 지원."""
+    from pathlib import Path
+    app_code = (Path(__file__).parent.parent / "web" / "app.py").read_text(encoding="utf-8")
+    assert "view" in app_code, "view 파라미터 미지원"
+    assert "index_pc.html" in app_code, "PC HTML 참조 없음"
+    assert "Mobile" in app_code or "mobile" in app_code, "모바일 UA 감지 없음"

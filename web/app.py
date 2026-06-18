@@ -14,7 +14,9 @@ from __future__ import annotations
 import os
 import secrets
 
-from fastapi import Depends, FastAPI, HTTPException, status
+import re
+
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
@@ -114,12 +116,28 @@ def api_timeline(
     )
 
 
-# ─── HTML 대시보드 ─────────────────────────────────────
+# ─── HTML 대시보드 (모바일/PC 자동 분기) ─────────────
+_MOBILE_RE = re.compile(r"iPhone|Android|Mobile|iPod|Opera Mini|IEMobile", re.I)
+
+
 @app.get("/", response_class=HTMLResponse)
-def index():
+def index(request: Request, view: str | None = Query(None)):
     from pathlib import Path
 
-    return (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+    # 강제 전환: ?view=pc / ?view=mobile
+    if view == "pc":
+        use_pc = True
+    elif view == "mobile":
+        use_pc = False
+    else:
+        ua = request.headers.get("user-agent", "")
+        use_pc = not _MOBILE_RE.search(ua)
+
+    filename = "index_pc.html" if use_pc else "index.html"
+    html_path = Path(__file__).parent / filename
+    if not html_path.exists():
+        html_path = Path(__file__).parent / "index.html"
+    return html_path.read_text(encoding="utf-8")
 
 
 def run():
