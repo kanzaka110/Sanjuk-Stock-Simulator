@@ -319,6 +319,7 @@ def _fetch_portfolio_raw() -> dict:
         HOLDINGS_GENERAL, HOLDINGS_RIA, HOLDINGS_IRP,
         HOLDINGS_PENSION, HOLDINGS_ISA,
         DEFAULT_CASH, RIA_CASH, IRP_CASH, PENSION_MMF, ISA_CASH,
+        IRP_DEFAULT_OPTION,
         PORTFOLIO, HOLDING_STRATEGY,
     )
     from core.market import _batch_quotes
@@ -326,7 +327,8 @@ def _fetch_portfolio_raw() -> dict:
     accounts = [
         ("일반", HOLDINGS_GENERAL, DEFAULT_CASH),
         ("RIA", HOLDINGS_RIA, RIA_CASH),
-        ("IRP", HOLDINGS_IRP, IRP_CASH),
+        # IRP 현금 = 예수금 + 디폴트옵션(안정투자형) 잔고
+        ("IRP", HOLDINGS_IRP, IRP_CASH + IRP_DEFAULT_OPTION),
         ("연금저축", HOLDINGS_PENSION, PENSION_MMF),
         ("ISA", HOLDINGS_ISA, ISA_CASH),
     ]
