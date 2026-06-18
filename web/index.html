@@ -288,6 +288,50 @@ details[open] summary::before{transform:rotate(90deg)}
 .sim-rec-item{display:flex;gap:8px;align-items:center;padding:6px 0;border-bottom:1px solid var(--ln);font-size:12px}
 .sim-rec-item:last-child{border-bottom:none}
 
+/* ═══ Decision Brief (모바일 세로형 6블록) ═══ */
+.dbm{display:flex;flex-direction:column;gap:8px}
+.db-cell{background:var(--sf2);border-radius:10px;padding:11px 12px;border-left:3px solid var(--ln)}
+.db-cell.warn{border-left-color:var(--o)}
+.db-cell.guard{border-left-color:var(--b)}
+.db-cell .dh{font-size:11px;font-weight:700;color:var(--mt);margin-bottom:6px}
+.di-r{font-size:12.5px;line-height:1.55;padding:2px 0}
+.di-r b{color:var(--wh);font-weight:700}
+.di-r.mt{color:var(--mt)}
+.dbi{display:flex;align-items:flex-start;gap:8px;padding:4px 0;font-size:12.5px;line-height:1.5}
+.dbi-tx{flex:1;min-width:0}
+.dbi-tx b{color:var(--wh);font-weight:700}
+
+/* ═══ 이벤트 캘린더 (모바일) ═══ */
+.calm{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--ln)}
+.calm:last-child{border-bottom:none}
+.cal-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.cal-dd{text-align:center;min-width:40px;flex-shrink:0}
+.cal-dd .n{font-size:16px;font-weight:800;line-height:1}
+.cal-dd .u{font-size:9px;color:var(--mt)}
+.cal-bd{flex:1;min-width:0}
+.cal-bd .t{font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cal-bd .s{font-size:11px;color:var(--mt);margin-top:1px}
+
+/* ═══ 주문표 미리보기 (모바일) ═══ */
+.opvm{background:var(--sf2);border-radius:8px;padding:9px 10px;margin-top:8px}
+.opvm-h{display:flex;justify-content:space-between;align-items:center;margin-bottom:7px}
+.opvm-h .t{font-size:11px;font-weight:700;color:var(--tx)}
+.opvm-h .lbl{font-size:9px;color:var(--o)}
+.opvm-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.opvm-cell{background:var(--sf);border-radius:6px;padding:6px 8px}
+.opvm-cell .k{font-size:9px;color:var(--mt)}
+.opvm-cell .v{font-size:12px;font-weight:700;margin-top:1px;font-variant-numeric:tabular-nums}
+.opvm-foot{display:flex;flex-wrap:wrap;gap:6px 10px;margin-top:7px;font-size:10px;color:var(--mt)}
+.opvm-foot b{color:var(--tx);font-weight:700}
+
+/* ═══ 벤치마크 바 (성과 분석) ═══ */
+.pbar{display:grid;grid-template-columns:88px 1fr 50px 50px;align-items:center;gap:6px;padding:5px 0}
+.pbar .nm{font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pbar .track{position:relative;height:14px;background:var(--sf3);border-radius:3px}
+.pbar .track .zero{position:absolute;left:50%;top:0;bottom:0;width:1px;background:var(--ln)}
+.pbar .track i{position:absolute;top:2px;height:10px;border-radius:2px}
+.pbar .val{font-size:11px;font-weight:700;text-align:right;font-variant-numeric:tabular-nums}
+
 /* 모바일 전용 — PC는 index_pc.html에서 별도 렌더 */
 </style>
 </head>
@@ -314,8 +358,10 @@ details[open] summary::before{transform:rotate(90deg)}
 <div class="c ha-risk"><h3>리스크 보드</h3><div id="h-risk"></div></div>
 <div class="c ha-movers"><h3>오늘 많이 움직인 종목</h3><div id="h-movers"></div></div>
 <div class="c ha-act"><h3>오늘 주요 액션</h3><div id="h-act"></div></div>
+<div class="c ha-dbrief"><h3>의사결정 브리핑 <span class="mt" id="db-sub"></span></h3><div id="h-dbrief"><div class="emp">불러오는 중…</div></div></div>
 <div class="c ha-sig"><h3>실시간 기술 신호</h3><div id="h-sig"></div></div>
 <div class="c ha-sched"><h3>다음 일정</h3><div id="h-sched"></div></div>
+<div class="c ha-cal"><h3>이벤트 캘린더</h3><div id="h-cal"><div class="emp">불러오는 중…</div></div></div>
 <div class="c ha-perf"><h3>30일 성과</h3><div id="h-perf"></div></div>
 <div class="c ha-news"><h3>주요 뉴스</h3><div id="h-news"></div></div>
 </div>
@@ -342,6 +388,7 @@ details[open] summary::before{transform:rotate(90deg)}
 <!-- ═══ 액션 ═══ -->
 <div class="tc" id="t-act">
 <div class="c"><h3>오늘 액션 요약</h3><div class="g4" id="a-sum"></div></div>
+<div class="c"><h3>의사결정 브리핑 <span class="mt" id="db-sub2"></span></h3><div id="a-dbrief"><div class="emp">불러오는 중…</div></div></div>
 <div class="c"><h3>실행 필요</h3><div id="a-exec"></div></div>
 <div class="c"><h3>조건부 매수</h3><div id="a-cond"></div></div>
 <div class="c"><h3>보유 관리</h3><div id="a-mgmt"></div></div>
@@ -355,6 +402,9 @@ details[open] summary::before{transform:rotate(90deg)}
 <!-- ═══ 성과 ═══ -->
 <div class="tc" id="t-perf">
 <div class="c"><h3>30일 요약</h3><div id="p-sum"></div></div>
+<div class="c"><h3>벤치마크 대비 (오늘, 가중)</h3><div id="p-bench"><div class="emp">불러오는 중…</div></div></div>
+<div class="c"><h3>종목별 손익 기여도 (₩)</h3><div id="p-contrib"><div class="emp">불러오는 중…</div></div></div>
+<div class="c"><h3>실현 손익 · 기여 종목</h3><div id="p-realized"><div class="emp">불러오는 중…</div></div></div>
 <div class="c"><h3>액션 타입별 평균 수익률</h3><div id="p-act"></div></div>
 <div class="c"><h3>브리핑 타입별</h3><div id="p-br"></div></div>
 <div class="c"><details><summary>종목별 적중률</summary><div id="p-tk"></div></details></div>
@@ -468,7 +518,7 @@ function stackedBar(win,loss,neu,total){
 }
 
 /* Action card with position bar */
-function renderAct(r){
+function renderAct(r,withOpv){
   const cls=classify(r.action_type,r.signal);
   const acct=r.account_type?`<span class="mt">[${E(r.account_type)}]</span>`:"";
   return`<div class="ai" onclick="openM('${E(r.ticker)}')">
@@ -478,8 +528,112 @@ function renderAct(r){
       ${r.entry_price?posBar(r.stop_loss,r.entry_price,r.target_price):""}
       ${confBar(r.confidence)}
       ${mn(cls)}
+      ${withOpv?opvBlock(r):""}
     </div>
   </div>`;
+}
+
+/* 주문표 미리보기 (모바일) — 읽기 전용·실제 주문 아님 */
+function pfItem(tk){return(window._pfItems||[]).find(x=>x.ticker===tk)}
+function opvBlock(r){
+  const it=pfItem(r.ticker),k=classify(r.action_type,r.signal);
+  const isBuy=(k==="buy"||k==="cond"),limit=r.entry_price,curP=it?it.current_price:0;
+  if(!limit&&!curP)return"";
+  const curr=it?(it.currency==="USD"?"$":"₩"):"";
+  let vsCur="—";
+  if(limit&&curP){const g=(limit-curP)/curP*100;vsCur=`<span class="${cc(-g)}">${g>=0?"+":""}${g.toFixed(1)}%</span>`;}
+  let fill="—",miss="—";
+  if(limit&&curP){
+    const imm=isBuy?(limit>=curP):(limit<=curP);
+    if(imm){fill="즉시 체결 가능";miss="낮음";}
+    else{const g=Math.abs(limit-curP)/curP*100;fill="지정가 도달 대기";miss=g>=5?"높음":g>=2?"보통":"낮음";}
+  }
+  const f=v=>v.toLocaleString();
+  const acct=r.account_type?`[${E(r.account_type)}]`:"—";
+  const impact=it?`보유 비중 ${it.weight||0}%`:(isBuy?"신규 편입 검토":"—");
+  return`<div class="opvm"><div class="opvm-h"><div class="t">📋 주문표 미리보기</div><div class="lbl">참고용 · 실제 주문 아님</div></div>`+
+    `<div class="opvm-grid"><div class="opvm-cell"><div class="k">계좌</div><div class="v">${acct}</div></div>`+
+    `<div class="opvm-cell"><div class="k">지정가</div><div class="v">${limit?curr+f(limit):"—"}</div></div>`+
+    `<div class="opvm-cell"><div class="k">현재가</div><div class="v">${curP?curr+f(curP):"—"}</div></div>`+
+    `<div class="opvm-cell"><div class="k">현재가 대비</div><div class="v">${vsCur}</div></div></div>`+
+    `<div class="opvm-foot"><span>체결 <b>${fill}</b></span><span>미체결 <b>${miss}</b></span><span>${E(impact)}</span></div></div>`;
+}
+
+/* ═══ 의사결정 브리핑 (모바일 세로형) ═══ */
+const _BTm={"KR_NIGHT":"한국장 야간 프리브리핑","KR_OPEN":"개장 직전 액션","US_NIGHT":"미국장 프리브리핑","US_CLOSE":"데일리 리뷰","KR_BEFORE":"한국장 브리핑","US_BEFORE":"미국장 브리핑","MANUAL":"수시 브리핑"};
+function dbItem(it){
+  const c=classify(it.action_type,it.signal);
+  const a=it.account?`<span class="mt">[${E(it.account)}]</span>`:"";
+  const px=it.entry_price?` <b>${it.entry_price.toLocaleString()}</b>`:"";
+  return`<div class="dbi">${badge(c)}<span class="dbi-tx"><b>${E(it.name)}</b> ${a} ${E(it.label||"")}${px}${it.note?` · ${E(it.note)}`:""}</span></div>`;
+}
+function renderDBrief(b){
+  const w=b.what||{};
+  const what=`<div class="di-r"><b>${E(_BTm[w.briefing_type]||w.briefing_type||"브리핑")}</b></div><div class="di-r mt">총 ${w.total||0}건 · 지금 할 일 ${w.do_now||0} · 조건부 ${w.conditional||0}</div>`;
+  const why=b.why?`<div class="di-r">${E(b.why)}</div>`:'<div class="di-r mt">근거 정보 없음</div>';
+  const doNow=(b.do_now&&b.do_now.length)?b.do_now.map(dbItem).join(""):'<div class="di-r mt">지금 실행할 액션 없음</div>';
+  const cond=(b.conditional&&b.conditional.length)?b.conditional.map(dbItem).join(""):"";
+  const dont=(b.dont&&b.dont.length)?b.dont.map(dbItem).join(""):'<div class="di-r mt">특이사항 없음</div>';
+  const risks=(b.risks&&b.risks.length)?b.risks.map(r=>`<div class="di-r"><b>${E(r.name)}</b> · ${E(r.invalidation)}</div>`).join(""):'<div class="di-r mt">표시할 무효화 조건 없음</div>';
+  const guard=(b.guardrails||[]).map(g=>`<div class="di-r">${E(g)}</div>`).join("");
+  return`<div class="dbm">`+
+    `<div class="db-cell"><div class="dh">🗞 무슨 일이 있었나</div>${what}</div>`+
+    `<div class="db-cell"><div class="dh">❓ 왜 중요한가</div>${why}</div>`+
+    `<div class="db-cell"><div class="dh">✅ 지금 할 일</div>${doNow}${cond}</div>`+
+    `<div class="db-cell warn"><div class="dh">⛔ 하지 말 것</div>${dont}</div>`+
+    `<div class="db-cell warn"><div class="dh">⚠️ 리스크 · 무효화 조건</div>${risks}</div>`+
+    `<div class="db-cell guard"><div class="dh">🛡 보호 규칙</div>${guard}</div></div>`;
+}
+async function loadDBrief(){
+  const d=await J("/api/decision-brief");
+  const html=(!d||d.empty)?'<div class="emp">최근 브리핑이 없습니다</div>':renderDBrief(d.blocks);
+  const h=document.getElementById("h-dbrief");if(h)h.innerHTML=html;
+  const a=document.getElementById("a-dbrief");if(a)a.innerHTML=html;
+  const t=(d&&d.day)?`${d.day} 기준 · 참고용`:"";
+  const s1=document.getElementById("db-sub");if(s1)s1.textContent=t;
+  const s2=document.getElementById("db-sub2");if(s2)s2.textContent=t;
+}
+
+/* ═══ 이벤트 캘린더 (모바일) ═══ */
+const _CCOLm={economic:"var(--b)",earnings:"var(--up)",dividend:"var(--g)"};
+const _CLBm={economic:"경제·매크로",earnings:"실적",dividend:"배당"};
+function calRow(it){
+  const col=_CCOLm[it.category]||"var(--gy)";
+  const date=it.date?it.date.slice(5):"";
+  let n="·",u="";
+  if(it.d_day!=null){if(it.d_day===0){n="D";u="today";}else if(it.d_day>0){n=it.d_day;u="일 후";}else{n="+"+(-it.d_day);u="일 전";}}
+  return`<div class="calm"><span class="cal-dot" style="background:${col}"></span><div class="cal-dd"><div class="n">${n}</div><div class="u">${u}</div></div><div class="cal-bd"><div class="t">${E(it.name)}</div><div class="s">${date?date+" · ":""}${_CLBm[it.category]||""}${it.importance==="HIGH"?" · 중요":""}</div></div></div>`;
+}
+async function loadCalendar(){
+  const d=await J("/api/calendar");const items=(d&&d.items)||[];
+  const el=document.getElementById("h-cal");if(!el)return;
+  el.innerHTML=items.length?items.slice(0,8).map(calRow).join(""):'<div class="emp">예정 일정 없음</div>';
+}
+
+/* ═══ 성과 분석 — 벤치마크·기여도 (모바일) ═══ */
+async function loadAnalytics(){
+  const d=await J("/api/portfolio/analytics");if(!d)return;
+  const benchEl=document.getElementById("p-bench");
+  if(benchEl){
+    const wd=d.weighted_day_pct||0;
+    const rows=[["내 포트폴리오",wd,null]].concat((d.benchmarks||[]).map(b=>[b.name,b.day_pct,b.vs_port]));
+    const mx=Math.max(...rows.map(([,p])=>Math.abs(p)),1);
+    benchEl.innerHTML=rows.map(([n,p,vs])=>{
+      const pos=p>=0,c=pos?"var(--up)":"var(--down)",me=vs===null;
+      return`<div class="pbar"><div class="nm" style="${me?"font-weight:800":""}">${E(n)}${me?" ★":""}</div><div class="track"><div class="zero"></div><i style="${pos?"left:50%":"right:50%"};width:${Math.abs(p)/mx*50}%;background:${c}"></i></div><div class="val ${cc(p)}">${cs(+p.toFixed(2))}</div><div class="val ${vs!==null?cc(vs):""}">${vs!==null?(vs>=0?"▲":"▼")+" "+Math.abs(+vs.toFixed(2)):""}</div></div>`;
+    }).join("");
+  }
+  const cset=d.contributors||[],mg=Math.max(...cset.map(x=>Math.abs(x.pnl_krw||0)),1);
+  const ce=document.getElementById("p-contrib");
+  if(ce)ce.innerHTML=cset.length?cset.map(it=>{const pos=(it.pnl_krw||0)>=0,c=pos?"var(--up)":"var(--down)";return`<div style="display:flex;align-items:center;gap:8px;padding:5px 0;cursor:pointer" onclick="openM('${E(it.ticker)}')"><div style="width:80px;font-size:12px;font-weight:600;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${E(it.name)}</div><div style="flex:1">${hbar(Math.abs(it.pnl_krw)/mg*100,c,10)}</div><div style="width:84px;text-align:right;font-size:12px;font-weight:700" class="${pos?"up":"dn"}">${pos?"+":"-"}₩${Math.round(Math.abs(it.pnl_krw)).toLocaleString()}</div></div>`}).join(""):'<div class="emp">데이터 없음</div>';
+  const rz=d.realized||{},wl=d.worst_holding,tw=d.top_winner,tl=d.top_loser;
+  const re=document.getElementById("p-realized");
+  if(re)re.innerHTML=`
+    <div class="pi"><span class="mt">실현 승률</span><span class="${cc((rz.win_rate||0)-50)}" style="font-weight:700">${rz.win_rate||0}% <span class="mt" style="font-size:11px">(${rz.wins||0}승 ${rz.losses||0}패)</span></span></div>
+    <div class="pi"><span class="mt">평균 실현 수익률</span><span class="${cc(rz.avg_pnl)}" style="font-weight:700">${cs(rz.avg_pnl||0)}</span></div>
+    <div class="pi"><span class="mt">최고 기여 종목</span><span style="font-weight:700">${tw?E(tw.name)+" <span class='"+cc(tw.pnl_pct)+"'>"+cs(tw.pnl_pct)+"</span>":"—"}</span></div>
+    <div class="pi"><span class="mt">최저 기여 종목</span><span style="font-weight:700">${tl?E(tl.name)+" <span class='"+cc(tl.pnl_pct)+"'>"+cs(tl.pnl_pct)+"</span>":"—"}</span></div>
+    <div class="pi"><span class="mt">최대 평가손실 보유</span><span class="${wl?cc(wl.pnl_pct):""}" style="font-weight:700">${wl?E(wl.name)+" "+cs(wl.pnl_pct):"—"}</span></div>`;
 }
 
 /* 실시간 기술 신호 카드 (브리핑 무관 라이브) */
@@ -655,6 +809,7 @@ async function loadPF(){
     ah+=`<div class="c"><h3>${E(acct.name)} <span class="${ap}">${cs(acct.pnl_pct)}</span><span class="mt" style="float:right">₩${acct.eval_total?acct.eval_total.toLocaleString():0}</span></h3><table class="ptable"><tr><th>종목</th><th>현재가</th><th>등락</th><th>수량</th><th>평단</th><th>수익률</th><th>평가</th><th>비중</th></tr>${trows}</table><div class="cards-m">${mcards}</div></div>`;
   }
   document.getElementById("pf-accts").innerHTML=ah;
+  window._pfItems=allItems;
 
   // Ranking bar
   const sorted=[...allItems].sort((a,b)=>b.pnl_pct-a.pnl_pct);
@@ -701,8 +856,8 @@ async function loadAct(){
   document.getElementById("h-brief").innerHTML=`<div class="brief-ic">●</div><div class="brief-tx">${buildBrief(gr,_mktCache?_mktCache.mode:null,_mktCache?_mktCache.vix:null)}</div>`;
 
   const none='<div class="emp">없음</div>';
-  document.getElementById("a-exec").innerHTML=[...gr.buy,...gr.sell].map(renderAct).join("")||none;
-  document.getElementById("a-cond").innerHTML=gr.cond.map(renderAct).join("")||none;
+  document.getElementById("a-exec").innerHTML=[...gr.buy,...gr.sell].map(r=>renderAct(r,true)).join("")||none;
+  document.getElementById("a-cond").innerHTML=gr.cond.map(r=>renderAct(r,true)).join("")||none;
   document.getElementById("a-mgmt").innerHTML=gr.mgmt.map(renderAct).join("")||none;
   document.getElementById("a-watch").innerHTML=gr.watch.map(renderAct).join("")||none;
 
@@ -1170,12 +1325,12 @@ function simPreview(){
 }
 
 /* ═══ INIT ═══ */
-async function init(){await Promise.all([loadMkt(),loadAct(),loadPF(),loadPerf(),loadNews(),loadTimeline(),loadSimList(),loadSignals()])}
+async function init(){await Promise.all([loadMkt(),loadAct(),loadPF(),loadPerf(),loadNews(),loadTimeline(),loadSimList(),loadSignals(),loadDBrief(),loadCalendar(),loadAnalytics()])}
 init();
-setInterval(()=>{loadMkt();loadAct();loadTimeline()},30000);
-setInterval(()=>{loadPF();loadPerf();loadSimList()},120000);
+setInterval(()=>{loadMkt();loadAct();loadTimeline();loadDBrief()},30000);
+setInterval(()=>{loadPF();loadPerf();loadSimList();loadAnalytics()},120000);
 setInterval(()=>{loadSignals()},300000);
-setInterval(loadNews,600000);
+setInterval(()=>{loadNews();loadCalendar()},600000);
 </script>
 </body>
 </html>
