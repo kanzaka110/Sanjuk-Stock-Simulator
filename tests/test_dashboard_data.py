@@ -218,7 +218,7 @@ def test_simulator_tab_in_html():
 
     # 주요 요소 ID
     assert 'id="sim-list"' in html
-    assert 'id="sim-detail"' in html
+    assert 'id="sim-hero"' in html
     assert 'id="sim-order"' in html
 
     # 안전 장치: POST/실제 주문 없음
