@@ -253,83 +253,81 @@ details[open] summary::before{transform:rotate(90deg)}
 .sim-rec-item{display:flex;gap:8px;align-items:center;padding:6px 0;border-bottom:1px solid var(--ln);font-size:12px}
 .sim-rec-item:last-child{border-bottom:none}
 
-/* ═══ responsive-pc-dashboard-v3 ═══ */
+/* ═══ PC 대시보드 v4 — bento board redesign ═══ */
 
-/* 티커 스트립: PC에서 컴팩트 카드 */
+/* ── 1100px+ 공통 ── */
 @media(min-width:1100px){
-  .chip{min-width:90px;padding:6px 10px}
-  .chip .p{font-size:14px;margin:1px 0}
-  .chip .ch{font-size:11px}
-}
-@media(min-width:1500px){
-  .strip{flex-wrap:nowrap;justify-content:center}
-}
-
-/* PC 홈 화면 v3: grid-template-areas */
-@media(min-width:1100px){
-  body{max-width:100%;margin:0;flex-direction:row;flex-wrap:wrap}
+  body{max-width:100%;margin:0}
   .top{width:100%;flex-shrink:0}
+
   /* 사이드바 */
-  .tabs{flex-direction:column;width:160px;position:fixed;top:42px;left:0;bottom:0;
-    border-bottom:none;border-right:1px solid var(--ln);overflow-y:auto;overflow-x:hidden;
-    z-index:99;background:var(--bg);padding-top:8px}
-  .tb{text-align:left;padding:12px 16px;border-bottom:none;border-left:3px solid transparent;min-height:44px;font-size:13px}
-  .tb.on{border-left-color:var(--b);border-bottom-color:transparent}
+  .tabs{flex-direction:column;width:56px;position:fixed;top:42px;left:0;bottom:0;
+    border-bottom:none;border-right:1px solid var(--ln);overflow:hidden;
+    z-index:99;background:var(--sf);padding-top:12px;transition:width .2s}
+  .tabs:hover{width:160px}
+  .tb{text-align:center;padding:14px 0;border-bottom:none;border-left:3px solid transparent;
+    min-height:44px;font-size:11px;overflow:hidden;white-space:nowrap;transition:all .2s}
+  .tabs:hover .tb{text-align:left;padding:12px 16px;font-size:13px}
+  .tb.on{border-left-color:var(--b);border-bottom-color:transparent;background:var(--sf2)}
+
   /* 콘텐츠 */
-  .tc{margin-left:160px;max-width:1400px;padding:16px 20px 40px}
+  .tc{margin-left:56px;padding:16px 20px 40px}
   .tc.on{display:block}
-  /* ── 홈: area 레이아웃 ── */
-  #t-home{
+
+  /* 티커 컴팩트 */
+  .chip{min-width:86px;padding:6px 8px}
+  .chip .p{font-size:13px;margin:1px 0}
+  .chip .ch{font-size:10px}
+  .strip{gap:4px}
+
+  /* ── 홈: bento grid ── */
+  #t-home.on{
     display:grid!important;
-    grid-template-columns:2fr 1fr;
+    grid-template-columns:1fr 1fr 320px;
+    grid-template-rows:auto auto auto auto;
     grid-template-areas:
-      "strip  strip"
-      "pf     todo"
-      "pf     perf"
-      "pf     act"
-      "pf     news";
-    gap:12px;align-items:start;
+      "strip  strip  strip"
+      "pf     pf     todo"
+      "pf     pf     perf"
+      "act    news   news";
+    gap:10px;align-items:start;
   }
   .ha-strip{grid-area:strip}
   .ha-todo{grid-area:todo}
-  .ha-pf{grid-area:pf}
+  .ha-pf{grid-area:pf;min-height:280px}
   .ha-perf{grid-area:perf}
   .ha-act{grid-area:act}
   .ha-news{grid-area:news}
-  /* 포트폴리오 */
-  #t-pf{display:grid!important;grid-template-columns:1fr 1fr;gap:12px}
-  #t-pf>*:first-child{grid-column:1/-1}
-  #t-pf>#pf-accts{grid-column:1/-1}
-  /* 액션 */
-  #t-act{display:grid!important;grid-template-columns:1fr 1fr;gap:12px}
-  #t-act>*:first-child{grid-column:1/-1}
-  /* 성과 */
-  #t-perf{display:grid!important;grid-template-columns:1fr 1fr;gap:12px}
-  #t-perf>*:first-child{grid-column:1/-1}
+
+  /* 다른 탭: 자연 flow — grid 강제 안 함 */
+  #t-pf.on,#t-act.on,#t-perf.on,#t-mkt.on{display:block!important}
+
   /* 시뮬레이터 */
-  #t-sim{margin-left:160px;padding:0}
-  .sim-hero{margin-left:0}
-  .sim-toolbar{margin-left:0}
+  #t-sim{margin-left:56px;padding:0}
   .sim-wrap{flex-direction:row!important;gap:0}
-  .sim-left{width:240px;flex-shrink:0;border-right:1px solid var(--ln);max-height:calc(100vh - 240px);overflow-y:auto}
+  .sim-left{width:220px;flex-shrink:0;border-right:1px solid var(--ln);max-height:calc(100vh - 200px);overflow-y:auto}
   .sim-center{flex:1;min-width:0}
-  .sim-right{width:280px;flex-shrink:0;border-left:1px solid var(--ln)}
-  /* 카드 */
-  .c{border-radius:14px;padding:16px}
-  .sb .v{font-size:22px}
-  /* 모달 */
+  .sim-right{width:260px;flex-shrink:0;border-left:1px solid var(--ln)}
+
+  /* 카드/모달 */
+  .c{border-radius:12px;padding:14px}
   .md{max-width:640px;border-radius:16px;margin:auto;max-height:90vh}
   .mo{align-items:center}
 }
-/* 1500px+: 홈 3열 */
-@media(min-width:1500px){
-  #t-home{
-    grid-template-columns:1fr 2fr 1fr;
+
+/* ── 1400px+: 홈 넓은 bento ── */
+@media(min-width:1400px){
+  #t-home.on{
+    grid-template-columns:1fr 1fr 1fr 340px;
     grid-template-areas:
-      "strip  strip  strip"
-      "todo   pf     act"
-      "perf   pf     news";
+      "strip  strip  strip  strip"
+      "pf     pf     pf     todo"
+      "pf     pf     pf     perf"
+      "act    act    news   news";
   }
+  /* 2열 콘텐츠 for 포트폴리오/액션/성과 탭 */
+  #t-pf.on,#t-act.on,#t-perf.on{columns:2;column-gap:16px}
+  #t-pf.on .c,#t-act.on .c,#t-perf.on .c{break-inside:avoid;margin-bottom:12px}
 }
 </style>
 </head>
