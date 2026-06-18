@@ -274,6 +274,7 @@ details[open] summary::before{transform:rotate(90deg)}
 <div class="strip ha-strip" id="h-strip" style="margin-bottom:12px"></div>
 <div class="c ha-todo"><h3>오늘 할 일</h3><div class="g4" id="h-sum"></div></div>
 <div class="c ha-pf"><h3>내 포트폴리오</h3><div id="h-pf"></div></div>
+<div class="c ha-movers"><h3>오늘 많이 움직인 종목</h3><div id="h-movers"></div></div>
 <div class="c ha-perf"><h3>30일 성과</h3><div id="h-perf"></div></div>
 <div class="c ha-act"><h3>오늘 주요 액션</h3><div id="h-act"></div></div>
 <div class="c ha-news"><h3>주요 뉴스</h3><div id="h-news"></div></div>
@@ -448,7 +449,8 @@ async function loadMkt(){
   const all=[...Object.entries(idx),...Object.entries(mac)];
   document.getElementById("h-strip").innerHTML=all.map(([n,q])=>{
     const c=cc(q.pct);const arrow=q.pct>0?"▲":q.pct<0?"▼":"—";
-    return`<div class="chip"><div class="n">${E(n)}</div><div class="p">${q.price?q.price.toLocaleString():"—"}</div><div class="ch ${c}"><span class="arrow">${arrow}</span> ${cs(q.pct)}</div></div>`;
+    const rng=(q.high&&q.low&&q.high>q.low)?(()=>{const p=Math.max(0,Math.min(100,(q.price-q.low)/(q.high-q.low)*100));return`<div style="position:relative;height:3px;background:var(--sf3);border-radius:2px;margin-top:6px"><div style="position:absolute;top:-1px;left:${p}%;transform:translateX(-50%);width:5px;height:5px;border-radius:50%;background:var(--b)"></div></div>`;})():"";
+    return`<div class="chip"><div class="n">${E(n)}</div><div class="p">${q.price?q.price.toLocaleString():"—"}</div><div class="ch ${c}"><span class="arrow">${arrow}</span> ${cs(q.pct)}</div>${rng}</div>`;
   }).join("");
   // Market tab
   const sess=d.session||{};const kr=sess.kr||"CLOSED",us=sess.us||"CLOSED";
@@ -465,12 +467,17 @@ async function loadMkt(){
 async function loadPF(){
   const d=await J("/api/portfolio");if(!d){document.getElementById("h-pf").innerHTML='<div class="emp">로딩 실패</div>';return}
   const pc=cc(d.total_pnl_pct);
+  // 오늘 변동 (일간 손익): Σ 평가금액 × 당일 등락률
+  let todayChg=0;
+  (d.accounts||[]).forEach(a=>(a.items||[]).forEach(it=>{todayChg+=(it.eval_krw||0)*(it.day_pct||0)/100}));
+  const todayPct=d.total_eval?todayChg/d.total_eval*100:0;
+  const tc=cc(todayPct);const todayAmt=(todayChg>=0?"+":"")+Math.round(todayChg).toLocaleString();
   // Home summary + donut
   const alloc=d.allocation||[];
-  document.getElementById("h-pf").innerHTML=`<div class="g3"><div class="sb"><div class="v">${(d.total_eval||0).toLocaleString()}</div><div class="l">총 평가 (₩)</div></div><div class="sb"><div class="v ${pc}">${cs(d.total_pnl_pct)}</div><div class="l">수익률</div></div><div class="sb"><div class="v">${d.cash_weight||0}%</div><div class="l">현금 비중</div></div></div>${alloc.length?'<div style="margin-top:12px">'+donut(alloc,cs(d.total_pnl_pct))+'</div>':""}`;
+  document.getElementById("h-pf").innerHTML=`<div class="g4"><div class="sb"><div class="v">${(d.total_eval||0).toLocaleString()}</div><div class="l">총 평가 (₩)</div></div><div class="sb"><div class="v ${tc}">${cs(+todayPct.toFixed(2))}</div><div class="l">오늘 ${todayAmt}₩</div></div><div class="sb"><div class="v ${pc}">${cs(d.total_pnl_pct)}</div><div class="l">수익률</div></div><div class="sb"><div class="v">${d.cash_weight||0}%</div><div class="l">현금 비중</div></div></div>${alloc.length?'<div style="margin-top:12px">'+donut(alloc,cs(d.total_pnl_pct))+'</div>':""}`;
 
   // PF tab summary
-  document.getElementById("pf-sum").innerHTML=`<div class="g4"><div class="sb"><div class="v">${(d.total_eval||0).toLocaleString()}</div><div class="l">총 평가</div></div><div class="sb"><div class="v ${pc}">${cs(d.total_pnl_pct)}</div><div class="l">수익률</div></div><div class="sb"><div class="v">${(d.total_cash||0).toLocaleString()}</div><div class="l">현금</div></div><div class="sb"><div class="v">${d.usdkrw}</div><div class="l">USD/KRW</div></div></div>`;
+  document.getElementById("pf-sum").innerHTML=`<div class="g4"><div class="sb"><div class="v">${(d.total_eval||0).toLocaleString()}</div><div class="l">총 평가</div></div><div class="sb"><div class="v ${tc}">${cs(+todayPct.toFixed(2))}</div><div class="l">오늘 ${todayAmt}₩</div></div><div class="sb"><div class="v ${pc}">${cs(d.total_pnl_pct)}</div><div class="l">수익률</div></div><div class="sb"><div class="v">${(d.total_cash||0).toLocaleString()}</div><div class="l">현금</div></div><div class="sb"><div class="v">${d.usdkrw}</div><div class="l">USD/KRW</div></div></div>`;
 
   // PF tab allocation donut
   document.getElementById("pf-alloc").innerHTML=alloc.length?donut(alloc,"₩"+(d.total_eval||0).toLocaleString()):'<div class="emp">데이터 없음</div>';
@@ -504,6 +511,13 @@ async function loadPF(){
     const c=it.pnl_pct>=0?"var(--g)":"var(--r)";const w=Math.abs(it.pnl_pct)/maxAbs*100;
     return`<div style="display:flex;align-items:center;gap:8px;padding:4px 0;cursor:pointer" onclick="openM('${E(it.ticker)}')"><div style="width:80px;font-size:12px;font-weight:600;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${E(it.name)}</div><div style="flex:1">${hbar(w,c,10)}</div><div style="width:60px;text-align:right;font-size:12px;font-weight:700" class="${cc(it.pnl_pct)}">${cs(it.pnl_pct)}</div></div>`;
   }).join("")||'<div class="emp">데이터 없음</div>';
+
+  // Home: 오늘 많이 움직인 종목 (당일 등락률 절대값 정렬)
+  const movers=allItems.filter(x=>x.day_pct!=null).sort((a,b)=>Math.abs(b.day_pct)-Math.abs(a.day_pct)).slice(0,5);
+  document.getElementById("h-movers").innerHTML=movers.length?movers.map(it=>{
+    const c=cc(it.day_pct);const cur=it.currency==="USD"?"$":"₩";const arrow=it.day_pct>0?"▲":it.day_pct<0?"▼":"—";
+    return`<div class="pi" style="cursor:pointer" onclick="openM('${E(it.ticker)}')"><span style="font-weight:600">${E(it.name)}</span><div><span style="font-weight:700">${cur}${it.current_price?it.current_price.toLocaleString():"—"}</span><span class="${c}" style="margin-left:8px;font-size:12px"><span style="font-size:11px">${arrow}</span> ${cs(it.day_pct)}</span></div></div>`;
+  }).join(""):'<div class="emp">데이터 없음</div>';
 }
 
 /* ═══ LOAD ACTIONS ═══ */
