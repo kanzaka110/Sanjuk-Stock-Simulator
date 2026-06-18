@@ -102,46 +102,55 @@ class TestNoBuyReason:
 class TestSaveIntegration:
     """저장 시 action_type/briefing_type/original_signal 무결성."""
 
+    # 테스트 전용 티커 — 운영 데이터와 절대 충돌 안 함
+    _TEST_BUY_TICKER = "ZZTEST_BUY.KS"
+    _TEST_SELL_TICKER = "ZZTEST_SELL"
+
     def _cleanup(self, tickers):
         from core.memory import _get_conn
         conn = _get_conn()
         for tk in tickers:
             conn.execute(
-                "DELETE FROM predictions WHERE ticker=? AND created_at >= datetime('now','-2 minutes')",
-                (tk,))
+                "DELETE FROM predictions WHERE ticker=?", (tk,))
         conn.commit()
+
+    def setup_method(self):
+        self._cleanup([self._TEST_BUY_TICKER, self._TEST_SELL_TICKER])
+
+    def teardown_method(self):
+        self._cleanup([self._TEST_BUY_TICKER, self._TEST_SELL_TICKER])
 
     def test_save_fills_required_fields(self):
         from core.action_normalizer import normalize_actions
         from core.memory import save_predictions_from_briefing, _get_conn
         raw = {
             "strategy_buy": [
-                {"ticker": "035720.KS", "name": "카카오", "account": "[ISA]",
+                {"ticker": self._TEST_BUY_TICKER, "name": "테스트매수", "account": "[ISA]",
                  "entry_price": "₩40,000", "target_price": "₩44,000", "stop_loss": "₩38,000",
                  "risk_reward": 2.0, "invalidation_condition": "OBV매도", "reason": "즉시 진입"}],
             "strategy_sell": [
-                {"ticker": "MU", "name": "마이크론", "current_price": "$900",
+                {"ticker": self._TEST_SELL_TICKER, "name": "테스트매도", "current_price": "$900",
                  "reason": "홀딩 전환"}],
         }
-        prices = {"035720.KS": 40500, "MU": 880}
+        prices = {self._TEST_BUY_TICKER: 40500, self._TEST_SELL_TICKER: 880}
         norm = normalize_actions(raw, "KR_BEFORE", prices, {})
         save_predictions_from_briefing(raw, current_prices=prices,
                                        briefing_type="KR_BEFORE", normalized=norm)
         conn = _get_conn()
         rows = conn.execute(
             """SELECT name, signal, original_signal, action_type, briefing_type, account_type
-               FROM predictions WHERE ticker IN ('035720.KS','MU')
-               AND created_at >= datetime('now','-2 minutes')"""
+               FROM predictions WHERE ticker IN (?,?)
+               AND created_at >= datetime('now','-2 minutes')""",
+            (self._TEST_BUY_TICKER, self._TEST_SELL_TICKER),
         ).fetchall()
         by_name = {r[0]: r for r in rows}
-        # 카카오: 매수 실행
-        k = by_name.get("카카오")
+        # 테스트매수: 매수 실행
+        k = by_name.get("테스트매수")
         assert k and k[3] == "AI_NEW_BUY" and k[4] == "KR_BEFORE" and k[5] == "ISA"
         assert k[1] == "매수" and k[2] == "매수"
-        # MU: 홀딩 전환 → signal=관망 (매도로 저장 안 됨)
-        m = by_name.get("마이크론")
+        # 테스트매도: 홀딩 전환 → signal=관망 (매도로 저장 안 됨)
+        m = by_name.get("테스트매도")
         assert m and m[3] == "HOLD_REVIEW" and m[1] == "관망"
-        self._cleanup(["035720.KS", "MU"])
 
     def test_no_normalized_saves_nothing(self):
         from core.memory import save_predictions_from_briefing
