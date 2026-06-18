@@ -174,6 +174,66 @@ details[open] summary::before{transform:rotate(90deg)}
 .rec-body{margin-top:2px}
 .new-badge{display:inline-block;background:var(--b);color:#fff;font-size:10px;font-weight:700;padding:1px 8px;border-radius:10px;margin-left:6px;animation:pulse 2s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+
+/* ═══ 시뮬레이터 — 토스식 라이트 서피스 ═══ */
+:root{
+  --sim-bg:#f7f8fa;--sim-sf:#ffffff;--sim-ln:#e5e8eb;
+  --sim-tx:#191f28;--sim-mt:#8b95a1;--sim-wh:#333d4b;
+  --sim-g:#00c471;--sim-g2:rgba(0,196,113,.12);
+  --sim-r:#f04452;--sim-r2:rgba(240,68,82,.12);
+  --sim-b:#3182f6;--sim-b2:rgba(49,130,246,.1);
+}
+.sim-wrap{display:flex;flex-direction:column;gap:12px}
+@media(min-width:960px){
+  .sim-wrap{flex-direction:row;gap:16px}
+  .sim-left{width:260px;flex-shrink:0}
+  .sim-center{flex:1;min-width:0}
+  .sim-right{width:280px;flex-shrink:0}
+}
+.sim-card{background:var(--sim-sf);border:1px solid var(--sim-ln);border-radius:16px;padding:16px;color:var(--sim-tx);margin-bottom:0}
+.sim-card h3{font-size:13px;font-weight:700;color:var(--sim-mt);margin-bottom:12px;letter-spacing:.3px}
+
+/* 종목 리스트 */
+.sim-item{display:flex;justify-content:space-between;align-items:center;padding:10px 8px;border-radius:10px;cursor:pointer;min-height:48px;transition:background .15s;-webkit-tap-highlight-color:transparent}
+.sim-item:hover,.sim-item.selected{background:var(--sim-b2)}
+.sim-item .si-name{font-size:13px;font-weight:600;color:var(--sim-tx)}
+.sim-item .si-ticker{font-size:11px;color:var(--sim-mt)}
+.sim-item .si-price{font-size:14px;font-weight:700;text-align:right}
+.sim-item .si-change{font-size:11px;font-weight:600;text-align:right}
+.sim-item .si-shares{font-size:10px;color:var(--sim-mt);text-align:right}
+.sim-up{color:var(--sim-r)}.sim-dn{color:var(--sim-b)}.sim-fl{color:var(--sim-mt)}
+
+/* 중앙 패널 */
+.sim-hero-name{font-size:22px;font-weight:800;color:var(--sim-tx)}
+.sim-hero-price{font-size:32px;font-weight:800;color:var(--sim-tx);margin:4px 0}
+.sim-hero-change{font-size:16px;font-weight:700}
+.sim-thesis{font-size:13px;color:var(--sim-mt);line-height:1.6;padding:10px 12px;background:var(--sim-bg);border-radius:10px;margin-top:12px}
+.sim-sparkline{margin:16px 0 8px}
+.sim-sparkline svg{width:100%;height:80px;display:block}
+.sim-sparkline .spark-note{font-size:10px;color:var(--sim-mt);text-align:center;margin-top:4px}
+.sim-recs{margin-top:12px}
+.sim-rec-item{display:flex;gap:8px;align-items:center;padding:6px 0;border-bottom:1px solid var(--sim-ln);font-size:12px}
+.sim-rec-item:last-child{border-bottom:none}
+
+/* 주문 계산 패널 */
+.sim-order-tabs{display:flex;gap:0;margin-bottom:12px;border-radius:10px;overflow:hidden;border:1px solid var(--sim-ln)}
+.sim-order-tab{flex:1;padding:10px;text-align:center;font-size:13px;font-weight:700;cursor:pointer;background:var(--sim-bg);color:var(--sim-mt);border:none;min-height:44px;-webkit-tap-highlight-color:transparent}
+.sim-order-tab.buy-on{background:var(--sim-r2);color:var(--sim-r)}
+.sim-order-tab.sell-on{background:var(--sim-b2);color:var(--sim-b)}
+.sim-input-group{margin-bottom:12px}
+.sim-input-group label{display:block;font-size:12px;font-weight:600;color:var(--sim-mt);margin-bottom:4px}
+.sim-input{width:100%;padding:10px 12px;border:1px solid var(--sim-ln);border-radius:10px;font-size:14px;background:var(--sim-bg);color:var(--sim-tx);box-sizing:border-box;min-height:44px}
+.sim-input:focus{outline:none;border-color:var(--sim-b)}
+.sim-result{background:var(--sim-bg);border-radius:10px;padding:12px;margin-top:12px}
+.sim-result-row{display:flex;justify-content:space-between;padding:4px 0;font-size:13px}
+.sim-result-row .label{color:var(--sim-mt)}
+.sim-result-row .value{font-weight:700;color:var(--sim-tx)}
+.sim-warning{font-size:11px;padding:8px 10px;border-radius:8px;margin-top:8px}
+.sim-warn-red{background:var(--sim-r2);color:var(--sim-r)}
+.sim-warn-blue{background:var(--sim-b2);color:var(--sim-b)}
+.sim-warn-green{background:var(--sim-g2);color:var(--sim-g)}
+.sim-preview-btn{width:100%;padding:12px;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;margin-top:12px;min-height:48px;-webkit-tap-highlight-color:transparent;background:var(--sim-bg);color:var(--sim-mt);border:1px solid var(--sim-ln)}
+.sim-preview-btn:hover{background:var(--sim-ln)}
 </style>
 </head>
 <body>
@@ -186,6 +246,7 @@ details[open] summary::before{transform:rotate(90deg)}
 <button class="tb" data-t="pf">포트폴리오</button>
 <button class="tb" data-t="act">액션</button>
 <button class="tb" data-t="perf">성과</button>
+<button class="tb" data-t="sim">시뮬레이터</button>
 </div>
 
 <!-- ═══ 홈 ═══ -->
@@ -236,6 +297,36 @@ details[open] summary::before{transform:rotate(90deg)}
 <div class="c"><h3>브리핑 타입별</h3><div id="p-br"></div></div>
 <div class="c"><details><summary>종목별 적중률</summary><div id="p-tk"></div></details></div>
 <div class="c"><details><summary>최근 종료 결과</summary><div id="p-cl"></div></details></div>
+</div>
+
+<!-- ═══ 시뮬레이터 ═══ -->
+<div class="tc" id="t-sim">
+<div class="sim-wrap">
+  <!-- 좌측: 보유/관심 종목 리스트 -->
+  <div class="sim-left">
+    <div class="sim-card">
+      <h3>보유 종목</h3>
+      <div id="sim-list"></div>
+    </div>
+  </div>
+  <!-- 중앙: 선택 종목 상세 -->
+  <div class="sim-center">
+    <div class="sim-card">
+      <div id="sim-detail">
+        <div style="text-align:center;padding:40px 0;color:var(--sim-mt);font-size:14px">좌측에서 종목을 선택하세요</div>
+      </div>
+    </div>
+  </div>
+  <!-- 우측: 가상 주문 계산 패널 -->
+  <div class="sim-right">
+    <div class="sim-card">
+      <h3>가상 주문 계산</h3>
+      <div id="sim-order">
+        <div style="text-align:center;padding:20px 0;color:var(--sim-mt);font-size:13px">종목을 먼저 선택하세요</div>
+      </div>
+    </div>
+  </div>
+</div>
 </div>
 
 <!-- ═══ 모달 ═══ -->
@@ -628,11 +719,197 @@ async function loadTimeline(){
   document.getElementById("a-tl").innerHTML=html;
 }
 
+/* ═══ SIMULATOR ═══ */
+let _simItems=[];
+let _simSelected=null;
+let _simOrderSide="buy";
+
+function simCC(v){return v>0?"sim-up":v<0?"sim-dn":"sim-fl"}
+function simCS(v){return(v>=0?"+":"")+v.toFixed(2)+"%"}
+function simCur(it){return it.currency==="USD"?"$":"₩"}
+
+async function loadSimList(){
+  const d=await J("/api/portfolio");
+  if(!d||!d.accounts)return;
+  _simItems=[];
+  for(const acct of d.accounts){
+    for(const it of acct.items){
+      it._acct=acct.name;
+      _simItems.push(it);
+    }
+  }
+  const el=document.getElementById("sim-list");
+  if(!_simItems.length){el.innerHTML='<div style="text-align:center;padding:16px;color:var(--sim-mt);font-size:13px">보유 종목 없음</div>';return}
+  el.innerHTML=_simItems.map((it,i)=>{
+    const c=simCC(it.day_pct);const cur=simCur(it);
+    return`<div class="sim-item${_simSelected===i?" selected":""}" onclick="simSelect(${i})">
+      <div><div class="si-name">${E(it.name)}</div><div class="si-ticker">${E(it.ticker)} · ${E(it._acct)}</div></div>
+      <div><div class="si-price">${cur}${it.current_price?it.current_price.toLocaleString():"—"}</div><div class="si-change ${c}">${simCS(it.day_pct)}</div><div class="si-shares">${it.shares}주 · ${simCS(it.pnl_pct)}</div></div>
+    </div>`;
+  }).join("");
+}
+
+function simSelect(idx){
+  _simSelected=idx;
+  // highlight
+  document.querySelectorAll(".sim-item").forEach((el,i)=>el.classList.toggle("selected",i===idx));
+  const it=_simItems[idx];
+  if(!it)return;
+  // load detail
+  simLoadDetail(it);
+  simRenderOrder(it);
+}
+
+async function simLoadDetail(it){
+  const el=document.getElementById("sim-detail");
+  const c=simCC(it.day_pct);const cur=simCur(it);
+  const arrow=it.day_pct>0?"▲":it.day_pct<0?"▼":"—";
+
+  let h=`<div class="sim-hero-name">${E(it.name)}</div>
+    <div style="font-size:12px;color:var(--sim-mt)">${E(it.ticker)} · ${E(it._acct)} · ${it.shares}주</div>
+    <div class="sim-hero-price">${cur}${it.current_price?it.current_price.toLocaleString():"—"}</div>
+    <div class="sim-hero-change ${c}">${arrow} ${simCS(it.day_pct)}</div>`;
+
+  if(it.thesis)h+=`<div class="sim-thesis">${E(it.thesis)}</div>`;
+  if(it.horizon)h+=`<div style="margin-top:6px;font-size:12px;color:var(--sim-mt)">투자 기간: ${E(it.horizon)}</div>`;
+
+  // sparkline placeholder — will fill with ticker data
+  h+=`<div class="sim-sparkline" id="sim-spark"></div>`;
+  h+=`<div class="sim-recs" id="sim-recs"><div style="color:var(--sim-mt);font-size:12px">추천 이력 로딩 중…</div></div>`;
+  el.innerHTML=h;
+
+  // load ticker detail for sparkline + recs
+  const td=await J("/api/ticker/"+encodeURIComponent(it.ticker));
+  if(!td)return;
+
+  // sparkline from open predictions entry/target/stop + current price
+  const sparkEl=document.getElementById("sim-spark");
+  if(sparkEl){
+    const points=[];
+    if(td.open&&td.open.length){
+      const op=td.open[0];
+      if(op.stop_loss)points.push({v:op.stop_loss,l:"손절"});
+      if(op.entry_price)points.push({v:op.entry_price,l:"진입"});
+      if(td.current_price)points.push({v:td.current_price,l:"현재"});
+      if(op.target_price)points.push({v:op.target_price,l:"목표"});
+    }else if(td.recent&&td.recent.length){
+      const r=td.recent[0];
+      if(r.stop_loss)points.push({v:r.stop_loss,l:"손절"});
+      if(r.entry_price)points.push({v:r.entry_price,l:"진입"});
+      if(td.current_price)points.push({v:td.current_price,l:"현재"});
+      if(r.target_price)points.push({v:r.target_price,l:"목표"});
+    }
+    if(points.length>=2){
+      const vals=points.map(p=>p.v);
+      const mn=Math.min(...vals),mx=Math.max(...vals);
+      const range=mx-mn||1;const pad=12;const w=300;const h2=60;
+      let svg=`<svg viewBox="0 0 ${w+pad*2} ${h2+pad*2+16}" preserveAspectRatio="none">`;
+      const xs=points.map((_,i)=>pad+i*(w/(points.length-1)));
+      const ys=points.map(p=>pad+(1-(p.v-mn)/range)*h2);
+      // line
+      let path=points.map((p,i)=>`${i===0?"M":"L"}${xs[i]},${ys[i]}`).join(" ");
+      svg+=`<polyline points="${xs.map((x,i)=>x+","+ys[i]).join(" ")}" fill="none" stroke="${it.day_pct>=0?"#f04452":"#3182f6"}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>`;
+      // dots + labels
+      points.forEach((p,i)=>{
+        const col=p.l==="손절"?"#f04452":p.l==="목표"?"#00c471":p.l==="현재"?"#3182f6":"#8b95a1";
+        svg+=`<circle cx="${xs[i]}" cy="${ys[i]}" r="4" fill="${col}"/>`;
+        svg+=`<text x="${xs[i]}" y="${ys[i]-8}" text-anchor="middle" font-size="10" fill="${col}" font-weight="600">${p.l}</text>`;
+        svg+=`<text x="${xs[i]}" y="${ys[i]+16}" text-anchor="middle" font-size="9" fill="#8b95a1">${p.v.toLocaleString()}</text>`;
+      });
+      svg+=`</svg>`;
+      sparkEl.innerHTML=svg+`<div class="spark-note">⚠ 실시간 차트 아님 — 추천 기준가 기반 참고용</div>`;
+    }else if(td.current_price){
+      sparkEl.innerHTML=`<div class="spark-note">차트 데이터 부족 (현재가: ${cur}${td.current_price.toLocaleString()})</div>`;
+    }
+  }
+
+  // recent recs
+  const recEl=document.getElementById("sim-recs");
+  if(recEl&&td.recent&&td.recent.length){
+    let rh='<div style="font-size:12px;font-weight:700;color:var(--sim-mt);margin-bottom:6px">최근 추천</div>';
+    td.recent.slice(0,5).forEach(r=>{
+      const cls=classify(r.action_type,r.signal);
+      const st=r.status==="closed"?(r.outcome==="win"?"✅":"❌"):"⏳";
+      const pnl=r.pnl_pct!=null?`<span class="${r.pnl_pct>=0?"sim-up":"sim-dn"}">${(r.pnl_pct>=0?"+":"")}${r.pnl_pct}%</span>`:"";
+      rh+=`<div class="sim-rec-item"><span>${badge(cls)}</span><span style="color:var(--sim-mt)">${E((r.created_at||"").slice(5,16))}</span><span>${st}</span>${pnl}</div>`;
+    });
+    recEl.innerHTML=rh;
+  }else if(recEl){
+    recEl.innerHTML='<div style="color:var(--sim-mt);font-size:12px">추천 이력 없음</div>';
+  }
+}
+
+function simRenderOrder(it){
+  const el=document.getElementById("sim-order");
+  const cur=simCur(it);
+  el.innerHTML=`
+    <div class="sim-order-tabs">
+      <button class="sim-order-tab${_simOrderSide==="buy"?" buy-on":""}" onclick="simSwitchSide('buy')">매수</button>
+      <button class="sim-order-tab${_simOrderSide==="sell"?" sell-on":""}" onclick="simSwitchSide('sell')">매도</button>
+    </div>
+    <div class="sim-input-group">
+      <label>지정가 (${cur})</label>
+      <input class="sim-input" id="sim-price" type="number" step="any" value="${it.current_price||""}" oninput="simCalc()">
+    </div>
+    <div class="sim-input-group">
+      <label>수량 (주)</label>
+      <input class="sim-input" id="sim-qty" type="number" min="1" step="1" value="1" oninput="simCalc()">
+    </div>
+    <div class="sim-result" id="sim-result"></div>
+    <div id="sim-warnings"></div>
+    <button class="sim-preview-btn" onclick="simPreview()">📋 주문표 미리보기</button>
+    <div style="text-align:center;margin-top:8px;font-size:10px;color:var(--sim-mt)">실제 주문이 실행되지 않습니다</div>
+  `;
+  simCalc();
+}
+
+function simSwitchSide(side){
+  _simOrderSide=side;
+  if(_simSelected!=null)simRenderOrder(_simItems[_simSelected]);
+}
+
+function simCalc(){
+  const it=_simItems[_simSelected];if(!it)return;
+  const price=parseFloat(document.getElementById("sim-price")?.value)||0;
+  const qty=parseInt(document.getElementById("sim-qty")?.value)||0;
+  const total=price*qty;
+  const cur=simCur(it);
+  const curPrice=it.current_price||0;
+  const gap=curPrice?((price-curPrice)/curPrice*100):0;
+  const gapAbs=Math.abs(gap);
+
+  let rh=`<div class="sim-result-row"><span class="label">예상 금액</span><span class="value">${cur}${total.toLocaleString()}</span></div>`;
+  rh+=`<div class="sim-result-row"><span class="label">현재가 대비</span><span class="value ${gap>=0?"sim-up":"sim-dn"}">${(gap>=0?"+":"")}${gap.toFixed(2)}%</span></div>`;
+  if(it.currency==="USD"){
+    rh+=`<div class="sim-result-row"><span class="label">원화 환산</span><span class="value">₩${Math.round(total*1400).toLocaleString()} (추정)</span></div>`;
+  }
+  document.getElementById("sim-result").innerHTML=rh;
+
+  // warnings
+  let warns=[];
+  if(_simOrderSide==="buy"&&gapAbs<0.3&&price>0)warns.push({cls:"sim-warn-red",msg:"⚠ 현재가와 거의 같음 — 즉시 체결 가능성"});
+  if(_simOrderSide==="buy"&&gap>3)warns.push({cls:"sim-warn-red",msg:"⚠ 현재가보다 "+gap.toFixed(1)+"% 높은 지정가 — 괴리율 주의"});
+  if(_simOrderSide==="buy"&&gap<-5)warns.push({cls:"sim-warn-green",msg:"✓ 현재가 대비 "+gapAbs.toFixed(1)+"% 눌림목 매수 — 미체결 가능성"});
+  if(_simOrderSide==="sell"&&gap<-3)warns.push({cls:"sim-warn-blue",msg:"⚠ 현재가보다 "+gapAbs.toFixed(1)+"% 낮은 매도 — 즉시 손절 가능성"});
+  if(qty>it.shares&&_simOrderSide==="sell")warns.push({cls:"sim-warn-red",msg:"⚠ 보유 수량("+it.shares+"주) 초과"});
+  document.getElementById("sim-warnings").innerHTML=warns.map(w=>`<div class="sim-warning ${w.cls}">${w.msg}</div>`).join("");
+}
+
+function simPreview(){
+  const it=_simItems[_simSelected];if(!it)return;
+  const price=parseFloat(document.getElementById("sim-price")?.value)||0;
+  const qty=parseInt(document.getElementById("sim-qty")?.value)||0;
+  const total=price*qty;const cur=simCur(it);
+  const side=_simOrderSide==="buy"?"매수":"매도";
+  const gap=it.current_price?((price-it.current_price)/it.current_price*100):0;
+  alert(`📋 주문표 미리보기 (실제 주문 아님)\n\n${side} · ${it.name} (${it.ticker})\n계좌: ${it._acct}\n지정가: ${cur}${price.toLocaleString()}\n수량: ${qty}주\n예상 금액: ${cur}${total.toLocaleString()}\n현재가 대비: ${(gap>=0?"+":"")}${gap.toFixed(2)}%\n\n⚠ 이 주문표는 메모용이며 실제로 실행되지 않습니다.`);
+}
+
 /* ═══ INIT ═══ */
-async function init(){await Promise.all([loadMkt(),loadAct(),loadPF(),loadPerf(),loadNews(),loadTimeline()])}
+async function init(){await Promise.all([loadMkt(),loadAct(),loadPF(),loadPerf(),loadNews(),loadTimeline(),loadSimList()])}
 init();
 setInterval(()=>{loadMkt();loadAct();loadTimeline()},30000);
-setInterval(()=>{loadPF();loadPerf()},120000);
+setInterval(()=>{loadPF();loadPerf();loadSimList()},120000);
 setInterval(loadNews,600000);
 </script>
 </body>

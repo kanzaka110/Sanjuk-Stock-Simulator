@@ -154,3 +154,79 @@ def test_with_sample_rows(empty_db):
     lb = dd.latest_briefing_actions()
     assert lb["day"] == "2026-06-10"
     assert lb["by_type"].get("AI_NEW_BUY") == 1
+
+
+# ─── 추천 타임라인 구조 검증 ──────────────────────────
+def test_timeline_structure(empty_db):
+    tl = dd.recommendations_timeline(range_="today")
+    assert "items" in tl
+    assert "count" in tl
+    assert isinstance(tl["items"], list)
+    assert tl["count"] == 0
+
+
+def test_timeline_with_data(empty_db):
+    """타임라인에 데이터가 있을 때 action_label 필드 포함."""
+    from datetime import datetime, timezone, timedelta
+    today = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%dT09:00:00")
+
+    conn = sqlite3.connect(empty_db)
+    conn.execute(
+        """INSERT INTO predictions
+           (created_at, closed_at, ticker, name, signal, action_type,
+            account_type, entry_price, target_price, status, outcome,
+            pnl_pct, normalizer_version, briefing_type)
+           VALUES
+           (?, '', 'NVDA', 'NVIDIA', '매수',
+            'AI_NEW_BUY', '일반', 130, 150, 'open', '', 0, 'v1', 'US_BEFORE')""",
+        (today,),
+    )
+    conn.commit()
+    conn.close()
+
+    tl = dd.recommendations_timeline(range_="today")
+    assert tl["count"] == 1
+    assert tl["items"][0]["ticker"] == "NVDA"
+    assert "action_label" in tl["items"][0]
+
+
+# ─── ticker_detail 구조 검증 ─────────────────────────
+def test_ticker_detail_structure(empty_db):
+    """ticker_detail이 필수 키를 항상 반환."""
+    td = dd.ticker_detail("UNKNOWN")
+    for key in ("ticker", "name", "current_price", "day_pct",
+                "recent", "open", "closed", "accuracy"):
+        assert key in td, f"missing key: {key}"
+    assert isinstance(td["recent"], list)
+    assert isinstance(td["open"], list)
+
+
+# ─── 시뮬레이터 HTML 구조 검증 ───────────────────────
+def test_simulator_tab_in_html():
+    """index.html에 시뮬레이터 탭과 주요 요소가 존재."""
+    from pathlib import Path
+    html = (Path(__file__).parent.parent / "web" / "index.html").read_text(encoding="utf-8")
+
+    # 탭 버튼
+    assert 'data-t="sim"' in html
+    assert 'id="t-sim"' in html
+
+    # 3패널 구조
+    assert 'sim-left' in html
+    assert 'sim-center' in html
+    assert 'sim-right' in html
+
+    # 주요 요소 ID
+    assert 'id="sim-list"' in html
+    assert 'id="sim-detail"' in html
+    assert 'id="sim-order"' in html
+
+    # 안전 장치: POST/실제 주문 없음
+    assert "주문표 미리보기" in html
+    assert "실제 주문이 실행되지 않습니다" in html
+
+    # HTML 기본 구조
+    assert html.count("<html") == 1
+    assert html.count("</html>") == 1
+    assert html.count("<body") == 1
+    assert html.count("</body>") == 1
