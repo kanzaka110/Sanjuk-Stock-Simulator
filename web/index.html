@@ -252,6 +252,49 @@ details[open] summary::before{transform:rotate(90deg)}
 .sim-risk-row:last-child{border-bottom:none}
 .sim-rec-item{display:flex;gap:8px;align-items:center;padding:6px 0;border-bottom:1px solid var(--ln);font-size:12px}
 .sim-rec-item:last-child{border-bottom:none}
+
+/* ═══ responsive-pc-dashboard ═══ */
+@media(min-width:1100px){
+  body{max-width:100%;margin:0;flex-direction:row;flex-wrap:wrap}
+  .top{width:100%;flex-shrink:0}
+  /* 사이드바: 탭을 세로 변환 */
+  .tabs{flex-direction:column;width:180px;position:fixed;top:42px;left:0;bottom:0;
+    border-bottom:none;border-right:1px solid var(--ln);overflow-y:auto;overflow-x:hidden;
+    z-index:99;background:var(--bg);padding-top:8px}
+  .tb{text-align:left;padding:12px 20px;border-bottom:none;border-left:3px solid transparent;min-height:44px}
+  .tb.on{border-left-color:var(--b);border-bottom-color:transparent}
+  /* 콘텐츠 영역: 사이드바 오른쪽 */
+  .tc{margin-left:180px;max-width:1200px;padding:16px 24px 40px}
+  .tc.on{display:block}
+  /* 홈 탭: 2열 그리드 */
+  #t-home{display:grid!important;grid-template-columns:1fr 1fr;gap:12px}
+  #t-home .strip{grid-column:1/-1}
+  #t-home .c:first-of-type{grid-column:1/-1}
+  /* 포트폴리오 탭 */
+  #t-pf{display:grid!important;grid-template-columns:1fr 1fr;gap:12px}
+  #t-pf>*:first-child{grid-column:1/-1}
+  #t-pf>#pf-accts{grid-column:1/-1}
+  /* 액션 탭: 2열 */
+  #t-act{display:grid!important;grid-template-columns:1fr 1fr;gap:12px}
+  #t-act>*:first-child{grid-column:1/-1}
+  /* 성과 탭: 2열 */
+  #t-perf{display:grid!important;grid-template-columns:1fr 1fr;gap:12px}
+  #t-perf>*:first-child{grid-column:1/-1}
+  /* 시뮬레이터: 3열 터미널 */
+  #t-sim{margin-left:180px;padding:0}
+  .sim-hero{margin-left:0}
+  .sim-toolbar{margin-left:0}
+  .sim-wrap{flex-direction:row!important;gap:0}
+  .sim-left{width:240px;flex-shrink:0;border-right:1px solid var(--ln);max-height:calc(100vh - 240px);overflow-y:auto}
+  .sim-center{flex:1;min-width:0}
+  .sim-right{width:280px;flex-shrink:0;border-left:1px solid var(--ln)}
+  /* 카드 확장 */
+  .c{border-radius:14px;padding:18px}
+  .sb .v{font-size:22px}
+  /* 모달 PC 최적화 */
+  .md{max-width:640px;border-radius:16px;margin:auto;max-height:90vh}
+  .mo{align-items:center}
+}
 </style>
 </head>
 <body>
