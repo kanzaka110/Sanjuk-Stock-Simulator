@@ -700,3 +700,123 @@ class TestDBIntegrity:
                    WHERE signal='매도' AND briefing_type != ''
                      AND reasoning LIKE ?""", (f"%{phrase}%",)).fetchone()[0]
             assert n == 0, f"signal=매도 + '{phrase}' {n}건"
+
+
+class TestAccountFallback:
+    """계좌 미지정 시 결정론적 계좌 추론 (대괄호 표기)."""
+
+    def _conditional(self, raw):
+        raw = {**raw, "strategy_sell": []}
+        n = normalize_actions(raw, "US_NIGHT", {"MSFT": 370.0}, {})
+        return n["conditional_buy_candidates"][0]
+
+    def test_no_account_us_stock_defaults_general(self):
+        # account/account_type 둘 다 없음 + 미국 개별주 → [일반]
+        c = self._conditional({"strategy_buy": [
+            {"ticker": "MSFT", "name": "마이크로소프트",
+             "entry_price": "$355", "reason": "눌림목 대기"}]})
+        assert c["account"] == "[일반]"
+
+    def test_account_type_only_renders(self):
+        # account 없고 account_type만 있으면 account_type 우선 (ticker 기본값보다)
+        c = self._conditional({"strategy_buy": [
+            {"ticker": "MSFT", "name": "마이크로소프트", "account_type": "연금저축",
+             "entry_price": "$355", "reason": "눌림목 대기"}]})
+        assert c["account"] == "[연금저축]"
+
+    def test_no_account_kr_stock_defaults_isa(self):
+        c = self._conditional({"strategy_buy": [
+            {"ticker": "069500.KS", "name": "KODEX 200",
+             "entry_price": "₩138,000", "reason": "눌림목 대기"}]})
+        # KR 종목은 cur 없으니 ok_pullback 조건부 → [ISA] 기본
+        n = normalize_actions(
+            {"strategy_buy": [{"ticker": "069500.KS", "name": "KODEX 200",
+                               "entry_price": "₩138,000", "reason": "눌림목 대기"}],
+             "strategy_sell": []}, "KR_NIGHT", {"069500.KS": 143000}, {})
+        assert n["conditional_buy_candidates"][0]["account"] == "[ISA]"
+
+    def test_conditional_card_first_line_shows_account(self):
+        # 텔레그램 렌더 첫 줄에 계좌 표기 (예: 🕐🟢 [일반] 마이크로소프트)
+        from core.models import BriefingResult
+        from core.telegram import _build_impact_message
+        raw = {"strategy_buy": [{"ticker": "MSFT", "name": "마이크로소프트",
+                                 "entry_price": "$355", "confidence": "55",
+                                 "reason": "눌림목 대기"}], "strategy_sell": []}
+        raw["normalized"] = normalize_actions(raw, "US_NIGHT", {"MSFT": 370.0}, {})
+        msg = _build_impact_message(BriefingResult(title="t", raw_json=raw),
+                                    raw, "🇺🇸", "t", "US_NIGHT")
+        assert "[일반]" in msg and "마이크로소프트" in msg
+
+
+class TestUSQty:
+    """미국주 수량/총액 — KRW 예산을 USD로 환산 (천문학적 수량 방지)."""
+
+    def _card(self, conf="55"):
+        from core.models import BriefingResult
+        from core.telegram import _build_impact_message
+        raw = {"strategy_buy": [{"ticker": "MSFT", "name": "마이크로소프트",
+                                 "entry_price": "$355", "confidence": conf,
+                                 "reason": "눌림목 대기"}], "strategy_sell": []}
+        raw["normalized"] = normalize_actions(raw, "US_NIGHT", {"MSFT": 370.0}, {})
+        return raw["normalized"]["conditional_buy_candidates"][0], \
+            _build_impact_message(BriefingResult(title="t", raw_json=raw),
+                                  raw, "🇺🇸", "t", "US_NIGHT")
+
+    def test_us_qty_is_sane(self):
+        c, _ = self._card(conf="55")
+        # 100만원 ÷ ₩1,450 ≈ $689, $355 → 1주 (천문학적 수량 아님)
+        assert 1 <= c["qty_num"] <= 3
+        assert c["order_total"] == 355  # 1주 × $355
+
+    def test_us_qty_not_krw_division(self):
+        c, _ = self._card(conf="55")
+        # 버그였다면 1,000,000 // 355 = 2816주
+        assert c["qty_num"] < 100
+
+
+class TestSellProtectedHold:
+    """보유 보호 종목(MU 등) — 실행 매도 절대 금지 → 보유 관리로 강등."""
+
+    def test_mu_sell_never_executable(self):
+        raw = {"strategy_buy": [], "strategy_sell": [
+            {"ticker": "MU", "name": "마이크론", "current_price": "$900",
+             "take_profit": "$920", "reason": "RSI 78 과열 부분 익절"}]}
+        n = normalize_actions(raw, "US_NIGHT", {"MU": 900}, {})
+        assert len(n["executable_actions"]) == 0
+        assert len(n["cancelled_sells"]) == 1
+        act = n["cancelled_sells"][0]
+        assert act["action_type"] == HOLD_REVIEW
+        assert act["protected_hold"] is True
+        assert "실행 매도 아님" in act["hold_note"]
+
+    def test_mu_invalidation_shows_warning_not_sell(self):
+        raw = {"strategy_buy": [], "strategy_sell": [
+            {"ticker": "MU", "name": "마이크론", "current_price": "$900",
+             "reason": "HBM 수요 둔화 우려 — 주요 지지선 이탈 점검"}]}
+        n = normalize_actions(raw, "US_NIGHT", {"MU": 900}, {})
+        assert len(n["executable_actions"]) == 0
+        act = n["cancelled_sells"][0]
+        assert act["action_type"] == HOLD_REVIEW
+        assert act.get("invalidation_warning") is True
+        assert "무효화 조건 접근 경고" in act["hold_note"]
+
+    def test_mu_render_shows_hold_not_sell(self):
+        from core.models import BriefingResult
+        from core.telegram import _build_impact_message
+        raw = {"strategy_buy": [], "strategy_sell": [
+            {"ticker": "MU", "name": "마이크론", "current_price": "$900",
+             "take_profit": "$920", "reason": "RSI 78 과열 부분 익절"}]}
+        raw["normalized"] = normalize_actions(raw, "US_NIGHT", {"MU": 900}, {})
+        msg = _build_impact_message(BriefingResult(title="t", raw_json=raw),
+                                    raw, "🇺🇸", "t", "US_NIGHT")
+        assert "보유 관리" in msg
+        assert "실행 매도 아님" in msg
+
+    def test_non_protected_sell_still_executable(self):
+        # LMT는 보호 종목 아님 → 정상 실행 매도 유지
+        raw = {"strategy_buy": [], "strategy_sell": [
+            {"ticker": "LMT", "name": "록히드", "current_price": "$540",
+             "take_profit": "$560", "reason": "RSI 75 과열 부분 익절"}]}
+        n = normalize_actions(raw, "US_NIGHT", {"LMT": 540}, {})
+        assert len(n["executable_actions"]) == 1
+        assert n["executable_actions"][0]["action_type"] == AI_SELL_MANAGEMENT

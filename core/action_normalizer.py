@@ -63,6 +63,25 @@ SELL_CANCEL_PHRASES: tuple[str, ...] = (
     "전량 매도 부적절", "전량매도 부적절", "잔여 보유", "잔여보유",
 )
 
+# HOLDING_STRATEGY thesis에 있으면 "실행 매도 절대 금지" 보유 보호 종목 → 매도 신호를 보유 관리로 강등.
+# 의도적으로 명시 문구만 매칭한다(예: '전량 매도 금지'는 부분 익절을 허용하므로 보호 대상 아님).
+# 다른 종목을 보호하려면 thesis에 아래 문구를 직접 넣어 opt-in.
+SELL_PROTECT_PHRASES: tuple[str, ...] = (
+    "매도하지 않", "실행 매도 지시 금지", "실행 매도 금지",
+)
+
+# 보호 종목 매도 reason에 있으면 "무효화 조건 접근 경고"로 표시 (그래도 실행 매도 아님)
+INVALIDATION_PHRASES: tuple[str, ...] = (
+    "무효화", "지지선 이탈", "가이던스 훼손", "실적 훼손", "수요 둔화",
+    "논지 훼손", "파이프라인 훼손",
+)
+
+# 미국주 지정가(USD)를 KRW 예산으로 환산할 때 쓰는 폴백 환율
+USDKRW_FALLBACK = 1450.0
+
+# 계좌 추론용 유효 계좌 집합 (대괄호 표기 통일)
+_VALID_ACCOUNTS: tuple[str, ...] = ("일반", "ISA", "RIA", "IRP", "연금저축")
+
 
 def _row_text(row: dict, *fields: str) -> str:
     """row의 지정 필드들을 합쳐 소문자 무시 검색용 텍스트로."""
@@ -91,6 +110,44 @@ def _is_held(ticker: str, name: str, holdings: dict | None) -> bool:
         return True
     # 이름 매칭 (보유 dict가 {ticker: {...}} 형태일 때 name으로도 점검)
     return False
+
+
+def _is_kr_ticker(ticker: str) -> bool:
+    """국내 종목(.KS/.KQ 또는 6자리 숫자코드) 여부."""
+    t = str(ticker or "")
+    return t.endswith((".KS", ".KQ")) or t[:1].isdigit()
+
+
+def _bracket_account(val) -> str:
+    """'일반' 또는 '[일반]' → '[일반]'. 유효 계좌만, 아니면 빈 문자열."""
+    if not val:
+        return ""
+    bare = str(val).strip().strip("[]").strip()
+    return f"[{bare}]" if bare in _VALID_ACCOUNTS else ""
+
+
+def _infer_account(row: dict) -> str:
+    """카드용 계좌 추론 (대괄호 포함 반환).
+
+    우선순위: row.account → row.account_type → ticker 기준 기본값.
+    미국 개별주 → [일반], 국내 주식/ETF → [ISA] (config 기본).
+    """
+    acc = _bracket_account(row.get("account", "")) or _bracket_account(row.get("account_type", ""))
+    if acc:
+        return acc
+    return "[ISA]" if _is_kr_ticker(row.get("ticker", "")) else "[일반]"
+
+
+def _is_sell_protected(ticker: str) -> bool:
+    """HOLDING_STRATEGY thesis에 '실행 매도 금지' 표현이 있는 보유 보호 종목 여부."""
+    if not ticker:
+        return False
+    try:
+        from config.settings import HOLDING_STRATEGY
+    except Exception:
+        return False
+    thesis = str(HOLDING_STRATEGY.get(ticker, {}).get("thesis", ""))
+    return _has_phrase(thesis, SELL_PROTECT_PHRASES) != ""
 
 
 def _num(val) -> float:
@@ -181,11 +238,14 @@ def _buy_price_gate(entry: float, cur: float, inval: float) -> tuple[str, str]:
     return "immediate_fill", f"지정가 {entry:,.0f}가 현재가 {cur:,.0f}에 근접(-3% 미만) — 눌림목 아님, 재확인 필요"
 
 
-def _suggest_qty(account: str, entry: float, confidence: int, is_held: bool) -> dict:
+def _suggest_qty(entry: float, confidence: int, is_held: bool,
+                 is_kr: bool = True, usdkrw: float = USDKRW_FALLBACK) -> dict:
     """조건부 매수 수량/총액 산정 (예산 규칙 기반).
 
-    예산: RIA 1차 ETF 진입 기본 50~100만, 확신도 50+ 코어 ETF 최대 100~150만,
-          확신도 40 미만/타계좌 보유 중이면 30~60만. 수량=floor(예산/지정가).
+    예산: 1차 진입 기본 60~100만원. 확신도 40 미만/타계좌 보유 중이면 60만,
+          확신도 50+ 코어 100만, 그 외 80만. 수량=floor(예산/지정가).
+    미국주는 지정가가 USD이므로 KRW 예산을 USDKRW로 환산해 수량 산출
+    (예: 80만원 ÷ ₩1,450 ≈ $552, $355 종목 → 1주). order_total은 지정가 통화 기준.
     수량 0이면 shortage 플래그. AI가 shares를 명시했으면 그쪽을 우선.
     """
     if entry <= 0:
@@ -197,7 +257,9 @@ def _suggest_qty(account: str, entry: float, confidence: int, is_held: bool) -> 
         budget = 1_000_000
     else:
         budget = 800_000
-    qty = int(budget // entry)
+    # 미국주: KRW 예산 → USD 환산 후 USD 지정가로 수량 산출
+    eff_budget = budget if is_kr else (budget / usdkrw if usdkrw > 0 else budget)
+    qty = int(eff_budget // entry)
     if qty <= 0:
         return {"qty_num": 0, "budget": budget, "shortage": True}
     return {
@@ -241,7 +303,8 @@ def _build_action(row: dict, action_type: str, side: str, briefing_type: str,
             qty_fields = {"qty_num": int(ai_shares), "order_total": int(ai_shares) * entry_num,
                           "shortage": False, "qty_source": "ai"}
         else:
-            qty_fields = {**_suggest_qty(row.get("account", ""), entry_num, confidence, is_held),
+            qty_fields = {**_suggest_qty(entry_num, confidence, is_held,
+                                         is_kr=_is_kr_ticker(row.get("ticker", ""))),
                           "qty_source": "budget"}
 
     return {
@@ -250,7 +313,7 @@ def _build_action(row: dict, action_type: str, side: str, briefing_type: str,
         "action_type": action_type,
         "type": disp_type,
         "side": side,
-        "account": row.get("account", ""),
+        "account": _infer_account(row),
         "ticker": row.get("ticker", ""),
         "name": row.get("name", ""),
         "horizon": row.get("horizon", ""),
@@ -432,12 +495,25 @@ def normalize_actions(
             continue
         text = _row_text(row, "reason", "execution_condition", "timing")
         canceller = _has_phrase(text, SELL_CANCEL_PHRASES)
+        ticker = row.get("ticker", "")
 
         if canceller:
             # "홀딩 전환/매도 취소" → 실행 매도 아님
             atype = HOLD_REVIEW if ("홀딩" in canceller or "보유" in canceller) else CANCEL_SELL
             act = _build_action(row, atype, "sell", briefing_type)
             act["cancel_reason"] = canceller
+            cancelled_sells.append(act)
+        elif _is_sell_protected(ticker):
+            # 보유 보호 종목(예: MU): 실행 매도 절대 금지 → 보유 관리(HOLD_REVIEW)로 강등.
+            # 무효화 조건 접근 시에도 '경고'일 뿐, 사용자 승인 전 실행 매도 섹션에 넣지 않는다.
+            act = _build_action(row, HOLD_REVIEW, "sell", briefing_type)
+            act["protected_hold"] = True
+            if _has_phrase(text, INVALIDATION_PHRASES):
+                act["hold_note"] = "무효화 조건 접근 경고 — 실행 매도 아님 (승인 전 매도 금지)"
+                act["invalidation_warning"] = True
+            else:
+                act["hold_note"] = "보유 관리 · 실행 매도 아님"
+            act["cancel_reason"] = "보유 보호 종목 — 실행 매도 차단"
             cancelled_sells.append(act)
         else:
             executable.append(_build_action(row, AI_SELL_MANAGEMENT, "sell", briefing_type))
