@@ -630,6 +630,63 @@ def recommendations_timeline(
     return {"items": rows, "count": len(rows), "range": range_}
 
 
+# ─── /api/signals — 실시간 기술 신호 (브리핑과 무관, 라이브 계산) ──
+def _fetch_live_signals_raw() -> dict:
+    """보유+워치리스트 종목의 실시간 기술 지표 신호 (RSI/MACD/볼린저 합류).
+
+    브리핑(스케줄)과 무관하게 매 조회 시 yfinance로 라이브 계산한다.
+    confluence_score(-4~+4) 기준 강한 신호 우선 정렬. 읽기 전용·참고용(실행 주문 아님).
+    held(보유)는 매도 단정 대신 '보유 관리 관찰'로 완화 표기(장기 보유 원칙 존중).
+    """
+    from config.settings import PORTFOLIO, WATCHLIST
+    from core.indicators import calculate_all
+
+    held = set(PORTFOLIO)
+    tickers = {**PORTFOLIO, **WATCHLIST}
+    results = calculate_all(tickers, period="3mo")
+
+    items: list[dict] = []
+    for tk, r in results.items():
+        is_held = tk in held
+        score = int(r.confluence_score)
+        if score >= 2:
+            direction = "buy"
+            rec = "강세 신호 · 보유 유지/추가 검토" if is_held else "매수 신호 · 신규 검토"
+        elif score <= -2:
+            direction = "sell"
+            rec = "과열·약세 · 보유 관리 관찰" if is_held else "약세 · 관망"
+        else:
+            direction = "neutral"
+            rec = "중립"
+        items.append({
+            "ticker": tk,
+            "name": r.name,
+            "held": is_held,
+            "rsi": round(float(r.rsi), 1),
+            "confluence_score": score,
+            "confluence_label": r.confluence_label,
+            "rsi_signal": int(r.rsi_signal),
+            "macd_signal": int(r.macd_signal),
+            "bb_signal": int(r.bb_signal),
+            "bb_position": round(float(r.bb_position), 2),
+            "direction": direction,
+            "rec": rec,
+        })
+    # 강한 신호 우선 (합류 절대값 → RSI 극단)
+    items.sort(key=lambda x: (abs(x["confluence_score"]), abs(x["rsi"] - 50)), reverse=True)
+    return {
+        "items": items,
+        "count": len(items),
+        "generated_at": datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"),
+    }
+
+
+def live_signals() -> dict:
+    """실시간 기술 신호 (5분 캐시 — yfinance 호출 비용 완화)."""
+    out = _cached("live_signals", 300, _fetch_live_signals_raw)
+    return out if isinstance(out, dict) and out else {"items": [], "count": 0, "generated_at": ""}
+
+
 # ─── /api/news ────────────────────────────────────────────
 def _fetch_news_raw() -> dict:
     """뉴스 수집 — 기존 캐시/로그 우선, RSS 폴백. AI 호출 없음."""
@@ -794,3 +851,250 @@ def _fetch_rss_news() -> list[dict]:
 def news_data() -> dict:
     """뉴스 데이터 (10분 캐시)."""
     return _cached("news", 600, _fetch_news_raw)
+
+
+# ─── /api/calendar — 이벤트 캘린더 (경제·실적·배당 D-day) ──
+def _fetch_calendar_raw() -> dict:
+    """경제 일정(ECONOMIC_CALENDAR) + 보유 종목 실적/배당 + D-day.
+
+    읽기 전용. fundamentals(yfinance) 호출은 보유 종목에만 적용(비용 완화).
+    """
+    today = datetime.now(KST).date()
+    items: list[dict] = []
+
+    def _dday(date_str: str) -> int | None:
+        try:
+            d = datetime.strptime(date_str[:10], "%Y-%m-%d").date()
+            return (d - today).days
+        except Exception:
+            return None
+
+    # 1) 경제/매크로 일정
+    try:
+        from config.settings import ECONOMIC_CALENDAR
+        for date_str, name, importance in ECONOMIC_CALENDAR:
+            dd = _dday(date_str)
+            if dd is None or dd < -1:
+                continue
+            cat = "earnings" if "실적" in name else "economic"
+            items.append({
+                "date": date_str, "name": name, "category": cat,
+                "importance": importance, "d_day": dd, "ticker": "",
+            })
+    except Exception as e:
+        log.warning("calendar economic load failed: %s", e)
+
+    # 2) 보유 종목 실적/배당 (fundamentals)
+    try:
+        from config.settings import PORTFOLIO
+        from core.fundamentals import fetch_financial_data
+        # 같은 날 이미 실적 이벤트가 있으면(ECONOMIC_CALENDAR 수기 등록 등) 중복 방지
+        earnings_dates = {it["date"] for it in items if it["category"] == "earnings"}
+        for ticker, name in PORTFOLIO.items():
+            try:
+                fin = fetch_financial_data(ticker, name)
+            except Exception:
+                fin = None
+            if not fin:
+                continue
+            if fin.earnings_date:
+                dd = _dday(fin.earnings_date)
+                if dd is not None and dd >= -1 and fin.earnings_date not in earnings_dates:
+                    items.append({
+                        "date": fin.earnings_date, "name": f"{name} 실적 발표",
+                        "category": "earnings", "importance": "HIGH",
+                        "d_day": dd, "ticker": ticker,
+                    })
+                    earnings_dates.add(fin.earnings_date)
+            if fin.dividend_yield and fin.dividend_yield > 0:
+                items.append({
+                    "date": "", "name": f"{name} 배당 {fin.dividend_yield}%",
+                    "category": "dividend", "importance": "LOW",
+                    "d_day": None, "ticker": ticker,
+                })
+    except Exception as e:
+        log.warning("calendar earnings load failed: %s", e)
+
+    # 날짜 있는 이벤트 우선 정렬(D-day 오름차순), 배당(날짜 없음)은 뒤로
+    dated = sorted([i for i in items if i["d_day"] is not None], key=lambda x: x["d_day"])
+    undated = [i for i in items if i["d_day"] is None]
+    return {
+        "items": dated + undated,
+        "count": len(dated) + len(undated),
+        "generated_at": datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"),
+    }
+
+
+def event_calendar() -> dict:
+    """이벤트 캘린더 (6시간 캐시 — fundamentals 호출 비용 완화)."""
+    out = _cached("calendar", 21600, _fetch_calendar_raw)
+    return out if isinstance(out, dict) and out else {"items": [], "count": 0, "generated_at": ""}
+
+
+# ─── /api/portfolio/analytics — 성과 분석 (기여도·벤치마크·승률) ──
+def _fetch_portfolio_analytics_raw() -> dict:
+    """종목별 수익 기여도 + 가중 일간수익률 vs 벤치마크 + 승률↔실현손익.
+
+    기존 portfolio_data / market_data / performance_data 재사용(추가 시세 호출 최소화).
+    포트폴리오 가치 시계열을 저장하지 않으므로 시계열 MDD 대신
+    '현재 보유 종목 중 최대 평가손실'을 노출(라벨 명시).
+    """
+    pf = portfolio_data()
+    mk = market_data()
+    perf = performance_data(30)
+
+    # 전 종목 펼치기 (계좌 무관 합산)
+    holdings: list[dict] = []
+    for acct in pf.get("accounts", []):
+        for it in acct.get("items", []):
+            holdings.append({**it, "account": acct.get("name", "")})
+
+    grand_eval = float(pf.get("total_eval", 0) or 0)
+
+    # 종목별 손익 기여도 (평가손익 절대액 기준)
+    contrib: list[dict] = []
+    weighted_day = 0.0
+    worst = None
+    for it in holdings:
+        eval_krw = float(it.get("eval_krw", 0) or 0)
+        pnl_pct = float(it.get("pnl_pct", 0) or 0)
+        day_pct = float(it.get("day_pct", 0) or 0)
+        # cost_krw 역산 → 평가손익(원화)
+        cost_krw = eval_krw / (1 + pnl_pct / 100) if pnl_pct != -100 else 0.0
+        pnl_krw = eval_krw - cost_krw
+        weight = (eval_krw / grand_eval * 100) if grand_eval else 0.0
+        weighted_day += weight * day_pct / 100
+        row = {
+            "ticker": it.get("ticker", ""), "name": it.get("name", ""),
+            "account": it.get("account", ""), "eval_krw": round(eval_krw),
+            "pnl_krw": round(pnl_krw), "pnl_pct": round(pnl_pct, 2),
+            "day_pct": round(day_pct, 2), "weight": round(weight, 1),
+        }
+        contrib.append(row)
+        if worst is None or pnl_pct < worst["pnl_pct"]:
+            worst = row
+    contrib.sort(key=lambda x: x["pnl_krw"], reverse=True)
+
+    # 벤치마크: 시장 지수 일간 등락률 (KOSPI / S&P500 / NASDAQ)
+    indices = mk.get("indices", {})
+    bench = []
+    for label in ("KOSPI", "S&P500", "NASDAQ"):
+        q = indices.get(label)
+        if q:
+            bench.append({
+                "name": label, "day_pct": round(float(q.get("pct", 0) or 0), 2),
+                "vs_port": round(weighted_day - float(q.get("pct", 0) or 0), 2),
+            })
+
+    summary = perf.get("summary", {})
+    return {
+        "weighted_day_pct": round(weighted_day, 2),
+        "total_eval": round(grand_eval),
+        "total_pnl_pct": pf.get("total_pnl_pct", 0),
+        "contributors": contrib,
+        "top_winner": contrib[0] if contrib else None,
+        "top_loser": contrib[-1] if contrib else None,
+        "worst_holding": worst,
+        "benchmarks": bench,
+        "realized": {
+            "win_rate": summary.get("win_rate", 0),
+            "avg_pnl": summary.get("avg_pnl", 0),
+            "total": summary.get("total", 0),
+            "wins": summary.get("wins", 0),
+            "losses": summary.get("losses", 0),
+        },
+        "now": datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S KST"),
+    }
+
+
+def portfolio_analytics() -> dict:
+    """포트폴리오 성과 분석 (60초 캐시)."""
+    out = _cached("portfolio_analytics", 60, _fetch_portfolio_analytics_raw)
+    return out if isinstance(out, dict) and out else {}
+
+
+# ─── /api/decision-brief — 의사결정 브리핑 카드 ───────────
+_BUY_TYPES = ("AI_NEW_BUY", "AI_ADD_BUY", "CONDITIONAL_NEW_BUY")
+_SELL_TYPES = ("AI_SELL_MANAGEMENT",)
+_HOLD_TYPES = ("CANCEL_SELL", "HOLD_REVIEW")
+
+
+def _fetch_decision_brief_raw() -> dict:
+    """최근 브리핑을 6블록으로 구조화: 무슨일/왜중요/지금할일/하지말것/리스크/보호규칙.
+
+    DB predictions(최근 같은 날) read-only. 실행 주문 아님 — 참고용 정리.
+    """
+    conn = _conn()
+    if conn is None:
+        return {"day": "", "blocks": {}, "empty": True}
+    latest = _scalar(conn, "SELECT MAX(created_at) FROM predictions", default="")
+    if not latest:
+        conn.close()
+        return {"day": "", "blocks": {}, "empty": True}
+    day = str(latest)[:10]
+    rows = _rows(
+        conn,
+        """SELECT created_at, name, ticker, signal, action_type, account_type,
+                  entry_price, target_price, stop_loss, confidence,
+                  invalidation_condition, briefing_type, reasoning
+           FROM predictions WHERE created_at LIKE ? ORDER BY confidence DESC""",
+        (f"{day}%",),
+    )
+    conn.close()
+
+    do_now, conditionals, dont, risks = [], [], [], []
+    for r in rows:
+        at = r.get("action_type", "")
+        label = _ACTION_LABELS.get(at, at)
+        acct = r.get("account_type", "")
+        name = r.get("name") or r.get("ticker", "")
+        entry = r.get("entry_price")
+        item = {
+            "ticker": r.get("ticker", ""), "name": name, "account": acct,
+            "action_type": at, "label": label, "signal": r.get("signal", ""),
+            "entry_price": entry, "target_price": r.get("target_price"),
+            "stop_loss": r.get("stop_loss"), "confidence": r.get("confidence"),
+        }
+        if at in ("AI_NEW_BUY", "AI_ADD_BUY"):
+            do_now.append(item)
+        elif at == "CONDITIONAL_NEW_BUY":
+            conditionals.append(item)
+        elif at in _SELL_TYPES:
+            do_now.append({**item, "side": "sell"})
+        elif at in _HOLD_TYPES:
+            dont.append({**item, "note": "보유 관리 · 실행 매도 아님"})
+        elif at == "WATCH_ONLY":
+            dont.append({**item, "note": "관망 — 신규 진입 보류"})
+        inv = r.get("invalidation_condition")
+        if inv:
+            risks.append({"ticker": r.get("ticker", ""), "name": name, "invalidation": inv})
+
+    briefing_type = rows[0].get("briefing_type", "") if rows else ""
+    blocks = {
+        # 무슨 일: 브리핑 종류 + 액션 수
+        "what": {
+            "briefing_type": briefing_type,
+            "total": len(rows),
+            "do_now": len(do_now),
+            "conditional": len(conditionals),
+        },
+        # 왜 중요: 가장 신뢰도 높은 액션의 근거 일부
+        "why": (rows[0].get("reasoning", "")[:300] if rows else ""),
+        "do_now": do_now,           # 지금 할 일
+        "conditional": conditionals,  # 조건 충족 시
+        "dont": dont,               # 하지 말 것
+        "risks": risks[:6],         # 리스크/무효화 조건
+        # 사용자 보호 규칙 (고정)
+        "guardrails": [
+            "표시된 수치는 참고용이며 실제 주문이 아닙니다.",
+            "장기 보유 종목은 단기 변동으로 매도하지 않습니다.",
+            "조건부 매수는 조건 충족 전 즉시 체결하지 않습니다.",
+        ],
+    }
+    return {"day": day, "blocks": blocks, "empty": len(rows) == 0}
+
+
+def decision_brief() -> dict:
+    """의사결정 브리핑 (60초 캐시)."""
+    out = _cached("decision_brief", 60, _fetch_decision_brief_raw)
+    return out if isinstance(out, dict) and out else {"day": "", "blocks": {}, "empty": True}

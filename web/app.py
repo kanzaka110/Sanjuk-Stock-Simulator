@@ -103,6 +103,26 @@ def api_news():
     return JSONResponse(dd.news_data())
 
 
+@app.get("/api/signals")
+def api_signals():
+    return JSONResponse(dd.live_signals())
+
+
+@app.get("/api/calendar")
+def api_calendar():
+    return JSONResponse(dd.event_calendar())
+
+
+@app.get("/api/portfolio/analytics")
+def api_portfolio_analytics():
+    return JSONResponse(dd.portfolio_analytics())
+
+
+@app.get("/api/decision-brief")
+def api_decision_brief():
+    return JSONResponse(dd.decision_brief())
+
+
 @app.get("/api/recommendations/timeline")
 def api_timeline(
     range: str = "today",

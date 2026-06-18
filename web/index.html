@@ -314,6 +314,7 @@ details[open] summary::before{transform:rotate(90deg)}
 <div class="c ha-risk"><h3>리스크 보드</h3><div id="h-risk"></div></div>
 <div class="c ha-movers"><h3>오늘 많이 움직인 종목</h3><div id="h-movers"></div></div>
 <div class="c ha-act"><h3>오늘 주요 액션</h3><div id="h-act"></div></div>
+<div class="c ha-sig"><h3>실시간 기술 신호</h3><div id="h-sig"></div></div>
 <div class="c ha-sched"><h3>다음 일정</h3><div id="h-sched"></div></div>
 <div class="c ha-perf"><h3>30일 성과</h3><div id="h-perf"></div></div>
 <div class="c ha-news"><h3>주요 뉴스</h3><div id="h-news"></div></div>
@@ -345,6 +346,7 @@ details[open] summary::before{transform:rotate(90deg)}
 <div class="c"><h3>조건부 매수</h3><div id="a-cond"></div></div>
 <div class="c"><h3>보유 관리</h3><div id="a-mgmt"></div></div>
 <div class="c"><h3>관망 / 취소</h3><div id="a-watch"></div></div>
+<div class="c"><h3>실시간 기술 신호 <span class="mt" id="sig-ts"></span></h3><div class="ai-sub" style="margin-bottom:6px">RSI·MACD·볼린저 합류 — 브리핑과 무관한 라이브 계산 (참고용)</div><div id="a-sig"></div></div>
 <div class="c"><h3>시간별 추천 타임라인 <span id="tl-new"></span></h3><div id="a-tl"></div></div>
 <div class="c"><details><summary>미결 예측 전체</summary><div id="a-open"></div></details></div>
 <div class="c"><details><summary>최근 추천 20건</summary><div id="a-recent"></div></details></div>
@@ -478,6 +480,35 @@ function renderAct(r){
       ${mn(cls)}
     </div>
   </div>`;
+}
+
+/* 실시간 기술 신호 카드 (브리핑 무관 라이브) */
+function sigBadge(it){
+  const c=it.direction==="buy"?"bg-g":it.direction==="sell"?"bg-r":"bg-gy";
+  const sign=(it.confluence_score>0?"+":"")+it.confluence_score;
+  return`<span class="bg ${c}">${E(it.confluence_label)} ${sign}</span>`;
+}
+function renderSignal(it){
+  const tag=it.held?'<span class="mt">보유</span>':'<span class="mt">관심</span>';
+  return`<div class="ai" onclick="openM('${E(it.ticker)}')">
+    <div>${sigBadge(it)}</div>
+    <div class="ai-bd">
+      <div class="ai-nm">${E(it.name)} ${tag}</div>
+      <div class="ai-sub">RSI ${it.rsi} · ${E(it.rec)}</div>
+    </div>
+  </div>`;
+}
+async function loadSignals(){
+  const d=await J("/api/signals");
+  if(!d)return;
+  const its=d.items||[];
+  const ts=document.getElementById("sig-ts");if(ts)ts.textContent=d.generated_at?("· "+d.generated_at):"";
+  const strong=its.filter(x=>Math.abs(x.confluence_score)>=2);
+  const show=strong.length?strong:its.slice(0,6);
+  const full=document.getElementById("a-sig");
+  if(full)full.innerHTML=show.length?show.map(renderSignal).join(""):'<div class="emp">강한 신호 없음 (전 종목 중립권)</div>';
+  const home=document.getElementById("h-sig");
+  if(home)home.innerHTML=show.length?show.slice(0,4).map(renderSignal).join(""):'<div class="emp">중립권</div>';
 }
 
 /* ═══ PC 터미널 참조 컴포넌트 ═══ */
@@ -1139,10 +1170,11 @@ function simPreview(){
 }
 
 /* ═══ INIT ═══ */
-async function init(){await Promise.all([loadMkt(),loadAct(),loadPF(),loadPerf(),loadNews(),loadTimeline(),loadSimList()])}
+async function init(){await Promise.all([loadMkt(),loadAct(),loadPF(),loadPerf(),loadNews(),loadTimeline(),loadSimList(),loadSignals()])}
 init();
 setInterval(()=>{loadMkt();loadAct();loadTimeline()},30000);
 setInterval(()=>{loadPF();loadPerf();loadSimList()},120000);
+setInterval(()=>{loadSignals()},300000);
 setInterval(loadNews,600000);
 </script>
 </body>
