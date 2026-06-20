@@ -538,13 +538,61 @@ def _mobile_html() -> str:
     return (Path(__file__).parent.parent / "web" / "index.html").read_text(encoding="utf-8")
 
 
-# 6-1) 모바일 홈 핵심 마커 존재
+# 6-1) 모바일 홈 핵심 마커 존재 (v3 bento 투자 터미널)
 def test_mobile_home_markers():
     html = _mobile_html()
-    assert "오늘 투자 체크" in html, "히어로 '오늘 투자 체크' 없음"
-    assert "오늘 액션" in html, "'오늘 액션' 요약 없음"
-    assert "보유 관리" in html, "'보유 관리' 표시 없음"
+    assert ("모바일 투자 터미널" in html) or ("산적 투자 터미널" in html), "터미널 제목 없음"
+    assert "오늘 결론" in html, "Today Decision Strip 없음"
+    assert "수익 기여" in html, "Portfolio Bento '수익 기여' 없음"
+    assert "보유 TOP" in html, "Holdings 랭킹 '보유 TOP' 없음"
+    assert "주의 알림" in html, "Alert Stack '주의 알림' 없음"
+    assert "보유 관리 · 실행 매도 아님" in html, "보호종목 문구 없음"
     assert ("주문표 미리보기" in html) or ("가상 계산" in html), "안전 CTA 없음"
+
+
+# 8-1) bento/타일 레이아웃 마커 존재 (v3 세로 일지형 탈피)
+def test_mobile_bento_markers():
+    html = _mobile_html()
+    for marker in (
+        "mini-command-bar",   # 1. Sticky Mini Command Bar
+        "bento-hero",         # 2. Bento Hero Grid
+        "bento-main",
+        "bento-mini",
+        "action-matrix",      # 3. Action Tile Matrix
+        "action-tile",
+        "priority-rail",      # 4. Priority Rail (가로 스와이프)
+        "prail-card",
+        "portfolio-bento",    # 5. Portfolio Bento
+        "contrib-pair",
+        "holding-rank-compact",
+        "alert-stack",        # 6. Alert Stack
+        "alert-item",
+        "detail-drawer",      # 7. Detail Drawers
+    ):
+        assert marker in html, f"bento 마커 '{marker}' 없음"
+    # 가로 스와이프 rail (scroll-snap)
+    assert "scroll-snap-type:x mandatory" in html, "가로 rail scroll-snap 없음"
+
+
+# 8-2) 세로 일지형(v2) 회귀 방지 — 옛 단일 세로 컨테이너 ID 제거
+def test_mobile_no_vertical_journal_regression():
+    html = _mobile_html()
+    # v2의 분리형 세로 섹션 ID는 bento로 통합되며 사라져야 함
+    for gone in ('id="h-snap"', 'id="h-top"'):
+        assert gone not in html, f"세로 일지형 잔재 '{gone}' 존재 — bento 통합 누락"
+    # 액션은 가로 rail-cell이 아닌 2x2 action-tile로 렌더
+    assert 'class="action-tile' in html, "action-tile 렌더 없음 (옛 rail-cell 잔존 가능)"
+    # 우선순위는 prail-card(가로)로 렌더
+    assert 'class="prail-card' in html, "prail-card 렌더 없음"
+
+
+# 6-1b) analytics 필드 적극 사용 확인
+def test_mobile_uses_analytics_fields():
+    html = _mobile_html()
+    assert "top_contributors" in html, "top_contributors 미사용"
+    assert "bottom_contributors" in html, "bottom_contributors 미사용"
+    assert "risk_flags" in html, "risk_flags 미사용"
+    assert ("asset_classes" in html) or ("concentration" in html), "자산군/집중도 미사용"
 
 
 # 6-2) 금지 CTA 없음 (실제 주문 실행처럼 보이는 문구 차단)
@@ -591,3 +639,134 @@ def test_mobile_read_only():
     app_code = (Path(__file__).parent.parent / "web" / "app.py").read_text(encoding="utf-8")
     for verb in ("POST", "PUT", "DELETE"):
         assert verb not in app_code, f"app.py에 {verb} 핸들러 — read-only 위반"
+
+
+# ═══════════════════════════════════════════════════════
+# 폴드7 / 태블릿 PC식 레이아웃 (9단계) — index.html 정적 검증
+# ═══════════════════════════════════════════════════════
+# 9-1) 폴드 레이아웃 구조 마커 존재
+def test_mobile_fold_layout_markers():
+    html = _mobile_html()
+    for marker in (
+        "fold-layout",   # 홈 그리드 컨테이너
+        "fold-grid",     # 레이아웃 마커
+        "fold-main",     # 좌측 메인
+        "fold-side",     # 우측 사이드
+        "fold-wide",     # 하단 와이드
+        "fold-only",     # 폴드 폭에서만 노출
+    ):
+        assert marker in html, f"폴드 레이아웃 마커 '{marker}' 없음"
+    # grid-template-areas 로 2열/3영역 배치
+    assert "grid-template-areas" in html, "grid-template-areas 배치 없음"
+
+
+# 9-2) 폴드 전용 PC급 정보 패널 마커 존재
+def test_mobile_fold_panels():
+    html = _mobile_html()
+    for marker in (
+        "fold-performance-panel",  # 30일 성과 + 유형별 + 종료
+        "fold-market-panel",       # 지수 + 모드 + 뉴스
+        "fold-signal-panel",       # 기술 신호 + 일정
+        "fold-portfolio-panel",    # 기여도 + 보유 TOP + 자산군 + 계좌
+    ):
+        assert marker in html, f"폴드 패널 마커 '{marker}' 없음"
+
+
+# 9-3) 폴드/태블릿 breakpoint 존재 (720 / 900)
+def test_mobile_fold_breakpoints():
+    html = _mobile_html()
+    h = html.replace(" ", "")
+    assert "@media(min-width:720px)" in h, "720px breakpoint 없음"
+    assert "@media(min-width:900px)" in h, "900px breakpoint 없음"
+
+
+# 9-4) 헬퍼 클래스 존재 (폰/폴드 분기 + 그리드)
+def test_mobile_fold_helper_classes():
+    html = _mobile_html()
+    for cls in (
+        "fold-card-grid", "fold-wide-grid", "fold-dense-list",
+        "fold-visible", "phone-only", "fold-only",
+    ):
+        assert cls in html, f"헬퍼 클래스 '{cls}' 없음"
+
+
+# 9-5) PC급 analytics 정보 필드를 홈에서 사용
+def test_mobile_fold_uses_pc_fields():
+    html = _mobile_html()
+    for field in (
+        "top_contributors", "bottom_contributors",
+        "asset_classes", "risk_flags",
+    ):
+        assert field in html, f"PC급 필드 '{field}' 미사용"
+    # 집중도(concentration) — analytics 또는 비중 기반
+    assert ("concentration" in html) or ("weight" in html), "집중도/비중 정보 없음"
+
+
+# 9-6) 시뮬레이터 폴드 3패널 (CSS 보강) — sim-left/center/right + row 분기
+def test_mobile_fold_simulator_3panel():
+    html = _mobile_html()
+    for cls in ("sim-left", "sim-center", "sim-right"):
+        assert cls in html, f"시뮬레이터 패널 '{cls}' 없음"
+    # 폴드 폭에서 가로 3패널로 전환
+    assert "flex-direction:row" in html, "시뮬레이터 가로(row) 분기 없음"
+    # 주문 CTA는 계속 '주문표 미리보기' (실주문 아님)
+    assert ("주문표 미리보기" in html) or ("가상 주문 계산" in html), "안전 CTA 없음"
+
+
+# ═══ 9단계 보정: 축소 PC판 제거 — 폴드용 태블릿 터미널 ═══
+
+# 9R-1) 보정 마커 존재 (하이브리드/터미널/패널 분기)
+def test_mobile_fold_refine_markers():
+    html = _mobile_html()
+    for marker in (
+        "fold-hybrid",      # 720~899 하이브리드 단일 컬럼
+        "tablet-terminal",  # 900+ 2열 터미널 그리드
+        "fold-open-panel",  # 폴드에서 펼쳐두는 패널 묶음
+        "phone-collapsed",  # 폰에서만 접는 details
+        "tablet-visible",   # 태블릿 폭에서 노출
+    ):
+        assert marker in html, f"폴드 보정 마커 '{marker}' 없음"
+
+
+# 9R-2) 재계층화된 breakpoint (719/899 분기 + 1100 wide)
+def test_mobile_fold_refine_breakpoints():
+    html = _mobile_html()
+    h = html.replace(" ", "")
+    assert "max-width:899px" in h, "720~899 하이브리드 분기 없음"
+    assert "@media(min-width:1100px)" in h, "1100px wide breakpoint 없음"
+
+
+# 9R-3) 압축 방지 마커 — 최소 카드폭 + 큰 타이포
+def test_mobile_fold_refine_no_compress():
+    html = _mobile_html()
+    h = html.replace(" ", "")
+    assert "minmax(300px" in h, "최소 카드폭(minmax 300px) 방어 없음"
+    assert "clamp(30px" in h, "핵심 수치 대형 타이포(clamp 30px) 없음"
+
+
+# 9R-4) 메인/사이드 컬럼 비율 (메인 넓게)
+def test_mobile_fold_refine_column_ratio():
+    html = _mobile_html()
+    h = html.replace(" ", "")
+    # 메인 1.8fr 이상 / 사이드 보조
+    assert ("minmax(0,1.8fr)" in h) or ("minmax(0,1.9fr)" in h), "메인 컬럼 우세 비율 없음"
+
+
+# 9R-5) 집중도(concentration) 필드를 실제로 사용
+def test_mobile_fold_refine_concentration():
+    html = _mobile_html()
+    assert "concentration" in html, "concentration 필드 미사용"
+    # 집중도 행 마커
+    assert "conc-row" in html, "집중도 표시 행(conc-row) 없음"
+
+
+# 9R-6) 폴드 홈 그리드는 활성(.on) 탭일 때만 — 펼친 상태 탭 전환 회귀 방지
+def test_mobile_fold_home_grid_gated_by_on():
+    html = _mobile_html()
+    h = html.replace(" ", "").replace("\n", "")
+    # display:grid / display:block 으로 홈을 켜는 규칙은 .on 으로 게이트돼야
+    # (안 그러면 #t-home(120) > .tc{display:none}(10) 라 홈이 항상 떠 다른 탭을 덮음)
+    assert "#t-home.fold-layout.tablet-terminal.on{display:grid" in h, \
+        "900+ 홈 그리드가 .on 게이트 안 됨 — 펼친 상태 탭 클릭 무효"
+    assert "#t-home.fold-layout.on{display:block" in h, \
+        "720~899 홈 블록이 .on 게이트 안 됨 — 탭 클릭 무효"
