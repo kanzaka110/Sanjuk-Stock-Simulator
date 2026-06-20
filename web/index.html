@@ -32,7 +32,7 @@ body{background:var(--bg);color:var(--tx);font-family:-apple-system,BlinkMacSyst
 /* Tabs */
 .tabs{display:flex;border-bottom:1px solid var(--ln);position:sticky;top:41px;background:var(--bg);z-index:99;overflow-x:auto;-webkit-overflow-scrolling:touch}
 .tabs::-webkit-scrollbar{display:none}
-.tb{flex-shrink:0;padding:10px 16px;font-size:13px;font-weight:600;color:var(--mt);background:none;border:none;cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap;min-height:44px;-webkit-tap-highlight-color:transparent}
+.tb{flex-shrink:0;padding:13px 18px;font-size:14px;font-weight:600;color:var(--mt);background:none;border:none;cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap;min-height:48px;-webkit-tap-highlight-color:transparent}
 .tb.on{color:var(--wh);border-bottom-color:var(--b)}
 .tc{display:none;padding:12px 14px 80px;flex:1}.tc.on{display:block}
 
@@ -184,6 +184,26 @@ details[open] summary::before{transform:rotate(90deg)}
 .brief-tx{font-size:13.5px;line-height:1.65;color:var(--tx);font-weight:500}
 .brief-tx b{color:var(--wh);font-weight:700}
 .brief-tx .up{font-weight:700}.brief-tx .dn{font-weight:700}
+
+/* 오늘 투자 체크 히어로 */
+.hero-card{background:linear-gradient(135deg,#10203a 0%,#111a2b 100%);border:1px solid var(--ln);border-radius:14px;padding:16px 14px;margin-bottom:12px}
+.hero-card h3{font-size:11px;font-weight:700;color:var(--b);text-transform:uppercase;letter-spacing:.8px;margin-bottom:12px}
+.hero-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+.hero-cell{background:rgba(255,255,255,.03);border-radius:10px;padding:11px 12px}
+.hero-cell .l{font-size:11px;color:var(--mt);margin-bottom:3px}
+.hero-cell .v{font-size:22px;font-weight:800;line-height:1.15;font-variant-numeric:tabular-nums}
+
+/* 우선순위 액션 */
+.prio{display:flex;align-items:flex-start;gap:10px;padding:11px 0;border-bottom:1px solid var(--ln);min-height:52px;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.prio:last-child{border-bottom:none}
+.prio-bd{flex:1;min-width:0}
+.prio-nm{font-size:14px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.prio-rs{font-size:12px;color:var(--mt);margin-top:3px}
+
+/* 위험·주의 알림 (강제 매도 빨강 금지 — 주황/파랑만) */
+.warn-row{display:flex;align-items:center;gap:8px;padding:9px 11px;border-radius:9px;margin-top:8px;font-size:12.5px;font-weight:600;line-height:1.4}
+.warn-amber{background:var(--o2);color:var(--o);border:1px solid rgba(240,169,59,.3)}
+.warn-info{background:var(--b2);color:var(--b);border:1px solid rgba(59,130,246,.3)}
 
 /* 다이버징 바 차트 (지수 등락) */
 .divg{display:flex;flex-direction:column;gap:7px}
@@ -348,22 +368,32 @@ details[open] summary::before{transform:rotate(90deg)}
 <button class="tb" data-t="sim">시뮬레이터</button>
 </div>
 
-<!-- ═══ 홈 ═══ -->
+<!-- ═══ 홈: 요약 → 액션 → 포트폴리오 → 주의 ═══ -->
 <div class="tc on" id="t-home">
+<!-- 1. 오늘 투자 체크 (히어로) -->
+<div class="hero-card" id="h-hero"><h3>오늘 투자 체크</h3><div class="emp">데이터 대기</div></div>
+<!-- 2. 한 줄 판단 -->
 <div class="brief" id="h-brief"><div class="brief-ic">●</div><div class="brief-tx">오늘의 브리핑을 불러오는 중…</div></div>
+<!-- 3. 시장 한눈 -->
 <div class="strip ha-strip" id="h-strip" style="margin-bottom:12px"></div>
-<div class="c ha-todo"><h3>오늘 할 일</h3><div class="g4" id="h-sum"></div></div>
+<!-- 4. 오늘 액션 요약 -->
+<div class="c ha-todo"><h3>오늘 액션</h3><div class="g4" id="h-sum"></div></div>
+<!-- 5. 우선순위 액션 3 -->
+<div class="c"><h3>우선순위 액션</h3><div id="h-prio"><div class="emp">불러오는 중…</div></div></div>
+<!-- 6. 포트폴리오 핵심 -->
 <div class="c ha-pf"><h3>내 포트폴리오</h3><div id="h-pf"></div></div>
-<div class="c ha-divg"><h3>대표 지수 등락</h3><div id="h-divg"></div></div>
-<div class="c ha-risk"><h3>리스크 보드</h3><div id="h-risk"></div></div>
+<!-- 7. 위험 · 주의 -->
+<div class="c ha-risk"><h3>위험 · 주의</h3><div id="h-risk"></div></div>
 <div class="c ha-movers"><h3>오늘 많이 움직인 종목</h3><div id="h-movers"></div></div>
-<div class="c ha-act"><h3>오늘 주요 액션</h3><div id="h-act"></div></div>
-<div class="c ha-dbrief"><h3>의사결정 브리핑 <span class="mt" id="db-sub"></span></h3><div id="h-dbrief"><div class="emp">불러오는 중…</div></div></div>
-<div class="c ha-sig"><h3>실시간 기술 신호</h3><div id="h-sig"></div></div>
-<div class="c ha-sched"><h3>다음 일정</h3><div id="h-sched"></div></div>
-<div class="c ha-cal"><h3>이벤트 캘린더</h3><div id="h-cal"><div class="emp">불러오는 중…</div></div></div>
-<div class="c ha-perf"><h3>30일 성과</h3><div id="h-perf"></div></div>
-<div class="c ha-news"><h3>주요 뉴스</h3><div id="h-news"></div></div>
+<!-- 상세 (기본 접힘) -->
+<div class="c"><details><summary>오늘 주요 액션 전체</summary><div id="h-act"></div></details></div>
+<div class="c"><details><summary>의사결정 브리핑 <span class="mt" id="db-sub"></span></summary><div id="h-dbrief"><div class="emp">불러오는 중…</div></div></details></div>
+<div class="c"><details><summary>대표 지수 등락</summary><div id="h-divg"></div></details></div>
+<div class="c"><details><summary>실시간 기술 신호</summary><div id="h-sig"></div></details></div>
+<div class="c"><details><summary>다음 일정</summary><div id="h-sched"></div></details></div>
+<div class="c"><details><summary>이벤트 캘린더</summary><div id="h-cal"><div class="emp">불러오는 중…</div></div></details></div>
+<div class="c"><details><summary>30일 성과</summary><div id="h-perf"></div></details></div>
+<div class="c"><details><summary>주요 뉴스</summary><div id="h-news"></div></details></div>
 </div>
 
 <!-- ═══ 시장 ═══ -->
@@ -394,7 +424,7 @@ details[open] summary::before{transform:rotate(90deg)}
 <div class="c"><h3>보유 관리</h3><div id="a-mgmt"></div></div>
 <div class="c"><h3>관망 / 취소</h3><div id="a-watch"></div></div>
 <div class="c"><h3>실시간 기술 신호 <span class="mt" id="sig-ts"></span></h3><div class="ai-sub" style="margin-bottom:6px">RSI·MACD·볼린저 합류 — 브리핑과 무관한 라이브 계산 (참고용)</div><div id="a-sig"></div></div>
-<div class="c"><h3>시간별 추천 타임라인 <span id="tl-new"></span></h3><div id="a-tl"></div></div>
+<div class="c"><details><summary>시간별 추천 타임라인 <span id="tl-new"></span></summary><div id="a-tl"></div></details></div>
 <div class="c"><details><summary>미결 예측 전체</summary><div id="a-open"></div></details></div>
 <div class="c"><details><summary>최근 추천 20건</summary><div id="a-recent"></div></details></div>
 </div>
@@ -476,11 +506,12 @@ function openM(t){mo.classList.add('open');document.getElementById('mc').innerHT
 /* Utils */
 function cc(v){return v>0?"up":v<0?"dn":"fl"}
 function cs(v){return(v>=0?"+":"")+v+"%"}
-function classify(at,s){const t=at||s||"";if(t==="AI_SELL_MANAGEMENT")return"mgmt";if(t.includes("NEW_BUY")||t.includes("ADD_BUY")||s==="매수")return"buy";if(t.includes("CONDITIONAL"))return"cond";if(t.includes("SELL")||s==="매도")return"sell";return"watch"}
+function classify(at,s){const t=at||s||"";if(t==="AI_SELL_MANAGEMENT")return"mgmt";if(t.includes("CONDITIONAL"))return"cond";if(t.includes("NEW_BUY")||t.includes("ADD_BUY")||s==="매수")return"buy";if(t.includes("SELL")||s==="매도")return"sell";return"watch"}
 const BL={buy:"매수",cond:"조건부 매수",sell:"매도",mgmt:"보유 관리",watch:"관망"};
 const BC={buy:"bg-g",cond:"bg-b",sell:"bg-r",mgmt:"bg-o",watch:"bg-gy"};
 function badge(c){return`<span class="bg ${BC[c]}">${BL[c]}</span>`}
-function mn(c){return c==="mgmt"?'<div class="ai-note">실행 매도 아님 · 트레일링 익절 점검</div>':""}
+/* AI_SELL_MANAGEMENT → 보유 관리 (주황/중립, 강제 매도 아님) */
+function mn(c){return c==="mgmt"?'<div class="ai-note">보유 관리 · 실행 매도 아님 · 트레일링 익절 점검</div>':""}
 
 /* Horizontal bar helper */
 function hbar(pct,color,h=8){const w=Math.min(Math.abs(pct),100);return`<div class="hbar" style="height:${h}px"><div class="fill" style="width:${w}%;background:${color}"></div></div>`}
@@ -613,6 +644,8 @@ async function loadCalendar(){
 /* ═══ 성과 분석 — 벤치마크·기여도 (모바일) ═══ */
 async function loadAnalytics(){
   const d=await J("/api/portfolio/analytics");if(!d)return;
+  window._anFlags=d.risk_flags||[];
+  renderRiskBoard();
   const benchEl=document.getElementById("p-bench");
   if(benchEl){
     const wd=d.weighted_day_pct||0;
@@ -720,9 +753,21 @@ function renderRiskBoard(){
     ["현금 비중",cash!=null?`${cash}%`:"—",""],
     ["오늘 변동",tday!=null?`<span class="${cc(tday)}">${cs(+tday.toFixed(2))}</span>`:"—",""],
   ];
-  el.innerHTML='<div class="risk-grid">'+cells.map(([l,v,s])=>
+  let html='<div class="risk-grid">'+cells.map(([l,v,s])=>
     `<div class="risk-cell"><div class="rk-l">${l}</div><div class="rk-v">${v}</div>${s?`<div class="rk-s">${E(s)}</div>`:""}</div>`
   ).join("")+'</div>';
+  // 보호종목·리스크 플래그 (강제 매도 빨강 금지 — 주황/파랑만)
+  const flags=window._anFlags||[];
+  flags.forEach(f=>{
+    if(f.type==="protected"){
+      html+=`<div class="warn-row warn-amber">🛡 ${E(f.name||f.ticker||"")} · 보유 관리 · 실행 매도 아님</div>`;
+    }else if(f.type==="data_error"||f.type==="stale"){
+      html+=`<div class="warn-row warn-amber">⚠ ${E(f.message||"데이터 점검 필요")}</div>`;
+    }else if(f.message){
+      html+=`<div class="warn-row warn-amber">⚠ ${E(f.message)}</div>`;
+    }
+  });
+  el.innerHTML=html;
 }
 
 /* 다음 일정 (장 스케줄) */
@@ -767,6 +812,41 @@ async function loadMkt(){
   document.getElementById("h-divg").innerHTML=divergingChart(Object.entries(idx));
   renderSched(d);
   renderRiskBoard();
+}
+
+/* 오늘 투자 체크 히어로 (포트폴리오 KPI) */
+function renderHero(d){
+  const el=document.getElementById("h-hero");if(!el)return;
+  if(!d||!d.total_eval){el.innerHTML='<h3>오늘 투자 체크</h3><div class="emp">데이터 대기</div>';return}
+  let todayChg=0;(d.accounts||[]).forEach(a=>(a.items||[]).forEach(it=>{todayChg+=(it.eval_krw||0)*(it.day_pct||0)/100}));
+  const todayPct=d.total_eval?todayChg/d.total_eval*100:0;
+  const cells=[
+    ["총 평가액","₩"+(d.total_eval||0).toLocaleString(),""],
+    ["총 손익률",cs(d.total_pnl_pct),cc(d.total_pnl_pct)],
+    ["오늘 변동",cs(+todayPct.toFixed(2)),cc(todayPct)],
+    ["현금 비중",(d.cash_weight||0)+"%",""],
+  ];
+  el.innerHTML='<h3>오늘 투자 체크</h3><div class="hero-grid">'+
+    cells.map(([l,v,c])=>`<div class="hero-cell"><div class="l">${l}</div><div class="v ${c}">${v}</div></div>`).join("")+'</div>';
+}
+
+/* 우선순위 액션 — 실행 → 조건부 → 보유관리 순 top 3 */
+function prioReason(r,cls){
+  const acct=r.account_type?`[${E(r.account_type)}] `:"";
+  const px=r.entry_price?` · 지정가 ${r.entry_price.toLocaleString()}`:"";
+  if(cls==="mgmt")return `${acct}보유 관리 · 실행 매도 아님`;
+  if(cls==="cond")return r.entry_price?`${acct}조건 도달 시만${px}`:`${acct}정보 부족 · 검토`;
+  if(cls==="buy")return r.entry_price?`${acct}실행 후보${px}`:`${acct}정보 부족 · 검토`;
+  if(cls==="sell")return `${acct}매도 검토${px}`;
+  return `${acct}관망`;
+}
+function renderPrio(gr){
+  const el=document.getElementById("h-prio");if(!el)return;
+  const ordered=[...(gr.buy||[]),...(gr.cond||[]),...(gr.mgmt||[])].slice(0,3);
+  if(!ordered.length){el.innerHTML='<div class="emp">우선순위 액션 없음 — 보유 관리에 집중</div>';return}
+  el.innerHTML=ordered.map(r=>{const cls=classify(r.action_type,r.signal);
+    return`<div class="prio" onclick="openM('${E(r.ticker)}')"><div>${badge(cls)}</div><div class="prio-bd"><div class="prio-nm">${E(r.name)}</div><div class="prio-rs">${prioReason(r,cls)}</div></div></div>`;
+  }).join("");
 }
 
 /* ═══ LOAD PORTFOLIO ═══ */
@@ -830,6 +910,7 @@ async function loadPF(){
   const conc=allItems.length?Math.max(...allItems.map(x=>x.weight||0)):0;
   _riskPF={conc:Math.round(conc),cash:d.cash_weight||0,todayPct:todayPct};
   renderRiskBoard();
+  renderHero(d);
 }
 
 /* ═══ LOAD ACTIONS ═══ */
@@ -847,6 +928,7 @@ async function loadAct(){
   const sumHTML=`<div class="sb"><div class="v" style="color:var(--g)">${gr.buy.length+gr.sell.length}</div><div class="l">실행</div></div><div class="sb"><div class="v" style="color:var(--b)">${gr.cond.length}</div><div class="l">조건부</div></div><div class="sb"><div class="v" style="color:var(--o)">${gr.mgmt.length}</div><div class="l">보유관리</div></div><div class="sb"><div class="v" style="color:var(--gy)">${gr.watch.length}</div><div class="l">관망</div></div>`;
   document.getElementById("h-sum").innerHTML=sumHTML;
   document.getElementById("a-sum").innerHTML=sumHTML;
+  renderPrio(gr);
 
   const order=["buy","cond","sell","mgmt","watch"];
   const sorted=[...rows].sort((a,b)=>order.indexOf(classify(a.action_type,a.signal))-order.indexOf(classify(b.action_type,b.signal)));

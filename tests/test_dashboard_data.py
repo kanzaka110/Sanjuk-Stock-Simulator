@@ -518,13 +518,76 @@ def test_pc_read_only():
         assert verb not in app_code, f"app.py에 {verb} 핸들러 — read-only 위반"
 
 
-# 4-6) 모바일 index.html 미변경(불필요한 대규모 변경 없음)
-def test_mobile_html_untouched():
+# PC 파일 미변경 가드 — 모바일(6단계) 작업이 PC 터미널을 건드리지 않음
+def test_pc_html_untouched():
     import subprocess
     from pathlib import Path
     root = Path(__file__).parent.parent
     diff = subprocess.run(
-        ["git", "diff", "--stat", "HEAD", "--", "web/index.html"],
+        ["git", "diff", "--stat", "HEAD", "--", "web/index_pc.html"],
         cwd=root, capture_output=True, text=True,
     ).stdout
-    assert diff.strip() == "", f"모바일 index.html 변경 감지:\n{diff}"
+    assert diff.strip() == "", f"PC index_pc.html 변경 감지:\n{diff}"
+
+
+# ═══════════════════════════════════════════════════════
+# 모바일 투자 툴 UX (6단계) — index.html 정적 검증
+# ═══════════════════════════════════════════════════════
+def _mobile_html() -> str:
+    from pathlib import Path
+    return (Path(__file__).parent.parent / "web" / "index.html").read_text(encoding="utf-8")
+
+
+# 6-1) 모바일 홈 핵심 마커 존재
+def test_mobile_home_markers():
+    html = _mobile_html()
+    assert "오늘 투자 체크" in html, "히어로 '오늘 투자 체크' 없음"
+    assert "오늘 액션" in html, "'오늘 액션' 요약 없음"
+    assert "보유 관리" in html, "'보유 관리' 표시 없음"
+    assert ("주문표 미리보기" in html) or ("가상 계산" in html), "안전 CTA 없음"
+
+
+# 6-2) 금지 CTA 없음 (실제 주문 실행처럼 보이는 문구 차단)
+def test_mobile_no_forbidden_cta():
+    html = _mobile_html()
+    for cta in ("주문 실행", "매수하기", "매도하기"):
+        assert cta not in html, f"금지 CTA '{cta}' 존재"
+
+
+# 6-3) AI_SELL_MANAGEMENT → 보유 관리 매핑 마커
+def test_mobile_sell_management_mapped():
+    html = _mobile_html()
+    assert "AI_SELL_MANAGEMENT" in html, "보유관리 분류 식별자 없음"
+    # classify가 mgmt로 분류하고 라벨을 '보유 관리'로 노출
+    assert '"보유 관리"' in html or "보유 관리" in html, "보유 관리 라벨 없음"
+
+
+# 6-4) 보호종목 문구 '보유 관리 · 실행 매도 아님' 존재
+def test_mobile_protected_phrase():
+    html = _mobile_html()
+    assert "보유 관리 · 실행 매도 아님" in html, "보호종목 문구 없음"
+
+
+# 6-6) classify 분류 순서 — CONDITIONAL이 NEW_BUY보다 먼저 판정
+def test_mobile_classify_conditional_before_newbuy():
+    import re
+    html = _mobile_html()
+    m = re.search(r"function classify\(at,s\)\{(.*?)\}", html, re.S)
+    assert m, "classify 함수 없음"
+    body = m.group(1)
+    i_cond = body.find('includes("CONDITIONAL")')
+    i_buy = body.find('includes("NEW_BUY")')
+    assert i_cond != -1 and i_buy != -1, "CONDITIONAL/NEW_BUY 판정 누락"
+    assert i_cond < i_buy, \
+        "CONDITIONAL_NEW_BUY가 buy로 오분류 — CONDITIONAL 판정을 NEW_BUY보다 먼저 둬야 함"
+
+
+# 6-5) read-only — 주문 실행 폼/POST 없음
+def test_mobile_read_only():
+    html = _mobile_html()
+    assert 'method="post"' not in html.lower(), "주문 실행 폼(method=post) 존재"
+    assert "실제 주문이 실행되지 않습니다" in html, "가상/읽기전용 안내 없음"
+    from pathlib import Path
+    app_code = (Path(__file__).parent.parent / "web" / "app.py").read_text(encoding="utf-8")
+    for verb in ("POST", "PUT", "DELETE"):
+        assert verb not in app_code, f"app.py에 {verb} 핸들러 — read-only 위반"
