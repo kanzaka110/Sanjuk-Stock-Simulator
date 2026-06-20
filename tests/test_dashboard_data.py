@@ -465,3 +465,66 @@ def test_analytics_does_not_write_db(empty_db, monkeypatch):
     after = _sq.connect(empty_db).execute(
         "SELECT COUNT(*) FROM predictions").fetchone()[0]
     assert before == after == 0
+
+
+# ═══════════════════════════════════════════════════════
+# PC 다크 투자 터미널 (4단계) — index_pc.html 정적 검증
+# ═══════════════════════════════════════════════════════
+def _pc_html() -> str:
+    from pathlib import Path
+    return (Path(__file__).parent.parent / "web" / "index_pc.html").read_text(encoding="utf-8")
+
+
+# 4-1) 다크 테마 마커 유지
+def test_pc_dark_theme_markers():
+    html = _pc_html()
+    assert "다크 PC 투자 터미널" in html, "다크 터미널 주석/식별자 없음"
+    assert ("#0a0e17" in html or "#070b12" in html), "다크 배경 변수 없음"
+    assert ("#111a2b" in html or "#101826" in html), "다크 패널 변수 없음"
+
+
+# 4-2) 라이트 회귀 방지 — 라이트 배경이 주요 변수로 쓰이지 않음
+def test_pc_no_light_regression():
+    html = _pc_html()
+    assert "#f5f6f8" not in html, "라이트 배경 #f5f6f8 회귀"
+    # #ffffff가 배경 변수(--bg/--panel)로 선언되지 않았는지 확인
+    import re
+    bad = re.findall(r"--(?:bg|bg2|panel)\s*:\s*#ffffff", html, re.IGNORECASE)
+    assert not bad, f"라이트 배경 변수 회귀: {bad}"
+
+
+# 4-3) PC 홈에 portfolio analytics 필드 사용
+def test_pc_uses_analytics_fields():
+    html = _pc_html()
+    for field in ("top_contributors", "bottom_contributors",
+                  "risk_flags", "concentration", "asset_classes"):
+        assert field in html, f"analytics 필드 미사용: {field}"
+
+
+# 4-4) MU/보호종목 문구 확인
+def test_pc_protected_phrasing():
+    html = _pc_html()
+    assert "보유 관리" in html, "'보유 관리' 문구 없음"
+    assert "실행 매도 아님" in html, "'실행 매도 아님' 문구 없음"
+
+
+# 4-5) read-only — 주문 버튼/POST 없음
+def test_pc_read_only():
+    html = _pc_html()
+    assert "POST" not in html, "PC HTML에 POST 존재 — read-only 위반"
+    from pathlib import Path
+    app_code = (Path(__file__).parent.parent / "web" / "app.py").read_text(encoding="utf-8")
+    for verb in ("POST", "PUT", "DELETE"):
+        assert verb not in app_code, f"app.py에 {verb} 핸들러 — read-only 위반"
+
+
+# 4-6) 모바일 index.html 미변경(불필요한 대규모 변경 없음)
+def test_mobile_html_untouched():
+    import subprocess
+    from pathlib import Path
+    root = Path(__file__).parent.parent
+    diff = subprocess.run(
+        ["git", "diff", "--stat", "HEAD", "--", "web/index.html"],
+        cwd=root, capture_output=True, text=True,
+    ).stdout
+    assert diff.strip() == "", f"모바일 index.html 변경 감지:\n{diff}"

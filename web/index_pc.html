@@ -255,15 +255,19 @@ body{background:var(--bg);color:var(--tx);font-family:-apple-system,BlinkMacSyst
 <div class="page on" id="p-home">
   <div class="brief" style="margin-bottom:14px"><div class="ai">✦</div><div class="txt" id="brief">오늘의 브리핑을 불러오는 중…</div></div>
   <div class="kpis" style="margin-bottom:14px" id="home-kpis">
-    <div class="kpi"><div class="k">총자산</div><div class="v skl">&nbsp;</div></div>
-    <div class="kpi"><div class="k">오늘 손익</div><div class="v skl">&nbsp;</div></div>
-    <div class="kpi"><div class="k">오늘 액션</div><div class="v skl">&nbsp;</div></div>
-    <div class="kpi"><div class="k">리스크</div><div class="v skl">&nbsp;</div></div>
+    <div class="kpi"><div class="k">전체 평가액</div><div class="v skl">&nbsp;</div></div>
+    <div class="kpi"><div class="k">총 손익률</div><div class="v skl">&nbsp;</div></div>
+    <div class="kpi"><div class="k">오늘 가중 수익률</div><div class="v skl">&nbsp;</div></div>
+    <div class="kpi"><div class="k">현금 비중</div><div class="v skl">&nbsp;</div></div>
   </div>
   <div class="strip" id="home-strip" style="margin-bottom:14px"></div>
   <div class="panel" id="home-dbrief-panel" style="margin-bottom:14px">
     <div class="ph"><h2>의사결정 브리핑</h2><span class="sub" id="dbrief-sub">참고용 · 실제 주문 아님</span></div>
     <div id="home-dbrief"><div class="emp">브리핑을 불러오는 중…</div></div>
+  </div>
+  <div class="panel" id="home-contrib-panel" style="margin-bottom:14px">
+    <div class="ph"><h2>포트폴리오 기여도</h2><span class="sub">수익·손실을 만든 종목 · 참고용</span></div>
+    <div id="home-contrib"><div class="emp">기여도를 불러오는 중…</div></div>
   </div>
   <div class="grid" style="grid-template-columns:1fr 340px">
     <div>
@@ -272,8 +276,8 @@ body{background:var(--bg);color:var(--tx);font-family:-apple-system,BlinkMacSyst
         <div id="home-chart"></div>
       </div>
       <div class="panel">
-        <div class="ph"><h2>내 종목</h2><span class="sub" id="home-tbl-sub"></span></div>
-        <div class="tbl-scroll"><table class="tbl"><thead><tr><th>종목</th><th>현재가</th><th>오늘</th><th>평가(₩)</th><th>수익률</th><th>비중</th><th>상태</th></tr></thead><tbody id="home-rows"></tbody></table></div>
+        <div class="ph"><h2>내 종목 랭킹</h2><span class="sub" id="home-tbl-sub"></span></div>
+        <div class="tbl-scroll"><table class="tbl"><thead><tr><th>종목</th><th>평가(₩)</th><th>손익률</th><th>손익금액</th><th>비중</th><th>일간기여</th><th>상태</th></tr></thead><tbody id="home-rows"></tbody></table></div>
       </div>
     </div>
     <div>
@@ -283,7 +287,7 @@ body{background:var(--bg);color:var(--tx);font-family:-apple-system,BlinkMacSyst
     </div>
   </div>
   <div class="grid" style="grid-template-columns:1fr 1fr 1fr;margin-top:14px">
-    <div class="panel"><div class="ph"><h2>최근 추천 타임라인</h2></div><div id="home-tl"></div></div>
+    <div class="panel"><div class="ph"><h2>최근 추천 타임라인</h2></div><div id="home-tl" class="tbl-scroll" style="max-height:340px"></div></div>
     <div class="panel"><div class="ph"><h2>리스크 보드</h2></div><div id="home-risk"></div></div>
     <div class="panel"><div class="ph"><h2>이벤트 캘린더</h2><span class="sub" id="home-cal-sub"></span></div><div id="home-cal"></div></div>
   </div>
@@ -466,7 +470,8 @@ function renderSched(){
   const sess=(_mkt&&_mkt.session)||{},kr=sess.kr||"",us=sess.us||"";
   const kBadge=kr.includes("REGULAR")?'<span class="up">개장 중</span>':'<span class="mt">대기</span>';
   const uBadge=us.includes("REGULAR")?'<span class="up">개장 중</span>':us.includes("PRE")||us.includes("AFTER")?'<span class="o" style="color:var(--o)">시간외</span>':'<span class="mt">대기</span>';
-  document.getElementById("home-sched").innerHTML=`<div class="sched"><div class="when">09:00–15:30</div><div class="what">한국장 (KST) ${kBadge}</div></div><div class="sched"><div class="when">23:30–06:00</div><div class="what">미국장 (KST) ${uBadge}</div></div><div class="sched"><div class="when">매일 07:00</div><div class="what">데일리 리뷰 브리핑</div></div><div class="sched"><div class="when">매일 23:00</div><div class="what">한국장 야간 프리브리핑</div></div>`;
+  const schedEl=document.getElementById("home-sched");if(!schedEl)return;
+  schedEl.innerHTML=`<div class="sched"><div class="when">09:00–15:30</div><div class="what">한국장 (KST) ${kBadge}</div></div><div class="sched"><div class="when">23:30–06:00</div><div class="what">미국장 (KST) ${uBadge}</div></div><div class="sched"><div class="when">매일 07:00</div><div class="what">데일리 리뷰 브리핑</div></div><div class="sched"><div class="when">매일 23:00</div><div class="what">한국장 야간 프리브리핑</div></div>`;
 }
 
 /* ════ PORTFOLIO ════ */
@@ -474,16 +479,16 @@ let _pf=null;
 async function ldPF(){
   const d=await J("/api/portfolio");if(!d)return;_pf=d;
   let todayChg=0,items=[];
-  (d.accounts||[]).forEach(a=>(a.items||[]).forEach(it=>{todayChg+=(it.eval_krw||0)*(it.day_pct||0)/100;items.push(it)}));
+  (d.accounts||[]).forEach(a=>(a.items||[]).forEach(it=>{todayChg+=(it.eval_krw||0)*(it.day_pct||0)/100;items.push({...it,account:a.name})}));
   _pf._today=todayChg;_pf._items=items;
   const todayPct=d.total_eval?todayChg/d.total_eval*100:0;
   const maxW=Math.max(...items.map(x=>x.weight||0),0);
-  // home KPI (액션/리스크는 다른 로더가 채움)
+  // home KPI: 전체 평가액 / 총 손익률 / 오늘 가중 수익률 / 현금 비중 (analytics 실패해도 채워짐)
   setKPI("home-kpis",[
-    ["총자산",`₩${F(d.total_eval)}`,"",""],
-    ["오늘 손익",cs(todayPct),`${todayChg>=0?"+":""}${F(Math.round(todayChg))}₩`,cc(todayPct)],
-    ["오늘 액션","—","집계 중",""],
-    ["리스크","—","집계 중",""],
+    ["전체 평가액",`₩${F(d.total_eval)}`,"",""],
+    ["총 손익률",cs(d.total_pnl_pct),"",cc(d.total_pnl_pct)],
+    ["오늘 가중 수익률",cs(todayPct),`${todayChg>=0?"+":""}${F(Math.round(todayChg))}₩`,cc(todayPct)],
+    ["현금 비중",`${d.cash_weight}%`,`₩${F(d.total_cash)}`,""],
   ]);
   window._kpiToday={pct:todayPct,amt:todayChg,maxW:maxW};
   // pf KPI
@@ -519,7 +524,10 @@ async function ldPF(){
 }
 function rowHome(it){
   const st=it.pnl_pct>0?'<span class="tag up">수익</span>':it.pnl_pct<0?'<span class="tag dn">손실</span>':'<span class="tag gy">―</span>';
-  return`<tr onclick="openTk('${E(it.ticker)}')"><td><span class="nm">${E(it.name)}</span> <span class="tk">${E(it.ticker)}</span></td><td>${cur(it)}${F(it.current_price)}</td><td class="${cc(it.day_pct)}">${cs(it.day_pct)}</td><td>₩${F(it.eval_krw)}</td><td class="${cc(it.pnl_pct)}">${cs(it.pnl_pct)}</td><td>${it.weight||0}%</td><td>${st}</td></tr>`;
+  const pnlK=it.pnl_pct?(it.eval_krw-it.eval_krw/(1+it.pnl_pct/100)):0;
+  const dayC=(it.weight||0)*(it.day_pct||0)/100;
+  const acct=it.account?` <span class="tk">[${E(it.account)}]</span>`:"";
+  return`<tr onclick="openTk('${E(it.ticker)}')"><td><span class="nm">${E(it.name)}</span> <span class="tk">${E(it.ticker)}</span>${acct}</td><td>₩${F(it.eval_krw)}</td><td class="${cc(it.pnl_pct)}">${cs(it.pnl_pct)}</td><td class="${cc(pnlK)}">${pnlK>=0?"+":"-"}${F(Math.round(Math.abs(pnlK)))}</td><td>${it.weight||0}%</td><td class="${cc(dayC)}">${dayC>=0?"+":""}${(Math.round(dayC*100)/100)}%p</td><td>${st}</td></tr>`;
 }
 function setKPI(id,arr){document.getElementById(id).innerHTML=arr.map(([k,v,x,c])=>`<div class="kpi"><div class="k">${k}</div><div class="v ${c||""}">${v}</div>${x?`<div class="x ${c||"mt"}">${x}</div>`:""}</div>`).join("")}
 
@@ -531,12 +539,21 @@ function renderRisk(){
   const modeC=mode==="위험"?"dn":mode==="주의"?"o":"up";
   const vixC=vix>=25?"dn":vix>=18?"o":"up";
   const concC=tp.maxW>=30?"dn":tp.maxW>=20?"o":"fl";
+  // analytics risk_flags — 보호 종목은 매도 압박 아님(중립/주황)으로 렌더
+  const an=window._an;let flagHTML="";
+  if(an&&(an.risk_flags||[]).length){
+    flagHTML=an.risk_flags.map(f=>{
+      if(f.type==="protected")return`<div class="risk-row"><span class="k">🛡 ${E(f.name||f.ticker)}</span><span class="v" style="color:var(--o);font-size:11.5px">보유 관리 · 실행 매도 아님</span></div>`;
+      const lossF=f.type==="loss";
+      return`<div class="risk-row"><span class="k" style="font-size:11.5px">${E(f.message||f.type)}</span><span class="v ${lossF?"dn":""}" style="${lossF?"":"color:var(--o)"};font-size:11.5px">주의</span></div>`;
+    }).join("");
+  }
   document.getElementById("home-risk").innerHTML=`
     <div class="risk-row"><span class="k">시장 모드</span><span class="v ${modeC==="o"?"":modeC}" style="${modeC==="o"?"color:var(--o)":""}">${mode}</span></div>
     <div class="risk-row"><span class="k">VIX 공포지수</span><span class="v ${vixC==="o"?"":vixC}" style="${vixC==="o"?"color:var(--o)":""}">${vix??"—"}</span></div>
     <div class="risk-row"><span class="k">오늘 변동</span><span class="v ${cc(tp.pct)}">${cs(tp.pct||0)}</span></div>
     <div class="risk-row"><span class="k">현금 비중</span><span class="v">${d?d.cash_weight:"—"}%</span></div>
-    <div class="risk-row"><span class="k">최대 종목 집중</span><span class="v ${concC==="o"?"":concC}" style="${concC==="o"?"color:var(--o)":""}">${tp.maxW?tp.maxW.toFixed(1):"—"}%</span></div>`;
+    <div class="risk-row"><span class="k">최대 종목 집중</span><span class="v ${concC==="o"?"":concC}" style="${concC==="o"?"color:var(--o)":""}">${tp.maxW?tp.maxW.toFixed(1):"—"}%</span></div>`+flagHTML;
 }
 
 /* ════ STATUS ════ */
@@ -559,9 +576,7 @@ async function ldAct(){
   const brief=buildBrief(gr);
   document.getElementById("brief").innerHTML=brief;
   document.getElementById("act-brief").innerHTML=brief;
-  // KPI 액션/리스크 채우기 (home)
   const n=exec.length;
-  patchKPI("home-kpis",2,["오늘 액션",`${n}건`,cond.length?`조건부 ${cond.length}`:"실행 필요",""]);
   // act KPIs
   setKPI("act-kpis",[
     ["실행 필요",`${n}건`,`매수 ${gr.buy.length}·매도 ${gr.sell.length}`,n?"up":""],
@@ -788,9 +803,36 @@ async function ldCalendar(){
   el.innerHTML=items.length?items.slice(0,8).map(calRow).join(""):'<div class="emp">예정 일정 없음</div>';
 }
 
-/* ════ PORTFOLIO ANALYTICS (feature 2) ════ */
+/* ════ PORTFOLIO ANALYTICS (feature 2 + 3단계 홈 기여도) ════ */
+/* 홈 기여도 패널: top_contributors / bottom_contributors / concentration / asset_classes / 보호종목 */
+function renderHomeContrib(d){
+  const el=document.getElementById("home-contrib");if(!el)return;
+  if(!d){el.innerHTML='<div class="emp">기여도 데이터 없음</div>';return;}
+  const top=(d.top_contributors||[])[0],bot=(d.bottom_contributors||[])[0],conc=d.concentration||{};
+  const prot=(d.risk_flags||[]).filter(f=>f.type==="protected");
+  const man=k=>(k>=0?"+":"-")+F(Math.round(Math.abs(k)/10000))+"만원";
+  let h='<div class="grid" style="grid-template-columns:1fr 1fr;gap:11px">';
+  if(top){h+=`<div class="db-cell"><div class="dh">🔺 수익 기여 1위</div><div class="di"><b>${E(top.name)}</b> <span class="up">${man(top.pnl_krw)}</span></div><div class="di mt">기여도 ${top.contribution_pct>=0?"+":""}${top.contribution_pct}% · 비중 ${top.weight}%</div></div>`;}
+  else{h+='<div class="db-cell"><div class="dh">🔺 수익 기여 1위</div><div class="di mt">데이터 없음</div></div>';}
+  if(bot&&bot.pnl_krw<0){h+=`<div class="db-cell"><div class="dh">🔻 손실 기여 1위</div><div class="di"><b>${E(bot.name)}</b> <span class="dn">${man(bot.pnl_krw)}</span></div><div class="di mt">기여도 ${bot.contribution_pct}% · 비중 ${bot.weight}%</div></div>`;}
+  else{h+='<div class="db-cell"><div class="dh">🔻 손실 기여 1위</div><div class="di mt">손실 종목 없음</div></div>';}
+  h+='</div>';
+  h+=`<div class="opv-foot" style="margin-top:11px"><span class="f">상위 3종목 집중 <b>${conc.top3_weight||0}%</b></span><span class="f">최대 종목 <b>${conc.largest_holding?E(conc.largest_holding.name)+" "+conc.largest_holding.weight+"%":"—"}</b></span><span class="f">현금 비중 <b>${conc.cash_weight||0}%</b></span></div>`;
+  const ac=d.asset_classes||[];
+  if(ac.length){
+    h+='<div style="margin-top:11px"><div class="mt" style="font-size:10.5px;font-weight:700;margin-bottom:6px">자산군별 평가손익</div>'+ac.map(a=>{const p=a.pnl_krw||0,c=p>0?"up":p<0?"dn":"mt";return`<div class="arow"><div class="k nowrap" style="width:84px">${E(a.name)}</div><div class="b mt" style="font-size:11px">${a.pct}%</div><div class="v ${c}">${p?((p>=0?"+":"-")+F(Math.round(Math.abs(p)/10000))+"만"):"—"}</div></div>`}).join("")+'</div>';
+  }
+  // 보호 종목: 주황 뱃지 · 매도 압박이 아니라 '보유 관리 · 실행 매도 아님'
+  if(prot.length){
+    h+='<div style="margin-top:10px;display:flex;flex-wrap:wrap;gap:7px">'+prot.map(f=>`<span class="tag o">🛡 ${E(f.name||f.ticker)} · 보유 관리 · 실행 매도 아님</span>`).join("")+'</div>';
+  }
+  el.innerHTML=h;
+}
 async function ldAnalytics(){
-  const d=await J("/api/portfolio/analytics");if(!d)return;
+  const d=await J("/api/portfolio/analytics");
+  window._an=d||null;
+  renderHomeContrib(d);renderRisk();
+  if(!d)return;
   const benchEl=document.getElementById("perf-bench");
   if(benchEl){
     const wd=d.weighted_day_pct||0;
