@@ -932,12 +932,42 @@ def event_calendar() -> dict:
 
 
 # ─── /api/portfolio/analytics — 성과 분석 (기여도·벤치마크·승률) ──
+# 자산군 ETF 식별 키워드 (_fetch_portfolio_raw 분류와 동일)
+_ETF_NAME_HINTS = ("TIGER", "KODEX", "PLUS", "나스닥", "S&P", "선진국", "고배당", "중국")
+# 리스크 임계값 (하드코딩 회피 — 한 곳에 모음)
+_RISK_LOSS_PCT = -10.0       # 종목 평가손실 경고선
+_RISK_WEIGHT_PCT = 25.0      # 단일 종목 집중 경고선
+_CASH_MIN_PCT = 5.0          # 현금 비중 하한
+_CASH_MAX_PCT = 40.0         # 현금 비중 상한
+_PROTECTED_LABEL = "보유 관리 · 실행 매도 아님"
+
+
+def _asset_class(ticker: str, name: str) -> str:
+    """종목을 ETF / 국내주식 / 해외주식으로 분류 (_fetch_portfolio_raw 로직과 동일)."""
+    t = ticker or ""
+    nm = name or ""
+    if ".KS" in t and any(k in nm for k in _ETF_NAME_HINTS):
+        return "ETF"
+    if ".KS" in t or ".KQ" in t:
+        return "국내주식"
+    return "해외주식"
+
+
+def _is_protected(ticker: str) -> bool:
+    """보유 보호 종목(예: MU) 여부 — action_normalizer 판정 재사용. 실패 시 False."""
+    try:
+        from core.action_normalizer import _is_sell_protected
+        return bool(_is_sell_protected(ticker))
+    except Exception:
+        return False
+
+
 def _fetch_portfolio_analytics_raw() -> dict:
-    """종목별 수익 기여도 + 가중 일간수익률 vs 벤치마크 + 승률↔실현손익.
+    """종목별 수익 기여도 + 계좌별·자산군별 손익 + 집중도/리스크 + 벤치마크 + 승률.
 
     기존 portfolio_data / market_data / performance_data 재사용(추가 시세 호출 최소화).
-    포트폴리오 가치 시계열을 저장하지 않으므로 시계열 MDD 대신
-    '현재 보유 종목 중 최대 평가손실'을 노출(라벨 명시).
+    전부 읽기 전용 계산 — DB write 없음. 보호 종목(MU)은 기여도에 표시하되
+    '보유 관리 · 실행 매도 아님'으로 라벨해 실행 매도처럼 보이지 않게 한다.
     """
     pf = portfolio_data()
     mk = market_data()
@@ -950,12 +980,21 @@ def _fetch_portfolio_analytics_raw() -> dict:
             holdings.append({**it, "account": acct.get("name", "")})
 
     grand_eval = float(pf.get("total_eval", 0) or 0)
+    total_cash = float(pf.get("total_cash", 0) or 0)
+    cash_weight = float(pf.get("cash_weight", 0) or 0)
 
-    # 종목별 손익 기여도 (평가손익 절대액 기준)
-    contrib: list[dict] = []
+    # 1차 패스: 종목별 평가손익·비중·일간기여 (전체 평가손익 합계 산출용)
+    rows: list[dict] = []
     weighted_day = 0.0
+    total_pnl_krw = 0.0
     worst = None
+    # 자산군 집계 (현금 포함)
+    asset_val: dict[str, float] = {"ETF": 0.0, "국내주식": 0.0, "해외주식": 0.0}
+    asset_pnl: dict[str, float] = {"ETF": 0.0, "국내주식": 0.0, "해외주식": 0.0}
+
     for it in holdings:
+        ticker = it.get("ticker", "")
+        name = it.get("name", "")
         eval_krw = float(it.get("eval_krw", 0) or 0)
         pnl_pct = float(it.get("pnl_pct", 0) or 0)
         day_pct = float(it.get("day_pct", 0) or 0)
@@ -963,17 +1002,112 @@ def _fetch_portfolio_analytics_raw() -> dict:
         cost_krw = eval_krw / (1 + pnl_pct / 100) if pnl_pct != -100 else 0.0
         pnl_krw = eval_krw - cost_krw
         weight = (eval_krw / grand_eval * 100) if grand_eval else 0.0
-        weighted_day += weight * day_pct / 100
+        day_contribution = weight * day_pct / 100
+        weighted_day += day_contribution
+        total_pnl_krw += pnl_krw
+
+        cls = _asset_class(ticker, name)
+        asset_val[cls] += eval_krw
+        asset_pnl[cls] += pnl_krw
+
         row = {
-            "ticker": it.get("ticker", ""), "name": it.get("name", ""),
-            "account": it.get("account", ""), "eval_krw": round(eval_krw),
+            "ticker": ticker, "name": name, "account": it.get("account", ""),
+            "eval_krw": round(eval_krw), "cost_krw": round(cost_krw),
             "pnl_krw": round(pnl_krw), "pnl_pct": round(pnl_pct, 2),
             "day_pct": round(day_pct, 2), "weight": round(weight, 1),
+            "day_contribution_pct": round(day_contribution, 3),
+            "protected": _is_protected(ticker),
         }
-        contrib.append(row)
+        rows.append(row)
         if worst is None or pnl_pct < worst["pnl_pct"]:
             worst = row
-    contrib.sort(key=lambda x: x["pnl_krw"], reverse=True)
+
+    # 2차 패스: 전체 손익 대비 기여도 (전체 손익 0이면 0 처리)
+    for row in rows:
+        row["contribution_pct"] = (
+            round(row["pnl_krw"] / total_pnl_krw * 100, 1) if total_pnl_krw else 0.0
+        )
+
+    contrib = sorted(rows, key=lambda x: x["pnl_krw"], reverse=True)
+    top_contributors = contrib[:5]
+    bottom_contributors = sorted(rows, key=lambda x: x["pnl_krw"])[:5]
+
+    # 계좌별 요약 (eval/cost/cash/pnl_krw/pnl_pct/weight)
+    accounts_summary: list[dict] = []
+    for acct in pf.get("accounts", []):
+        eval_total = float(acct.get("eval_total", 0) or 0)
+        cost_total = float(acct.get("cost_total", 0) or 0)
+        accounts_summary.append({
+            "name": acct.get("name", ""),
+            "eval_total": round(eval_total),
+            "cost_total": round(cost_total),
+            "cash": round(float(acct.get("cash", 0) or 0)),
+            "pnl_krw": round(eval_total - cost_total),
+            "pnl_pct": acct.get("pnl_pct", 0),
+            "weight": acct.get("weight", 0),
+        })
+
+    # 자산군별 (현금 포함). 현금은 평가손익 0.
+    asset_classes: list[dict] = []
+    for cls in ("ETF", "국내주식", "해외주식"):
+        val = asset_val[cls]
+        if val <= 0:
+            continue
+        asset_classes.append({
+            "name": cls, "value": round(val),
+            "pct": round(val / grand_eval * 100, 1) if grand_eval else 0.0,
+            "pnl_krw": round(asset_pnl[cls]),
+        })
+    if total_cash > 0:
+        asset_classes.append({
+            "name": "현금", "value": round(total_cash),
+            "pct": round(total_cash / grand_eval * 100, 1) if grand_eval else 0.0,
+            "pnl_krw": 0,  # 현금은 평가손익 없음
+        })
+
+    # 집중도
+    by_weight = sorted(rows, key=lambda x: x["weight"], reverse=True)
+    largest = by_weight[0] if by_weight else None
+    concentration = {
+        "top1_weight": round(by_weight[0]["weight"], 1) if by_weight else 0.0,
+        "top3_weight": round(sum(r["weight"] for r in by_weight[:3]), 1),
+        "largest_holding": (
+            {"ticker": largest["ticker"], "name": largest["name"],
+             "weight": largest["weight"]} if largest else None
+        ),
+        "cash_weight": round(cash_weight, 1),
+    }
+
+    # 리스크 플래그
+    risk_flags: list[dict] = []
+    for row in rows:
+        if row["protected"]:
+            # 보호 종목: 기여도엔 표시하되 실행 매도 아님을 명시
+            risk_flags.append({
+                "type": "protected", "ticker": row["ticker"], "name": row["name"],
+                "message": f"{row['name']} {_PROTECTED_LABEL}",
+            })
+            continue  # 보호 종목은 손실/집중 경고로 매도 압박하지 않음
+        if row["pnl_pct"] <= _RISK_LOSS_PCT:
+            risk_flags.append({
+                "type": "loss", "ticker": row["ticker"], "name": row["name"],
+                "pnl_pct": row["pnl_pct"],
+                "message": f"{row['name']} 평가손실 {row['pnl_pct']:.1f}% ({_RISK_LOSS_PCT:.0f}% 이하)",
+            })
+        if row["weight"] >= _RISK_WEIGHT_PCT:
+            risk_flags.append({
+                "type": "concentration", "ticker": row["ticker"], "name": row["name"],
+                "weight": row["weight"],
+                "message": f"{row['name']} 비중 {row['weight']:.0f}% ({_RISK_WEIGHT_PCT:.0f}% 이상 집중)",
+            })
+    if cash_weight < _CASH_MIN_PCT:
+        risk_flags.append({
+            "type": "cash_low", "message": f"현금 비중 {cash_weight:.0f}% ({_CASH_MIN_PCT:.0f}% 미만)",
+        })
+    elif cash_weight > _CASH_MAX_PCT:
+        risk_flags.append({
+            "type": "cash_high", "message": f"현금 비중 {cash_weight:.0f}% ({_CASH_MAX_PCT:.0f}% 초과)",
+        })
 
     # 벤치마크: 시장 지수 일간 등락률 (KOSPI / S&P500 / NASDAQ)
     indices = mk.get("indices", {})
@@ -991,10 +1125,19 @@ def _fetch_portfolio_analytics_raw() -> dict:
         "weighted_day_pct": round(weighted_day, 2),
         "total_eval": round(grand_eval),
         "total_pnl_pct": pf.get("total_pnl_pct", 0),
+        "total_pnl_krw": round(total_pnl_krw),
+        "total_cash": round(total_cash),
+        "cash_weight": round(cash_weight, 1),
         "contributors": contrib,
+        "top_contributors": top_contributors,
+        "bottom_contributors": bottom_contributors,
         "top_winner": contrib[0] if contrib else None,
         "top_loser": contrib[-1] if contrib else None,
         "worst_holding": worst,
+        "accounts": accounts_summary,
+        "asset_classes": asset_classes,
+        "concentration": concentration,
+        "risk_flags": risk_flags,
         "benchmarks": bench,
         "realized": {
             "win_rate": summary.get("win_rate", 0),
@@ -1011,6 +1154,59 @@ def portfolio_analytics() -> dict:
     """포트폴리오 성과 분석 (60초 캐시)."""
     out = _cached("portfolio_analytics", 60, _fetch_portfolio_analytics_raw)
     return out if isinstance(out, dict) and out else {}
+
+
+# ─── 브리핑/텔레그램용 기여도 요약 (읽기 전용 텍스트) ──────
+def _fmt_man(krw: float) -> str:
+    """원화 → '만원' 표기. 예: 1_200_000 → '+120만원'."""
+    return f"{krw / 10000:+,.0f}만원"
+
+
+def portfolio_contribution_summary() -> dict:
+    """포트폴리오 기여도를 브리핑/텔레그램에 바로 넣을 짧은 요약(dict + text).
+
+    실행 주문 아님 — 참고용. 보호 종목(MU)은 '보유 관리, 실행 매도 아님'으로 명시.
+    """
+    a = portfolio_analytics()
+    if not a:
+        return {"text": "포트폴리오 데이터 없음", "lines": [], "empty": True}
+
+    total_eval = float(a.get("total_eval", 0) or 0)
+    total_pnl_pct = a.get("total_pnl_pct", 0)
+    top = a.get("top_contributors") or []
+    bottom = a.get("bottom_contributors") or []
+    conc = a.get("concentration") or {}
+
+    lines: list[str] = [
+        f"전체 평가액: {total_eval / 10000:,.0f}만원 / 손익 {total_pnl_pct:+.1f}%"
+    ]
+
+    if top:
+        w = top[0]
+        lines.append(
+            f"수익 기여 1위: {w['name']} {_fmt_man(w['pnl_krw'])} "
+            f"({w.get('contribution_pct', 0):+.0f}% 기여)"
+        )
+    if bottom:
+        l = bottom[0]
+        if l["pnl_krw"] < 0:  # 실제 손실 종목이 있을 때만
+            lines.append(
+                f"손실 기여 1위: {l['name']} {_fmt_man(l['pnl_krw'])} "
+                f"({l.get('contribution_pct', 0):+.0f}% 기여)"
+            )
+
+    lines.append(
+        f"집중도: 상위 3종목 {conc.get('top3_weight', 0):.0f}%, "
+        f"현금 {conc.get('cash_weight', 0):.0f}%"
+    )
+
+    # 보호 종목 경고 (실행 매도 아님)
+    protected = [f["name"] for f in a.get("risk_flags", []) if f.get("type") == "protected"]
+    if protected:
+        names = ", ".join(protected)
+        lines.append(f"주의: {names}는 보호 종목 — 보유 관리, 실행 매도 아님")
+
+    return {"text": "\n".join(lines), "lines": lines, "empty": False}
 
 
 # ─── /api/decision-brief — 의사결정 브리핑 카드 ───────────

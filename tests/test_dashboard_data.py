@@ -254,3 +254,214 @@ def test_view_query_routing():
     assert "view" in app_code, "view 파라미터 미지원"
     assert "index_pc.html" in app_code, "PC HTML 참조 없음"
     assert "Mobile" in app_code or "mobile" in app_code, "모바일 UA 감지 없음"
+
+
+# ═══════════════════════════════════════════════════════
+# 포트폴리오 기여도/성과 분석 (3단계) — 시세 호출 모킹
+# ═══════════════════════════════════════════════════════
+def _sample_pf() -> dict:
+    """결정론적 샘플 포트폴리오 (계좌·자산군·보호종목 포함).
+
+    TIGER S&P500(ETF, +2,000,000) / MU 마이크론(해외주식·보호, +500,000)
+    시프트업(국내주식, -1,000,000). 전체 평가손익 = +1,500,000.
+    """
+    return {
+        "accounts": [
+            {
+                "name": "일반",
+                "cash": 2_000_000,
+                "eval_total": 15_500_000,
+                "cost_total": 13_000_000,
+                "pnl_pct": 19.23,
+                "weight": 81.4,
+                "items": [
+                    {"ticker": "360750.KS", "name": "TIGER 미국S&P500",
+                     "eval_krw": 10_000_000, "pnl_pct": 25.0, "day_pct": 2.0},
+                    {"ticker": "MU", "name": "마이크론",
+                     "eval_krw": 5_500_000, "pnl_pct": 10.0, "day_pct": 1.0},
+                ],
+            },
+            {
+                "name": "ISA",
+                "cash": 0,
+                "eval_total": 4_000_000,
+                "cost_total": 5_000_000,
+                "pnl_pct": -20.0,
+                "weight": 18.6,
+                "items": [
+                    {"ticker": "462870.KS", "name": "시프트업",
+                     "eval_krw": 4_000_000, "pnl_pct": -20.0, "day_pct": -3.0},
+                ],
+            },
+        ],
+        "total_eval": 21_500_000,
+        "total_cash": 2_000_000,
+        "cash_weight": 9.3,
+        "total_pnl_pct": 7.5,
+    }
+
+
+def _patch_sources(monkeypatch, pf: dict):
+    """analytics가 재사용하는 portfolio/market/performance 데이터 모킹 + 캐시 초기화."""
+    monkeypatch.setattr(dd, "portfolio_data", lambda: pf)
+    monkeypatch.setattr(
+        dd, "market_data",
+        lambda: {"indices": {"KOSPI": {"pct": 0.5},
+                             "S&P500": {"pct": 0.8},
+                             "NASDAQ": {"pct": 1.0}}},
+    )
+    monkeypatch.setattr(
+        dd, "performance_data",
+        lambda days=30: {"summary": {"win_rate": 60, "avg_pnl": 1.2,
+                                     "total": 10, "wins": 6, "losses": 4}},
+    )
+    dd._cache.clear()
+
+
+def _row(rows, ticker):
+    return next(r for r in rows if r["ticker"] == ticker)
+
+
+# 1) 종목별 pnl_krw / weight / contribution_pct 계산 검증
+def test_contribution_per_holding(monkeypatch):
+    _patch_sources(monkeypatch, _sample_pf())
+    a = dd._fetch_portfolio_analytics_raw()
+
+    assert a["total_pnl_krw"] == 1_500_000
+
+    tiger = _row(a["contributors"], "360750.KS")
+    assert tiger["pnl_krw"] == 2_000_000
+    assert tiger["cost_krw"] == 8_000_000
+    assert abs(tiger["weight"] - 46.5) < 0.2          # 10M / 21.5M
+    assert abs(tiger["contribution_pct"] - 133.3) < 0.2  # 2M / 1.5M
+
+    shift = _row(a["contributors"], "462870.KS")
+    assert shift["pnl_krw"] == -1_000_000
+    assert abs(shift["contribution_pct"] - (-66.7)) < 0.2
+
+    # 일간 기여도 = weight * day_pct / 100
+    assert abs(tiger["day_contribution_pct"] - (tiger["weight"] * 2.0 / 100)) < 0.01
+
+
+# 2) top_contributors / bottom_contributors 정렬 검증
+def test_top_bottom_contributors_sorted(monkeypatch):
+    _patch_sources(monkeypatch, _sample_pf())
+    a = dd._fetch_portfolio_analytics_raw()
+
+    top = a["top_contributors"]
+    bottom = a["bottom_contributors"]
+    assert top[0]["ticker"] == "360750.KS"   # +2,000,000 최상위
+    assert bottom[0]["ticker"] == "462870.KS"  # -1,000,000 최하위
+
+    assert [r["pnl_krw"] for r in top] == sorted([r["pnl_krw"] for r in top], reverse=True)
+    assert [r["pnl_krw"] for r in bottom] == sorted([r["pnl_krw"] for r in bottom])
+
+
+# 3) 계좌별 합계가 종목+현금과 일치
+def test_account_totals_match_holdings(monkeypatch):
+    pf = _sample_pf()
+    _patch_sources(monkeypatch, pf)
+    a = dd._fetch_portfolio_analytics_raw()
+
+    by_name = {acc["name"]: acc for acc in a["accounts"]}
+    for src in pf["accounts"]:
+        acc = by_name[src["name"]]
+        items_eval = sum(it["eval_krw"] for it in src["items"])
+        assert acc["eval_total"] == items_eval
+        assert acc["pnl_krw"] == acc["eval_total"] - acc["cost_total"]
+        assert acc["cash"] == src["cash"]
+
+
+# 4) 현금 비중 계산 검증
+def test_cash_weight(monkeypatch):
+    _patch_sources(monkeypatch, _sample_pf())
+    a = dd._fetch_portfolio_analytics_raw()
+
+    assert a["total_cash"] == 2_000_000
+    assert abs(a["cash_weight"] - 9.3) < 0.2
+    assert abs(a["concentration"]["cash_weight"] - 9.3) < 0.2
+    cash_cls = next(c for c in a["asset_classes"] if c["name"] == "현금")
+    assert cash_cls["value"] == 2_000_000
+    assert cash_cls["pnl_krw"] == 0  # 현금은 평가손익 없음
+
+
+# 5) 전체 손익이 0일 때 contribution_pct 0 처리
+def test_zero_total_pnl_contribution(monkeypatch):
+    pf = {
+        "accounts": [{
+            "name": "일반", "cash": 0,
+            "eval_total": 9_000_000, "cost_total": 9_000_000,
+            "pnl_pct": 0.0, "weight": 100.0,
+            "items": [
+                {"ticker": "AAA", "name": "에이", "eval_krw": 5_000_000,
+                 "pnl_pct": 25.0, "day_pct": 0.0},   # +1,000,000
+                {"ticker": "BBB", "name": "비", "eval_krw": 4_000_000,
+                 "pnl_pct": -20.0, "day_pct": 0.0},  # -1,000,000
+            ],
+        }],
+        "total_eval": 9_000_000, "total_cash": 0,
+        "cash_weight": 0.0, "total_pnl_pct": 0.0,
+    }
+    _patch_sources(monkeypatch, pf)
+    a = dd._fetch_portfolio_analytics_raw()
+
+    assert a["total_pnl_krw"] == 0
+    assert all(r["contribution_pct"] == 0.0 for r in a["contributors"])
+
+
+# 6) MU 보호 라벨 — 보유 관리 · 실행 매도 아님
+def test_protected_stock_label(monkeypatch):
+    _patch_sources(monkeypatch, _sample_pf())
+    a = dd._fetch_portfolio_analytics_raw()
+
+    protected = [f for f in a["risk_flags"] if f.get("type") == "protected"]
+    assert any(f["ticker"] == "MU" for f in protected)
+    mu_flag = next(f for f in protected if f["ticker"] == "MU")
+    assert "실행 매도 아님" in mu_flag["message"]
+
+    # 보호 종목은 비중 25%↑여도 집중 경고로 매도 압박하지 않음
+    conc_flags = [f for f in a["risk_flags"]
+                  if f.get("type") == "concentration" and f.get("ticker") == "MU"]
+    assert conc_flags == []
+
+    # 기여도 표에는 그대로 표시(보유 관리 성격 유지)
+    mu_row = _row(a["contributors"], "MU")
+    assert mu_row["protected"] is True
+
+    # 요약 텍스트에도 보호 종목 명시
+    monkeypatch.setattr(dd, "portfolio_analytics", dd._fetch_portfolio_analytics_raw)
+    s = dd.portfolio_contribution_summary()
+    assert "보호 종목" in s["text"]
+    assert "실행 매도 아님" in s["text"]
+
+
+# 7) read-only 보장 — DB write/POST 없음
+def test_read_only_guarantees():
+    from pathlib import Path
+    root = Path(__file__).parent.parent
+
+    # web/app.py에 POST/PUT/DELETE 핸들러 추가 없음
+    app_code = (root / "web" / "app.py").read_text(encoding="utf-8")
+    for verb in ("POST", "PUT", "DELETE"):
+        assert verb not in app_code, f"{verb} 핸들러 발견 — read-only 위반"
+
+    # dashboard_data.py에 쓰기 SQL 없음
+    dd_code = (root / "core" / "dashboard_data.py").read_text(encoding="utf-8")
+    for kw in ("INSERT", "UPDATE ", "DELETE FROM", "DROP ", "CREATE TABLE"):
+        assert kw not in dd_code, f"쓰기 SQL '{kw}' 발견 — read-only 위반"
+
+
+def test_analytics_does_not_write_db(empty_db, monkeypatch):
+    """portfolio analytics 호출 후 predictions 행 수가 변하지 않음(DB write 없음)."""
+    import sqlite3 as _sq
+    before = _sq.connect(empty_db).execute(
+        "SELECT COUNT(*) FROM predictions").fetchone()[0]
+
+    _patch_sources(monkeypatch, _sample_pf())
+    dd._fetch_portfolio_analytics_raw()
+    monkeypatch.setattr(dd, "portfolio_analytics", dd._fetch_portfolio_analytics_raw)
+    dd.portfolio_contribution_summary()
+
+    after = _sq.connect(empty_db).execute(
+        "SELECT COUNT(*) FROM predictions").fetchone()[0]
+    assert before == after == 0
