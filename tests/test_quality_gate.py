@@ -925,6 +925,51 @@ class TestActionsTelegramRender:
         assert "오늘 실제 실행: 없음" in msg
         assert "매수 후보 없음 사유" in msg
 
+    def test_telegram_incomplete_order_shown_as_info_insufficient(self):
+        # Section A: 현재가 누락 조건부 매수 → '정보 부족' 섹션에 표시, 조건부 후보 섹션엔 없음
+        from core.action_normalizer import normalize_actions
+        from core.telegram import _build_impact_message
+        raw = {"strategy_buy": [
+            {"name": "KODEX 200", "ticker": "069500.KS", "account": "[RIA]",
+             "entry_price": "₩138,000", "reason": "눌림목 대기"}],
+            "strategy_sell": []}
+        raw["normalized"] = normalize_actions(raw, "KR_NIGHT", {"MSFT": 370.0}, {})
+        msg = _build_impact_message(self._make_result(raw), raw, "🇰🇷", "t", "KR_NIGHT")
+        assert "주문 차단·정보 부족" in msg
+        assert "정보 부족으로 주문표 제외" in msg
+        # 조건부 매수 후보 섹션엔 KODEX 200이 실행 주문표로 나오면 안 됨
+        assert "조건부 매수 후보" not in msg
+
+    def test_telegram_executable_sell_does_not_hide_conditional_buy(self):
+        # Section E: 실행 매도가 있어도 조건부 매수 섹션이 숨겨지면 안 됨
+        from core.action_normalizer import normalize_actions
+        from core.telegram import _build_impact_message
+        raw = {"strategy_buy": [
+            {"name": "KODEX 반도체", "ticker": "091160.KS", "account": "[RIA]",
+             "entry_price": "₩166,500", "confidence": "55", "reason": "추격 금지 눌림목"}],
+            "strategy_sell": [
+            {"ticker": "LMT", "name": "록히드", "current_price": "$540",
+             "take_profit": "$560", "reason": "RSI 75 과열 부분 익절"}]}
+        raw["normalized"] = normalize_actions(
+            raw, "KR_BEFORE", {"091160.KS": 172000, "LMT": 540}, {})
+        msg = _build_impact_message(self._make_result(raw), raw, "🇰🇷", "t", "KR_BEFORE")
+        assert "오늘 실제 실행" in msg and "록히드" in msg
+        assert "조건부 매수 후보" in msg and "KODEX 반도체" in msg
+
+    def test_no_buy_reason_does_not_revive_blocked_stock(self):
+        # Section E: 조건부 매수 0건 + 차단 종목 있을 때 no_buy_reason이 차단 종목 매수 문구를 살리지 않음
+        from core.action_normalizer import normalize_actions
+        from core.telegram import _build_impact_message
+        raw = {"strategy_buy": [
+            {"name": "KODEX 200", "ticker": "069500.KS", "account": "[RIA]",
+             "entry_price": "₩138,000", "reason": "눌림목 대기"}],
+            "strategy_sell": [],
+            "next_action": "KODEX 200 즉시 매수 진입 권고"}
+        raw["normalized"] = normalize_actions(raw, "KR_NIGHT", {"MSFT": 370.0}, {})
+        msg = _build_impact_message(self._make_result(raw), raw, "🇰🇷", "t", "KR_NIGHT")
+        # 차단된 KODEX 200의 '즉시 매수' 문구가 매수 후보 없음 사유로 부활하면 안 됨
+        assert "KODEX 200 즉시 매수 진입 권고" not in msg
+
 
 class TestIsActionablePolicy:
     """긴급알림 _is_actionable() 정책 테스트."""

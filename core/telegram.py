@@ -218,15 +218,30 @@ def _render_normalized_sections(lines: list, normalized: dict, sep: str, next_ac
             lines.append("  메모: 추격매수 아님 — 미체결 가능 (즉시 실행 아님)")
         lines.append("")
 
-    # 🚫 게이트 차단 매수 (즉시체결/무효화/대량주문 + 충돌)
-    if blocked:
+    # 🚫 게이트 차단 매수 (즉시체결/무효화/대량주문 + 충돌) — 정보 부족과 분리
+    gate_blocked = [a for a in blocked if not a.get("incomplete_order")]
+    incomplete = [a for a in blocked if a.get("incomplete_order")]
+    if gate_blocked:
         lines.append(sep)
         lines.append("🚫 *차단된 매수 후보* (실행 금지)")
-        for a in blocked[:5]:
+        for a in gate_blocked[:5]:
             lines.append(f"🚫 {a.get('account','')} *{a.get('name') or a.get('ticker','')}*")
             br = a.get("block_reason", "")
             if br:
                 lines.append(f"  사유: {str(br)[:120]}")
+        lines.append("")
+
+    # ⚠️ 주문 차단·정보 부족 (주문표 필수 필드 누락)
+    if incomplete:
+        lines.append(sep)
+        lines.append("⚠️ *주문 차단·정보 부족* (주문표 제외)")
+        for a in incomplete[:5]:
+            lines.append(f"⚠️ {a.get('account','') or '[계좌미상]'} *{a.get('name') or a.get('ticker','') or '종목미상'}*")
+            miss = a.get("missing_fields") or []
+            if miss:
+                lines.append(f"  정보 부족으로 주문표 제외 — 누락: {', '.join(miss)}")
+            else:
+                lines.append("  정보 부족으로 주문표 제외")
         lines.append("")
 
     # 🟡 매도 취소·홀딩 전환

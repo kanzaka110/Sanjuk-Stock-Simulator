@@ -82,6 +82,52 @@ USDKRW_FALLBACK = 1450.0
 # 계좌 추론용 유효 계좌 집합 (대괄호 표기 통일)
 _VALID_ACCOUNTS: tuple[str, ...] = ("일반", "ISA", "RIA", "IRP", "연금저축")
 
+# 조건부 매수 주문표를 실행 후보로 렌더하기 위한 수량/총액 필수 필드 (price 무관)
+_REQUIRED_QTY_FIELDS: tuple[tuple[str, str], ...] = (
+    ("qty_num", "수량"),
+    ("order_total", "주문총액"),
+)
+# 현재가 데이터가 제공된 경우에만 강제하는 가격 비교 필드 (현재가 대비 안내)
+_REQUIRED_PRICE_FIELDS: tuple[tuple[str, str], ...] = (
+    ("entry_price_num", "지정가"),
+    ("current_price_num", "현재가"),
+)
+
+
+def _missing_order_fields(a: dict, require_price_compare: bool) -> list[str]:
+    """조건부 매수 주문표 렌더에 필요한 필수 필드 중 누락/0인 항목 라벨 목록.
+
+    Section A: account/종목/지정가/수량/총액/현재가/현재가대비(gap_pct)/조건문구/
+    미체결문구가 모두 갖춰져야 실행 가능한 조건부 후보로 렌더한다.
+    하나라도 비면 '정보 부족'으로 분류해 주문표에서 제외한다.
+
+    require_price_compare=True일 때(현재가 데이터 제공됨)만 지정가/현재가/현재가대비를
+    강제한다. 현재가 소스 자체가 없는 분류 전용 호출에서는 가격 비교를 요구하지 않는다.
+    """
+    missing: list[str] = []
+    if not _bracket_account(a.get("account", "")):
+        missing.append("계좌")
+    if not (a.get("ticker") or a.get("name")):
+        missing.append("종목")
+    for key, label in _REQUIRED_QTY_FIELDS:
+        val = a.get(key)
+        if not val or (isinstance(val, (int, float)) and val <= 0):
+            missing.append(label)
+    if require_price_compare:
+        for key, label in _REQUIRED_PRICE_FIELDS:
+            val = a.get(key)
+            if not val or (isinstance(val, (int, float)) and val <= 0):
+                missing.append(label)
+        if "gap_pct" not in a:
+            missing.append("현재가대비")
+    # 실행 조건 문구
+    if not (a.get("block_reason") or a.get("reason") or a.get("cancel_if")):
+        missing.append("조건문구")
+    # 미체결 가능성 문구
+    if not (a.get("gap_note") or a.get("invalidation_note")):
+        missing.append("미체결문구")
+    return missing
+
 
 def _row_text(row: dict, *fields: str) -> str:
     """row의 지정 필드들을 합쳐 소문자 무시 검색용 텍스트로."""
@@ -475,6 +521,20 @@ def normalize_actions(
                         f"{name or ticker}: 대량주문 {total:,.0f} 이벤트 대기 중 차단")
                     continue
                 a["large_order_note"] = f"⚠️ 대량주문 {total:,.0f} — 분할/비중 재검토"
+            # Section A: 주문표 필수 필드 검증 — 누락 시 실행 후보가 아닌 정보 부족 차단으로 이동.
+            # shortage(예산 부족/가격 과대로 수량 0)는 의도된 상태이므로 정보 부족 차단 대상 아님.
+            missing = [] if a.get("shortage") else _missing_order_fields(
+                a, require_price_compare=bool(current_prices))
+            if missing:
+                a["action_type"] = BLOCKED_BUY
+                a["blocked"] = True
+                a["incomplete_order"] = True
+                a["missing_fields"] = missing
+                a["block_reason"] = "정보 부족으로 주문표 제외 — 누락: " + ", ".join(missing)
+                blocked_buys.append(a)
+                integrity_errors.append(
+                    f"{name or ticker}: 조건부 매수 주문표 필드 누락({', '.join(missing)}) — 정보 부족 차단")
+                continue
             conditional_buy.append(a)
             continue
 

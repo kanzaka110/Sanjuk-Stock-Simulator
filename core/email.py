@@ -336,13 +336,27 @@ def _build_briefing_html(
                 parts.append(f"<td>{_esc(a.get('block_reason', ''))}</td></tr>")
             parts.append("</table>")
 
-        if blocked:
+        gate_blocked = [a for a in blocked if not a.get("incomplete_order")]
+        incomplete = [a for a in blocked if a.get("incomplete_order")]
+
+        if gate_blocked:
             section += 1
             parts.append(f"<h2>{section}. 🚫 주문 차단 / 실행 금지</h2>")
             parts.append("<table><tr><th>종목</th><th>차단 사유</th></tr>")
-            for a in blocked:
+            for a in gate_blocked:
                 parts.append(f"<tr><td><b>{_esc(a.get('name', ''))}</b></td>")
                 parts.append(f"<td>{_esc(a.get('block_reason', ''))}</td></tr>")
+            parts.append("</table>")
+
+        if incomplete:
+            section += 1
+            parts.append(f"<h2>{section}. ⚠️ 주문 차단·정보 부족</h2>")
+            parts.append("<table><tr><th>종목</th><th>계좌</th><th>누락 필드</th></tr>")
+            for a in incomplete:
+                miss = ", ".join(a.get("missing_fields") or [])
+                parts.append(f"<tr><td><b>{_esc(a.get('name', '') or a.get('ticker', '') or '종목미상')}</b></td>")
+                parts.append(f"<td>{_esc(a.get('account', '') or '[계좌미상]')}</td>")
+                parts.append(f"<td>정보 부족으로 주문표 제외 — {_esc(miss)}</td></tr>")
             parts.append("</table>")
 
         if not exec_buys and not cond_buys:

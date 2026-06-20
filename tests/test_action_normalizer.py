@@ -725,10 +725,7 @@ class TestAccountFallback:
         assert c["account"] == "[연금저축]"
 
     def test_no_account_kr_stock_defaults_isa(self):
-        c = self._conditional({"strategy_buy": [
-            {"ticker": "069500.KS", "name": "KODEX 200",
-             "entry_price": "₩138,000", "reason": "눌림목 대기"}]})
-        # KR 종목은 cur 없으니 ok_pullback 조건부 → [ISA] 기본
+        # KR 종목 현재가 제공 시 ok_pullback 조건부 → 계좌 미지정이면 [ISA] 기본
         n = normalize_actions(
             {"strategy_buy": [{"ticker": "069500.KS", "name": "KODEX 200",
                                "entry_price": "₩138,000", "reason": "눌림목 대기"}],
@@ -820,3 +817,31 @@ class TestSellProtectedHold:
         n = normalize_actions(raw, "US_NIGHT", {"LMT": 540}, {})
         assert len(n["executable_actions"]) == 1
         assert n["executable_actions"][0]["action_type"] == AI_SELL_MANAGEMENT
+
+
+class TestIncompleteOrderGate:
+    """Section A: 조건부 매수 주문표 필수 필드 누락 → 정보 부족 차단 섹션으로 이동."""
+
+    def test_missing_current_price_blocks_as_incomplete(self):
+        # 다른 종목 현재가만 제공 → 대상 KR 종목은 현재가/괴리 없음 → 정보 부족 차단
+        raw = {"strategy_buy": [
+            {"ticker": "069500.KS", "name": "KODEX 200", "account": "[RIA]",
+             "entry_price": "₩138,000", "reason": "눌림목 대기"}],
+            "strategy_sell": []}
+        n = normalize_actions(raw, "KR_NIGHT", {"MSFT": 370.0}, {})
+        assert len(n["conditional_buy_candidates"]) == 0
+        blocked = n["blocked_buys"]
+        assert len(blocked) == 1
+        assert blocked[0].get("incomplete_order") is True
+        assert "현재가" in blocked[0]["missing_fields"]
+        assert "정보 부족으로 주문표 제외" in blocked[0]["block_reason"]
+
+    def test_complete_order_not_blocked(self):
+        # 현재가 제공 + 모든 필드 완비 → 정상 조건부 후보
+        raw = {"strategy_buy": [
+            {"ticker": "069500.KS", "name": "KODEX 200", "account": "[RIA]",
+             "entry_price": "₩138,000", "confidence": "55", "reason": "눌림목 대기"}],
+            "strategy_sell": []}
+        n = normalize_actions(raw, "KR_NIGHT", {"069500.KS": 143000}, {})
+        assert len(n["conditional_buy_candidates"]) == 1
+        assert len(n["blocked_buys"]) == 0
