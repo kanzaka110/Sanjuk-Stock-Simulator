@@ -985,6 +985,8 @@ def _update_accuracy_stats() -> None:
             losses INTEGER DEFAULT 0,
             neutral_count INTEGER DEFAULT 0,
             invalid_count INTEGER DEFAULT 0,
+            data_error_count INTEGER DEFAULT 0,
+            expired_count INTEGER DEFAULT 0,
             avg_pnl REAL DEFAULT 0,
             avg_win REAL DEFAULT 0,
             avg_loss REAL DEFAULT 0,
@@ -1008,7 +1010,8 @@ def _update_accuracy_stats() -> None:
     from collections import defaultdict
     stats: dict[str, dict] = defaultdict(lambda: {
         "total": 0, "wins": 0, "losses": 0, "neutral": 0,
-        "invalid": 0, "win_pnls": [], "loss_pnls": [],
+        "invalid": 0, "data_error": 0, "expired": 0,
+        "win_pnls": [], "loss_pnls": [],
     })
 
     for row in rows:
@@ -1034,9 +1037,13 @@ def _update_accuracy_stats() -> None:
                 s["loss_pnls"].append(pnl)
             else:
                 log.info("비현실 수익률 제외: %s pnl=%.1f%%", norm_ticker, pnl)
-        elif outcome in ("invalid", "data_error"):
+        elif outcome == "invalid":
             s["invalid"] += 1
-        else:  # neutral, expired
+        elif outcome == "data_error":
+            s["data_error"] += 1
+        elif outcome == "expired":
+            s["expired"] += 1
+        else:  # neutral (목표/손절 미도달, 엣지 부족, 기간 내 미확정)
             s["neutral"] += 1
 
     for ticker, s in stats.items():
@@ -1064,11 +1071,13 @@ def _update_accuracy_stats() -> None:
         conn.execute(
             """INSERT OR REPLACE INTO accuracy_stats
                (ticker, total_predictions, evaluated_count, wins, losses,
-                neutral_count, invalid_count, avg_pnl, avg_win, avg_loss,
+                neutral_count, invalid_count, data_error_count, expired_count,
+                avg_pnl, avg_win, avg_loss,
                 profit_factor, expectancy, win_rate, last_updated)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (ticker, s["total"], evaluated, s["wins"], s["losses"],
-             s["neutral"], s["invalid"], round(avg_pnl, 2),
+             s["neutral"], s["invalid"], s["data_error"], s["expired"],
+             round(avg_pnl, 2),
              round(avg_win, 2), round(avg_loss, 2),
              round(profit_factor, 2), round(expectancy, 2),
              round(win_rate, 1), now),
@@ -1131,6 +1140,10 @@ def get_accuracy_summary() -> dict[str, dict]:
     col_names_set = {row[1] for row in conn.execute("PRAGMA table_info(accuracy_stats)").fetchall()}
     has_expectancy = "expectancy" in col_names_set
 
+    # 원인 버킷 컬럼 존재 여부 (구 캐시 호환 — 없으면 0)
+    has_data_error = "data_error_count" in col_names_set
+    has_expired = "expired_count" in col_names_set
+
     for r in rows:
         norm = normalize_ticker(r["ticker"])
         if has_new_schema and has_expectancy:
@@ -1140,6 +1153,9 @@ def get_accuracy_summary() -> dict[str, dict]:
                 "wins": r["wins"],
                 "losses": r["losses"],
                 "neutral_count": r["neutral_count"],
+                "invalid_count": r["invalid_count"] if "invalid_count" in col_names_set else 0,
+                "data_error_count": r["data_error_count"] if has_data_error else 0,
+                "expired_count": r["expired_count"] if has_expired else 0,
                 "avg_pnl": r["avg_pnl"],
                 "avg_win": r["avg_win"] if "avg_win" in col_names_set else 0,
                 "avg_loss": r["avg_loss"] if "avg_loss" in col_names_set else 0,
@@ -1154,6 +1170,9 @@ def get_accuracy_summary() -> dict[str, dict]:
                 "wins": r["wins"],
                 "losses": r["losses"],
                 "neutral_count": r["neutral_count"],
+                "invalid_count": r["invalid_count"] if "invalid_count" in col_names_set else 0,
+                "data_error_count": r["data_error_count"] if has_data_error else 0,
+                "expired_count": r["expired_count"] if has_expired else 0,
                 "avg_pnl": r["avg_pnl"],
                 "avg_win": 0, "avg_loss": 0, "profit_factor": 0, "expectancy": 0,
                 "win_rate": r["win_rate"],
@@ -1166,11 +1185,76 @@ def get_accuracy_summary() -> dict[str, dict]:
                 "wins": r["correct"],
                 "losses": r["wrong"],
                 "neutral_count": 0,
+                "invalid_count": 0,
+                "data_error_count": 0,
+                "expired_count": 0,
                 "avg_pnl": r["avg_pnl"],
                 "avg_win": 0, "avg_loss": 0, "profit_factor": 0, "expectancy": 0,
                 "win_rate": r["win_rate"],
             }
     return result
+
+
+# 위험 종목 판정 최소 평가 표본 (이 미만은 표본부족 — 승률·위험 경고 산정 안 함)
+RELIABILITY_MIN_EVAL = 5
+# 데이터 품질 점검 임계 (무효/오류/중립 비율이 이 이상이면 데이터 품질 분류)
+DATA_QUALITY_RATIO = 0.5
+
+_CAUSE_LABELS: tuple[tuple[str, str], ...] = (
+    ("neutral_count", "중립"),
+    ("invalid_count", "무효"),
+    ("data_error_count", "데이터오류"),
+    ("expired_count", "만료"),
+)
+
+
+def _cause_breakdown_text(stats: dict) -> str:
+    """원인별 count를 '중립 1·무효 6' 형태로 (0인 항목 생략)."""
+    parts = [f"{label} {stats.get(key, 0)}"
+             for key, label in _CAUSE_LABELS if stats.get(key, 0)]
+    return "·".join(parts)
+
+
+def classify_reliability(stats: dict) -> tuple[str, str, str]:
+    """종목 통계를 신뢰도 카테고리로 분류 + 리포트 문구 생성.
+
+    Returns: (category, headline, detail)
+      category ∈ {"evaluated", "low_sample", "data_quality"}
+      - evaluated:    평가 완료 (evaluated_count >= 5) — 승률 기준 판단. 위험 경고는 여기서만.
+      - low_sample:   표본부족 (evaluated_count < 5) — 승률 미산정, 위험 경고 아님.
+      - data_quality: 무효/데이터오류/중립 비율이 높음 — 데이터 품질 점검 필요.
+
+    invalid/data_error/neutral/expired는 승률 분모(evaluated)에 들어가지 않는다.
+    """
+    wins = stats.get("wins", 0)
+    losses = stats.get("losses", 0)
+    evaluated = stats.get("evaluated_count", wins + losses)
+    total = stats.get("total", 0) or (
+        evaluated + stats.get("neutral_count", 0) + stats.get("invalid_count", 0)
+        + stats.get("data_error_count", 0) + stats.get("expired_count", 0))
+    win_rate = stats.get("win_rate", 0) or 0
+    breakdown = _cause_breakdown_text(stats)
+
+    bad = (stats.get("invalid_count", 0) + stats.get("data_error_count", 0)
+           + stats.get("neutral_count", 0))
+
+    # 평가 완료: 승률 기준 판단. '위험 종목' 문구는 evaluated_count>=5 & win_rate<30%에서만.
+    if evaluated >= RELIABILITY_MIN_EVAL:
+        if win_rate < 30:
+            headline = f"평가 {evaluated}건 승률 {win_rate:.0f}% — 위험 종목"
+        else:
+            headline = f"평가 {evaluated}건 승률 {win_rate:.0f}%"
+        return "evaluated", headline, breakdown
+
+    # 표본부족인데 무효/오류/중립 비율이 높으면 데이터 품질 점검으로 분리 (위험 종목 아님)
+    if total >= 3 and bad >= total * DATA_QUALITY_RATIO and bad > evaluated:
+        bad_cnt = stats.get("invalid_count", 0) + stats.get("data_error_count", 0)
+        headline = f"무효/오류 {bad_cnt}건 — 가격/무효화 조건/벤치마크 데이터 점검 필요"
+        return "data_quality", headline, breakdown
+
+    # 표본부족: 승률 미산정 (위험 종목 아님)
+    headline = f"평가 {evaluated}/{total}건, 승률 미산정"
+    return "low_sample", headline, breakdown
 
 
 def get_strategy_accuracy_summary() -> dict[str, dict]:
@@ -1248,19 +1332,27 @@ def memory_to_text() -> str:
 
     if accuracy:
         lines.append("\n  [정확도 통계]")
+        # 원인별로 분리 리포트 — invalid/neutral/data_error/expired가 '위험 종목'으로
+        # 오해되지 않게 평가완료/표본부족/데이터품질 점검으로 나눠 표시한다.
+        cat_icon = {"evaluated": "📊", "low_sample": "🔎", "data_quality": "🧪"}
         for ticker, stats in accuracy.items():
-            evaluated = stats.get("evaluated_count", stats["wins"] + stats["losses"])
-            if evaluated < 3:
-                # 평가 표본 부족 — "0% 승률"은 통계적으로 무의미. 위험 신호로 오인 금지.
+            category, headline, detail = classify_reliability(stats)
+            if category == "evaluated":
+                # 위험 종목 문구는 evaluated_count>=5 & win_rate<30%일 때만
+                risk = " — 위험 종목" if (stats.get("win_rate", 0) or 0) < 30 else ""
                 lines.append(
-                    f"  {ticker}: {stats['total']}건 기록, 평가 {evaluated}건 "
-                    f"[데이터부족 — 승률 판단 불가]"
+                    f"  📊 {ticker}: {stats['total']}건 중 {stats['wins']}적중 "
+                    f"(승률 {stats['win_rate']:.0f}%, 평균 {stats['avg_pnl']:+.1f}%, "
+                    f"평가 {stats.get('evaluated_count', 0)}건){risk}"
+                    + (f" · 원인: {detail}" if detail else "")
                 )
             else:
-                lines.append(
-                    f"  {ticker}: {stats['total']}건 중 {stats['wins']}적중 "
-                    f"(승률 {stats['win_rate']:.0f}%, 평균 {stats['avg_pnl']:+.1f}%, 평가 {evaluated}건)"
-                )
+                # 표본부족·데이터품질은 위험 종목이 아님 — 원인별 count + '위험 경고 아님' 명시
+                line = f"  {cat_icon[category]} {ticker}: {headline}"
+                if detail:
+                    line += f" · 원인: {detail}"
+                line += " · 위험 경고 아님"
+                lines.append(line)
 
     if predictions:
         open_preds = [p for p in predictions if p.status == "open"]

@@ -729,6 +729,163 @@ class TestPhase4Expectancy:
             assert col in cols, f"Phase 4 컬럼 {col} 누락"
 
 
+class TestReliabilityReport:
+    """2단계: invalid/neutral/data_error/expired 원인별 분리 리포트 + 위험 판정 안전화."""
+
+    def _seed(self, ticker, outcomes):
+        """(outcome, pnl) 리스트를 predictions에 삽입 후 통계 재집계."""
+        import core.memory as mem
+        conn = mem._get_conn()
+        now = "2026-05-20T00:00:00"
+        for outcome, pnl in outcomes:
+            conn.execute(
+                """INSERT INTO predictions
+                   (created_at, ticker, name, signal, entry_price, target_price,
+                    stop_loss, confidence, status, closed_at, closed_price, pnl_pct,
+                    outcome, action_type)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (now, ticker, ticker, "매수", 100, 110, 90, 70,
+                 "closed", now, 105, pnl, outcome, "AI_NEW_BUY"),
+            )
+        conn.commit()
+        mem._update_accuracy_stats()
+        return mem.get_accuracy_summary()[ticker]
+
+    def test_cause_buckets_separated(self):
+        """neutral/invalid/data_error/expired가 개별 count로 분리된다."""
+        s = self._seed("TESTA.KS", [
+            ("win", 5), ("loss", -3), ("neutral", 0.2),
+            ("invalid", 0), ("data_error", 500), ("expired", 0)])
+        assert s["neutral_count"] == 1
+        assert s["invalid_count"] == 1
+        assert s["data_error_count"] == 1
+        assert s["expired_count"] == 1
+
+    def test_invalid_neutral_excluded_from_win_rate(self):
+        """invalid/data_error/neutral/expired는 승률 분모(evaluated)에서 제외."""
+        s = self._seed("TESTB.KS", [
+            ("win", 5), ("loss", -3),
+            ("neutral", 0), ("invalid", 0), ("data_error", 999), ("expired", 0)])
+        # 분모는 win+loss=2뿐
+        assert s["evaluated_count"] == 2
+        assert abs(s["win_rate"] - 50.0) < 0.1
+
+    def test_low_sample_not_risk(self):
+        """evaluated_count 0 또는 4면 위험 종목으로 분류되지 않음."""
+        from core.memory import classify_reliability
+        # evaluated=0 (전부 invalid)
+        zero = {"total": 7, "evaluated_count": 0, "wins": 0, "losses": 0,
+                "win_rate": 0, "neutral_count": 1, "invalid_count": 6,
+                "data_error_count": 0, "expired_count": 0, "avg_pnl": 0}
+        cat0, head0, _ = classify_reliability(zero)
+        assert cat0 != "evaluated"
+        assert "위험" not in head0 or "위험 경고 아님" in head0
+        # evaluated=4, 낮은 승률이어도 표본부족 — '위험 종목' 문구 금지
+        four = {"total": 6, "evaluated_count": 4, "wins": 1, "losses": 3,
+                "win_rate": 25.0, "neutral_count": 2, "invalid_count": 0,
+                "data_error_count": 0, "expired_count": 0, "avg_pnl": -1}
+        cat4, head4, _ = classify_reliability(four)
+        assert cat4 == "low_sample"
+        assert "위험 종목" not in head4
+
+    def test_evaluated_low_winrate_is_risk(self):
+        """evaluated_count>=5 & win_rate<30%인 경우만 위험 종목."""
+        from core.memory import classify_reliability
+        risk = {"total": 9, "evaluated_count": 7, "wins": 1, "losses": 6,
+                "win_rate": 14.0, "neutral_count": 1, "invalid_count": 1,
+                "data_error_count": 0, "expired_count": 0, "avg_pnl": -8}
+        cat, head, _ = classify_reliability(risk)
+        assert cat == "evaluated"
+        assert "위험 종목" in head
+
+    def test_data_quality_classification(self):
+        """무효/오류 비율 높은 표본부족 종목은 데이터품질 점검으로 표시."""
+        from core.memory import classify_reliability
+        nvda = {"total": 22, "evaluated_count": 1, "wins": 0, "losses": 1,
+                "win_rate": 0, "neutral_count": 0, "invalid_count": 18,
+                "data_error_count": 3, "expired_count": 0, "avg_pnl": 0}
+        cat, head, _ = classify_reliability(nvda)
+        assert cat == "data_quality"
+        assert "데이터 점검 필요" in head
+
+    def test_report_exposes_cause_counts(self):
+        """memory_to_text 정확도 리포트에 원인별 count가 노출된다."""
+        import core.memory as mem
+        self._seed("TESTC.KS", [
+            ("neutral", 0), ("invalid", 0), ("invalid", 0),
+            ("data_error", 700), ("expired", 0)])
+        text = mem.memory_to_text()
+        assert "TESTC.KS" in text
+        # 표본부족/데이터품질 분류 + 원인 문구 노출 (위험 경고 아님)
+        assert ("위험 경고 아님" in text) or ("데이터 점검 필요" in text)
+        assert ("무효" in text) or ("중립" in text)
+
+    def test_data_quality_report_line_has_causes_and_no_risk(self):
+        """data_quality 리포트 라인에 원인별 count + '위험 경고 아님' 포함, '위험 종목' 미포함."""
+        import core.memory as mem
+        # 무효 3·중립 1·데이터오류 1, 평가 1건(loss) → data_quality
+        self._seed("TESTE.KS", [
+            ("loss", -3), ("neutral", 0),
+            ("invalid", 0), ("invalid", 0), ("invalid", 0),
+            ("data_error", 800)])
+        text = mem.memory_to_text()
+        line = next(l for l in text.splitlines() if "TESTE.KS" in l)
+        assert "데이터 점검 필요" in line
+        assert "원인:" in line
+        assert "무효" in line and "데이터오류" in line
+        assert "위험 경고 아님" in line
+        assert "위험 종목" not in line
+
+    def test_only_evaluated_low_winrate_shows_risk_label(self):
+        """evaluated_count>=5 & win_rate<30%인 종목만 리포트에 '위험 종목' 노출."""
+        import core.memory as mem
+        # 161510.KS: 평가 7건(win 1·loss 6) 승률 14% → 위험 종목
+        self._seed("161510.KS", [
+            ("win", 3), ("loss", -5), ("loss", -4), ("loss", -6),
+            ("loss", -3), ("loss", -2), ("loss", -5)])
+        # 동시에 표본부족 종목은 위험 종목으로 표시되지 않아야 함
+        self._seed("TESTF.KS", [("loss", -3), ("invalid", 0), ("invalid", 0)])
+        text = mem.memory_to_text()
+        risk_line = next(l for l in text.splitlines() if "161510.KS" in l)
+        assert "위험 종목" in risk_line
+        low_line = next(l for l in text.splitlines() if "TESTF.KS" in l)
+        assert "위험 종목" not in low_line
+
+    def test_non_executable_excluded_from_stats(self):
+        """CANCEL_SELL/HOLD_REVIEW/WATCH_ONLY는 전략/태그/종목 성과 집계에서 제외."""
+        import core.memory as mem
+        conn = mem._get_conn()
+        now = "2026-05-20T00:00:00"
+        rows = [
+            ("AI_NEW_BUY", "win", 5, "추세", "돌파"),
+            ("CANCEL_SELL", "loss", -3, "추세", "돌파"),
+            ("HOLD_REVIEW", "loss", -4, "추세", "돌파"),
+            ("WATCH_ONLY", "loss", -2, "추세", "돌파"),
+        ]
+        for atype, outcome, pnl, stype, tags in rows:
+            conn.execute(
+                """INSERT INTO predictions
+                   (created_at, ticker, name, signal, entry_price, target_price,
+                    stop_loss, confidence, status, closed_at, closed_price, pnl_pct,
+                    outcome, action_type, strategy_type, strategy_tags)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (now, "TESTD.KS", "TESTD", "매수", 100, 110, 90, 70,
+                 "closed", now, 105, pnl, outcome, atype, stype, tags),
+            )
+        conn.commit()
+        mem._update_accuracy_stats()
+        # 종목 통계: 실행성 1건(win)만 집계
+        s = mem.get_accuracy_summary()["TESTD.KS"]
+        assert s["total"] == 1 and s["wins"] == 1 and s["losses"] == 0
+        # 전략 유형 성과: 비실행 제외 → total >= 2 미달이면 미노출
+        strat = mem.get_strategy_accuracy_summary()
+        assert strat.get("추세", {}).get("total", 0) <= 1
+        # 태그 성과: 실행성 1건만
+        tagstats = mem.get_tag_accuracy_summary()
+        if "돌파" in tagstats:
+            assert tagstats["돌파"]["total"] == 1
+
+
 class TestNightOrdersTelegram:
     """야간 브리핑 예약 주문 텔레그램 표시 테스트."""
 
