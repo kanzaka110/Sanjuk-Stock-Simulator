@@ -30,9 +30,31 @@ body{background:var(--bg);color:var(--tx);font-family:-apple-system,BlinkMacSyst
 .dot-g{background:var(--g)}.dot-r{background:var(--r)}
 
 /* Tabs */
-.tabs{display:flex;border-bottom:1px solid var(--ln);position:sticky;top:36px;background:var(--bg);z-index:99;overflow-x:auto;-webkit-overflow-scrolling:touch}
+.tabs{display:flex;border-bottom:1px solid var(--ln);position:sticky;top:36px;background:var(--bg);z-index:99;overflow-x:auto;-webkit-overflow-scrolling:touch;flex-wrap:wrap}
 .tabs::-webkit-scrollbar{display:none}
-.tb{flex-shrink:0;padding:13px 18px;font-size:14px;font-weight:600;color:var(--mt);background:none;border:none;cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap;min-height:48px;-webkit-tap-highlight-color:transparent}
+.tb{flex-shrink:0;padding:13px 14px;font-size:13px;font-weight:600;color:var(--mt);background:none;border:none;cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap;min-height:44px;-webkit-tap-highlight-color:transparent}
+/* 브리핑 탭 가시성 강조 */
+.briefing-tab-visible{position:relative}
+.briefing-tab-priority::after{content:"";position:absolute;top:8px;right:6px;width:5px;height:5px;border-radius:50%;background:var(--b)}
+.tab-scroll-hint{display:none}
+/* 접힘 폰: 탭 wrap + compact */
+.mobile-tab-wrap{flex-wrap:wrap}
+@media(max-width:649px){
+  .tabs{flex-wrap:wrap;gap:0}
+  .tb{padding:10px 12px;font-size:12px;min-height:38px}
+  .tab-scroll-hint{display:none}
+}
+@media(min-width:650px){
+  .tabs{flex-wrap:nowrap}
+  .tb{padding:13px 18px;font-size:14px;min-height:48px}
+}
+/* 브리핑 미리보기 */
+.briefing-preview-panel{background:var(--sf);border:1px solid var(--ln);border-radius:10px;padding:12px;margin-top:12px}
+.briefing-preview-panel .bpp-title{font-size:12px;font-weight:700;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center}
+.briefing-preview-card{background:var(--sf2);border-radius:8px;padding:8px 10px;margin-bottom:5px;font-size:11.5px}
+.briefing-preview-card .bpc-row{display:flex;justify-content:space-between;align-items:center}
+.briefing-preview-latest{font-size:10.5px;color:var(--mt);margin-top:4px}
+.briefing-preview-open-tab{font-size:11px;color:var(--b);font-weight:700;cursor:pointer}
 .tb.on{color:var(--wh);border-bottom-color:var(--b)}
 .tc{display:none;padding:12px 14px 80px;flex:1}.tc.on{display:block}
 
@@ -830,14 +852,15 @@ details[open] summary::before{transform:rotate(90deg)}
 
 <div class="top"><h1>산적 투자 터미널</h1><div class="m"><div id="svc"><span class="dot dot-r"></span>확인 중</div><div id="clk"></div></div></div>
 
-<div class="tabs">
+<div class="tabs mobile-tab-wrap">
 <button class="tb on" data-t="home">홈</button>
 <button class="tb" data-t="mkt">시장</button>
 <button class="tb" data-t="pf">포트폴리오</button>
 <button class="tb" data-t="act">액션</button>
 <button class="tb" data-t="perf">성과</button>
-<button class="tb briefing-tab-button" data-t="briefing">브리핑</button>
+<button class="tb briefing-tab-button briefing-tab-visible briefing-tab-priority" data-t="briefing">브리핑</button>
 <button class="tb" data-t="sim">시뮬레이터</button>
+<span class="tab-scroll-hint"></span>
 </div>
 <!-- Refresh Status Bar -->
 <div class="refresh-status-bar refresh-fallback-safe preserve-stale-data" id="refresh-bar">
@@ -864,6 +887,8 @@ details[open] summary::before{transform:rotate(90deg)}
 <div class="priority-rail" id="h-prio"><div class="emp">불러오는 중…</div></div>
 <!-- 한 줄 브리핑 -->
 <div class="brief" id="h-brief" style="margin-top:14px"><div class="brief-ic">●</div><div class="brief-tx">오늘의 브리핑을 불러오는 중…</div></div>
+<!-- 브리핑 미리보기 (홈) -->
+<div class="briefing-preview-panel" id="h-br-preview"><div class="briefing-preview-latest">최근 브리핑 데이터 대기</div></div>
 </div>
 
 <!-- 우측 사이드 (side): 액션 매트릭스 · 위험 알림 · 시장 스트립 -->
@@ -973,6 +998,8 @@ details[open] summary::before{transform:rotate(90deg)}
 
 <!-- ═══ 브리핑 ═══ -->
 <div class="tc briefing-tab-panel briefing-stale-safe" id="t-briefing">
+<div class="briefing-tab-title" style="font-size:18px;font-weight:800;margin-bottom:4px">브리핑</div>
+<div class="briefing-tab-description" style="font-size:12px;color:var(--mt);margin-bottom:12px">최근 브리핑 액션을 날짜별로 모아봅니다 · 최근 50개 제한</div>
 <div class="briefing-latest-summary" id="br-latest"><div class="emp">브리핑 데이터 대기</div></div>
 <div class="briefing-filter-bar" id="br-filter"></div>
 <div class="briefing-history-list briefing-limited-history" id="br-list"><div class="briefing-empty-state">브리핑 데이터 대기</div></div>
@@ -2178,7 +2205,7 @@ let _prevTlItems=[];
 
 /* ═══ BRIEFING TAB ═══ */
 const _BT_LBL={"KR_BEFORE":"한국장 전 브리핑","KR_NIGHT":"한국 야간 브리핑","KR_OPEN":"한국장중 브리핑","US_BEFORE":"미국장 전 브리핑","US_NIGHT":"미국 야간 브리핑","US_CLOSE":"미국장 마감 리뷰","MANUAL":"수시 브리핑"};
-let _brRows=[];let _brRange="today";let _brType="all";
+let _brRows=[];let _brRange="7d";let _brType="all";
 
 async function loadBriefing(){
   const[db,pr,tl]=await Promise.allSettled([J("/api/decision-brief"),J("/api/predictions"),J("/api/recommendations/timeline?range=7d&order=desc")]);
@@ -2197,9 +2224,10 @@ async function loadBriefing(){
   const rows=(pred&&pred.recent)||[];
   _brRows=rows.slice(0,50);
 
-  /* 필터바 */
+  /* 필터바 + 미리보기 */
   renderBrFilter();
   renderBrList();
+  renderBriefingPreview();
 }
 
 function renderBrFilter(){
@@ -2244,6 +2272,22 @@ function renderBrList(){
     const tickers=[...new Set(items.map(r=>r.name||r.ticker).filter(Boolean))].slice(0,3);
     return`<div class="briefing-history-card" onclick="openBriefingDetail('${E(day)}')"><div class="bhc-top"><div class="bhc-type">${E(lbl)}</div><div class="bhc-time">${E(day)}</div></div><div class="bhc-stats"><span style="color:var(--g)">실행 ${gr.buy}</span><span style="color:var(--b)">조건 ${gr.cond}</span><span style="color:var(--o)">관리 ${gr.mgmt}</span><span>관망 ${gr.watch}</span></div><div class="bhc-tickers">${tickers.map(t=>`<span class="briefing-related-ticker" onclick="event.stopPropagation();openM('${E(items.find(r=>r.name===t||r.ticker===t)?.ticker||t)}')">${E(t)}</span>`).join(" · ")}</div><div class="bhc-more">상세 ›</div></div>`;
   }).join("");
+}
+
+/* 홈 브리핑 미리보기 */
+function renderBriefingPreview(){
+  const el=document.getElementById("h-br-preview");if(!el)return;
+  if(!_brRows.length){el.innerHTML='<div class="briefing-preview-latest">최근 브리핑 데이터 대기</div>';return}
+  const recent=_brRows.slice(0,6);
+  const groups={};recent.forEach(r=>{const d=(r.created_at||"").slice(0,10);(groups[d]=groups[d]||[]).push(r)});
+  const entries=Object.entries(groups).slice(0,3);
+  let h=`<div class="bpp-title"><span>최근 브리핑</span><span class="briefing-preview-open-tab" onclick="go('briefing')">브리핑 전체 보기 ›</span></div>`;
+  entries.forEach(([day,items])=>{
+    const bt=items[0].briefing_type||"";const lbl=_BT_LBL[bt]||"브리핑";
+    const tickers=[...new Set(items.map(r=>r.name).filter(Boolean))].slice(0,3).join(", ");
+    h+=`<div class="briefing-preview-card" onclick="go('briefing')"><div class="bpc-row"><span style="font-weight:600">${E(lbl)}</span><span class="mt">${E(day)}</span></div><div class="mt" style="margin-top:2px">${items.length}건 · ${E(tickers)}</div></div>`;
+  });
+  el.innerHTML=h;
 }
 
 function openBriefingDetail(day){

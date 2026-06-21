@@ -638,6 +638,50 @@ def test_mobile_read_only():
 
 
 # ═══════════════════════════════════════════════════════
+# 브리핑 탭 가시성 + 미리보기 (18단계)
+# ═══════════════════════════════════════════════════════
+
+def test_briefing_visibility_markers():
+    """브리핑 탭 가시성 마커 존재."""
+    html = _mobile_html()
+    for marker in (
+        "briefing-tab-visible",
+        "briefing-tab-priority",
+        "tab-scroll-hint",
+        "mobile-tab-wrap",
+        "briefing-preview-panel",
+        "briefing-preview-card",
+        "briefing-preview-latest",
+        "briefing-preview-open-tab",
+        "briefing-tab-title",
+        "briefing-tab-description",
+    ):
+        assert marker in html, f"브리핑 가시성 마커 '{marker}' 없음"
+
+
+def test_briefing_default_range():
+    """기본 range가 7d (최근 자료 표시)."""
+    html = _mobile_html()
+    assert '_brRange="7d"' in html, "기본 range가 7d 아님"
+
+
+def test_briefing_preview_functions():
+    """브리핑 미리보기 함수/연결 존재."""
+    html = _mobile_html()
+    assert "renderBriefingPreview" in html
+    assert "go('briefing')" in html
+    assert "브리핑 전체 보기" in html
+    assert "최근 브리핑 데이터 대기" in html
+
+
+def test_briefing_visibility_no_forbidden_cta():
+    """금지 CTA 없음."""
+    html = _mobile_html()
+    for cta in ("주문 실행", "매수하기", "매도하기"):
+        assert cta not in html, f"금지 CTA '{cta}' 존재"
+
+
+# ═══════════════════════════════════════════════════════
 # 브리핑 탭 (17단계)
 # ═══════════════════════════════════════════════════════
 
