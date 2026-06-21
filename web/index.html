@@ -441,6 +441,33 @@ details[open] summary::before{transform:rotate(90deg)}
 .stale-data-badge{display:inline-block;font-size:8px;padding:1px 5px;border-radius:3px;background:#f59e0b22;color:#f59e0b;font-weight:600;margin-left:4px}
 .active-chart-refresh{position:relative}
 .chart-refresh-preserve{min-height:180px}
+/* ── Briefing Tab ── */
+.briefing-latest-summary{background:var(--sf);border:1px solid var(--ln);border-radius:12px;padding:14px;margin-bottom:12px}
+.briefing-latest-summary .bls-type{font-size:11px;color:var(--mt);margin-bottom:4px}
+.briefing-latest-summary .bls-title{font-size:16px;font-weight:800;margin-bottom:6px}
+.briefing-latest-summary .bls-stats{display:flex;gap:12px;flex-wrap:wrap;font-size:12px}
+.briefing-latest-summary .bls-stats .bs{background:var(--sf2);padding:4px 10px;border-radius:6px;font-weight:600}
+.briefing-filter-bar{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:12px;padding:0 2px}
+.briefing-range-chip{padding:5px 12px;border-radius:7px;font-size:11px;font-weight:600;background:var(--sf2);color:var(--mt);border:none;cursor:pointer;min-height:30px}
+.briefing-range-chip.on{background:var(--b2);color:var(--b)}
+.briefing-history-list{display:flex;flex-direction:column;gap:8px}
+.briefing-history-card{background:var(--sf);border:1px solid var(--ln);border-radius:10px;padding:12px;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.briefing-history-card .bhc-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+.briefing-history-card .bhc-type{font-size:12px;font-weight:700}
+.briefing-history-card .bhc-time{font-size:10.5px;color:var(--mt)}
+.briefing-history-card .bhc-stats{display:flex;gap:6px;font-size:11px;flex-wrap:wrap}
+.briefing-history-card .bhc-stats span{background:var(--sf2);padding:2px 7px;border-radius:5px}
+.briefing-history-card .bhc-tickers{font-size:11px;color:var(--mt);margin-top:4px}
+.briefing-history-card .bhc-more{font-size:9.5px;color:var(--mt);margin-top:4px;opacity:.7}
+.briefing-detail-sheet{padding:4px 0}
+.briefing-detail-sheet h3{font-size:16px;font-weight:800;margin:0 0 10px}
+.briefing-action-list{display:flex;flex-direction:column;gap:6px}
+.briefing-detail-row{background:var(--sf);border:1px solid var(--ln);border-radius:9px;padding:10px 12px;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.briefing-detail-guard{font-size:10.5px;margin-top:4px;padding:5px 8px;background:var(--sf2);border-radius:6px;color:var(--mt)}
+.briefing-related-ticker{color:var(--b);font-weight:700;font-size:11px;cursor:pointer}
+.briefing-empty-state{font-size:12px;color:var(--mt);padding:16px 0;text-align:center}
+@media(min-width:720px){.briefing-history-list{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}}
+@media(min-width:1100px){.briefing-history-list{grid-template-columns:repeat(3,1fr)}}
 
 /* 4. Priority Rail (가로 스와이프) */
 .priority-rail{display:flex;gap:9px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:4px;scroll-snap-type:x mandatory}
@@ -809,6 +836,7 @@ details[open] summary::before{transform:rotate(90deg)}
 <button class="tb" data-t="pf">포트폴리오</button>
 <button class="tb" data-t="act">액션</button>
 <button class="tb" data-t="perf">성과</button>
+<button class="tb briefing-tab-button" data-t="briefing">브리핑</button>
 <button class="tb" data-t="sim">시뮬레이터</button>
 </div>
 <!-- Refresh Status Bar -->
@@ -941,6 +969,13 @@ details[open] summary::before{transform:rotate(90deg)}
 <div class="c"><h3>브리핑 타입별</h3><div id="p-br"></div></div>
 <div class="c"><details><summary>종목별 적중률</summary><div id="p-tk"></div></details></div>
 <div class="c"><details><summary>최근 종료 결과</summary><div id="p-cl"></div></details></div>
+</div>
+
+<!-- ═══ 브리핑 ═══ -->
+<div class="tc briefing-tab-panel briefing-stale-safe" id="t-briefing">
+<div class="briefing-latest-summary" id="br-latest"><div class="emp">브리핑 데이터 대기</div></div>
+<div class="briefing-filter-bar" id="br-filter"></div>
+<div class="briefing-history-list briefing-limited-history" id="br-list"><div class="briefing-empty-state">브리핑 데이터 대기</div></div>
 </div>
 
 <!-- ═══ 시뮬레이터 ═══ -->
@@ -2141,6 +2176,104 @@ function openInfoDetail(kind,idx){
 
 let _prevTlItems=[];
 
+/* ═══ BRIEFING TAB ═══ */
+const _BT_LBL={"KR_BEFORE":"한국장 전 브리핑","KR_NIGHT":"한국 야간 브리핑","KR_OPEN":"한국장중 브리핑","US_BEFORE":"미국장 전 브리핑","US_NIGHT":"미국 야간 브리핑","US_CLOSE":"미국장 마감 리뷰","MANUAL":"수시 브리핑"};
+let _brRows=[];let _brRange="today";let _brType="all";
+
+async function loadBriefing(){
+  const[db,pr,tl]=await Promise.allSettled([J("/api/decision-brief"),J("/api/predictions"),J("/api/recommendations/timeline?range=7d&order=desc")]);
+  const brief=db.status==="fulfilled"?db.value:null;
+  const pred=pr.status==="fulfilled"?pr.value:null;
+  const timeline=tl.status==="fulfilled"?tl.value:null;
+
+  /* 최신 요약 */
+  const el=document.getElementById("br-latest");
+  if(el&&brief&&!brief.empty){
+    const w=brief.blocks?.what||{};
+    el.innerHTML=`<div class="bls-type">${_BT_LBL[w.briefing_type]||w.briefing_type||"브리핑"} · ${brief.day||""}</div><div class="bls-title">오늘 브리핑 요약</div><div class="bls-stats"><span class="bs">총 ${w.total||0}건</span><span class="bs" style="color:var(--g)">실행 ${w.do_now||0}</span><span class="bs" style="color:var(--b)">조건부 ${w.conditional||0}</span><span class="bs" style="color:var(--o)">보유관리</span><span class="bs" style="color:var(--mt)">관망</span></div>`;
+  }else if(el){el.innerHTML='<div class="briefing-empty-state">브리핑 데이터 대기</div>'}
+
+  /* 히스토리 rows 수집 (predictions에서 날짜별 그룹핑, 최근 50개) */
+  const rows=(pred&&pred.recent)||[];
+  _brRows=rows.slice(0,50);
+
+  /* 필터바 */
+  renderBrFilter();
+  renderBrList();
+}
+
+function renderBrFilter(){
+  const el=document.getElementById("br-filter");if(!el)return;
+  const ranges=[["today","오늘"],["7d","7일"],["30d","30일"]];
+  const types=[["all","전체"],["KR_BEFORE","한국"],["US_BEFORE","미국"],["US_CLOSE","리뷰"],["MANUAL","수시"]];
+  el.innerHTML=ranges.map(([k,l])=>`<button class="briefing-range-chip${k===_brRange?" on":""}" onclick="setBrFilter('${k}',null)">${l}</button>`).join("")+
+    `<span style="width:8px"></span>`+
+    types.map(([k,l])=>`<button class="briefing-range-chip${k===_brType?" on":""}" onclick="setBrFilter(null,'${k}')">${l}</button>`).join("");
+}
+
+function setBrFilter(range,type){
+  if(range)_brRange=range;if(type)_brType=type;
+  renderBrFilter();renderBrList();
+}
+
+function renderBrList(){
+  const el=document.getElementById("br-list");if(!el)return;
+  const now=new Date();
+  let filtered=_brRows;
+  /* range filter */
+  if(_brRange==="today"){
+    const today=now.toISOString().slice(0,10);
+    filtered=filtered.filter(r=>(r.created_at||"").startsWith(today));
+  }else if(_brRange==="7d"){
+    const cut=new Date(now-7*86400000).toISOString().slice(0,10);
+    filtered=filtered.filter(r=>(r.created_at||"")>=cut);
+  }
+  /* type filter */
+  if(_brType!=="all")filtered=filtered.filter(r=>(r.briefing_type||"")==_brType);
+
+  if(!filtered.length){el.innerHTML='<div class="briefing-empty-state">브리핑 데이터 대기 · 최근 50개 제한</div>';return}
+
+  /* 날짜별 그룹 */
+  const groups={};
+  filtered.forEach(r=>{const day=(r.created_at||"").slice(0,10);(groups[day]=groups[day]||[]).push(r)});
+
+  el.innerHTML=Object.entries(groups).slice(0,20).map(([day,items])=>{
+    const bt=items[0].briefing_type||"";const lbl=_BT_LBL[bt]||bt||"브리핑";
+    const gr={buy:0,cond:0,mgmt:0,watch:0};
+    items.forEach(r=>{const c=classify(r.action_type,r.signal);gr[c]=(gr[c]||0)+1});
+    const tickers=[...new Set(items.map(r=>r.name||r.ticker).filter(Boolean))].slice(0,3);
+    return`<div class="briefing-history-card" onclick="openBriefingDetail('${E(day)}')"><div class="bhc-top"><div class="bhc-type">${E(lbl)}</div><div class="bhc-time">${E(day)}</div></div><div class="bhc-stats"><span style="color:var(--g)">실행 ${gr.buy}</span><span style="color:var(--b)">조건 ${gr.cond}</span><span style="color:var(--o)">관리 ${gr.mgmt}</span><span>관망 ${gr.watch}</span></div><div class="bhc-tickers">${tickers.map(t=>`<span class="briefing-related-ticker" onclick="event.stopPropagation();openM('${E(items.find(r=>r.name===t||r.ticker===t)?.ticker||t)}')">${E(t)}</span>`).join(" · ")}</div><div class="bhc-more">상세 ›</div></div>`;
+  }).join("");
+}
+
+function openBriefingDetail(day){
+  mo.classList.add("open");
+  const items=_brRows.filter(r=>(r.created_at||"").startsWith(day));
+  const bt=items[0]?.briefing_type||"";const lbl=_BT_LBL[bt]||"브리핑";
+  let h=`<div class="briefing-detail-sheet"><h3>${E(lbl)} · ${E(day)}</h3>`;
+  h+=`<div style="font-size:12px;color:var(--mt);margin-bottom:10px">총 ${items.length}건 · 최근 50개 제한</div>`;
+  if(!items.length){h+=`<div class="briefing-empty-state">해당 날짜 브리핑 없음</div>`}
+  else{
+    h+=`<div class="briefing-action-list">`;
+    items.forEach(r=>{
+      const cls=classify(r.action_type,r.signal);
+      const cur=(r.ticker||"").endsWith(".KS")||(r.ticker||"").endsWith(".KQ")?"₩":"$";
+      const condNote=cls==="cond"?'<div class="briefing-detail-guard">조건 도달 시만 실행</div>':"";
+      const mgmtNote=cls==="mgmt"?'<div class="briefing-detail-guard">보유 관리 · 실행 매도 아님</div>':"";
+      h+=`<div class="briefing-detail-row" onclick="mo.classList.remove('open');setTimeout(()=>openM('${E(r.ticker)}'),200)"><div style="display:flex;justify-content:space-between;align-items:center"><div>${badge(cls)} <strong>${E(r.name||r.ticker)}</strong> <span class="mt">[${E(r.account_type||"")}]</span></div><div class="briefing-related-ticker">종목 상세 ›</div></div>`;
+      const prices=[];
+      if(r.entry_price)prices.push(`진입 ${cur}${r.entry_price}`);
+      if(r.target_price)prices.push(`목표 ${cur}${r.target_price}`);
+      if(r.stop_loss)prices.push(`손절 ${cur}${r.stop_loss}`);
+      if(prices.length)h+=`<div style="font-size:11px;color:var(--mt);margin-top:4px">${prices.join(" · ")}${r.confidence?" · 신뢰 "+r.confidence+"%":""}</div>`;
+      h+=condNote+mgmtNote+`</div>`;
+    });
+    h+=`</div>`;
+  }
+  h+=`<div style="text-align:center;padding:6px 0"><button onclick="mo.classList.remove('open')" style="background:var(--sf2);color:var(--tx);border:none;padding:10px 32px;border-radius:10px;font-size:14px;cursor:pointer;min-height:44px">닫기</button></div></div>`;
+  document.getElementById("mc").innerHTML=h;
+}
+
 /* ═══ SIMULATOR — Webull Dark Trading Terminal ═══ */
 let _simItems=[];let _simSelected=null;let _simOrderSide="buy";let _simTd=null;let _simView="chart";
 
@@ -2425,7 +2558,7 @@ async function refreshAllNow(){
   const btn=document.getElementById("refresh-btn");if(btn)btn.disabled=true;
   setRefreshState("ok",'<span class="refresh-last-updated">갱신 중…</span>');
   try{
-    await Promise.allSettled([loadMkt(),loadAct(),loadPF(),loadPerf(),loadTimeline(),loadSignals(),loadDBrief(),loadAnalytics()]);
+    await Promise.allSettled([loadMkt(),loadAct(),loadPF(),loadPerf(),loadTimeline(),loadSignals(),loadDBrief(),loadAnalytics(),loadBriefing()]);
     markRefreshSuccess();
   }catch(e){markRefreshError("all")}
   _refreshing=false;if(btn)btn.disabled=false;
@@ -2454,12 +2587,12 @@ function safeInterval(fn,ms){
 
 /* ═══ INIT ═══ */
 async function init(){
-  await Promise.allSettled([loadMkt(),loadAct(),loadPF(),loadPerf(),loadNews(),loadTimeline(),loadSimList(),loadSignals(),loadDBrief(),loadCalendar(),loadAnalytics()]);
+  await Promise.allSettled([loadMkt(),loadAct(),loadPF(),loadPerf(),loadNews(),loadTimeline(),loadSimList(),loadSignals(),loadDBrief(),loadCalendar(),loadAnalytics(),loadBriefing()]);
   markRefreshSuccess();
 }
 init();
 safeInterval(()=>{loadMkt();loadAct();loadTimeline();loadDBrief()},30000);
-safeInterval(()=>{loadPF();loadPerf();loadSimList();loadAnalytics()},120000);
+safeInterval(()=>{loadPF();loadPerf();loadSimList();loadAnalytics();loadBriefing()},120000);
 safeInterval(()=>{loadSignals()},300000);
 safeInterval(()=>{loadNews();loadCalendar()},600000);
 </script>

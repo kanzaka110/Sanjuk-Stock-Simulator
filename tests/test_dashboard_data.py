@@ -638,6 +638,70 @@ def test_mobile_read_only():
 
 
 # ═══════════════════════════════════════════════════════
+# 브리핑 탭 (17단계)
+# ═══════════════════════════════════════════════════════
+
+def test_briefing_tab_markers():
+    """브리핑 탭 마커 존재."""
+    html = _mobile_html()
+    for marker in (
+        "briefing-tab-button",
+        "briefing-tab-panel",
+        "briefing-latest-summary",
+        "briefing-filter-bar",
+        "briefing-range-chip",
+        "briefing-history-list",
+        "briefing-history-card",
+        "briefing-detail-sheet",
+        "briefing-action-list",
+        "briefing-related-ticker",
+        "briefing-detail-guard",
+        "briefing-limited-history",
+        "briefing-stale-safe",
+        "briefing-empty-state",
+    ):
+        assert marker in html, f"브리핑 탭 마커 '{marker}' 없음"
+
+
+def test_briefing_functions():
+    """브리핑 함수/API 호출 존재."""
+    html = _mobile_html()
+    assert "loadBriefing" in html
+    assert "openBriefingDetail" in html
+    assert "/api/decision-brief" in html
+    assert "/api/predictions" in html
+    assert "/api/recommendations/timeline" in html
+
+
+def test_briefing_phrases():
+    """브리핑 문구 존재."""
+    html = _mobile_html()
+    assert "조건 도달 시만" in html
+    assert "보유 관리 · 실행 매도 아님" in html
+    assert "최근 50개" in html
+    assert "브리핑 데이터 대기" in html
+
+
+def test_briefing_no_forbidden_cta():
+    """브리핑 탭 금지 CTA 없음."""
+    html = _mobile_html()
+    for cta in ("주문 실행", "매수하기", "매도하기"):
+        assert cta not in html, f"금지 CTA '{cta}' 존재"
+
+
+def test_briefing_pc_untouched():
+    """index_pc.html 미변경."""
+    import subprocess
+    from pathlib import Path
+    root = Path(__file__).parent.parent
+    diff = subprocess.run(
+        ["git", "diff", "--stat", "HEAD", "--", "web/index_pc.html"],
+        cwd=root, capture_output=True, text=True,
+    ).stdout
+    assert diff.strip() == "", f"PC index_pc.html 변경:\n{diff}"
+
+
+# ═══════════════════════════════════════════════════════
 # 준실시간 자동 갱신 UX (16단계)
 # ═══════════════════════════════════════════════════════
 
