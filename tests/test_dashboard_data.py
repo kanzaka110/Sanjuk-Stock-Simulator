@@ -638,6 +638,68 @@ def test_mobile_read_only():
 
 
 # ═══════════════════════════════════════════════════════
+# 폴드7 레이아웃 마감 (15단계) — 3단 분기 정리
+# ═══════════════════════════════════════════════════════
+
+def test_layout_density_markers():
+    """레이아웃 밀도 시스템 마커 존재."""
+    html = _mobile_html()
+    for marker in (
+        "folded-phone-layout",
+        "fold-open-layout",
+        "tablet-terminal-layout",
+        "desktop-wide-layout",
+        "fold-density-compact",
+        "fold-density-terminal",
+        "fold-modal-sheet",
+        "modal-density-phone",
+        "modal-density-fold",
+    ):
+        assert marker in html, f"레이아웃 마커 '{marker}' 없음"
+
+
+def test_layout_breakpoints():
+    """주요 breakpoint 문자열 존재."""
+    html = _mobile_html()
+    h = html.replace(" ", "")
+    assert "650px" in h, "650px breakpoint 없음"
+    assert "900px" in h, "900px breakpoint 없음"
+    assert "1200px" in h, "1200px breakpoint 없음"
+
+
+def test_layout_preserves_existing_markers():
+    """기존 주요 기능 마커가 유지됨."""
+    html = _mobile_html()
+    for marker in (
+        "stock-detail-terminal",
+        "kis-holding-strip",
+        "action-detail-sheet",
+        "performance-detail-sheet",
+        "info-hub-panel",
+    ):
+        assert marker in html, f"기존 마커 '{marker}' 실종"
+
+
+def test_layout_pc_html_untouched():
+    """index_pc.html 미변경 확인."""
+    import subprocess
+    from pathlib import Path
+    root = Path(__file__).parent.parent
+    diff = subprocess.run(
+        ["git", "diff", "--stat", "HEAD", "--", "web/index_pc.html"],
+        cwd=root, capture_output=True, text=True,
+    ).stdout
+    assert diff.strip() == "", f"PC index_pc.html 변경 감지:\n{diff}"
+
+
+def test_layout_no_forbidden_cta():
+    """금지 CTA 없음."""
+    html = _mobile_html()
+    for cta in ("주문 실행", "매수하기", "매도하기"):
+        assert cta not in html, f"금지 CTA '{cta}' 존재"
+
+
+# ═══════════════════════════════════════════════════════
 # 정보 허브 (14단계) — 뉴스/신호/이벤트/타임라인
 # ═══════════════════════════════════════════════════════
 

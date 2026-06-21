@@ -488,6 +488,57 @@ details[open] summary::before{transform:rotate(90deg)}
 .conc-row{display:none}
 
 /* ── 폴드/태블릿 공통 타이포 상향 (≥720) — 작은 글씨/축소 PC 느낌 제거 ── */
+/* ═══ LAYOUT DENSITY SYSTEM ═══
+   folded-phone: < 650px (1열, 읽기 쉽게)
+   fold-open: 650~899px (2열 가능, 넓은 단일 + 내부 2열)
+   tablet-terminal: 900~1199px (2열 투자 터미널)
+   desktop-wide: >= 1200px (3열 고밀도)
+*/
+/* ── folded-phone 기본: 1열, 핵심 정보 가독성 우선 ── */
+.folded-phone-layout{display:block}
+.fold-density-compact{display:block}
+.fold-open-layout,.tablet-terminal-layout,.desktop-wide-layout{display:none}
+.fold-density-terminal{display:none}
+.fold-modal-sheet .md{border-radius:16px 16px 0 0;max-height:88vh}
+.modal-density-phone{display:block}
+.modal-density-fold{display:none}
+/* phone: info-hub 1열, 가로 overflow 방어 */
+.info-hub-panel{overflow:hidden}
+.info-hub-panel>div{min-width:0}
+
+/* ── fold-open: 650px+ ── */
+@media(min-width:650px){
+  .folded-phone-layout{display:none}
+  .fold-open-layout{display:block}
+  .fold-density-compact{display:none}
+  .fold-density-terminal{display:block}
+  .modal-density-phone{display:none}
+  .modal-density-fold{display:block}
+  .fold-modal-sheet .md{border-radius:14px;max-height:84vh;margin:auto}
+  /* 보유 카드 pnl-grid: 6열 compact */
+  .holding-pnl-grid{grid-template-columns:repeat(6,1fr)}
+  /* KIS 스트립: grid */
+  .kis-holding-strip{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;overflow:visible}
+}
+
+/* ── tablet-terminal: 900px+ ── */
+@media(min-width:900px){
+  .fold-open-layout{display:none}
+  .tablet-terminal-layout{display:block}
+  /* info-hub 중복 방지: fold-panel과 info-hub가 같은 화면에 있을 때 info-hub 우선 */
+  .fold-wide .phone-only,.fold-wide .phone-collapsed{display:none!important}
+}
+
+/* ── desktop-wide: 1200px+ ── */
+@media(min-width:1200px){
+  .tablet-terminal-layout{display:none}
+  .desktop-wide-layout{display:block}
+  body{max-width:1400px}
+  /* 홈 최대 3열 방어 */
+  .info-hub-panel{max-width:1200px}
+  .fold-wide{max-width:1200px}
+}
+
 @media (min-width:720px){
   body{font-size:15px}
   /* 폴드 폭부터 rich 패널 펼치고 폰 전용 details 접힘은 숨김 */
@@ -817,8 +868,8 @@ details[open] summary::before{transform:rotate(90deg)}
 <details open class="detail-drawer"><summary><span>이벤트 캘린더</span></summary><div class="dd-body" id="h-cal"><div class="emp">불러오는 중…</div></div></details>
 <details open class="detail-drawer phone-only phone-collapsed"><summary><span>30일 성과</span></summary><div class="dd-body" id="h-perf"></div></details>
 <details open class="detail-drawer phone-only phone-collapsed"><summary><span>주요 뉴스</span></summary><div class="dd-body" id="h-news"></div></details>
-<!-- 정보 허브 패널 -->
-<div class="info-hub-panel fold-info-hub-grid">
+<!-- 정보 허브 패널 (fold-density에 따라 1/2/4열 전환) -->
+<div class="info-hub-panel fold-info-hub-grid fold-density-compact fold-density-terminal">
 <div class="info-hub-news" id="ih-news"><div class="info-empty-state news-empty-state">뉴스 데이터 대기</div></div>
 <div class="info-hub-signals" id="ih-sig"><div class="info-empty-state signal-empty-state">신호 데이터 대기</div></div>
 <div class="info-hub-events" id="ih-events"><div class="info-empty-state event-empty-state">이벤트 데이터 대기</div></div>
@@ -916,7 +967,7 @@ details[open] summary::before{transform:rotate(90deg)}
 </div>
 
 <!-- ═══ 모달 ═══ -->
-<div class="mo" id="mo"><div class="md" id="md"><div class="handle"></div><div id="mc"></div></div></div>
+<div class="mo fold-modal-sheet" id="mo"><div class="md" id="md"><div class="handle"></div><div id="mc"></div></div></div>
 
 <script>
 const E=s=>(s==null?"":String(s)).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
