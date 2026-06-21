@@ -254,7 +254,16 @@ def build_archive_tracking(archive: dict) -> dict:
         pass
 
     # 각 prediction에 대해 tracking 계산
-    from core.dashboard_data import calc_price_context
+    from core.dashboard_data import calc_price_context, ticker_orderbook, summarize_execution_risk
+
+    # 국내 종목 호가 리스크 (최대 10종목)
+    ob_risks: dict[str, dict] = {}
+    kr_tks = [t for t in tickers if t.endswith(".KS") or t.endswith(".KQ")][:10]
+    for tk in kr_tks:
+        try:
+            ob_risks[tk] = summarize_execution_risk(ticker_orderbook(tk))
+        except Exception:
+            pass
 
     items = []
     total_pnl = 0.0
@@ -330,6 +339,7 @@ def build_archive_tracking(archive: dict) -> dict:
             "distance_summary": pctx["summary"],
             "tracking_label": tracking_label,
             "tracking_tone": tone,
+            "execution_risk": ob_risks.get(tk, {"has_warning": False, "label": "", "summary": "", "tone": "unknown"}),
         })
 
     result["summary"] = {

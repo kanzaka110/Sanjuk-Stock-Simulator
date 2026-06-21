@@ -638,6 +638,78 @@ def test_mobile_read_only():
 
 
 # ═══════════════════════════════════════════════════════
+# 호가 리스크 브리핑 연동 (24단계)
+# ═══════════════════════════════════════════════════════
+
+def test_summarize_execution_risk_ok():
+    """체결 리스크 낮음 → has_warning false."""
+    ob = {"execution_risk_label": "체결 리스크 낮음", "spread_pct": 0.1,
+          "imbalance_pct": 10, "source": "KIS"}
+    r = dd.summarize_execution_risk(ob)
+    assert r["has_warning"] is False
+    assert r["tone"] == "ok"
+
+
+def test_summarize_execution_risk_warn():
+    """스프레드 주의 → has_warning true."""
+    ob = {"execution_risk_label": "스프레드 주의", "spread_pct": 0.5,
+          "imbalance_pct": 20, "source": "KIS"}
+    r = dd.summarize_execution_risk(ob)
+    assert r["has_warning"] is True
+    assert r["tone"] == "warn"
+    assert "스프레드" in r["summary"]
+
+
+def test_summarize_execution_risk_bad():
+    """유동성 주의 → has_warning true, tone bad."""
+    ob = {"execution_risk_label": "유동성 주의", "spread_pct": 1.2,
+          "imbalance_pct": -70, "source": "KIS"}
+    r = dd.summarize_execution_risk(ob)
+    assert r["has_warning"] is True
+    assert r["tone"] == "bad"
+    assert "불균형" in r["summary"]
+
+
+def test_summarize_execution_risk_none():
+    """None/unsupported 안전."""
+    r = dd.summarize_execution_risk(None)
+    assert r["has_warning"] is False
+    assert r["tone"] == "unknown"
+
+    r2 = dd.summarize_execution_risk({"source": "unsupported", "error": "국내 종목만 지원"})
+    assert r2["has_warning"] is False
+
+
+def test_execution_risk_html_markers():
+    """HTML 호가 리스크 경고 마커 존재."""
+    html = _mobile_html()
+    for marker in (
+        "execution-risk-warning",
+        "execution-risk-summary",
+        "execution-risk-warn",
+        "execution-risk-bad",
+        "execution-risk-muted",
+        "briefing-execution-risk",
+    ):
+        assert marker in html, f"호가 리스크 마커 '{marker}' 없음"
+
+
+def test_execution_risk_phrases():
+    """호가 리스크 문구 존재."""
+    html = _mobile_html()
+    assert "호가 기준 판단 보조" in html
+    assert "주문 지시 아님" in html
+    assert "체결 리스크 참고" in html
+
+
+def test_execution_risk_no_forbidden_cta():
+    """금지 CTA 없음."""
+    html = _mobile_html()
+    for cta in ("주문 실행", "매수하기", "매도하기"):
+        assert cta not in html, f"금지 CTA '{cta}' 존재"
+
+
+# ═══════════════════════════════════════════════════════
 # KIS 국내 호가 (23단계)
 # ═══════════════════════════════════════════════════════
 

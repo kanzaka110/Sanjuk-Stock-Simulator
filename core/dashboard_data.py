@@ -1326,6 +1326,16 @@ def _fetch_decision_brief_raw() -> dict:
     except Exception:
         pass
 
+    # 국내 종목 호가 리스크 (최대 10종목, 캐시 재사용)
+    ob_risks: dict[str, dict] = {}
+    kr_tickers = [t for t in tickers_in_rows if t.endswith(".KS") or t.endswith(".KQ")][:10]
+    for tk in kr_tickers:
+        try:
+            ob = ticker_orderbook(tk)
+            ob_risks[tk] = summarize_execution_risk(ob)
+        except Exception:
+            pass
+
     do_now, conditionals, dont, risks = [], [], [], []
     for r in rows:
         at = r.get("action_type", "")
@@ -1346,6 +1356,7 @@ def _fetch_decision_brief_raw() -> dict:
             "price_context": pctx,
             "condition_label": pctx["condition_label"],
             "distance_summary": pctx["summary"],
+            "execution_risk": ob_risks.get(ticker, {"has_warning": False, "label": "", "summary": "", "tone": "unknown"}),
         }
         if at in ("AI_NEW_BUY", "AI_ADD_BUY"):
             do_now.append(item)
@@ -1390,6 +1401,53 @@ def decision_brief() -> dict:
     """의사결정 브리핑 (60초 캐시)."""
     out = _cached("decision_brief", 60, _fetch_decision_brief_raw)
     return out if isinstance(out, dict) and out else {"day": "", "blocks": {}, "empty": True}
+
+
+# ─── 호가 리스크 요약 유�� (공통) ──────────────────────
+def summarize_execution_risk(orderbook: dict | None) -> dict:
+    """orderbook 결과에서 warning 수준만 요약. 정상이면 has_warning=False."""
+    base = {"has_warning": False, "label": "데이터 대기",
+            "summary": "", "spread_pct": 0, "imbalance_pct": 0, "tone": "unknown"}
+    if not orderbook or not isinstance(orderbook, dict):
+        return base
+    if orderbook.get("error") or orderbook.get("source") == "unsupported":
+        base["label"] = orderbook.get("error") or "국내 종목만 지원"
+        return base
+
+    risk = orderbook.get("execution_risk_label", "")
+    spread = orderbook.get("spread_pct", 0) or 0
+    imbalance = orderbook.get("imbalance_pct", 0) or 0
+
+    base["spread_pct"] = spread
+    base["imbalance_pct"] = imbalance
+
+    if risk == "체결 리스크 낮음":
+        base["has_warning"] = False
+        base["label"] = "체결 리스크 낮음"
+        base["tone"] = "ok"
+        base["summary"] = f"스프레드 {spread:.2f}%"
+    elif risk == "스프레드 주의":
+        base["has_warning"] = True
+        base["label"] = "스프레드 주의"
+        base["tone"] = "warn"
+        base["summary"] = f"스프레드 {spread:.2f}% · 호가 기준 판단 보조"
+    elif risk == "유동성 주의":
+        base["has_warning"] = True
+        base["label"] = "유동성 주의"
+        base["tone"] = "bad"
+        base["summary"] = f"스프레드 {spread:.2f}% · 유동성 주의 · 호가 기준 판단 보조"
+    else:
+        base["label"] = risk or "데이터 대기"
+        base["tone"] = "unknown"
+
+    # imbalance 보조
+    if abs(imbalance) > 60:
+        base["has_warning"] = True
+        base["summary"] += f" · 불균형 {imbalance:+.0f}%"
+        if base["tone"] == "ok":
+            base["tone"] = "warn"
+
+    return base
 
 
 # ─── /api/ticker/{ticker}/orderbook — 호가/체결 리스크 ──────
