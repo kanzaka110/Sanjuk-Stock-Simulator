@@ -2241,7 +2241,7 @@ async function loadBriefingArchive(){
   el.innerHTML=d.items.map(a=>{
     const lbl=_BT_LBL[a.briefing_type]||a.briefing_type||"브리핑";
     const tickers=(a.tickers||[]).slice(0,4).join(", ");
-    return`<div class="briefing-archive-card" onclick="openBriefingArchive('${E(a.id)}')"><div class="bac-top"><div class="bac-type">${E(lbl)}</div><div class="bac-time">${E((a.created_at||"").slice(0,16))}</div></div><div class="bac-summary">${E(a.summary||a.title||"")}</div><div class="bac-footer"><span>${a.action_count||0}건</span>${tickers?`<span>${E(tickers)}</span>`:""}<span class="briefing-archive-open">원문 보기 ›</span></div></div>`;
+    return`<div class="briefing-archive-card" onclick="openBriefingArchive('${E(a.id)}')"><div class="bac-top"><div class="bac-type">${E(lbl)}</div><div class="bac-time">${E((a.created_at||"").slice(0,16))}</div></div><div class="bac-summary">${E(a.summary||a.title||"")}</div><div class="bac-footer"><span>${a.action_count||0}건</span>${tickers?`<span>${E(tickers)}</span>`:""}<span class="briefing-tracking-hint" style="font-size:9.5px;color:var(--mt)">상세에서 현재 결과 확인</span><span class="briefing-archive-open">원문 보기 ›</span></div></div>`;
   }).join("");
 }
 
@@ -2255,6 +2255,24 @@ async function openBriefingArchive(id){
   let h=`<div class="briefing-archive-detail"><h3>${E(lbl)} · ${E((d.created_at||"").slice(0,16))}</h3>`;
   if(d.subject)h+=`<div style="font-size:12px;color:var(--mt);margin-bottom:8px">${E(d.subject)}</div>`;
   if(tickers.length)h+=`<div style="margin-bottom:8px;display:flex;gap:5px;flex-wrap:wrap">${tickers.map(t=>`<span class="briefing-related-ticker" onclick="event.stopPropagation();mo.classList.remove('open');setTimeout(()=>openM('${E(t)}'),200)">${E(t)}</span>`).join("")}</div>`;
+  /* 현재 결과 추적 패널 */
+  const tr=d.tracking;
+  if(tr&&tr.items&&tr.items.length){
+    const s=tr.summary||{};
+    const toneC={good:"var(--g)",bad:"var(--r)",warn:"var(--o)",wait:"var(--mt)",neutral:"var(--mt)"};
+    h+=`<div class="briefing-tracking-panel" style="margin-bottom:12px"><div style="font-size:13px;font-weight:700;margin-bottom:8px">현재 결과 추적 <span class="briefing-tracking-source" style="font-size:10px;color:var(--mt);font-weight:400">· 브리핑 이후 현재 위치</span></div>`;
+    h+=`<div class="briefing-tracking-summary" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;font-size:11px"><span>총 ${s.total||0}건</span><span>진행 ${s.open||0}</span><span>종료 ${s.closed||0}</span>${s.reached?`<span style="color:var(--g)">도달 ${s.reached}</span>`:""}${s.avg_pnl_pct?`<span class="${s.avg_pnl_pct>=0?"up":"dn"}">평균 ${s.avg_pnl_pct>=0?"+":""}${s.avg_pnl_pct}%</span>`:""}</div>`;
+    h+=`<div class="briefing-tracking-list" style="display:flex;flex-direction:column;gap:5px">`;
+    tr.items.slice(0,15).forEach(it=>{
+      const tc=toneC[it.tracking_tone]||"var(--mt)";
+      const cur=it.ticker.endsWith(".KS")||it.ticker.endsWith(".KQ")?"₩":"$";
+      h+=`<div class="briefing-tracking-row" style="display:flex;justify-content:space-between;align-items:center;padding:6px 8px;background:var(--sf);border-radius:7px;cursor:pointer;font-size:11.5px" onclick="mo.classList.remove('open');setTimeout(()=>openM('${E(it.ticker)}'),200)"><div><span style="font-weight:600">${E(it.name||it.ticker)}</span> <span class="mt">${E(it.label)}</span></div><div style="text-align:right"><span class="briefing-tracking-label" style="color:${tc};font-weight:700">${E(it.tracking_label)}</span>${it.current_price?` <span class="briefing-tracking-distance mt" style="font-size:10px">${cur}${it.current_price.toLocaleString()}</span>`:""}</div></div>`;
+    });
+    h+=`</div></div>`;
+  }else{
+    h+=`<div class="briefing-tracking-panel"><div class="briefing-tracking-empty" style="font-size:11px;color:var(--mt);padding:8px 0">현재 결과 추적: 관련 추천 없음</div></div>`;
+  }
+  /* 원문 */
   if(d.body_html){h+=`<div class="briefing-email-body">${d.body_html}</div>`}
   else if(d.body_text){h+=`<div class="briefing-text-body">${E(d.body_text)}</div>`}
   else{h+=`<div class="briefing-archive-empty">본문 없음</div>`}

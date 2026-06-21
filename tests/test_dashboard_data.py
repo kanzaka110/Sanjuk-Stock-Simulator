@@ -638,6 +638,83 @@ def test_mobile_read_only():
 
 
 # ═══════════════════════════════════════════════════════
+# 브리핑 아카이브 결과 추적 (22단계)
+# ═══════════════════════════════════════════════════════
+
+def test_archive_tracking_shape(tmp_path, monkeypatch):
+    """build_archive_tracking 반환 shape 확인."""
+    from core import briefing_archive as ba
+    monkeypatch.setattr(ba, "_db_path", lambda: tmp_path / "test.db")
+    # archive 저장
+    ba.save_briefing_archive(
+        briefing_type="KR_BEFORE", title="테스트",
+        body_text="본문", raw_json={},
+    )
+    items = ba.list_briefing_archives(limit=1, days=1)
+    assert items
+    archive = items[0]
+    # predictions DB가 없으면 빈 결과
+    result = ba.build_archive_tracking(archive)
+    assert "summary" in result
+    assert "items" in result
+    assert isinstance(result["items"], list)
+
+
+def test_archive_tracking_html_markers():
+    """HTML tracking 마커 존재."""
+    html = _mobile_html()
+    for marker in (
+        "briefing-tracking-panel",
+        "briefing-tracking-summary",
+        "briefing-tracking-list",
+        "briefing-tracking-row",
+        "briefing-tracking-label",
+        "briefing-tracking-distance",
+        "briefing-tracking-empty",
+        "briefing-tracking-source",
+        "briefing-tracking-hint",
+    ):
+        assert marker in html, f"tracking 마커 '{marker}' 없음"
+
+
+def test_archive_tracking_phrases():
+    """추적 문구 존재."""
+    html = _mobile_html()
+    assert "현재 결과 추적" in html
+    assert "브리핑 이후 현재 위치" in html
+    assert "상세에서 현재 결과 확인" in html
+
+
+def test_archive_tracking_condition_labels():
+    """조건 상태 라벨 문자열 존재 (JS 렌더 시 사용)."""
+    html = _mobile_html()
+    # These appear in the openBriefingArchive JS as tracking_label values
+    # Verify the backend produces them:
+    from core.dashboard_data import calc_price_context
+    ctx_wait = calc_price_context(150, 145, 160, 140, "CONDITIONAL_NEW_BUY")
+    assert ctx_wait["condition_label"] == "조건 대기"
+    ctx_near = calc_price_context(146, 145, 160, 140, "CONDITIONAL_NEW_BUY")
+    assert ctx_near["condition_label"] == "조건 근접"
+    ctx_reach = calc_price_context(144, 145, 160, 140, "CONDITIONAL_NEW_BUY")
+    assert ctx_reach["condition_label"] == "조건 도달"
+
+
+def test_archive_tracking_no_forbidden_cta():
+    """금지 CTA 없음."""
+    html = _mobile_html()
+    for cta in ("주문 실행", "매수하기", "매도하기"):
+        assert cta not in html, f"금지 CTA '{cta}' 존재"
+
+
+def test_archive_tracking_api_has_tracking():
+    """app.py briefing detail에 tracking 반환."""
+    from pathlib import Path
+    code = (Path(__file__).parent.parent / "web" / "app.py").read_text(encoding="utf-8")
+    assert "build_archive_tracking" in code
+    assert "tracking" in code
+
+
+# ═══════════════════════════════════════════════════════
 # KIS 국내 차트 우선화 (21단계)
 # ═══════════════════════════════════════════════════════
 

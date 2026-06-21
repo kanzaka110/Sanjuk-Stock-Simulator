@@ -103,11 +103,12 @@ def api_briefings(limit: int = 50, days: int = 90, type: str = "all"):
 
 @app.get("/api/briefings/{archive_id}")
 def api_briefing_detail(archive_id: str):
-    from core.briefing_archive import get_briefing_archive
+    from core.briefing_archive import get_briefing_archive, build_archive_tracking
     item = get_briefing_archive(archive_id)
     if item is None:
         return JSONResponse({"error": "not found", "id": archive_id})
-    return JSONResponse({**item, "error": ""})
+    tracking = build_archive_tracking(item)
+    return JSONResponse({**item, "tracking": tracking, "error": ""})
 
 
 @app.get("/api/ticker/{ticker}/chart")

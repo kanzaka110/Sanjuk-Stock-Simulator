@@ -189,3 +189,156 @@ def get_briefing_archive(archive_id: str) -> dict | None:
     except Exception as e:
         log.warning("briefing archive get failed: %s", e)
         return None
+
+
+# ─── 현재 결과 추적 (read-only) ────────────────────
+_ACTION_LABELS = {
+    "AI_NEW_BUY": "신규 매수", "AI_ADD_BUY": "추가 매수",
+    "CONDITIONAL_NEW_BUY": "조건부 매수",
+    "AI_SELL_MANAGEMENT": "보유 관리",
+    "CANCEL_SELL": "매도 취소", "HOLD_REVIEW": "보유 점검",
+    "WATCH_ONLY": "관망",
+}
+
+
+def build_archive_tracking(archive: dict) -> dict:
+    """아카이브 브리핑의 추천들에 대한 현재 결과 추적. read-only."""
+    result = {"summary": {"total": 0, "open": 0, "closed": 0,
+                          "reached": 0, "waiting": 0, "avg_pnl_pct": 0.0},
+              "items": [], "error": ""}
+
+    day = (archive.get("created_at") or "")[:10]
+    bt = archive.get("briefing_type", "")
+    if not day:
+        result["error"] = "날짜 정보 없음"
+        return result
+
+    # predictions DB에서 같은 날짜+type 조회
+    try:
+        from core.dashboard_data import _conn as _dd_conn, _rows
+        conn = _dd_conn()
+        if conn is None:
+            result["error"] = "DB 없음"
+            return result
+        where = "created_at LIKE ?"
+        params: list = [f"{day}%"]
+        if bt:
+            where += " AND briefing_type = ?"
+            params.append(bt)
+        preds = _rows(conn, f"""
+            SELECT ticker, name, action_type, signal, status, outcome,
+                   pnl_pct, entry_price, target_price, stop_loss,
+                   created_at, account_type
+            FROM predictions WHERE {where}
+            ORDER BY created_at DESC LIMIT 50
+        """, tuple(params))
+        conn.close()
+    except Exception as e:
+        result["error"] = f"predictions 조회 실패: {e}"
+        return result
+
+    if not preds:
+        result["error"] = "관련 추천 없음"
+        return result
+
+    # 현재가 조회 (최대 20종목)
+    tickers = list({p["ticker"] for p in preds if p.get("ticker")})[:20]
+    cur_prices: dict[str, float] = {}
+    try:
+        from core.market import _get_quote_realtime
+        for tk in tickers:
+            q = _get_quote_realtime(tk)
+            if q and q.price:
+                cur_prices[tk] = q.price
+    except Exception:
+        pass
+
+    # 각 prediction에 대해 tracking 계산
+    from core.dashboard_data import calc_price_context
+
+    items = []
+    total_pnl = 0.0
+    pnl_count = 0
+    reached = 0
+    waiting = 0
+    open_count = 0
+    closed_count = 0
+
+    for p in preds:
+        tk = p.get("ticker", "")
+        at = p.get("action_type", "")
+        status = p.get("status", "")
+        outcome = p.get("outcome", "")
+        pnl_pct = p.get("pnl_pct")
+        cur_price = cur_prices.get(tk, 0.0)
+
+        label = _ACTION_LABELS.get(at, at or "기타")
+        pctx = calc_price_context(cur_price, p.get("entry_price"),
+                                   p.get("target_price"), p.get("stop_loss"), at)
+
+        # tracking label/tone
+        if status == "closed":
+            closed_count += 1
+            if outcome == "win":
+                tracking_label = f"승 ({pnl_pct:+.1f}%)" if pnl_pct else "승"
+                tone = "good"
+            elif outcome == "loss":
+                tracking_label = f"패 ({pnl_pct:+.1f}%)" if pnl_pct else "패"
+                tone = "bad"
+            else:
+                tracking_label = "무"
+                tone = "neutral"
+            if pnl_pct is not None:
+                total_pnl += pnl_pct
+                pnl_count += 1
+        else:
+            open_count += 1
+            if not cur_price:
+                tracking_label = "현재가 대기"
+                tone = "neutral"
+            elif at == "AI_SELL_MANAGEMENT":
+                tracking_label = "보유 유지"
+                tone = "neutral"
+            elif at == "CONDITIONAL_NEW_BUY":
+                tracking_label = pctx["condition_label"]
+                if pctx["condition_status"] == "reached":
+                    tone = "good"
+                    reached += 1
+                elif pctx["condition_status"] == "near":
+                    tone = "warn"
+                else:
+                    tone = "wait"
+                    waiting += 1
+            elif at in ("WATCH_ONLY", "HOLD_REVIEW", "CANCEL_SELL"):
+                tracking_label = "관망 유지"
+                tone = "neutral"
+            else:
+                tracking_label = "진행중"
+                tone = "neutral"
+
+        items.append({
+            "ticker": tk,
+            "name": p.get("name", tk),
+            "action_type": at,
+            "label": label,
+            "status": status,
+            "outcome": outcome,
+            "pnl_pct": pnl_pct,
+            "current_price": cur_price,
+            "price_context": pctx,
+            "condition_label": pctx["condition_label"],
+            "distance_summary": pctx["summary"],
+            "tracking_label": tracking_label,
+            "tracking_tone": tone,
+        })
+
+    result["summary"] = {
+        "total": len(preds),
+        "open": open_count,
+        "closed": closed_count,
+        "reached": reached,
+        "waiting": waiting,
+        "avg_pnl_pct": round(total_pnl / pnl_count, 2) if pnl_count else 0.0,
+    }
+    result["items"] = items
+    return result
