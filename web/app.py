@@ -111,6 +111,11 @@ def api_briefing_detail(archive_id: str):
     return JSONResponse({**item, "tracking": tracking, "error": ""})
 
 
+@app.get("/api/ticker/{ticker}/orderbook")
+def api_ticker_orderbook(ticker: str):
+    return JSONResponse(dd.ticker_orderbook(ticker))
+
+
 @app.get("/api/ticker/{ticker}/chart")
 def api_ticker_chart(ticker: str, range: str = "1d", interval: str = "5m"):
     return JSONResponse(dd.ticker_chart_data(ticker, range_=range, interval=interval))

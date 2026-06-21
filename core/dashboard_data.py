@@ -1392,6 +1392,50 @@ def decision_brief() -> dict:
     return out if isinstance(out, dict) and out else {"day": "", "blocks": {}, "empty": True}
 
 
+# ─── /api/ticker/{ticker}/orderbook — 호가/체결 리스크 ──────
+def ticker_orderbook(ticker: str) -> dict:
+    """국내 종목 호가 조회 (30초 캐시). 해외는 미지원."""
+    now_str = datetime.now(KST).strftime("%Y-%m-%dT%H:%M:%S")
+    base = {
+        "ticker": ticker, "source": "unsupported", "updated_at": now_str,
+        "cache_age_sec": 0, "bids": [], "asks": [],
+        "spread": 0, "spread_pct": 0, "mid_price": 0,
+        "total_bid_size": 0, "total_ask_size": 0, "imbalance_pct": 0,
+        "liquidity_label": "데이터 대기",
+        "execution_risk_label": "데이터 대기", "error": "",
+    }
+    if not _TICKER_SAFE.match(ticker):
+        base["error"] = "invalid ticker"
+        return base
+    is_kr = ticker.endswith(".KS") or ticker.endswith(".KQ")
+    if not is_kr:
+        base["error"] = "국내 종목만 지원"
+        return base
+
+    cache_key = f"orderbook:{ticker}"
+
+    def _fetch():
+        try:
+            from core.market_kis import get_domestic_orderbook
+            return get_domestic_orderbook(ticker)
+        except Exception:
+            return None
+
+    result = _cached(cache_key, 30, _fetch)
+    if not result or not isinstance(result, dict):
+        base["error"] = "호가 데이터 없음"
+        return base
+
+    with _cache_lock:
+        entry = _cache.get(cache_key)
+        if entry:
+            base["cache_age_sec"] = round(time.monotonic() - entry[0])
+
+    base.update(result)
+    base["updated_at"] = now_str
+    return base
+
+
 # ─── /api/ticker/{ticker}/chart — OHLCV 차트 데이터 ──────
 _CHART_RANGE_MAP: dict[str, tuple[str, str]] = {
     "1d":  ("1d",  "5m"),

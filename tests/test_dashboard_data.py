@@ -638,6 +638,91 @@ def test_mobile_read_only():
 
 
 # ═══════════════════════════════════════════════════════
+# KIS 국내 호가 (23단계)
+# ═══════════════════════════════════════════════════════
+
+def test_orderbook_domestic_shape(monkeypatch):
+    """국내 종목 orderbook shape 확인."""
+    mock_ob = {
+        "ticker": "005930.KS", "source": "KIS", "updated_at": "2026-06-21T10:00:00",
+        "bids": [{"price": 70000, "size": 100}],
+        "asks": [{"price": 70100, "size": 200}],
+        "spread": 100, "spread_pct": 0.143, "mid_price": 70050,
+        "total_bid_size": 100, "total_ask_size": 200,
+        "imbalance_pct": -33.3,
+        "liquidity_label": "유동성 양호",
+        "execution_risk_label": "체결 리스크 낮음", "error": "",
+    }
+    import core.market_kis as kis
+    monkeypatch.setattr(kis, "get_domestic_orderbook", lambda t: mock_ob)
+    dd._cache.clear()
+    result = dd.ticker_orderbook("005930.KS")
+    assert result["source"] == "KIS"
+    assert result["spread"] == 100
+    assert result["execution_risk_label"] == "체결 리스크 낮음"
+    assert "error" in result
+
+
+def test_orderbook_overseas_unsupported():
+    """해외 종목은 unsupported."""
+    dd._cache.clear()
+    result = dd.ticker_orderbook("MU")
+    assert result["source"] == "unsupported"
+    assert "국내 종목만 지원" in result["error"]
+
+
+def test_orderbook_invalid_ticker():
+    """이상한 ticker 안전 처리."""
+    dd._cache.clear()
+    result = dd.ticker_orderbook("../../etc")
+    assert result["error"] == "invalid ticker"
+
+
+def test_orderbook_route_exists():
+    """orderbook route가 chart/generic보다 먼저."""
+    from pathlib import Path
+    code = (Path(__file__).parent.parent / "web" / "app.py").read_text(encoding="utf-8")
+    ob_pos = code.find("/api/ticker/{ticker}/orderbook")
+    chart_pos = code.find("/api/ticker/{ticker}/chart")
+    generic_pos = code.find("/api/ticker/{ticker:path}")
+    assert ob_pos != -1
+    assert ob_pos < chart_pos < generic_pos
+
+
+def test_orderbook_html_markers():
+    """HTML 호가 마커 존재."""
+    html = _mobile_html()
+    for marker in (
+        "orderbook-panel",
+        "orderbook-ladder",
+        "orderbook-bid-row",
+        "orderbook-ask-row",
+        "orderbook-spread",
+        "orderbook-imbalance",
+        "execution-risk-badge",
+        "orderbook-readonly-note",
+        "orderbook-empty-state",
+    ):
+        assert marker in html, f"호가 마커 '{marker}' 없음"
+
+
+def test_orderbook_phrases():
+    """호가 관련 문구 존재."""
+    html = _mobile_html()
+    assert "호가/체결 리스크" in html
+    assert "read-only · 실제 주문 아님" in html
+    assert "KIS 호가" in html
+    assert "국내 종목만 지원" in html
+
+
+def test_orderbook_no_forbidden_cta():
+    """금지 CTA 없음."""
+    html = _mobile_html()
+    for cta in ("주문 실행", "매수하기", "매도하기"):
+        assert cta not in html, f"금지 CTA '{cta}' 존재"
+
+
+# ═══════════════════════════════════════════════════════
 # 브리핑 아카이브 결과 추적 (22단계)
 # ═══════════════════════════════════════════════════════
 

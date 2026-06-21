@@ -577,3 +577,104 @@ def _fetch_domestic_daily_chart(
         "day_pct": day_pct,
         "source": "KIS",
     }
+
+
+# ─── 국내주식 호가 (read-only) ─────────────────────
+def get_domestic_orderbook(ticker: str) -> dict | None:
+    """KIS API 국내주식 호가 조회 (FHKST01010200). read-only 판단 보조용.
+
+    실패 시 None. 실제 주문/자동매매에 사용 금지.
+    """
+    if not _is_kis_configured():
+        return None
+
+    token = _get_access_token()
+    if not token:
+        return None
+
+    stock_code = _ticker_to_kis_code(ticker)
+
+    try:
+        resp = requests.get(
+            f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn",
+            headers={
+                "authorization": f"Bearer {token}",
+                "appkey": KIS_APP_KEY,
+                "appsecret": KIS_APP_SECRET,
+                "tr_id": "FHKST01010200",
+                "content-type": "application/json; charset=utf-8",
+            },
+            params={
+                "FID_COND_MRKT_DIV_CODE": "J",
+                "FID_INPUT_ISCD": stock_code,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        if data.get("rt_cd") != "0":
+            return None
+
+        output = data.get("output1", {})
+        if not output:
+            return None
+
+        asks = []
+        for i in range(1, 6):
+            p = float(output.get(f"askp{i}", 0))
+            s = int(output.get(f"askp_rsqn{i}", 0))
+            if p > 0:
+                asks.append({"price": round(p), "size": s})
+
+        bids = []
+        for i in range(1, 6):
+            p = float(output.get(f"bidp{i}", 0))
+            s = int(output.get(f"bidp_rsqn{i}", 0))
+            if p > 0:
+                bids.append({"price": round(p), "size": s})
+
+        best_ask = asks[0]["price"] if asks else 0
+        best_bid = bids[0]["price"] if bids else 0
+        spread = best_ask - best_bid if best_ask and best_bid else 0
+        mid_price = (best_ask + best_bid) / 2 if best_ask and best_bid else 0
+        spread_pct = round(spread / mid_price * 100, 3) if mid_price else 0
+
+        total_bid = sum(b["size"] for b in bids)
+        total_ask = sum(a["size"] for a in asks)
+        total = total_bid + total_ask
+        imbalance_pct = round((total_bid - total_ask) / total * 100, 1) if total else 0
+
+        if spread_pct <= 0.2:
+            exec_label = "체결 리스크 낮음"
+            liq_label = "유동성 양호"
+        elif spread_pct <= 0.7:
+            exec_label = "스프레드 주의"
+            liq_label = "유동성 보통"
+        else:
+            exec_label = "유동성 주의"
+            liq_label = "호가 얇음"
+
+        from datetime import datetime, timezone, timedelta
+        KST = timezone(timedelta(hours=9))
+
+        return {
+            "ticker": ticker,
+            "source": "KIS",
+            "updated_at": datetime.now(KST).strftime("%Y-%m-%dT%H:%M:%S"),
+            "bids": bids,
+            "asks": asks,
+            "spread": spread,
+            "spread_pct": spread_pct,
+            "mid_price": round(mid_price),
+            "total_bid_size": total_bid,
+            "total_ask_size": total_ask,
+            "imbalance_pct": imbalance_pct,
+            "liquidity_label": liq_label,
+            "execution_risk_label": exec_label,
+            "error": "",
+        }
+
+    except requests.RequestException as e:
+        logger.warning("KIS 호가 조회 실패 [%s]: %s", ticker, e)
+        return None
