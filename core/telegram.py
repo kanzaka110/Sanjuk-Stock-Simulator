@@ -124,6 +124,15 @@ def _num_safe(val) -> float:
     return float(nums[0]) if nums else 0.0
 
 
+def _format_execution_risk_warning(item: dict) -> str:
+    """execution_risk has_warning true인 경우만 1줄 경고. 아니면 빈 문자열."""
+    risk = item.get("execution_risk") or {}
+    if not risk.get("has_warning"):
+        return ""
+    label = risk.get("label", "스프레드 주의")
+    return f"  ⚠ {label} · 호가 기준 판단 보조 · 주문 지시 아님"
+
+
 def _append_gap_note(lines: list, action: dict) -> None:
     """매수 액션의 현재가 대비 예약가 괴리 안내 한 줄 추가.
 
@@ -216,6 +225,9 @@ def _render_normalized_sections(lines: list, normalized: dict, sep: str, next_ac
             if a.get("large_order_note"):
                 lines.append(f"  {a['large_order_note']}")
             lines.append("  메모: 추격매수 아님 — 미체결 가능 (즉시 실행 아님)")
+            rw = _format_execution_risk_warning(a)
+            if rw:
+                lines.append(rw)
         lines.append("")
 
     # 🚫 게이트 차단 매수 (즉시체결/무효화/대량주문 + 충돌) — 정보 부족과 분리
@@ -268,6 +280,9 @@ def _render_normalized_sections(lines: list, normalized: dict, sep: str, next_ac
                     parts.append(f"손절까지 {(stp-cur_p)/cur_p*100:+.1f}%")
                 if parts:
                     lines.append(f"  {' · '.join(parts)}")
+            rw = _format_execution_risk_warning(a)
+            if rw:
+                lines.append(rw)
             if a.get("hold_note"):
                 lines.append(f"  🔒 {a['hold_note']}")
             why = a.get("cancel_reason") or a.get("reason", "")

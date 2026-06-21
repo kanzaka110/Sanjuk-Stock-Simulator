@@ -638,6 +638,71 @@ def test_mobile_read_only():
 
 
 # ═══════════════════════════════════════════════════════
+# 메일/텔레그램 호가 리스크 경고 (26단계)
+# ═══════════════════════════════════════════════════════
+
+def test_telegram_execution_risk_warning():
+    """텔레그램 risk warning 함수: has_warning true → 문구 반환."""
+    from core.telegram import _format_execution_risk_warning
+    # has_warning true
+    item = {"execution_risk": {"has_warning": True, "label": "스프레드 주의", "tone": "warn"}}
+    result = _format_execution_risk_warning(item)
+    assert "스프레드 주의" in result
+    assert "호가 기준 판단 보조" in result
+    assert "주문 지시 아님" in result
+
+
+def test_telegram_execution_risk_no_warning():
+    """has_warning false → 빈 문자열."""
+    from core.telegram import _format_execution_risk_warning
+    item = {"execution_risk": {"has_warning": False, "label": "체결 리스크 낮음", "tone": "ok"}}
+    assert _format_execution_risk_warning(item) == ""
+    assert _format_execution_risk_warning({}) == ""
+    assert _format_execution_risk_warning({"execution_risk": None}) == ""
+
+
+def test_email_risk_warning_in_source():
+    """email.py에 호가 리스크 경고 렌더 코드 존재."""
+    from pathlib import Path
+    code = (Path(__file__).parent.parent / "core" / "email.py").read_text(encoding="utf-8")
+    assert "호가 기준 판단 보조" in code
+    assert "주문 지시 아님" in code
+    assert "execution_risk" in code
+
+
+def test_telegram_risk_warning_in_source():
+    """telegram.py에 호가 리스크 경고 함수 존재."""
+    from pathlib import Path
+    code = (Path(__file__).parent.parent / "core" / "telegram.py").read_text(encoding="utf-8")
+    assert "_format_execution_risk_warning" in code
+    assert "호가 기준 판단 보조" in code
+    assert "주문 지시 아님" in code
+
+
+def test_risk_warning_no_forbidden_cta():
+    """메일/텔레그램 소스에 금지 CTA 없음."""
+    from pathlib import Path
+    root = Path(__file__).parent.parent / "core"
+    for fn in ("email.py", "telegram.py"):
+        code = (root / fn).read_text(encoding="utf-8")
+        for cta in ("매수하기", "매도하기"):
+            assert cta not in code, f"{fn}에 금지 CTA '{cta}' 발견"
+
+
+def test_web_files_unchanged():
+    """web/index.html, web/index_pc.html, web/app.py 미변경."""
+    import subprocess
+    from pathlib import Path
+    root = Path(__file__).parent.parent
+    for f in ("web/index.html", "web/index_pc.html", "web/app.py"):
+        diff = subprocess.run(
+            ["git", "diff", "--stat", "HEAD", "--", f],
+            cwd=root, capture_output=True, text=True,
+        ).stdout
+        assert diff.strip() == "", f"{f} 변경 감지:\n{diff}"
+
+
+# ═══════════════════════════════════════════════════════
 # 시장 상태/시세 신뢰도 (25단계)
 # ═══════════════════════════════════════════════════════
 

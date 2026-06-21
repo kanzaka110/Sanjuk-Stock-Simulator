@@ -359,6 +359,10 @@ def _build_briefing_html(
                 parts.append(f"<td>{_esc(a.get('price', ''))}</td>")
                 parts.append(f"<td>{_esc(dist_str)}</td>")
                 parts.append(f"<td>{_esc(a.get('invalidation_note', ''))}</td></tr>")
+                # execution risk warning (has_warning true만)
+                er = a.get("execution_risk") or {}
+                if er.get("has_warning"):
+                    parts.append(f'<tr><td colspan="6" style="color:#f59e0b;font-size:11px;padding:2px 4px">⚠ {_esc(er.get("label","스프레드 주의"))} · 호가 기준 판단 보조 · 주문 지시 아님</td></tr>')
             parts.append("</table>")
 
         gate_blocked = [a for a in blocked if not a.get("incomplete_order")]
