@@ -638,6 +638,103 @@ def test_mobile_read_only():
 
 
 # ═══════════════════════════════════════════════════════
+# normalized item execution_risk 주입 (27단계)
+# ═══════════════════════════════════════════════════════
+
+def test_attach_execution_risk_domestic(monkeypatch):
+    """국내 조건부 item에 execution_risk 주입."""
+    from core.analyzer import _attach_execution_risk
+    import core.dashboard_data as _dd
+    mock_ob = {
+        "execution_risk_label": "스프레드 주의", "spread_pct": 0.5,
+        "imbalance_pct": 20, "source": "KIS",
+    }
+    monkeypatch.setattr(_dd, "ticker_orderbook", lambda tk: mock_ob)
+    _dd._cache.clear()
+
+    normalized = {
+        "executable_actions": [{"ticker": "005930.KS", "name": "삼성전자"}],
+        "conditional_buy_candidates": [{"ticker": "069500.KS", "name": "KODEX200"}],
+        "cancelled_sells": [{"ticker": "462870.KS", "name": "시프트업"}],
+    }
+    _attach_execution_risk(normalized)
+
+    assert normalized["executable_actions"][0].get("execution_risk")
+    assert normalized["executable_actions"][0]["execution_risk"]["has_warning"] is True
+    assert normalized["conditional_buy_candidates"][0].get("execution_risk")
+    assert normalized["cancelled_sells"][0].get("execution_risk")
+
+
+def test_attach_execution_risk_overseas_skip(monkeypatch):
+    """해외 종목에는 execution_risk 미주입."""
+    from core.analyzer import _attach_execution_risk
+    import core.dashboard_data as _dd
+    call_count = {"n": 0}
+    def mock_ob(tk):
+        call_count["n"] += 1
+        return {"execution_risk_label": "체결 리스크 낮음", "spread_pct": 0.1, "imbalance_pct": 0, "source": "KIS"}
+    monkeypatch.setattr(_dd, "ticker_orderbook", mock_ob)
+    _dd._cache.clear()
+
+    normalized = {
+        "executable_actions": [{"ticker": "MU", "name": "마이크론"}],
+        "conditional_buy_candidates": [],
+        "cancelled_sells": [],
+    }
+    _attach_execution_risk(normalized)
+    assert call_count["n"] == 0
+    assert "execution_risk" not in normalized["executable_actions"][0]
+
+
+def test_attach_execution_risk_max_10(monkeypatch):
+    """최대 10종목 제한."""
+    from core.analyzer import _attach_execution_risk
+    import core.dashboard_data as _dd
+    call_count = {"n": 0}
+    def mock_ob(tk):
+        call_count["n"] += 1
+        return {"execution_risk_label": "체결 리스크 낮음", "spread_pct": 0.1, "imbalance_pct": 0, "source": "KIS"}
+    monkeypatch.setattr(_dd, "ticker_orderbook", mock_ob)
+    _dd._cache.clear()
+
+    items = [{"ticker": f"{str(i).zfill(6)}.KS", "name": f"종목{i}"} for i in range(15)]
+    normalized = {"executable_actions": items, "conditional_buy_candidates": [], "cancelled_sells": []}
+    _attach_execution_risk(normalized)
+    assert call_count["n"] == 10  # 최대 10종목
+
+
+def test_attach_execution_risk_exception_safe(monkeypatch):
+    """예외 발생해도 normalized 반환."""
+    from core.analyzer import _attach_execution_risk
+    import core.dashboard_data as _dd
+    monkeypatch.setattr(_dd, "ticker_orderbook", lambda tk: (_ for _ in ()).throw(RuntimeError("fail")))
+    _dd._cache.clear()
+
+    normalized = {
+        "executable_actions": [{"ticker": "005930.KS"}],
+        "conditional_buy_candidates": [],
+        "cancelled_sells": [],
+    }
+    _attach_execution_risk(normalized)  # 예외 없이 완료
+    # execution_risk는 fallback으로 들어감
+    er = normalized["executable_actions"][0].get("execution_risk", {})
+    assert er.get("has_warning") is False
+
+
+def test_unchanged_files():
+    """수정 금지 파일 미변경 확인."""
+    import subprocess
+    from pathlib import Path
+    root = Path(__file__).parent.parent
+    for f in ("core/email.py", "core/telegram.py", "web/index.html", "web/index_pc.html", "web/app.py"):
+        diff = subprocess.run(
+            ["git", "diff", "--stat", "HEAD", "--", f],
+            cwd=root, capture_output=True, text=True,
+        ).stdout
+        assert diff.strip() == "", f"{f} 변경 감지:\n{diff}"
+
+
+# ═══════════════════════════════════════════════════════
 # 메일/텔레그램 호가 리스크 경고 (26단계)
 # ═══════════════════════════════════════════════════════
 

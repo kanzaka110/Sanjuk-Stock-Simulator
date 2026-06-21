@@ -438,6 +438,50 @@ def _build_briefing_result(data: dict) -> BriefingResult:
     )
 
 
+def _attach_execution_risk(normalized: dict) -> None:
+    """국내 조건부/실행/보유관리 item에 KIS 호가 리스크 주입. 실패해도 계속.
+
+    - 국내 종목(.KS/.KQ) + 조건부/실행/보유관리만 대상
+    - 최대 10종목 (중복 조회 방지)
+    - 정상 리스크: has_warning=False로 저장
+    - warning 리스크: has_warning=True → 메일/텔레그램에서 1줄 표시
+    """
+    try:
+        from core.dashboard_data import ticker_orderbook, summarize_execution_risk
+    except ImportError:
+        return
+
+    # 대상 리스트 수집
+    targets: list[dict] = []
+    for section in ("executable_actions", "conditional_buy_candidates", "cancelled_sells"):
+        for item in (normalized.get(section) or []):
+            targets.append(item)
+
+    # 국내 ticker만, 최대 10종목
+    seen: set[str] = set()
+    cache: dict[str, dict] = {}
+
+    for item in targets:
+        tk = item.get("ticker", "")
+        if not tk:
+            continue
+        is_kr = tk.endswith(".KS") or tk.endswith(".KQ") or (tk.isdigit() and len(tk) == 6)
+        if not is_kr:
+            continue
+        if len(seen) >= 10 and tk not in seen:
+            continue
+
+        if tk not in cache:
+            seen.add(tk)
+            try:
+                ob = ticker_orderbook(tk)
+                cache[tk] = summarize_execution_risk(ob)
+            except Exception:
+                cache[tk] = {"has_warning": False, "label": "", "summary": "", "tone": "unknown"}
+
+        item["execution_risk"] = cache.get(tk, {"has_warning": False, "label": "", "summary": "", "tone": "unknown"})
+
+
 def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> BriefingResult:
     """멀티 에이전트 파이프라인으로 시장 분석.
 
@@ -869,6 +913,8 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
         # 텔레그램이 쓰도록 raw에 주입 + 실행 actions를 normalize 결과로 덮어씀
         data["normalized"] = normalized
         data["actions"] = normalized["executable_actions"]
+        # KIS 호가 리스크 주입 (국내 조건부/실행/보유관리, 최대 10종목, warning만 유효)
+        _attach_execution_risk(normalized)
         log.info(
             "  정규화: 실행 %d / 조건부매수 %d / 매도취소 %d",
             len(normalized["executable_actions"]),
