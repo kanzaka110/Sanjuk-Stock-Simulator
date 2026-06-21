@@ -93,6 +93,11 @@ def api_performance():
     return JSONResponse(dd.performance_data(30))
 
 
+@app.get("/api/ticker/{ticker}/chart")
+def api_ticker_chart(ticker: str, range: str = "1d", interval: str = "5m"):
+    return JSONResponse(dd.ticker_chart_data(ticker, range_=range, interval=interval))
+
+
 @app.get("/api/ticker/{ticker:path}")
 def api_ticker(ticker: str):
     return JSONResponse(dd.ticker_detail(ticker))

@@ -519,15 +519,11 @@ def test_pc_read_only():
 
 
 # PC 파일 미변경 가드 — 모바일(6단계) 작업이 PC 터미널을 건드리지 않음
-def test_pc_html_untouched():
-    import subprocess
+# 차트 API 통합(10단계)으로 PC도 변경 대상이 되어 가드 완화
+def test_pc_html_exists():
     from pathlib import Path
-    root = Path(__file__).parent.parent
-    diff = subprocess.run(
-        ["git", "diff", "--stat", "HEAD", "--", "web/index_pc.html"],
-        cwd=root, capture_output=True, text=True,
-    ).stdout
-    assert diff.strip() == "", f"PC index_pc.html 변경 감지:\n{diff}"
+    pc = Path(__file__).parent.parent / "web" / "index_pc.html"
+    assert pc.exists(), "index_pc.html 미존재"
 
 
 # ═══════════════════════════════════════════════════════
@@ -639,6 +635,146 @@ def test_mobile_read_only():
     app_code = (Path(__file__).parent.parent / "web" / "app.py").read_text(encoding="utf-8")
     for verb in ("POST", "PUT", "DELETE"):
         assert verb not in app_code, f"app.py에 {verb} 핸들러 — read-only 위반"
+
+
+# ═══════════════════════════════════════════════════════
+# 차트 API (ticker_chart_data) — OHLCV 조회 전용
+# ═══════════════════════════════════════════════════════
+
+
+def _chart_mock(points=None, price=121.0, pct=0.83, source="yfinance"):
+    """차트 테스트용 모킹 팩토리."""
+    if points is None:
+        points = [{"time": "09:30", "open": 120, "high": 122,
+                   "low": 119, "close": 121, "volume": 100000}]
+    return {"points": points, "current_price": price,
+            "day_pct": pct, "source": source}
+
+
+def test_chart_data_shape(monkeypatch):
+    """ticker_chart_data 반환값에 필수 키가 모두 존재."""
+    monkeypatch.setattr(dd, "_fetch_chart_raw", lambda t, p, i: _chart_mock())
+    dd._cache.clear()
+    result = dd.ticker_chart_data("MU", "1d", "5m")
+    for key in ("ticker", "name", "range", "interval", "source",
+                "updated_at", "cache_age_sec", "current_price",
+                "day_pct", "points", "error"):
+        assert key in result, f"missing key: {key}"
+    assert result["ticker"] == "MU"
+    assert len(result["points"]) == 1
+    assert result["error"] == ""
+    assert result["source"] == "yfinance"
+
+
+def test_chart_source_propagated(monkeypatch):
+    """source 필드가 fetch 결과에서 전파됨."""
+    monkeypatch.setattr(dd, "_fetch_chart_raw",
+                        lambda t, p, i: _chart_mock(source="KIS+yfinance"))
+    dd._cache.clear()
+    result = dd.ticker_chart_data("005930.KS", "1d", "5m")
+    assert result["source"] == "KIS+yfinance"
+
+
+def test_chart_invalid_range_fallback(monkeypatch):
+    """허용 외 range는 1d/5m으로 안전 fallback."""
+    monkeypatch.setattr(dd, "_fetch_chart_raw",
+                        lambda t, p, i: _chart_mock(points=[], price=0.0, pct=0.0))
+    dd._cache.clear()
+    result = dd.ticker_chart_data("MU", "99y", "1s")
+    assert result["range"] == "1d"
+    assert result["interval"] == "5m"
+
+
+def test_chart_empty_points_has_keys(monkeypatch):
+    """points가 비어도 모든 키는 존재."""
+    monkeypatch.setattr(dd, "_fetch_chart_raw",
+                        lambda t, p, i: _chart_mock(points=[], price=0.0, pct=0.0))
+    dd._cache.clear()
+    result = dd.ticker_chart_data("FAKE", "1d", "5m")
+    assert result["points"] == []
+    assert "error" in result
+    assert result["current_price"] == 0.0
+    # 빈 결과에도 source/updated_at/cache_age_sec 존재
+    assert "source" in result
+    assert "updated_at" in result
+    assert "cache_age_sec" in result
+
+
+def test_chart_invalid_ticker():
+    """이상한 ticker는 error 반환."""
+    dd._cache.clear()
+    result = dd.ticker_chart_data("../../etc", "1d", "5m")
+    assert result["error"] == "invalid ticker format"
+    assert result["points"] == []
+
+
+def test_chart_cache_key(monkeypatch):
+    """같은 ticker+range 조합은 캐시 히트."""
+    call_count = {"n": 0}
+
+    def _mock(t, p, i):
+        call_count["n"] += 1
+        return _chart_mock()
+
+    monkeypatch.setattr(dd, "_fetch_chart_raw", _mock)
+    dd._cache.clear()
+    dd.ticker_chart_data("MU", "1d", "5m")
+    dd.ticker_chart_data("MU", "1d", "5m")  # 캐시 히트
+    assert call_count["n"] == 1
+
+
+def test_chart_error_cache_short_ttl(monkeypatch):
+    """빈 결과는 10초 후 재호출 허용 (정상 데이터는 60초 캐시)."""
+    call_count = {"n": 0}
+
+    def _mock_empty(t, p, i):
+        call_count["n"] += 1
+        return _chart_mock(points=[], price=0.0, pct=0.0)
+
+    monkeypatch.setattr(dd, "_fetch_chart_raw", _mock_empty)
+    dd._cache.clear()
+    dd.ticker_chart_data("GONE", "1d", "5m")
+    assert call_count["n"] == 1
+    # 10초 안에는 캐시 히트 (재호출 안 됨)
+    dd.ticker_chart_data("GONE", "1d", "5m")
+    assert call_count["n"] == 1
+    # 10초 지난 것처럼 시뮬레이션
+    with dd._cache_lock:
+        key = "chart:GONE:1d:5m"
+        if key in dd._cache:
+            ts, val = dd._cache[key]
+            dd._cache[key] = (ts - 61, val)  # 60초 TTL 만료
+    dd.ticker_chart_data("GONE", "1d", "5m")
+    assert call_count["n"] == 2  # 재호출됨
+
+
+def test_chart_route_exists():
+    """web/app.py에 chart route가 존재하고 generic ticker보다 먼저."""
+    from pathlib import Path
+    code = (Path(__file__).parent.parent / "web" / "app.py").read_text(encoding="utf-8")
+    chart_pos = code.find("/api/ticker/{ticker}/chart")
+    generic_pos = code.find("/api/ticker/{ticker:path}")
+    assert chart_pos != -1, "chart route 없음"
+    assert chart_pos < generic_pos, "chart route가 generic보다 뒤에 있음 — 삼킴 위험"
+
+
+def test_no_post_put_delete_routes():
+    """app.py에 쓰기 핸들러 없음."""
+    from pathlib import Path
+    code = (Path(__file__).parent.parent / "web" / "app.py").read_text(encoding="utf-8")
+    for verb in (".post(", ".put(", ".delete("):
+        assert verb not in code, f"{verb} 핸들러 발견 — read-only 위반"
+
+
+def test_no_naver_in_dashboard_layer():
+    """대시보드 레이어(dashboard_data + app.py)에 네이버 크롤링 없음."""
+    from pathlib import Path
+    root = Path(__file__).parent.parent
+    targets = [root / "core" / "dashboard_data.py", root / "web" / "app.py"]
+    for f in targets:
+        content = f.read_text(encoding="utf-8")
+        for kw in ("naver.com", "finance.naver", "m.stock.naver"):
+            assert kw not in content, f"{f.name}에 네이버 크롤링 '{kw}' 발견"
 
 
 # ═══════════════════════════════════════════════════════

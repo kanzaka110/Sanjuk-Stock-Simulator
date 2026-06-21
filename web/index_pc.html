@@ -753,9 +753,40 @@ async function ldTk(t){
   let h=`<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px"><div><div style="font-size:19px;font-weight:800">${E(d.name)}</div><div class="mt">${E(d.ticker)}${d.horizon?" · "+E(d.horizon):""}</div></div><div style="text-align:right"><div style="font-size:24px;font-weight:800">${F(d.current_price)}</div><div class="${c}" style="font-weight:700">${cs(d.day_pct)}</div></div></div>`;
   if(d.thesis)h+=`<div style="background:var(--bg2);border-radius:10px;padding:12px;margin-bottom:13px"><div class="mt" style="font-size:10.5px;font-weight:700;margin-bottom:4px">투자 논지</div><div style="font-size:12.5px;line-height:1.6">${E(d.thesis)}</div></div>`;
   if(acc.evaluated_count)h+=`<div class="tiles" style="grid-template-columns:repeat(3,1fr);margin-bottom:13px"><div class="tile"><div class="v">${acc.win_rate||0}%</div><div class="k">승률</div></div><div class="tile"><div class="v ${cc(acc.avg_pnl)}">${cs(acc.avg_pnl||0)}</div><div class="k">평균</div></div><div class="tile"><div class="v">${acc.evaluated_count}</div><div class="k">평가</div></div></div>`;
+  h+=`<div id="tk-chart" style="background:var(--bg2);border-radius:10px;padding:12px;margin-bottom:13px"><div class="mt" style="font-size:10.5px">차트 로딩…</div></div>`;
   const rec=(d.recent||[]).slice(0,8);
   if(rec.length){h+=`<div class="mt" style="font-size:10.5px;font-weight:700;margin-bottom:5px">최근 추천</div>`+rec.map(r=>{const cc2=cls(r.action_type,r.signal);return`<div class="row" style="cursor:default"><div>${tag(cc2)}</div><div class="nm"><div class="t" style="font-size:12px">${E(LB(r.action_type))}</div><div class="s">${E((r.created_at||"").slice(0,16))}${r.entry_price?" · "+F(r.entry_price):""}</div></div>${r.pnl_pct!=null&&r.status==="closed"?`<div class="px"><div class="ch ${cc(r.pnl_pct)}">${cs(r.pnl_pct)}</div></div>`:r.confidence?`<div class="px"><div class="ch mt">${r.confidence}%</div></div>`:""}</div>`}).join("");}
   document.getElementById("md").innerHTML=h;
+  ldTkChart(t,"1d");
+}
+let _tkChartTicker="";
+async function ldTkChart(t,rng){
+  _tkChartTicker=t;
+  const ce=document.getElementById("tk-chart");if(!ce)return;
+  const ranges=["1d","5d","1mo","3mo"];
+  const btns=ranges.map(r=>`<span onclick="ldTkChart('${E(t)}','${r}')" style="padding:3px 8px;border-radius:4px;font-size:10px;font-weight:600;cursor:pointer;${r===rng?"background:var(--b);color:#fff":"color:var(--mt)"}">${r}</span>`).join("");
+  ce.innerHTML=`<div style="display:flex;gap:4px;margin-bottom:8px">${btns}</div><div class="mt" style="font-size:10.5px">로딩…</div>`;
+  const d=await J(`/api/ticker/${encodeURIComponent(t)}/chart?range=${rng}`);
+  if(!d||!d.points||!d.points.length){ce.innerHTML=`<div style="display:flex;gap:4px;margin-bottom:8px">${btns}</div><div class="mt" style="font-size:10.5px">${d&&d.error?E(d.error):"차트 데이터 없음"}</div>`;return}
+  const pts=d.points,closes=pts.map(p=>p.close),mn=Math.min(...pts.map(p=>p.low)),mx=Math.max(...pts.map(p=>p.high)),rg2=mx-mn||1;
+  const vols=pts.map(p=>p.volume),mxV=Math.max(...vols)||1;
+  const pad=26,W=480,H=120,VH=22,TH=H+VH+pad*2+12;
+  let svg=`<svg viewBox="0 0 ${W+pad*2} ${TH}" style="width:100%;height:auto">`;
+  for(let i=0;i<=3;i++){const y=pad+i*(H/3);svg+=`<line x1="${pad}" y1="${y}" x2="${W+pad}" y2="${y}" stroke="var(--border)" stroke-width="0.5"/>`;const pv=mx-i*(rg2/3);svg+=`<text x="${pad-3}" y="${y+3}" text-anchor="end" font-size="8" fill="var(--gy)" font-family="sans-serif">${pv>=1000?Math.round(pv).toLocaleString():pv.toFixed(2)}</text>`}
+  const step=W/Math.max(pts.length-1,1);
+  const vBase=pad+H+6;
+  pts.forEach((p,i)=>{const x=pad+i*step;const vh=p.volume/mxV*VH;const vc=p.close>=p.open?"var(--up)":"var(--dn)";svg+=`<rect x="${x-step*0.35}" y="${vBase+VH-vh}" width="${step*0.7}" height="${vh}" fill="${vc}" opacity="0.25" rx="1"/>`});
+  const lineCol=d.day_pct>=0?"var(--up)":"var(--dn)";
+  const polyPts=pts.map((p,i)=>(pad+i*step)+","+(pad+(1-(p.close-mn)/rg2)*H)).join(" ");
+  svg+=`<defs><linearGradient id="tkcg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${lineCol}" stop-opacity="0.2"/><stop offset="100%" stop-color="transparent"/></linearGradient></defs>`;
+  svg+=`<polygon points="${pad},${pad+H} ${polyPts} ${pad+(pts.length-1)*step},${pad+H}" fill="url(#tkcg)"/>`;
+  svg+=`<polyline points="${polyPts}" fill="none" stroke="${lineCol}" stroke-width="1.5" stroke-linejoin="round"/>`;
+  const labEvery=Math.max(1,Math.floor(pts.length/7));
+  pts.forEach((p,i)=>{if(i%labEvery===0||i===pts.length-1)svg+=`<text x="${pad+i*step}" y="${TH-1}" text-anchor="middle" font-size="7.5" fill="var(--gy)" font-family="sans-serif">${p.time}</text>`});
+  const lx=pad+(pts.length-1)*step,ly=pad+(1-(pts[pts.length-1].close-mn)/rg2)*H;
+  svg+=`<circle cx="${lx}" cy="${ly}" r="3" fill="${lineCol}"/>`;
+  svg+=`</svg>`;
+  ce.innerHTML=`<div style="display:flex;gap:4px;margin-bottom:8px">${btns}</div>${svg}<div class="mt" style="font-size:9.5px;margin-top:4px">${d.source||"yfinance"} · ${rng} · 읽기 전용</div>`;
 }
 
 /* ════ DECISION BRIEF (feature 4) ════ */

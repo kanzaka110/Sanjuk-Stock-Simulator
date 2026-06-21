@@ -1294,3 +1294,141 @@ def decision_brief() -> dict:
     """의사결정 브리핑 (60초 캐시)."""
     out = _cached("decision_brief", 60, _fetch_decision_brief_raw)
     return out if isinstance(out, dict) and out else {"day": "", "blocks": {}, "empty": True}
+
+
+# ─── /api/ticker/{ticker}/chart — OHLCV 차트 데이터 ──────
+_CHART_RANGE_MAP: dict[str, tuple[str, str]] = {
+    "1d":  ("1d",  "5m"),
+    "5d":  ("5d",  "15m"),
+    "1mo": ("1mo", "1d"),
+    "3mo": ("3mo", "1d"),
+}
+
+# ticker 경로 안전 패턴 (영숫자 + . + - + = 만 허용)
+_TICKER_SAFE = __import__("re").compile(r"^[A-Za-z0-9.\-=^]{1,20}$")
+
+
+def _fetch_chart_raw(ticker: str, period: str, interval: str) -> dict:
+    """yfinance history로 OHLCV 조회. 내부용(캐시 래핑).
+
+    현재가/일간등락률은 기존 시세 체인(KIS→yfinance)에서 가져와
+    전일종가 대비 정확한 day_pct를 제공한다.
+    """
+    import yfinance as yf
+
+    tk = yf.Ticker(ticker)
+    df = tk.history(period=period, interval=interval)
+    if df is None or df.empty:
+        return {"points": [], "current_price": 0.0, "day_pct": 0.0,
+                "source": "yfinance"}
+
+    points: list[dict] = []
+    for idx, row in df.iterrows():
+        t = idx.strftime("%H:%M") if interval in ("5m", "15m") else idx.strftime("%m-%d")
+        points.append({
+            "time": t,
+            "open": round(float(row.get("Open", 0)), 2),
+            "high": round(float(row.get("High", 0)), 2),
+            "low": round(float(row.get("Low", 0)), 2),
+            "close": round(float(row.get("Close", 0)), 2),
+            "volume": int(row.get("Volume", 0)),
+        })
+
+    last_close = points[-1]["close"] if points else 0.0
+
+    # 현재가/day_pct: 기존 시세 체인(KIS 우선)에서 가져오기
+    cur_price = last_close
+    day_pct = 0.0
+    source = "yfinance"
+    try:
+        from core.market import _get_quote_realtime
+        q = _get_quote_realtime(ticker)
+        if q and q.price:
+            cur_price = q.price
+            day_pct = round(q.pct, 2)
+            # KIS 경유 판별: 국내 종목이고 KIS가 활성화되어 있으면 KIS
+            is_kr = ticker.endswith(".KS") or ticker.endswith(".KQ")
+            try:
+                from core.market_kis import _is_kis_configured
+                if is_kr and _is_kis_configured():
+                    source = "KIS+yfinance"
+            except Exception:
+                pass
+    except Exception:
+        # 폴백: 차트 데이터에서 계산
+        first_open = points[0]["open"] if points else 0.0
+        day_pct = round(((last_close - first_open) / first_open * 100), 2) if first_open else 0.0
+
+    return {
+        "points": points,
+        "current_price": cur_price,
+        "day_pct": day_pct,
+        "source": source,
+    }
+
+
+def ticker_chart_data(ticker: str, range_: str, interval: str) -> dict:
+    """종목 차트 데이터 (60초 캐시). 실패해도 200 + error 필드."""
+    now_str = datetime.now(KST).strftime("%Y-%m-%dT%H:%M:%S")
+    base = {
+        "ticker": ticker, "name": ticker, "range": range_,
+        "interval": interval, "source": "yfinance",
+        "updated_at": now_str, "cache_age_sec": 0,
+        "current_price": 0.0, "day_pct": 0.0,
+        "points": [], "error": "",
+    }
+
+    # ticker 안전 검증
+    if not _TICKER_SAFE.match(ticker):
+        base["error"] = "invalid ticker format"
+        return base
+
+    # range/interval 매핑 (허용 외 → 안전 fallback)
+    period, iv = _CHART_RANGE_MAP.get(range_, ("1d", "5m"))
+    base["range"] = range_ if range_ in _CHART_RANGE_MAP else "1d"
+    base["interval"] = iv
+
+    # 이름 조회
+    try:
+        from config.settings import PORTFOLIO
+        base["name"] = PORTFOLIO.get(ticker, ticker)
+    except Exception:
+        pass
+
+    cache_key = f"chart:{ticker}:{base['range']}:{iv}"
+
+    def _fetch():
+        return _fetch_chart_raw(ticker, period, iv)
+
+    # 정상 데이터는 60초 캐시, 빈 결과는 10초만 (빠른 재시도 허용)
+    cached_result = _cached(cache_key, 60, _fetch)
+
+    if not cached_result or not isinstance(cached_result, dict):
+        base["error"] = "no data available"
+        return base
+
+    has_points = bool(cached_result.get("points"))
+
+    # 빈 결과가 캐시됐으면 TTL을 10초로 줄여 재시도 허용
+    if not has_points:
+        with _cache_lock:
+            entry = _cache.get(cache_key)
+            if entry and time.monotonic() - entry[0] > 10:
+                _cache.pop(cache_key, None)
+
+    # cache_age_sec 계산
+    with _cache_lock:
+        entry = _cache.get(cache_key)
+        if entry:
+            base["cache_age_sec"] = round(time.monotonic() - entry[0])
+
+    base["points"] = cached_result.get("points", [])
+    base["current_price"] = cached_result.get("current_price", 0.0)
+    base["day_pct"] = cached_result.get("day_pct", 0.0)
+    base["source"] = cached_result.get("source", "yfinance")
+    base["updated_at"] = now_str
+
+    if not base["points"]:
+        base["error"] = "no data points"
+
+    return base
