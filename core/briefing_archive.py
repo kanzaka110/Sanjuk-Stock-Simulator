@@ -351,4 +351,14 @@ def build_archive_tracking(archive: dict) -> dict:
         "avg_pnl_pct": round(total_pnl / pnl_count, 2) if pnl_count else 0.0,
     }
     result["items"] = items
+
+    # 시장 신뢰도 컨텍스트
+    try:
+        from core.market_hours import market_reliability_context
+        mkt = market_reliability_context()
+        result["market_reliability"] = mkt
+        result["market_status_summary"] = mkt["summary"]
+    except Exception:
+        result["market_status_summary"] = ""
+
     return result

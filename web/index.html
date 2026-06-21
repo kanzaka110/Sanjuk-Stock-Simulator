@@ -508,6 +508,14 @@ details[open] summary::before{transform:rotate(90deg)}
 .execution-risk-muted{font-size:8px;color:var(--mt);opacity:.7}
 .execution-risk-summary{font-size:10px;color:var(--mt);margin-top:2px}
 .briefing-execution-risk{position:relative}
+/* ── Market Reliability / Quote Trust ── */
+.market-reliability-bar{font-size:9px;color:var(--mt)}
+.quote-trust-badge{display:inline-block;font-size:8.5px;padding:1px 5px;border-radius:3px;background:var(--sf2);color:var(--mt);font-weight:600}
+.quote-trust-live{background:#1a3a2a;color:#4ddb8f}
+.quote-trust-stale{background:#3a2a1a;color:#f59e0b}
+.quote-trust-closed{background:var(--sf2);color:var(--mt)}
+.quote-trust-note{font-size:8.5px;color:var(--mt);margin-left:3px}
+.briefing-market-context{font-size:9.5px;color:var(--mt);margin-bottom:6px}
 .briefing-archive-detail{padding:4px 0}
 .briefing-archive-detail h3{font-size:16px;font-weight:800;margin:0 0 10px}
 .briefing-email-body{max-height:60vh;overflow-y:auto;background:var(--sf);border:1px solid var(--ln);border-radius:10px;padding:14px;font-size:12px;line-height:1.6}
@@ -889,6 +897,7 @@ details[open] summary::before{transform:rotate(90deg)}
 <div class="refresh-status-bar refresh-fallback-safe preserve-stale-data" id="refresh-bar">
 <span class="refresh-live-dot" id="refresh-dot"></span>
 <span class="refresh-last-updated" id="refresh-msg">준실시간 · 30~120초 갱신 · 실시간 보장 아님</span>
+<span class="market-reliability-bar market-session-label" id="mkt-trust" style="font-size:9px;margin-left:4px"></span>
 <button class="manual-refresh-button" id="refresh-btn" onclick="refreshAllNow()">새로고침</button>
 </div>
 
@@ -2296,7 +2305,8 @@ async function openBriefingArchive(id){
   if(tr&&tr.items&&tr.items.length){
     const s=tr.summary||{};
     const toneC={good:"var(--g)",bad:"var(--r)",warn:"var(--o)",wait:"var(--mt)",neutral:"var(--mt)"};
-    h+=`<div class="briefing-tracking-panel" style="margin-bottom:12px"><div style="font-size:13px;font-weight:700;margin-bottom:8px">현재 결과 추적 <span class="briefing-tracking-source" style="font-size:10px;color:var(--mt);font-weight:400">· 브리핑 이후 현재 위치</span></div>`;
+    const mktSum=tr.market_status_summary||"";
+    h+=`<div class="briefing-tracking-panel" style="margin-bottom:12px"><div style="font-size:13px;font-weight:700;margin-bottom:4px">현재 결과 추적 <span class="briefing-tracking-source" style="font-size:10px;color:var(--mt);font-weight:400">· 브리핑 이후 현재 위치</span></div>${mktSum?`<div class="briefing-market-context">${E(mktSum)} · 시세 지연 가능 · 실시간 보장 아님</div>`:""}`;
     h+=`<div class="briefing-tracking-summary" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;font-size:11px"><span>총 ${s.total||0}건</span><span>진행 ${s.open||0}</span><span>종료 ${s.closed||0}</span>${s.reached?`<span style="color:var(--g)">도달 ${s.reached}</span>`:""}${s.avg_pnl_pct?`<span class="${s.avg_pnl_pct>=0?"up":"dn"}">평균 ${s.avg_pnl_pct>=0?"+":""}${s.avg_pnl_pct}%</span>`:""}</div>`;
     h+=`<div class="briefing-tracking-list" style="display:flex;flex-direction:column;gap:5px">`;
     tr.items.slice(0,15).forEach(it=>{
@@ -2702,6 +2712,13 @@ function markRefreshSuccess(){
   _lastRefresh=new Date();
   const t=_lastRefresh.toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit",second:"2-digit"});
   setRefreshState("ok",`<span class="refresh-last-updated">준실시간 · 마지막 ${t} · 실시간 보장 아님</span>`);
+  /* 시장 상태 badge 갱신 */
+  const mte=document.getElementById("mkt-trust");
+  if(mte&&_mktCache&&_mktCache.market_status_summary){
+    const tone=_mktCache.market_reliability?.trust_tone||"unknown";
+    const cls=tone==="live"?"quote-trust-live":tone==="stale"?"quote-trust-stale":"quote-trust-closed";
+    mte.innerHTML=`<span class="quote-trust-badge ${cls}">${E(_mktCache.quote_trust_label||"")}</span> <span class="quote-trust-note">${E(_mktCache.market_status_summary)}</span>`;
+  }
 }
 
 function markRefreshError(scope){

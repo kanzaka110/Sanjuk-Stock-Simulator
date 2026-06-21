@@ -638,6 +638,108 @@ def test_mobile_read_only():
 
 
 # ═══════════════════════════════════════════════════════
+# 시장 상태/시세 신뢰도 (25단계)
+# ═══════════════════════════════════════════════════════
+
+def test_market_reliability_context_shape():
+    """market_reliability_context 반환 shape 확인."""
+    from core.market_hours import market_reliability_context
+    ctx = market_reliability_context()
+    assert "kr" in ctx and "us" in ctx
+    assert "summary" in ctx
+    assert "trust_label" in ctx
+    assert ctx["trust_tone"] in ("live", "stale", "closed", "unknown")
+    assert ctx["kr"]["label"] in ("한국장 장중", "한국장 장전", "한국장 마감", "한국장 휴장")
+
+
+def test_market_reliability_kr_regular():
+    """장중 시간에 kr.is_open=True."""
+    from core.market_hours import market_reliability_context
+    from datetime import datetime, timezone, timedelta
+    KST = timezone(timedelta(hours=9))
+    # 월요일 10시
+    mon_10 = datetime(2026, 6, 22, 10, 0, tzinfo=KST)
+    ctx = market_reliability_context(mon_10)
+    assert ctx["kr"]["is_open"] is True
+    assert ctx["kr"]["label"] == "한국장 장중"
+    assert ctx["trust_tone"] == "live"
+
+
+def test_market_reliability_closed():
+    """주말에 closed."""
+    from core.market_hours import market_reliability_context
+    from datetime import datetime, timezone, timedelta
+    KST = timezone(timedelta(hours=9))
+    # 일요일
+    sun = datetime(2026, 6, 21, 14, 0, tzinfo=KST)
+    ctx = market_reliability_context(sun)
+    assert ctx["kr"]["is_open"] is False
+    assert "휴장" in ctx["kr"]["label"] or "마감" in ctx["kr"]["label"]
+
+
+def test_market_reliability_html_markers():
+    """HTML 시장 신뢰도 마커 존재."""
+    html = _mobile_html()
+    for marker in (
+        "market-reliability-bar",
+        "quote-trust-badge",
+        "market-session-label",
+        "quote-trust-live",
+        "quote-trust-stale",
+        "quote-trust-closed",
+        "quote-trust-note",
+        "briefing-market-context",
+    ):
+        assert marker in html, f"시장 신뢰도 마커 '{marker}' 없음"
+
+
+def test_market_reliability_phrases():
+    """시장 상태 문구: HTML 정적 + Python 모듈에 존재."""
+    html = _mobile_html()
+    # HTML에 정적으로 있는 문구
+    assert "시세 지연 가능" in html
+    assert "실시간 보장 아님" in html
+    # Python 모듈에서 생성되는 문구 확인
+    from core.market_hours import market_reliability_context
+    from datetime import datetime, timezone, timedelta
+    KST = timezone(timedelta(hours=9))
+    # 장중
+    ctx = market_reliability_context(datetime(2026, 6, 22, 10, 0, tzinfo=KST))
+    assert "한국장 장중" in ctx["kr"]["label"]
+    assert "장중 시세" in ctx["trust_label"]
+    # 마감
+    ctx2 = market_reliability_context(datetime(2026, 6, 22, 20, 0, tzinfo=KST))
+    assert "마감" in ctx2["kr"]["label"]
+    assert "마감 후 참고" in ctx2["trust_label"] or "캐시" in ctx2["trust_label"]
+
+
+def test_market_reliability_no_realtime_solo():
+    """HTML body 내 사용자 표시에서 '실시간'이 단독 과장되지 않음."""
+    html = _mobile_html()
+    import re
+    # <body> 이후 JS/HTML에서 사용자에게 보이는 문자열만 확인
+    body_start = html.find("<body")
+    if body_start < 0:
+        return
+    body = html[body_start:]
+    # 문자열 리터럴 안의 "실시간" 검색 (따옴표 안)
+    literals = re.findall(r'["\'][^"\']*실시간[^"\']*["\']', body)
+    for lit in literals:
+        # CSS 주석, 변수명, 기능 제목(기술 신호 등)은 무시
+        if "/*" in lit or "보유 실시간" in lit or "기술 신호" in lit:
+            continue
+        assert "보장 아님" in lit or "준실시간" in lit or "준" in lit, \
+            f"'실시간' 단독 과장 의심: {lit[:80]}"
+
+
+def test_market_reliability_no_forbidden_cta():
+    """금지 CTA 없음."""
+    html = _mobile_html()
+    for cta in ("주문 실행", "매수하기", "매도하기"):
+        assert cta not in html, f"금지 CTA '{cta}' 존재"
+
+
+# ═══════════════════════════════════════════════════════
 # 호가 리스크 브리핑 연동 (24단계)
 # ═══════════════════════════════════════════════════════
 

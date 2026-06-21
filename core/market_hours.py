@@ -184,3 +184,90 @@ def market_status_text(now: datetime | None = None) -> str:
     if us:
         return "🟢 미국장 개장 중"
     return "🔴 장 마감"
+
+
+# ─── 시세 신뢰도 레이어 (read-only) ────────────────
+_KR_SESSION_LABEL = {
+    KR_REGULAR: "한국장 장중",
+}
+_US_SESSION_LABEL = {
+    US_PREMARKET: "미국장 프리장",
+    US_REGULAR: "미국장 장중",
+    US_AFTERMARKET: "미국장 애프터장",
+}
+
+
+def market_reliability_context(now: datetime | None = None) -> dict:
+    """현재 시장 상태 기반 시세 신뢰도 컨텍스트. read-only 참고용."""
+    kst_now = _to_kst(now or datetime.now(KST))
+    session = get_market_session(kst_now)
+    from datetime import time as dt_time
+
+    # 한국장 상태
+    kr_sess = session["kr"]
+    kr_is_open = kr_sess == KR_REGULAR
+    if kr_is_open:
+        kr_label = "한국장 장중"
+        kr_note = "KIS 장중 시세"
+    elif is_weekday(kst_now):
+        t = kst_now.time()
+        if dt_time(8, 30) <= t < dt_time(9, 0):
+            kr_label = "한국장 장전"
+            kr_note = "동시호가 전 · 시세 지연 가능"
+        elif dt_time(15, 30) <= t < dt_time(18, 0):
+            kr_label = "한국장 마감"
+            kr_note = "시간외 · 마감 후 참고"
+        else:
+            kr_label = "한국장 마감"
+            kr_note = "마감 후 참고"
+    else:
+        kr_label = "한국장 휴장"
+        kr_note = "캐시 참고"
+
+    # 미국장 상태
+    us_sess = session["us"]
+    us_is_open = us_sess == US_REGULAR
+    if us_sess == US_REGULAR:
+        us_label = "미국장 장중"
+        us_note = "yfinance 장중 시세"
+    elif us_sess == US_PREMARKET:
+        us_label = "미국장 프리장"
+        us_note = "시간외 · 시세 지연 가능"
+    elif us_sess == US_AFTERMARKET:
+        us_label = "미국장 애프터장"
+        us_note = "시간외 · 시세 지연 가능"
+    else:
+        us_label = "미국장 마감"
+        us_note = "마감 후 참고"
+
+    # 통합 summary
+    parts = []
+    if kr_is_open:
+        parts.append("한국장 장중 · KIS 시세 우선")
+    else:
+        parts.append(f"{kr_label} · {kr_note}")
+    if us_is_open:
+        parts.append("미국장 장중")
+    else:
+        parts.append(f"{us_label}")
+    summary = " / ".join(parts)
+
+    # trust label/tone
+    if kr_is_open or us_is_open:
+        trust_label = "장중 시세"
+        trust_tone = "live"
+    elif us_sess in (US_PREMARKET, US_AFTERMARKET) or (is_weekday(kst_now) and kr_label == "한국장 마감"):
+        trust_label = "마감 후 참고"
+        trust_tone = "stale"
+    else:
+        trust_label = "캐시 참고"
+        trust_tone = "closed"
+
+    return {
+        "kr": {"session": kr_sess, "label": kr_label, "is_open": kr_is_open, "data_note": kr_note},
+        "us": {"session": us_sess, "label": us_label, "is_open": us_is_open, "data_note": us_note},
+        "summary": summary,
+        "trust_label": trust_label,
+        "trust_tone": trust_tone,
+        "warning": "",
+    }

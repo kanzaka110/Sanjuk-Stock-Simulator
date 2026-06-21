@@ -296,6 +296,8 @@ def _fetch_market_raw() -> dict:
         mode = "주의"
 
     session = get_market_session()
+    from core.market_hours import market_reliability_context
+    reliability = market_reliability_context()
     return {
         "indices": indices,
         "macro": macro,
@@ -304,6 +306,9 @@ def _fetch_market_raw() -> dict:
         "mode": mode,
         "vix": round(vix_price, 2),
         "now": datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S KST"),
+        "market_reliability": reliability,
+        "quote_trust_label": reliability["trust_label"],
+        "market_status_summary": reliability["summary"],
     }
 
 
@@ -1373,6 +1378,8 @@ def _fetch_decision_brief_raw() -> dict:
             risks.append({"ticker": r.get("ticker", ""), "name": name, "invalidation": inv})
 
     briefing_type = rows[0].get("briefing_type", "") if rows else ""
+    from core.market_hours import market_reliability_context
+    mkt_rel = market_reliability_context()
     blocks = {
         # 무슨 일: 브리핑 종류 + 액션 수
         "what": {
@@ -1381,6 +1388,8 @@ def _fetch_decision_brief_raw() -> dict:
             "do_now": len(do_now),
             "conditional": len(conditionals),
         },
+        "market_reliability": mkt_rel,
+        "market_status_summary": mkt_rel["summary"],
         # 왜 중요: 가장 신뢰도 높은 액션의 근거 일부
         "why": (rows[0].get("reasoning", "")[:300] if rows else ""),
         "do_now": do_now,           # 지금 할 일
