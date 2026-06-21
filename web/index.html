@@ -386,6 +386,24 @@ details[open] summary::before{transform:rotate(90deg)}
 .action-detail-row .adr-meta{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;font-size:11px;color:var(--mt);align-items:center}
 .action-detail-row .adr-reason{font-size:11.5px;color:var(--mt);margin-top:6px;line-height:1.5;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .action-detail-guard{font-size:10.5px;margin-top:6px;padding:6px 8px;background:var(--sf2);border-radius:6px;color:var(--mt);line-height:1.4}
+/* ── Performance Detail Sheet ── */
+.performance-detail-sheet{padding:4px 0}
+.performance-detail-sheet h3{font-size:16px;font-weight:800;margin:0 0 10px}
+.performance-detail-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:14px}
+.performance-detail-summary .pds-item{background:var(--sf);border-radius:8px;padding:8px;text-align:center}
+.performance-detail-summary .pds-item .k{font-size:10px;color:var(--mt)}
+.performance-detail-summary .pds-item .v{font-size:14px;font-weight:700;margin-top:2px}
+.performance-detail-list{display:flex;flex-direction:column;gap:6px}
+.performance-detail-row{background:var(--sf);border:1px solid var(--ln);border-radius:9px;padding:10px 12px;cursor:pointer;-webkit-tap-highlight-color:transparent;display:flex;justify-content:space-between;align-items:center;gap:8px}
+.performance-detail-row .pdr-left{flex:1;min-width:0}
+.performance-detail-row .pdr-name{font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.performance-detail-row .pdr-meta{font-size:11px;color:var(--mt);margin-top:2px}
+.performance-detail-row .pdr-right{text-align:right;flex-shrink:0}
+.performance-detail-row .pdr-pnl{font-size:14px;font-weight:800}
+.performance-detail-row .pdr-sub{font-size:10.5px;color:var(--mt)}
+.performance-detail-empty{font-size:12px;color:var(--mt);padding:16px 0;text-align:center}
+.performance-tap-detail{cursor:pointer;-webkit-tap-highlight-color:transparent}
+.perf-more{font-size:9.5px;color:var(--mt);opacity:.7;margin-left:4px}
 
 /* 4. Priority Rail (가로 스와이프) */
 .priority-rail{display:flex;gap:9px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:4px;scroll-snap-type:x mandatory}
@@ -1502,12 +1520,101 @@ async function loadAct(){
 }
 
 /* ═══ LOAD PERFORMANCE ═══ */
+/* ═══ 성과 상세 유틸 + 모달 ═══ */
+function fmtPctSmart(v){if(v==null||v===0)return"";const n=Number(v);if(isNaN(n))return"";const c=Math.max(-999,Math.min(999,n));return(c>=0?"+":"")+c.toFixed(2)+"%"}
+function isMeaningfulPct(v){if(v==null)return false;const n=Number(v);return!isNaN(n)&&Math.abs(n)>=0.01}
+function safeWinRate(v){if(v==null)return 0;const n=Number(v);if(isNaN(n))return 0;return Math.max(0,Math.min(100,Math.round(n)))}
+
+/* action_type raw → 사용자 라벨 */
+const _perfLabel={"AI_NEW_BUY":"신규 매수","AI_ADD_BUY":"추가 매수","CONDITIONAL_NEW_BUY":"조건부 매수","AI_SELL_MANAGEMENT":"보유 관리","CANCEL_SELL":"매도 취소","HOLD_REVIEW":"보유 점검","WATCH_ONLY":"관망"};
+function perfLbl(raw){return _perfLabel[raw]||BL[classify(raw,"")]||raw||"기타"}
+
+let _perfCache=null,_predCache=null,_accCache=null;
+
+function openPerfDetail(kind,key){
+  mo.classList.add("open");
+  const pf=_perfCache,pr=_predCache,ac=_accCache;
+  let h='<div class="performance-detail-sheet">';
+
+  if(kind==="outcome"){
+    /* 승/패/무 상세 */
+    const titles={win:"승 상세",loss:"패 상세",neutral:"무 상세"};
+    const icons={win:"✅",loss:"❌",neutral:"➖"};
+    h+=`<h3>${icons[key]||""} ${titles[key]||"종료 상세"}</h3>`;
+    const closed=(pr&&pr.closed&&pr.closed.recent)||[];
+    const filtered=closed.filter(r=>r.outcome===key);
+    if(!filtered.length){
+      h+=`<div class="performance-detail-empty">최근 종료 결과 중 해당 항목 없음</div>`;
+    }else{
+      h+=`<div class="ads-sub">최근 종료 결과 · ${filtered.length}건</div><div class="performance-detail-list">`;
+      filtered.forEach(r=>{
+        const pc=cc(r.pnl_pct);const pnl=isMeaningfulPct(r.pnl_pct)?fmtPctSmart(r.pnl_pct):"—";
+        h+=`<div class="performance-detail-row performance-tap-detail" onclick="mo.classList.remove('open');setTimeout(()=>openM('${E(r.ticker)}'),200)"><div class="pdr-left"><div class="pdr-name">${E(r.name)}</div><div class="pdr-meta">${E(r.ticker)} · ${E((r.closed_at||"").slice(0,10))} · 종목 상세 ›</div></div><div class="pdr-right"><div class="pdr-pnl ${pc}">${pnl}</div><div class="pdr-sub">${icons[r.outcome]||""}</div></div></div>`;
+      });
+      h+=`</div>`;
+    }
+  }else if(kind==="action_type"){
+    /* 액션 타입별 성과 상세 */
+    const at=(pf&&pf.by_action_type)||[];
+    const item=at.find(r=>r.grp===key);
+    const label=perfLbl(key);
+    h+=`<h3>${label} 성과 상세</h3>`;
+    if(!item){
+      h+=`<div class="performance-detail-empty">해당 액션 타입 데이터 없음</div>`;
+    }else{
+      const wr=safeWinRate(item.win_rate);const avg=isMeaningfulPct(item.avg_pnl)?fmtPctSmart(item.avg_pnl):"—";
+      h+=`<div class="performance-detail-summary"><div class="pds-item"><div class="k">표본</div><div class="v">${item.total||0}건</div></div><div class="pds-item"><div class="k">승률</div><div class="v">${wr}%</div></div><div class="pds-item"><div class="k">평균</div><div class="v ${cc(item.avg_pnl)}">${avg}</div></div></div>`;
+      if(key==="AI_SELL_MANAGEMENT")h+=`<div class="action-detail-guard" style="margin-bottom:10px">보유 관리 · 실행 매도 아님</div>`;
+      if(key==="CONDITIONAL_NEW_BUY")h+=`<div class="action-detail-guard" style="margin-bottom:10px">조건 도달 시만 실행</div>`;
+      /* 해당 타입의 최근 종료 결과 */
+      const closed=(pr&&pr.closed&&pr.closed.recent)||[];
+      const opens=(pr&&pr.open)||[];
+      /* open predictions에는 action_type이 없을 수 있으므로 closed만 */
+      h+=`<div class="ads-sub">최근 종료 결과</div><div class="performance-detail-list">`;
+      const related=closed.filter(r=>{const lb=perfLbl(key);return E(r.signal).includes(lb.slice(0,2))||r.name}).slice(0,8);
+      if(!related.length)h+=`<div class="performance-detail-empty">관련 종료 결과 없음</div>`;
+      else related.forEach(r=>{
+        const pc=cc(r.pnl_pct);const pnl=isMeaningfulPct(r.pnl_pct)?fmtPctSmart(r.pnl_pct):"—";const icon=r.outcome==="win"?"✅":"❌";
+        h+=`<div class="performance-detail-row performance-tap-detail" onclick="mo.classList.remove('open');setTimeout(()=>openM('${E(r.ticker)}'),200)"><div class="pdr-left"><div class="pdr-name">${icon} ${E(r.name)}</div><div class="pdr-meta">${E(r.ticker)} · ${E((r.closed_at||"").slice(0,10))} · 종목 상세 ›</div></div><div class="pdr-right"><div class="pdr-pnl ${pc}">${pnl}</div></div></div>`;
+      });
+      h+=`</div>`;
+    }
+  }else if(kind==="ticker"){
+    /* 종목별 적중률 상세 */
+    const tks=(ac&&ac.by_ticker)||[];
+    const item=tks.find(r=>r.ticker===key);
+    const it=pfItem(key);
+    const cur=key.endsWith(".KS")||key.endsWith(".KQ")?"₩":"$";
+    const isKr=key.endsWith(".KS")||key.endsWith(".KQ");
+    const src=isKr?"KIS":"yfinance";
+    h+=`<h3>${E(key)} 적중률 상세</h3>`;
+    if(!item){
+      h+=`<div class="performance-detail-empty">해당 종목 적중률 없음</div>`;
+    }else{
+      const wr=safeWinRate(item.win_rate);const avg=isMeaningfulPct(item.avg_pnl)?fmtPctSmart(item.avg_pnl):"—";
+      h+=`<div class="performance-detail-summary"><div class="pds-item"><div class="k">총 평가</div><div class="v">${item.evaluated_count||0}건</div></div><div class="pds-item"><div class="k">승률</div><div class="v">${wr}%</div></div><div class="pds-item"><div class="k">평균</div><div class="v ${cc(item.avg_pnl)}">${avg}</div></div></div>`;
+      h+=`<div class="performance-detail-summary" style="grid-template-columns:repeat(4,1fr)"><div class="pds-item"><div class="k">승</div><div class="v ok">${item.wins||0}</div></div><div class="pds-item"><div class="k">패</div><div class="v bad">${item.losses||0}</div></div><div class="pds-item"><div class="k">PF</div><div class="v">${item.profit_factor||"—"}</div></div><div class="pds-item"><div class="k">기대값</div><div class="v">${item.expectancy!=null?item.expectancy.toFixed(2):"—"}</div></div></div>`;
+      /* 현재가 meta (portfolio 캐시에서) */
+      if(it){
+        h+=`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-top:1px solid var(--ln);margin-top:6px"><div><div style="font-weight:700">${E(it.name||key)}</div><div class="mt" style="font-size:11px">${it.shares||0}주 · 비중 ${it.weight||0}%</div></div><div style="text-align:right"><div style="font-size:16px;font-weight:800">${cur}${it.current_price?it.current_price.toLocaleString():"—"}</div><div class="${cc(it.day_pct)}" style="font-weight:700">${cs(it.day_pct)}</div><div><span class="quote-source-badge${isKr?" kis":""}" style="font-size:8px;padding:1px 4px">${src}</span></div></div></div>`;
+      }
+      h+=`<div style="text-align:center;padding:8px 0"><span class="performance-tap-detail" onclick="mo.classList.remove('open');setTimeout(()=>openM('${E(key)}'),200)" style="color:var(--b);font-weight:700;font-size:13px;cursor:pointer">종목 상세 ›</span></div>`;
+    }
+  }
+
+  h+=`<div style="text-align:center;padding:8px 0;font-size:9.5px;color:var(--mt)">준실시간 · 60초 캐시 · 실시간 보장 아님</div>`;
+  h+=`<div style="text-align:center;padding:6px 0"><button onclick="mo.classList.remove('open')" style="background:var(--sf2);color:var(--tx);border:none;padding:10px 32px;border-radius:10px;font-size:14px;cursor:pointer;min-height:44px">닫기</button></div>`;
+  h+=`</div>`;
+  document.getElementById("mc").innerHTML=h;
+}
+
 async function loadPerf(){
   const[pf,pr,ac]=await Promise.all([J("/api/performance"),J("/api/predictions"),J("/api/accuracy")]);
+  _perfCache=pf;_predCache=pr;_accCache=ac;
   if(pf){
     const s=pf.summary||{};const sc=cc(s.avg_pnl);
     const total=s.total||1;const w=s.wins||0;const l=s.losses||0;const n=total-w-l;
-    document.getElementById("p-sum").innerHTML=`<div class="g4"><div class="sb"><div class="v ok">${w}</div><div class="l">승</div></div><div class="sb"><div class="v bad">${l}</div><div class="l">패</div></div><div class="sb"><div class="v">${s.win_rate||0}%</div><div class="l">승률</div></div><div class="sb"><div class="v ${sc}">${cs(s.avg_pnl||0)}</div><div class="l">평균</div></div></div>${stackedBar(w,l,n,total)}<div class="mt" style="margin-top:4px;text-align:center">승 ${w} · 패 ${l} · 기타 ${n} / ${total}건</div>`;
+    document.getElementById("p-sum").innerHTML=`<div class="g4"><div class="sb performance-tap-detail" onclick="openPerfDetail('outcome','win')"><div class="v ok">${w}</div><div class="l">승<span class="perf-more">상세 ›</span></div></div><div class="sb performance-tap-detail" onclick="openPerfDetail('outcome','loss')"><div class="v bad">${l}</div><div class="l">패<span class="perf-more">상세 ›</span></div></div><div class="sb"><div class="v">${s.win_rate||0}%</div><div class="l">승률</div></div><div class="sb performance-tap-detail" onclick="openPerfDetail('outcome','neutral')"><div class="v ${sc}">${cs(s.avg_pnl||0)}</div><div class="l">무<span class="perf-more">상세 ›</span></div></div></div>${stackedBar(w,l,n,total)}<div class="mt" style="margin-top:4px;text-align:center">승 ${w} · 패 ${l} · 기타 ${n} / ${total}건</div>`;
 
     // Home perf
     document.getElementById("h-perf").innerHTML=`<div class="g4"><div class="sb"><div class="v ok">${w}</div><div class="l">승</div></div><div class="sb"><div class="v bad">${l}</div><div class="l">패</div></div><div class="sb"><div class="v">${s.win_rate||0}%</div><div class="l">승률</div></div><div class="sb"><div class="v ${sc}">${cs(s.avg_pnl||0)}</div><div class="l">평균</div></div></div>${stackedBar(w,l,n,total)}`;
@@ -1515,10 +1622,11 @@ async function loadPerf(){
     // Action type bar chart
     const at=pf.by_action_type||[];
     const atMax=Math.max(...at.map(x=>Math.abs(x.avg_pnl||0)),0.1);
-    document.getElementById("p-act").innerHTML=at.length?at.map(r=>{
-      const c=r.avg_pnl>=0?"var(--up)":"var(--down)";const w=Math.abs(r.avg_pnl)/atMax*100;
-      return`<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--ln)"><div style="width:120px;font-size:12px;font-weight:600;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${E(r.grp)}</div><div style="flex:1">${hbar(w,c,10)}</div><div style="width:80px;text-align:right;font-size:12px"><span class="${cc(r.avg_pnl)}" style="font-weight:700">${cs(r.avg_pnl)}</span><br><span class="mt">${r.total}건 ${r.win_rate}%</span></div></div>`;
-    }).join(""):'<div class="emp">데이터 없음</div>';
+    document.getElementById("p-act").innerHTML=at.length?at.filter(r=>isMeaningfulPct(r.avg_pnl)||r.total>0).map(r=>{
+      const c=r.avg_pnl>=0?"var(--up)":"var(--down)";const w2=Math.abs(r.avg_pnl)/atMax*100;
+      const lbl=perfLbl(r.grp);const avg=isMeaningfulPct(r.avg_pnl)?fmtPctSmart(r.avg_pnl):"—";
+      return`<div class="performance-tap-detail" style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--ln);cursor:pointer" onclick="openPerfDetail('action_type','${E(r.grp)}')"><div style="width:120px;font-size:12px;font-weight:600;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${E(lbl)}</div><div style="flex:1">${hbar(w2,c,10)}</div><div style="width:90px;text-align:right;font-size:12px"><span class="${cc(r.avg_pnl)}" style="font-weight:700">${avg}</span><br><span class="mt">${r.total}건 ${safeWinRate(r.win_rate)}% · 상세 ›</span></div></div>`;
+    }).join(""):'<div class="emp">유의미한 변화 없음</div>';
 
     // Briefing type
     const bt=pf.by_briefing_type||[];
@@ -1544,8 +1652,9 @@ async function loadPerf(){
   // Ticker accuracy
   if(ac&&ac.by_ticker){
     document.getElementById("p-tk").innerHTML=ac.by_ticker.length?ac.by_ticker.map(r=>{
-      const wr=Math.round(r.win_rate||0);const wc=wr>=60?"var(--g)":wr<40?"var(--r)":"var(--o)";
-      return`<div class="pi" onclick="openM('${E(r.ticker)}')" style="cursor:pointer"><div><div style="font-weight:600">${E(r.ticker)}</div><div class="mt">${r.evaluated_count}건</div></div><div style="display:flex;gap:12px;align-items:center">${hbar(wr,wc,6).replace('class="hbar"','class="hbar" style="width:50px"')}<span style="font-weight:700">${wr}%</span><span class="mt">${(r.avg_pnl>=0?"+":"")}${E(r.avg_pnl)}%</span><span class="mt">PF ${E(r.profit_factor)}</span></div></div>`;
+      const wr=safeWinRate(r.win_rate);const wc=wr>=60?"var(--g)":wr<40?"var(--r)":"var(--o)";
+      const avg=isMeaningfulPct(r.avg_pnl)?fmtPctSmart(r.avg_pnl):"—";
+      return`<div class="pi performance-tap-detail" onclick="openPerfDetail('ticker','${E(r.ticker)}')" style="cursor:pointer"><div><div style="font-weight:600">${E(r.ticker)}</div><div class="mt">${r.evaluated_count}건 · 상세 ›</div></div><div style="display:flex;gap:12px;align-items:center">${hbar(wr,wc,6).replace('class="hbar"','class="hbar" style="width:50px"')}<span style="font-weight:700">${wr}%</span><span class="mt">${avg}</span><span class="mt">PF ${E(r.profit_factor)}</span></div></div>`;
     }).join(""):'<div class="emp">평가 없음</div>';
   }
 

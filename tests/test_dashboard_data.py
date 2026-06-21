@@ -638,6 +638,57 @@ def test_mobile_read_only():
 
 
 # ═══════════════════════════════════════════════════════
+# 성과 상세 시트 (13단계)
+# ═══════════════════════════════════════════════════════
+
+def test_performance_detail_markers():
+    """성과 상세 시트 마커 존재."""
+    html = _mobile_html()
+    for marker in (
+        "performance-detail-sheet",
+        "performance-detail-row",
+        "performance-detail-summary",
+        "performance-detail-list",
+        "performance-detail-empty",
+        "performance-tap-detail",
+    ):
+        assert marker in html, f"성과 상세 마커 '{marker}' 없음"
+
+
+def test_performance_detail_function():
+    """openPerfDetail 함수 및 문구 존재."""
+    html = _mobile_html()
+    assert "openPerfDetail" in html, "openPerfDetail 함수 없음"
+    assert "승 상세" in html or "승<span" in html, "승 상세 문구 없음"
+    assert "패 상세" in html or "패<span" in html, "패 상세 문구 없음"
+    assert "무 상세" in html, "무 상세 문구 없음"
+    assert "최근 종료 결과" in html, "최근 종료 결과 문구 없음"
+    assert "종목 상세 ›" in html, "종목 상세 안내 없음"
+
+
+def test_performance_percent_utils():
+    """fmtPctSmart / isMeaningfulPct / safeWinRate 유틸 존재."""
+    html = _mobile_html()
+    assert "fmtPctSmart" in html, "fmtPctSmart 없음"
+    assert "isMeaningfulPct" in html, "isMeaningfulPct 없음"
+    assert "safeWinRate" in html, "safeWinRate 없음"
+
+
+def test_performance_no_abnormal_percent():
+    """비정상 퍼센트 문자열 없음."""
+    html = _mobile_html()
+    for bad in ("4020%", "7500%", "10000%"):
+        assert bad not in html, f"비정상 퍼센트 '{bad}' 발견"
+
+
+def test_performance_no_forbidden_cta():
+    """금지 CTA 없음."""
+    html = _mobile_html()
+    for cta in ("주문 실행", "매수하기", "매도하기"):
+        assert cta not in html, f"금지 CTA '{cta}' 존재"
+
+
+# ═══════════════════════════════════════════════════════
 # 액션 매트릭스 상세 시트 (12단계)
 # ═══════════════════════════════════════════════════════
 
