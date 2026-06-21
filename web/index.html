@@ -90,6 +90,36 @@ body{background:var(--bg);color:var(--tx);font-family:-apple-system,BlinkMacSyst
 .gauge-val{position:absolute;bottom:0;left:50%;transform:translateX(-50%);font-size:16px;font-weight:800}
 
 /* Stock card */
+/* ── KIS Holding Strip (홈 상단 실시간 보유 스트립) ── */
+.kis-holding-strip{display:flex;gap:8px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding:6px 0 8px;scroll-snap-type:x mandatory;margin-bottom:10px}
+.kis-holding-strip::-webkit-scrollbar{display:none}
+.kis-strip-item{flex-shrink:0;min-width:130px;background:var(--sf);border:1px solid var(--ln);border-radius:10px;padding:9px 11px;scroll-snap-align:start;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.kis-strip-item .ks-name{font-size:12px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:110px}
+.kis-strip-item .ks-price{font-size:14px;font-weight:800;margin-top:2px;font-variant-numeric:tabular-nums}
+.kis-strip-item .ks-pct{font-size:12px;font-weight:700;margin-top:1px}
+.kis-strip-item .ks-src{font-size:8.5px;color:var(--mt);margin-top:2px}
+@media(min-width:720px){
+  .kis-holding-strip{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;overflow:visible}
+}
+
+/* ── KIS Holding Card (포트폴리오 보유 카드 강화) ── */
+.kis-holding-card{background:var(--sf);border:1px solid var(--ln);border-radius:12px;padding:13px;margin-bottom:8px;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.kis-holding-card .khc-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px}
+.kis-holding-card .khc-name{font-size:14.5px;font-weight:800}
+.kis-holding-card .khc-ticker{font-size:11px;color:var(--mt);margin-top:1px}
+.holding-live-price{font-size:18px;font-weight:900;text-align:right;font-variant-numeric:tabular-nums}
+.holding-day-change{font-size:12.5px;font-weight:700;text-align:right;margin-top:1px}
+.holding-pnl-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:5px;margin-top:8px}
+.holding-pnl-grid .pg-item{background:var(--sf2);border-radius:7px;padding:6px 8px;text-align:center}
+.holding-pnl-grid .pg-item .k{font-size:9.5px;color:var(--mt)}
+.holding-pnl-grid .pg-item .v{font-size:12px;font-weight:700;margin-top:1px}
+.holding-range-mini{height:4px;background:var(--sf2);border-radius:2px;margin-top:8px;position:relative;overflow:visible}
+.holding-range-mini .dot{position:absolute;top:-2px;width:8px;height:8px;border-radius:50%}
+.holding-source-meta{display:flex;justify-content:space-between;align-items:center;margin-top:6px;font-size:9px;color:var(--mt)}
+@media(min-width:720px){
+  .holding-pnl-grid{grid-template-columns:repeat(6,1fr)}
+}
+
 .sc{background:var(--sf);border:1px solid var(--ln);border-radius:12px;padding:12px;margin-bottom:8px;cursor:pointer;-webkit-tap-highlight-color:transparent}
 .sc .top-r{display:flex;justify-content:space-between;align-items:flex-start}
 .sc .sn{font-size:14px;font-weight:700}.sc .st{font-size:11px;color:var(--mt)}
@@ -669,6 +699,8 @@ details[open] summary::before{transform:rotate(90deg)}
 <div class="fold-main">
 <!-- 2. Bento Hero Grid -->
 <div class="bento-hero" id="h-hero"><div class="bento-main"><div class="emp">데이터 대기</div></div></div>
+<!-- KIS 보유 실시간 스트립 -->
+<div class="kis-holding-strip" id="h-kis-strip"></div>
 <!-- 3. Today Decision Strip -->
 <div class="decide" id="h-decide"><div class="dh">오늘 결론</div><div class="dt">불러오는 중…</div></div>
 <!-- 5. Priority Rail (가로 스와이프) -->
@@ -1308,11 +1340,12 @@ async function loadPF(){
       allItems.push(it);
       return`<tr onclick="openM('${E(it.ticker)}')"><td><strong>${E(it.name)}</strong><br><span class="mt">${E(it.ticker)}</span></td><td>${cur}${it.current_price?it.current_price.toLocaleString():"—"}</td><td class="${idc}">${cs(it.day_pct)}</td><td>${it.shares}</td><td>${cur}${it.avg_cost?it.avg_cost.toLocaleString():""}</td><td class="${ipc}">${cs(it.pnl_pct)}</td><td>₩${it.eval_krw?it.eval_krw.toLocaleString():""}</td><td>${it.weight||0}%</td></tr>`;
     }).join("");
-    // Mobile cards
+    // Mobile cards — KIS 기반 보유 카드 (증권앱형)
     let mcards=acct.items.map(it=>{
       const ipc=cc(it.pnl_pct);const idc=cc(it.day_pct);const cur=it.currency==="USD"?"$":"₩";
-      const barColor=it.pnl_pct>=0?"var(--up)":"var(--down)";
-      return`<div class="sc" onclick="openM('${E(it.ticker)}')"><div class="top-r"><div><div class="sn">${E(it.name)}</div><div class="st">${E(it.ticker)} · ${it.shares}주${it.horizon?" · "+E(it.horizon):""}</div></div><div><div class="sp">${cur}${it.current_price?it.current_price.toLocaleString():"—"}</div><div class="sd ${idc}">오늘 ${cs(it.day_pct)}</div></div></div>${hbar(Math.abs(it.pnl_pct),barColor,6)}<div class="btm"><span>평단 ${cur}${it.avg_cost?it.avg_cost.toLocaleString():""}</span><span class="${ipc}">수익 ${cs(it.pnl_pct)}</span><span>₩${it.eval_krw?it.eval_krw.toLocaleString():""}</span><span>${it.weight||0}%</span></div></div>`;
+      const isKr=it.ticker.endsWith(".KS")||it.ticker.endsWith(".KQ");
+      const src=isKr?"KIS":"yfinance";
+      return`<div class="kis-holding-card ticker-tap-detail" onclick="openM('${E(it.ticker)}')"><div class="khc-top"><div><div class="khc-name">${E(it.name)}</div><div class="khc-ticker">${E(it.ticker)} · ${it.shares}주${it.horizon?" · "+E(it.horizon):""}</div></div><div><div class="holding-live-price">${cur}${it.current_price?it.current_price.toLocaleString():"—"}</div><div class="holding-day-change ${idc}">${it.day_pct>0?"▲ ":it.day_pct<0?"▼ ":""}${cs(it.day_pct)}</div></div></div><div class="holding-pnl-grid"><div class="pg-item"><div class="k">평단</div><div class="v">${cur}${it.avg_cost?it.avg_cost.toLocaleString():""}</div></div><div class="pg-item"><div class="k">수익률</div><div class="v ${ipc}">${cs(it.pnl_pct)}</div></div><div class="pg-item"><div class="k">평가</div><div class="v">₩${it.eval_krw?it.eval_krw.toLocaleString():""}</div></div><div class="pg-item"><div class="k">비중</div><div class="v">${it.weight||0}%</div></div><div class="pg-item"><div class="k">일간</div><div class="v ${idc}">${cs(it.day_pct)}</div></div><div class="pg-item"><div class="k">현재가</div><div class="v">${cur}${it.current_price?it.current_price.toLocaleString():"—"}</div></div></div><div class="holding-source-meta"><span class="quote-source-badge${isKr?" kis":""}">${src}</span><span>준실시간 · 60초 캐시 · 실시간 보장 아님</span></div></div>`;
     }).join("");
 
     ah+=`<div class="c"><h3>${E(acct.name)} <span class="${ap}">${cs(acct.pnl_pct)}</span><span class="mt" style="float:right">₩${acct.eval_total?acct.eval_total.toLocaleString():0}</span></h3><table class="ptable"><tr><th>종목</th><th>현재가</th><th>등락</th><th>수량</th><th>평단</th><th>수익률</th><th>평가</th><th>비중</th></tr>${trows}</table><div class="cards-m">${mcards}</div></div>`;
@@ -1341,6 +1374,21 @@ async function loadPF(){
   renderRiskBoard();
   _heroPF=d;renderHero();renderMCB();
   _bentoItems=allItems;renderPortfolioBento();
+  renderKisStrip(allItems);
+}
+
+/* KIS 보유 실시간 스트립 — 홈 상단 주요 보유 종목 */
+function renderKisStrip(items){
+  const el=document.getElementById("h-kis-strip");if(!el)return;
+  if(!items||!items.length){el.innerHTML='';return}
+  const top=items.slice(0,8);
+  el.innerHTML=top.map(it=>{
+    const c=cc(it.day_pct);const cur=it.currency==="USD"?"$":"₩";
+    const isKr=it.ticker.endsWith(".KS")||it.ticker.endsWith(".KQ");
+    const src=isKr?"KIS":"yfinance";
+    const arrow=it.day_pct>0?"▲":it.day_pct<0?"▼":"";
+    return`<div class="kis-strip-item ticker-tap-detail" onclick="openM('${E(it.ticker)}')"><div class="ks-name">${E(it.name)}</div><div class="ks-price">${cur}${it.current_price?it.current_price.toLocaleString():"—"}</div><div class="ks-pct ${c}">${arrow} ${cs(it.day_pct)}</div><div class="ks-src"><span class="quote-source-badge${isKr?" kis":""}" style="font-size:8px;padding:1px 4px">${src}</span></div></div>`;
+  }).join("");
 }
 
 /* ═══ LOAD ACTIONS ═══ */

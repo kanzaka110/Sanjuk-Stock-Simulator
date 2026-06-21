@@ -638,6 +638,56 @@ def test_mobile_read_only():
 
 
 # ═══════════════════════════════════════════════════════
+# KIS 보유 스트립 + 포트폴리오 카드 강화 (11단계)
+# ═══════════════════════════════════════════════════════
+
+def test_kis_strip_markers():
+    """홈 KIS 보유 스트립 마커 존재."""
+    html = _mobile_html()
+    for marker in (
+        "kis-holding-strip",
+        "kis-strip-item",
+        "ticker-tap-detail",
+    ):
+        assert marker in html, f"KIS strip 마커 '{marker}' 없음"
+
+
+def test_kis_holding_card_markers():
+    """포트폴리오 보유 카드 강화 마커 존재."""
+    html = _mobile_html()
+    for marker in (
+        "kis-holding-card",
+        "holding-live-price",
+        "holding-day-change",
+        "holding-pnl-grid",
+        "holding-source-meta",
+    ):
+        assert marker in html, f"보유 카드 마커 '{marker}' 없음"
+
+
+def test_kis_strip_source_cache_messages():
+    """source/cache 안내 문구 존재."""
+    html = _mobile_html()
+    assert "준실시간" in html
+    assert "60초 캐시" in html
+    assert "실시간 보장 아님" in html
+
+
+def test_kis_strip_detail_connection():
+    """종목 클릭 시 loadTicker 연결."""
+    html = _mobile_html()
+    # openM → loadTicker 호출 체인
+    assert "openM(" in html, "종목 클릭 상세 연결 없음"
+
+
+def test_kis_strip_no_forbidden_cta():
+    """KIS 스트립/카드에서 금지 CTA 없음."""
+    html = _mobile_html()
+    for cta in ("주문 실행", "매수하기", "매도하기"):
+        assert cta not in html, f"금지 CTA '{cta}' 존재"
+
+
+# ═══════════════════════════════════════════════════════
 # 종목 상세 터미널 (10단계) — HTML 마커 검증
 # ═══════════════════════════════════════════════════════
 
