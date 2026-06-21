@@ -243,6 +243,7 @@ body{background:var(--bg);color:var(--tx);font-family:-apple-system,BlinkMacSyst
     <button data-p="portfolio">포트폴리오</button>
     <button data-p="act">액션</button>
     <button data-p="perf">성과</button>
+    <button data-p="briefing">브리핑</button>
     <button data-p="sim">시뮬레이터</button>
   </div>
   <div class="search"><span class="ic">🔍</span><input id="q" placeholder="종목 검색" autocomplete="off"/><span class="kbd">/</span></div>
@@ -352,6 +353,18 @@ body{background:var(--bg);color:var(--tx);font-family:-apple-system,BlinkMacSyst
   <div class="grid" style="grid-template-columns:1fr 1fr">
     <div class="panel"><div class="ph"><h2>액션 타입별 성과</h2><span class="sub">30일 평균</span></div><div id="perf-act"></div></div>
     <div class="panel"><div class="ph"><h2>종목별 성과</h2></div><div id="perf-tk"></div></div>
+  </div>
+</div>
+
+<!-- ═══ 브리핑 ═══ -->
+<div class="page" id="p-briefing">
+  <div class="panel" style="margin-bottom:14px">
+    <div class="ph"><h2>최근 브리핑</h2><span class="sub">날짜별 액션 요약 · 최근 50개 제한</span></div>
+    <div id="br-pc-latest"><div class="emp">브리핑 데이터 대기</div></div>
+  </div>
+  <div class="panel">
+    <div class="ph"><h2>브리핑 히스토리</h2><span class="sub" id="br-pc-sub"></span></div>
+    <div id="br-pc-list"><div class="emp">브리핑 데이터 대기</div></div>
   </div>
 </div>
 
@@ -888,11 +901,45 @@ async function ldAnalytics(){
     <div class="risk-row"><span class="k">최대 평가손실 보유</span><span class="v ${wl?cc(wl.pnl_pct):""}">${wl?E(wl.name)+" "+cs(wl.pnl_pct):"—"}</span></div>`;
 }
 
+/* ════ BRIEFING TAB ════ */
+const _BT_PC={"KR_BEFORE":"한국장 전","KR_NIGHT":"한국 야간","KR_OPEN":"한국장중","US_BEFORE":"미국장 전","US_NIGHT":"미국 야간","US_CLOSE":"마감 리뷰","MANUAL":"수시"};
+async function ldBriefing(){
+  const[db,pr]=await Promise.all([J("/api/decision-brief"),J("/api/predictions")]);
+  const brief=db;const rows=(pr&&pr.recent)||[];
+  /* 최신 요약 */
+  const el=document.getElementById("br-pc-latest");
+  if(el&&brief&&!brief.empty){
+    const w=brief.blocks?.what||{};
+    el.innerHTML=`<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:8px 0"><span style="font-weight:700">${E(_BT_PC[w.briefing_type]||w.briefing_type||"브리핑")}</span><span class="mt">${brief.day||""}</span><span class="tag up">실행 ${w.do_now||0}</span><span class="tag b">조건부 ${w.conditional||0}</span><span class="tag o">관리</span><span class="mt">총 ${w.total||0}건</span></div>`;
+  }else if(el){el.innerHTML='<div class="emp">브리핑 데이터 대기</div>'}
+  /* 히스토리 */
+  const list=document.getElementById("br-pc-list");if(!list)return;
+  const sub=document.getElementById("br-pc-sub");
+  const items=rows.slice(0,50);
+  if(sub)sub.textContent=items.length?`${items.length}건`:"";
+  if(!items.length){list.innerHTML='<div class="emp">브리핑 데이터 대기</div>';return}
+  const groups={};items.forEach(r=>{const d=(r.created_at||"").slice(0,10);(groups[d]=groups[d]||[]).push(r)});
+  list.innerHTML=Object.entries(groups).slice(0,15).map(([day,its])=>{
+    const bt=its[0].briefing_type||"";const lbl=_BT_PC[bt]||bt||"브리핑";
+    const gr={buy:0,cond:0,mgmt:0,watch:0};
+    its.forEach(r=>{const c=cls(r.action_type,r.signal);gr[c]=(gr[c]||0)+1});
+    const tickers=[...new Set(its.map(r=>r.name||r.ticker).filter(Boolean))].slice(0,4);
+    return`<div class="row" style="cursor:pointer" onclick="openBrDetail('${E(day)}')"><div class="nm"><div class="t">${E(lbl)} · ${E(day)}</div><div class="s">${tickers.join(", ")}</div></div><div class="px"><div style="display:flex;gap:6px;font-size:11px"><span class="tag up">${gr.buy}</span><span class="tag b">${gr.cond}</span><span class="tag o">${gr.mgmt}</span><span class="tag gy">${gr.watch}</span></div></div></div>`;
+  }).join("");
+}
+let _brPcRows=[];
+function openBrDetail(day){
+  const pr=_brPcRows.length?_brPcRows:[];/* fallback: 재조회 없이 현재 캐시 사용 */
+  /* 간단히 ticker detail로 대체 — 첫 종목 상세 */
+  const items=pr.filter(r=>(r.created_at||"").startsWith(day));
+  if(items.length&&items[0].ticker)openTk(items[0].ticker);
+}
+
 /* ════ INIT ════ */
-async function init(){ldStatus();ldMkt();await ldPF();ldAct();ldPerf();ldNews();ldDecisionBrief();ldCalendar();ldAnalytics();ldWorkspace();}
+async function init(){ldStatus();ldMkt();await ldPF();ldAct();ldPerf();ldNews();ldDecisionBrief();ldCalendar();ldAnalytics();ldWorkspace();ldBriefing();}
 init();
 setInterval(()=>{ldMkt();ldAct();ldStatus();ldDecisionBrief();},30000);
-setInterval(()=>{ldPF();ldPerf();ldAnalytics();ldWorkspace();},120000);
+setInterval(()=>{ldPF();ldPerf();ldAnalytics();ldWorkspace();ldBriefing();},120000);
 setInterval(()=>{ldNews();ldCalendar();},600000);
 </script>
 </body>

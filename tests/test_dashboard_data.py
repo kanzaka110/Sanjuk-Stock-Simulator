@@ -733,16 +733,11 @@ def test_briefing_no_forbidden_cta():
         assert cta not in html, f"금지 CTA '{cta}' 존재"
 
 
-def test_briefing_pc_untouched():
-    """index_pc.html 미변경."""
-    import subprocess
+def test_briefing_pc_has_tab():
+    """PC에도 브리핑 탭 존재."""
     from pathlib import Path
-    root = Path(__file__).parent.parent
-    diff = subprocess.run(
-        ["git", "diff", "--stat", "HEAD", "--", "web/index_pc.html"],
-        cwd=root, capture_output=True, text=True,
-    ).stdout
-    assert diff.strip() == "", f"PC index_pc.html 변경:\n{diff}"
+    pc = (Path(__file__).parent.parent / "web" / "index_pc.html").read_text(encoding="utf-8")
+    assert 'data-p="briefing"' in pc, "PC에 브리핑 탭 없음"
 
 
 # ═══════════════════════════════════════════════════════
@@ -797,16 +792,12 @@ def test_refresh_no_forbidden_cta():
         assert cta not in html, f"금지 CTA '{cta}' 존재"
 
 
-def test_refresh_pc_untouched():
-    """index_pc.html 미변경."""
-    import subprocess
+def test_pc_html_valid():
+    """PC HTML 기본 구조 유효."""
     from pathlib import Path
-    root = Path(__file__).parent.parent
-    diff = subprocess.run(
-        ["git", "diff", "--stat", "HEAD", "--", "web/index_pc.html"],
-        cwd=root, capture_output=True, text=True,
-    ).stdout
-    assert diff.strip() == "", f"PC index_pc.html 변경 감지:\n{diff}"
+    pc = (Path(__file__).parent.parent / "web" / "index_pc.html").read_text(encoding="utf-8")
+    assert pc.count("<html") == 1
+    assert "POST" not in pc
 
 
 # ═══════════════════════════════════════════════════════
@@ -852,16 +843,11 @@ def test_layout_preserves_existing_markers():
         assert marker in html, f"기존 마커 '{marker}' 실종"
 
 
-def test_layout_pc_html_untouched():
-    """index_pc.html 미변경 확인."""
-    import subprocess
+def test_layout_pc_briefing_tab():
+    """PC에 브리핑 페이지 존재."""
     from pathlib import Path
-    root = Path(__file__).parent.parent
-    diff = subprocess.run(
-        ["git", "diff", "--stat", "HEAD", "--", "web/index_pc.html"],
-        cwd=root, capture_output=True, text=True,
-    ).stdout
-    assert diff.strip() == "", f"PC index_pc.html 변경 감지:\n{diff}"
+    pc = (Path(__file__).parent.parent / "web" / "index_pc.html").read_text(encoding="utf-8")
+    assert 'id="p-briefing"' in pc, "PC 브리핑 페이지 없음"
 
 
 def test_layout_no_forbidden_cta():
