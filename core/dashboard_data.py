@@ -1405,11 +1405,22 @@ _TICKER_SAFE = __import__("re").compile(r"^[A-Za-z0-9.\-=^]{1,20}$")
 
 
 def _fetch_chart_raw(ticker: str, period: str, interval: str) -> dict:
-    """yfinance history로 OHLCV 조회. 내부용(캐시 래핑).
+    """OHLCV 차트 조회. 국내 종목은 KIS 우선, 실패 시 yfinance fallback.
 
     현재가/일간등락률은 기존 시세 체인(KIS→yfinance)에서 가져와
     전일종가 대비 정확한 day_pct를 제공한다.
     """
+    # 국내 종목: KIS 차트 우선 시도
+    is_kr = ticker.endswith(".KS") or ticker.endswith(".KQ")
+    if is_kr:
+        try:
+            from core.market_kis import get_domestic_chart
+            kis_data = get_domestic_chart(ticker, period, interval)
+            if kis_data and kis_data.get("points"):
+                return kis_data
+        except Exception as e:
+            log.debug("KIS chart fallback for %s: %s", ticker, e)
+
     import yfinance as yf
 
     tk = yf.Ticker(ticker)

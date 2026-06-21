@@ -394,3 +394,186 @@ def is_available() -> bool:
     if not _is_kis_configured():
         return False
     return _get_access_token() is not None
+
+
+# ─── 국내주식 차트 (분봉/일봉) ─────────────────────
+def get_domestic_chart(
+    ticker: str, period: str = "1d", interval: str = "5m"
+) -> dict | None:
+    """KIS API로 국내주식 OHLCV 차트 조회. 실패 시 None.
+
+    period/interval 매핑:
+      1d/5m  → 당일 분봉 (FHKST03010200)
+      1mo/1d → 일봉 30일 (FHKST03010100)
+      3mo/1d → 일봉 90일 (FHKST03010100)
+      5d/15m → 미지원 → None (yfinance fallback)
+    """
+    if not _is_kis_configured():
+        return None
+
+    token = _get_access_token()
+    if not token:
+        return None
+
+    stock_code = _ticker_to_kis_code(ticker)
+    is_intraday = interval in ("5m", "15m")
+
+    # 5d/15m은 KIS에서 직접 지원 어려움 → None
+    if period == "5d":
+        return None
+
+    try:
+        if is_intraday:
+            return _fetch_domestic_minute_chart(token, stock_code, ticker)
+        else:
+            days = 30 if period == "1mo" else 90
+            return _fetch_domestic_daily_chart(token, stock_code, ticker, days)
+    except Exception as e:
+        logger.warning("KIS 차트 조회 실패 [%s]: %s", ticker, e)
+        return None
+
+
+def _fetch_domestic_minute_chart(
+    token: str, stock_code: str, ticker: str
+) -> dict | None:
+    """당일 분봉 조회 (FHKST03010200)."""
+    from datetime import datetime, timezone, timedelta
+    KST = timezone(timedelta(hours=9))
+    now = datetime.now(KST)
+    time_str = now.strftime("%H%M%S")
+
+    resp = requests.get(
+        f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice",
+        headers={
+            "authorization": f"Bearer {token}",
+            "appkey": KIS_APP_KEY,
+            "appsecret": KIS_APP_SECRET,
+            "tr_id": "FHKST03010200",
+            "content-type": "application/json; charset=utf-8",
+        },
+        params={
+            "FID_ETC_CLS_CODE": "",
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD": stock_code,
+            "FID_INPUT_HOUR_1": time_str,
+            "FID_PW_DATA_INCU_YN": "Y",
+        },
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    if data.get("rt_cd") != "0":
+        return None
+
+    output2 = data.get("output2", [])
+    if not output2:
+        return None
+
+    points: list[dict] = []
+    for item in reversed(output2):
+        t = item.get("stck_cntg_hour", "")
+        if len(t) >= 4:
+            time_label = f"{t[:2]}:{t[2:4]}"
+        else:
+            continue
+        o = float(item.get("stck_oprc", 0))
+        h = float(item.get("stck_hgpr", 0))
+        lo = float(item.get("stck_lwpr", 0))
+        c = float(item.get("stck_prpr", 0))
+        v = int(item.get("cntg_vol", 0))
+        if c <= 0:
+            continue
+        points.append({
+            "time": time_label, "open": round(o),
+            "high": round(h), "low": round(lo),
+            "close": round(c), "volume": v,
+        })
+
+    if not points:
+        return None
+
+    last = points[-1]["close"]
+    first = points[0]["open"]
+    day_pct = round((last - first) / first * 100, 2) if first else 0.0
+
+    return {
+        "points": points,
+        "current_price": last,
+        "day_pct": day_pct,
+        "source": "KIS",
+    }
+
+
+def _fetch_domestic_daily_chart(
+    token: str, stock_code: str, ticker: str, days: int = 30
+) -> dict | None:
+    """일봉 조회 (FHKST03010100)."""
+    from datetime import datetime, timezone, timedelta
+    KST = timezone(timedelta(hours=9))
+    now = datetime.now(KST)
+    end_date = now.strftime("%Y%m%d")
+    start_date = (now - timedelta(days=days + 10)).strftime("%Y%m%d")
+
+    resp = requests.get(
+        f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
+        headers={
+            "authorization": f"Bearer {token}",
+            "appkey": KIS_APP_KEY,
+            "appsecret": KIS_APP_SECRET,
+            "tr_id": "FHKST03010100",
+            "content-type": "application/json; charset=utf-8",
+        },
+        params={
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD": stock_code,
+            "FID_INPUT_DATE_1": start_date,
+            "FID_INPUT_DATE_2": end_date,
+            "FID_PERIOD_DIV_CODE": "D",
+            "FID_ORG_ADJ_PRC": "0",
+        },
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    if data.get("rt_cd") != "0":
+        return None
+
+    output2 = data.get("output2", [])
+    if not output2:
+        return None
+
+    points: list[dict] = []
+    for item in reversed(output2[:days]):
+        d = item.get("stck_bsop_date", "")
+        if len(d) >= 8:
+            time_label = f"{d[4:6]}-{d[6:8]}"
+        else:
+            continue
+        o = float(item.get("stck_oprc", 0))
+        h = float(item.get("stck_hgpr", 0))
+        lo = float(item.get("stck_lwpr", 0))
+        c = float(item.get("stck_clpr", 0))
+        v = int(item.get("acml_vol", 0))
+        if c <= 0:
+            continue
+        points.append({
+            "time": time_label, "open": round(o),
+            "high": round(h), "low": round(lo),
+            "close": round(c), "volume": v,
+        })
+
+    if not points:
+        return None
+
+    last = points[-1]["close"]
+    first = points[0]["open"]
+    day_pct = round((last - first) / first * 100, 2) if first else 0.0
+
+    return {
+        "points": points,
+        "current_price": last,
+        "day_pct": day_pct,
+        "source": "KIS",
+    }

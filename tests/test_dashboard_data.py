@@ -638,6 +638,64 @@ def test_mobile_read_only():
 
 
 # ═══════════════════════════════════════════════════════
+# KIS 국내 차트 우선화 (21단계)
+# ═══════════════════════════════════════════════════════
+
+def test_chart_kis_priority_domestic(monkeypatch):
+    """국내 티커에서 KIS chart 성공 시 source=KIS."""
+    kis_data = {"points": [{"time": "09:05", "open": 70000, "high": 70500,
+                             "low": 69900, "close": 70400, "volume": 100}],
+                "current_price": 70400, "day_pct": 0.5, "source": "KIS"}
+    import core.market_kis as kis
+    monkeypatch.setattr(kis, "get_domestic_chart", lambda *a, **kw: kis_data)
+    dd._cache.clear()
+    # 직접 _fetch_chart_raw 호출
+    result = dd._fetch_chart_raw("005930.KS", "1d", "5m")
+    assert result["source"] == "KIS"
+    assert len(result["points"]) == 1
+
+
+def test_chart_kis_fallback_to_yfinance(monkeypatch):
+    """KIS chart 실패 시 yfinance fallback."""
+    import core.market_kis as kis
+    monkeypatch.setattr(kis, "get_domestic_chart", lambda *a, **kw: None)
+    # yfinance도 모킹
+    import yfinance
+    import pandas as pd
+    empty_df = pd.DataFrame()
+    monkeypatch.setattr(yfinance, "Ticker", lambda t: type("T", (), {"history": lambda self, **kw: empty_df})())
+    monkeypatch.setattr(dd, "_fetch_chart_raw.__wrapped__", None, raising=False)
+    dd._cache.clear()
+    result = dd._fetch_chart_raw("005930.KS", "1d", "5m")
+    # yfinance도 empty → points 빈 결과
+    assert result["source"] in ("yfinance", "KIS+yfinance")
+    assert result["points"] == []
+
+
+def test_chart_overseas_no_kis(monkeypatch):
+    """해외 티커는 KIS chart 호출하지 않음."""
+    call_count = {"n": 0}
+    import core.market_kis as kis
+    def mock_kis(*a, **kw):
+        call_count["n"] += 1
+        return None
+    monkeypatch.setattr(kis, "get_domestic_chart", mock_kis)
+    monkeypatch.setattr(dd, "_fetch_chart_raw", dd._fetch_chart_raw)  # use real
+    dd._cache.clear()
+    # MU는 해외 → KIS chart 미호출
+    # 직접 _fetch_chart_raw 코드 실행 확인
+    # 대신 ticker_chart_data에서 테스트 (mock)
+    from core.dashboard_data import _fetch_chart_raw
+    # _fetch_chart_raw는 MU에 대해 KIS chart를 호출하지 않아야 함
+    # 하지만 실제 yfinance 호출은 피하기 위해 monkeypatch
+    import yfinance
+    import pandas as pd
+    monkeypatch.setattr(yfinance, "Ticker", lambda t: type("T", (), {"history": lambda self, **kw: pd.DataFrame()})())
+    _fetch_chart_raw("MU", "1d", "5m")
+    assert call_count["n"] == 0, "해외 종목에 KIS chart 호출됨"
+
+
+# ═══════════════════════════════════════════════════════
 # 액션 현재가/조건거리 계산 (20단계)
 # ═══════════════════════════════════════════════════════
 
