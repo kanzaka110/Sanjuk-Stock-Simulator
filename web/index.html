@@ -427,6 +427,20 @@ details[open] summary::before{transform:rotate(90deg)}
 .decision-related-news,.decision-related-signal{font-size:10.5px;color:var(--mt);margin-top:3px;padding:4px 8px;background:var(--sf2);border-radius:6px}
 .fold-news-signal-layout{display:block}
 @media(min-width:720px){.fold-news-signal-layout{display:grid;grid-template-columns:1fr 1fr;gap:10px}}
+/* ── Refresh Status Bar ── */
+.refresh-status-bar{display:flex;align-items:center;gap:6px;padding:4px 14px;font-size:10px;color:var(--mt);background:var(--sf);border-bottom:1px solid var(--ln)}
+.refresh-live-dot{width:6px;height:6px;border-radius:50%;background:#22c55e;flex-shrink:0;animation:pulse 2s infinite}
+.refresh-live-dot.error{background:#ef4444;animation:none}
+.refresh-live-dot.paused{background:#f59e0b;animation:none}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.refresh-last-updated{flex:1}
+.refresh-error-state{color:#ef4444;font-weight:600}
+.refresh-paused-state{color:#f59e0b}
+.manual-refresh-button{padding:3px 10px;border-radius:5px;font-size:10px;font-weight:700;background:var(--sf2);color:var(--b);border:1px solid var(--b2);cursor:pointer;-webkit-tap-highlight-color:transparent;min-height:26px}
+.manual-refresh-button:disabled{opacity:.5;cursor:default}
+.stale-data-badge{display:inline-block;font-size:8px;padding:1px 5px;border-radius:3px;background:#f59e0b22;color:#f59e0b;font-weight:600;margin-left:4px}
+.active-chart-refresh{position:relative}
+.chart-refresh-preserve{min-height:180px}
 
 /* 4. Priority Rail (가로 스와이프) */
 .priority-rail{display:flex;gap:9px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:4px;scroll-snap-type:x mandatory}
@@ -796,6 +810,12 @@ details[open] summary::before{transform:rotate(90deg)}
 <button class="tb" data-t="act">액션</button>
 <button class="tb" data-t="perf">성과</button>
 <button class="tb" data-t="sim">시뮬레이터</button>
+</div>
+<!-- Refresh Status Bar -->
+<div class="refresh-status-bar refresh-fallback-safe preserve-stale-data" id="refresh-bar">
+<span class="refresh-live-dot" id="refresh-dot"></span>
+<span class="refresh-last-updated" id="refresh-msg">준실시간 · 30~120초 갱신 · 실시간 보장 아님</span>
+<button class="manual-refresh-button" id="refresh-btn" onclick="refreshAllNow()">새로고침</button>
 </div>
 
 <!-- ═══ 홈: 모바일 BENTO + 폴드7/태블릿 PC식 터미널 v4 ═══ -->
@@ -2376,13 +2396,72 @@ function simPreview(){
   alert(`📋 주문표 미리보기 (실제 주문 아님)\n\n${side} · ${it.name} (${it.ticker})\n계좌: ${it._acct}\n지정가: ${cur}${price.toLocaleString()}\n수량: ${qty}주\n예상 금액: ${cur}${total.toLocaleString()}\n현재가 대비: ${(gap>=0?"+":"")}${gap.toFixed(2)}%\n\n⚠ 이 주문표는 메모용이며 실제로 실행되지 않습니다.`);
 }
 
+/* ═══ REFRESH UX SYSTEM ═══ */
+let _refreshing=false;let _lastRefresh=null;let _paused=false;let _intervals=[];
+
+function setRefreshState(state,msg){
+  const dot=document.getElementById("refresh-dot");
+  const msgEl=document.getElementById("refresh-msg");
+  const btn=document.getElementById("refresh-btn");
+  if(!dot||!msgEl)return;
+  dot.className="refresh-live-dot"+(state==="error"?" error":state==="paused"?" paused":"");
+  if(msg)msgEl.innerHTML=msg;
+  if(btn)btn.disabled=_refreshing;
+}
+
+function markRefreshSuccess(){
+  _lastRefresh=new Date();
+  const t=_lastRefresh.toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit",second:"2-digit"});
+  setRefreshState("ok",`<span class="refresh-last-updated">준실시간 · 마지막 ${t} · 실시간 보장 아님</span>`);
+}
+
+function markRefreshError(scope){
+  setRefreshState("error",`<span class="refresh-error-state">일부 갱신 실패 · 기존 데이터 유지</span><span class="stale-data-badge">stale</span>`);
+}
+
+async function refreshAllNow(){
+  if(_refreshing)return;
+  _refreshing=true;
+  const btn=document.getElementById("refresh-btn");if(btn)btn.disabled=true;
+  setRefreshState("ok",'<span class="refresh-last-updated">갱신 중…</span>');
+  try{
+    await Promise.allSettled([loadMkt(),loadAct(),loadPF(),loadPerf(),loadTimeline(),loadSignals(),loadDBrief(),loadAnalytics()]);
+    markRefreshSuccess();
+  }catch(e){markRefreshError("all")}
+  _refreshing=false;if(btn)btn.disabled=false;
+  /* 모달 열린 차트 갱신 */
+  if(mo.classList.contains("open")&&_mdTicker&&document.getElementById("md-chart")){
+    mdLoadChart(_mdTicker,_mdChartRange);
+  }
+}
+
+/* 탭 비활성/활성 처리 — visibility-refresh-resume */
+function handleVisibilityRefresh(){
+  if(document.hidden){
+    _paused=true;
+    setRefreshState("paused",'<span class="refresh-paused-state">일시정지됨 · 탭 활성화 시 갱신</span>');
+  }else{
+    _paused=false;
+    refreshAllNow();
+  }
+}
+document.addEventListener("visibilitychange",handleVisibilityRefresh);
+
+/* interval 래퍼 — paused면 skip */
+function safeInterval(fn,ms){
+  _intervals.push(setInterval(()=>{if(!_paused&&!document.hidden)fn()},ms));
+}
+
 /* ═══ INIT ═══ */
-async function init(){await Promise.all([loadMkt(),loadAct(),loadPF(),loadPerf(),loadNews(),loadTimeline(),loadSimList(),loadSignals(),loadDBrief(),loadCalendar(),loadAnalytics()])}
+async function init(){
+  await Promise.allSettled([loadMkt(),loadAct(),loadPF(),loadPerf(),loadNews(),loadTimeline(),loadSimList(),loadSignals(),loadDBrief(),loadCalendar(),loadAnalytics()]);
+  markRefreshSuccess();
+}
 init();
-setInterval(()=>{loadMkt();loadAct();loadTimeline();loadDBrief()},30000);
-setInterval(()=>{loadPF();loadPerf();loadSimList();loadAnalytics()},120000);
-setInterval(()=>{loadSignals()},300000);
-setInterval(()=>{loadNews();loadCalendar()},600000);
+safeInterval(()=>{loadMkt();loadAct();loadTimeline();loadDBrief()},30000);
+safeInterval(()=>{loadPF();loadPerf();loadSimList();loadAnalytics()},120000);
+safeInterval(()=>{loadSignals()},300000);
+safeInterval(()=>{loadNews();loadCalendar()},600000);
 </script>
 </body>
 </html>

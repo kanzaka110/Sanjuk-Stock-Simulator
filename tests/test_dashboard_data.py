@@ -638,6 +638,70 @@ def test_mobile_read_only():
 
 
 # ═══════════════════════════════════════════════════════
+# 준실시간 자동 갱신 UX (16단계)
+# ═══════════════════════════════════════════════════════
+
+def test_refresh_ux_markers():
+    """갱신 상태바 마커 존재."""
+    html = _mobile_html()
+    for marker in (
+        "refresh-status-bar",
+        "refresh-live-dot",
+        "refresh-last-updated",
+        "manual-refresh-button",
+        "refresh-error-state",
+        "refresh-paused-state",
+        "preserve-stale-data",
+        "stale-data-badge",
+        "refresh-fallback-safe",
+        "handleVisibilityRefresh",
+        "visibility-refresh-resume",
+    ):
+        assert marker in html, f"갱신 UX 마커 '{marker}' 없음"
+
+
+def test_refresh_phrases():
+    """갱신 관련 문구 존재."""
+    html = _mobile_html()
+    assert "준실시간" in html
+    assert "마지막" in html
+    assert "새로고침" in html
+    assert "갱신 중" in html
+    assert "기존 데이터 유지" in html
+    assert "실시간 보장 아님" in html
+    assert "일시정지" in html
+
+
+def test_refresh_functions():
+    """갱신 함수 존재."""
+    html = _mobile_html()
+    assert "refreshAllNow" in html
+    assert "setRefreshState" in html
+    assert "markRefreshSuccess" in html
+    assert "markRefreshError" in html
+    assert "safeInterval" in html
+
+
+def test_refresh_no_forbidden_cta():
+    """금지 CTA 없음."""
+    html = _mobile_html()
+    for cta in ("주문 실행", "매수하기", "매도하기"):
+        assert cta not in html, f"금지 CTA '{cta}' 존재"
+
+
+def test_refresh_pc_untouched():
+    """index_pc.html 미변경."""
+    import subprocess
+    from pathlib import Path
+    root = Path(__file__).parent.parent
+    diff = subprocess.run(
+        ["git", "diff", "--stat", "HEAD", "--", "web/index_pc.html"],
+        cwd=root, capture_output=True, text=True,
+    ).stdout
+    assert diff.strip() == "", f"PC index_pc.html 변경 감지:\n{diff}"
+
+
+# ═══════════════════════════════════════════════════════
 # 폴드7 레이아웃 마감 (15단계) — 3단 분기 정리
 # ═══════════════════════════════════════════════════════
 
