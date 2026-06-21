@@ -638,6 +638,53 @@ def test_mobile_read_only():
 
 
 # ═══════════════════════════════════════════════════════
+# 액션 매트릭스 상세 시트 (12단계)
+# ═══════════════════════════════════════════════════════
+
+def test_action_detail_markers():
+    """액션 상세 시트 마커 존재."""
+    html = _mobile_html()
+    for marker in (
+        "action-detail-sheet",
+        "action-tile-clickable",
+        "action-detail-list",
+        "action-detail-row",
+        "action-detail-quote",
+        "action-detail-guard",
+    ):
+        assert marker in html, f"액션 상세 마커 '{marker}' 없음"
+
+
+def test_action_detail_function():
+    """openActionDetail 함수 존재."""
+    html = _mobile_html()
+    assert "openActionDetail" in html, "openActionDetail 함수 없음"
+    assert "상세 ›" in html, "'상세 ›' 문구 없음"
+
+
+def test_action_detail_guard_phrases():
+    """보호 문구 존재."""
+    html = _mobile_html()
+    assert "조건 도달 시만" in html
+    assert "보유 관리 · 실행 매도 아님" in html
+    assert "즉시 체결 금지" in html
+
+
+def test_action_detail_ticker_link():
+    """액션 상세에서 종목 상세 연결."""
+    html = _mobile_html()
+    assert "openM(" in html, "종목 상세 연결 없음"
+    assert "종목 상세 ›" in html, "종목 상세 안내 없음"
+
+
+def test_action_detail_no_forbidden_cta():
+    """액션 상세에서 금지 CTA 없음."""
+    html = _mobile_html()
+    for cta in ("주문 실행", "매수하기", "매도하기"):
+        assert cta not in html, f"금지 CTA '{cta}' 존재"
+
+
+# ═══════════════════════════════════════════════════════
 # KIS 보유 스트립 + 포트폴리오 카드 강화 (11단계)
 # ═══════════════════════════════════════════════════════
 

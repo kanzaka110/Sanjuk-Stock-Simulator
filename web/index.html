@@ -366,10 +366,26 @@ details[open] summary::before{transform:rotate(90deg)}
 .action-tile .n{font-size:26px;font-weight:800;line-height:1;font-variant-numeric:tabular-nums}
 .action-tile .lb{font-size:13px;font-weight:700;margin-top:5px}
 .action-tile .ds{font-size:10.5px;color:var(--mt);margin-top:2px}
+.action-tile .tile-more{font-size:9.5px;color:var(--mt);margin-top:4px;opacity:.7}
 .action-tile.t-exec{border-left-color:var(--g)}.action-tile.t-exec .n{color:var(--g)}
 .action-tile.t-cond{border-left-color:var(--b)}.action-tile.t-cond .n{color:var(--b)}
 .action-tile.t-mgmt{border-left-color:var(--o)}.action-tile.t-mgmt .n{color:var(--o)}
 .action-tile.t-watch{border-left-color:var(--gy)}.action-tile.t-watch .n{color:var(--gy)}
+/* ── Action Detail Sheet ── */
+.action-detail-sheet{padding:4px 0}
+.action-detail-sheet h3{font-size:16px;font-weight:800;margin:0 0 12px}
+.action-detail-sheet .ads-sub{font-size:11px;color:var(--mt);margin-bottom:14px}
+.action-detail-list{display:flex;flex-direction:column;gap:8px}
+.action-detail-row{background:var(--sf);border:1px solid var(--ln);border-radius:10px;padding:12px;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.action-detail-row .adr-top{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
+.action-detail-row .adr-name{font-size:14px;font-weight:700}
+.action-detail-row .adr-ticker{font-size:11px;color:var(--mt)}
+.action-detail-quote{text-align:right}
+.action-detail-quote .adq-price{font-size:15px;font-weight:800;font-variant-numeric:tabular-nums}
+.action-detail-quote .adq-pct{font-size:11.5px;font-weight:700}
+.action-detail-row .adr-meta{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;font-size:11px;color:var(--mt);align-items:center}
+.action-detail-row .adr-reason{font-size:11.5px;color:var(--mt);margin-top:6px;line-height:1.5;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.action-detail-guard{font-size:10.5px;margin-top:6px;padding:6px 8px;background:var(--sf2);border-radius:6px;color:var(--mt);line-height:1.4}
 
 /* 4. Priority Rail (가로 스와이프) */
 .priority-rail{display:flex;gap:9px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:4px;scroll-snap-type:x mandatory}
@@ -958,6 +974,53 @@ function opvBlock(r){
     `<div class="opvm-foot"><span>체결 <b>${fill}</b></span><span>미체결 <b>${miss}</b></span><span>${E(impact)}</span></div></div>`;
 }
 
+/* ═══ 액션 상세 시트 — 타일 클릭 시 모달 ═══ */
+const _ADT={exec:"실행 후보 상세",cond:"조건부 매수 상세",mgmt:"보유 관리 상세",watch:"관망/취소 상세"};
+const _ADS={exec:"지정가·조건 확인 후 실행 판단",cond:"조건 도달 시만 — 즉시 실행 금지",mgmt:"보유 관리 · 실행 매도 아님 · 트레일링 점검",watch:"관망 · 조건미충족 · 대기"};
+function openActionDetail(kind){
+  const gr=window._actGroups;if(!gr)return;
+  let items=[];
+  if(kind==="exec")items=[...(gr.buy||[]),...(gr.sell||[])];
+  else if(kind==="cond")items=gr.cond||[];
+  else if(kind==="mgmt")items=gr.mgmt||[];
+  else items=gr.watch||[];
+  mo.classList.add("open");
+  let h=`<div class="action-detail-sheet"><h3>${_ADT[kind]||"액션 상세"}</h3><div class="ads-sub">${_ADS[kind]||""}</div>`;
+  if(!items.length){
+    h+=`<div class="emp">해당 항목 없음</div>`;
+  }else{
+    h+=`<div class="action-detail-list">`;
+    items.forEach(r=>{
+      const cls=classify(r.action_type,r.signal);
+      const it=pfItem(r.ticker);
+      const cur=r.ticker&&(r.ticker.endsWith(".KS")||r.ticker.endsWith(".KQ"))?"₩":"$";
+      const isKr=r.ticker&&(r.ticker.endsWith(".KS")||r.ticker.endsWith(".KQ"));
+      const src=isKr?"KIS":"yfinance";
+      const curPrice=it?it.current_price:0;
+      const dayPct=it?it.day_pct:0;
+      const condNote=cls==="cond"?'<div class="action-detail-guard">조건 도달 시만 실행 — 즉시 체결 금지</div>':"";
+      const mgmtNote=cls==="mgmt"?'<div class="action-detail-guard">보유 관리 · 실행 매도 아님 · 트레일링 익절 점검</div>':"";
+      h+=`<div class="action-detail-row" onclick="mo.classList.remove('open');setTimeout(()=>openM('${E(r.ticker)}'),200)"><div class="adr-top"><div><div class="adr-name">${badge(cls)} ${E(r.name)}</div><div class="adr-ticker">${E(r.ticker)} · ${r.account_type?E(r.account_type):""} · 종목 상세 ›</div></div><div class="action-detail-quote"><div class="adq-price">${curPrice?cur+curPrice.toLocaleString():"—"}</div><div class="adq-pct ${cc(dayPct)}">${dayPct?cs(dayPct):""}</div><div style="margin-top:2px"><span class="quote-source-badge${isKr?" kis":""}" style="font-size:8px;padding:1px 4px">${src}</span></div></div></div>`;
+      // 가격 정보
+      const prices=[];
+      if(r.entry_price)prices.push(`진입 ${cur}${r.entry_price.toLocaleString()}`);
+      if(r.target_price)prices.push(`목표 ${cur}${r.target_price.toLocaleString()}`);
+      if(r.stop_loss)prices.push(`손절 ${cur}${r.stop_loss.toLocaleString()}`);
+      if(prices.length)h+=`<div class="adr-meta">${prices.join(" · ")}${r.confidence?" · 신뢰 "+r.confidence+"%":""}</div>`;
+      if(r.entry_price&&r.stop_loss&&r.target_price)h+=posBar(r.stop_loss,curPrice||r.entry_price,r.target_price);
+      // 무효화/이유
+      if(r.invalidation_condition)h+=`<div class="action-detail-guard">무효화: ${E(r.invalidation_condition)}</div>`;
+      h+=condNote+mgmtNote;
+      h+=`</div>`;
+    });
+    h+=`</div>`;
+  }
+  h+=`<div style="text-align:center;padding:14px 0;font-size:9.5px;color:var(--mt)">준실시간 · 60초 캐시 · 실시간 보장 아님</div>`;
+  h+=`<div style="text-align:center;padding:6px 0"><button onclick="mo.classList.remove('open')" style="background:var(--sf2);color:var(--tx);border:none;padding:10px 32px;border-radius:10px;font-size:14px;cursor:pointer;min-height:44px">닫기</button></div>`;
+  h+=`</div>`;
+  document.getElementById("mc").innerHTML=h;
+}
+
 /* ═══ 의사결정 브리핑 (모바일 세로형) ═══ */
 const _BTm={"KR_NIGHT":"한국장 야간 프리브리핑","KR_OPEN":"개장 직전 액션","US_NIGHT":"미국장 프리브리핑","US_CLOSE":"데일리 리뷰","KR_BEFORE":"한국장 브리핑","US_BEFORE":"미국장 브리핑","MANUAL":"수시 브리핑"};
 function dbItem(it){
@@ -1406,14 +1469,15 @@ async function loadAct(){
   // 액션 탭: 기존 stat box 그리드
   const sumHTML=`<div class="sb"><div class="v" style="color:var(--g)">${gr.buy.length+gr.sell.length}</div><div class="l">실행</div></div><div class="sb"><div class="v" style="color:var(--b)">${gr.cond.length}</div><div class="l">조건부</div></div><div class="sb"><div class="v" style="color:var(--o)">${gr.mgmt.length}</div><div class="l">보유관리</div></div><div class="sb"><div class="v" style="color:var(--gy)">${gr.watch.length}</div><div class="l">관망</div></div>`;
   document.getElementById("a-sum").innerHTML=sumHTML;
-  // 홈: Action Tile Matrix (2x2)
+  // 홈: Action Tile Matrix (2x2) — 클릭 시 상세 시트
+  window._actGroups=gr;
   const matrix=[
     ["exec","실행",gr.buy.length+gr.sell.length,"지정가·조건 확인"],
     ["cond","조건부",gr.cond.length,"조건 도달 시만"],
     ["mgmt","보유관리",gr.mgmt.length,"실행 매도 아님"],
     ["watch","관망",gr.watch.length,"대기 · 모니터"],
   ];
-  document.getElementById("h-sum").innerHTML=matrix.map(([k,lb,n,ds])=>`<div class="action-tile t-${k}" onclick="go('act')"><div class="n">${n}</div><div class="lb">${lb}</div><div class="ds">${ds}</div></div>`).join("");
+  document.getElementById("h-sum").innerHTML=matrix.map(([k,lb,n,ds])=>`<div class="action-tile action-tile-clickable t-${k}" onclick="openActionDetail('${k}')"><div class="n">${n}</div><div class="lb">${lb}</div><div class="ds">${ds}</div><div class="tile-more">상세 ›</div></div>`).join("");
   window._actCounts={exec:gr.buy.length+gr.sell.length,cond:gr.cond.length,mgmt:gr.mgmt.length,watch:gr.watch.length};
   renderMCB();
   renderPrio(gr);
