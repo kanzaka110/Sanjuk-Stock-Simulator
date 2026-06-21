@@ -93,6 +93,23 @@ def api_performance():
     return JSONResponse(dd.performance_data(30))
 
 
+@app.get("/api/briefings")
+def api_briefings(limit: int = 50, days: int = 90, type: str = "all"):
+    from core.briefing_archive import list_briefing_archives
+    items = list_briefing_archives(limit=min(limit, 100), days=min(days, 365),
+                                   briefing_type=type)
+    return JSONResponse({"items": items, "limit": limit, "days": days, "error": ""})
+
+
+@app.get("/api/briefings/{archive_id}")
+def api_briefing_detail(archive_id: str):
+    from core.briefing_archive import get_briefing_archive
+    item = get_briefing_archive(archive_id)
+    if item is None:
+        return JSONResponse({"error": "not found", "id": archive_id})
+    return JSONResponse({**item, "error": ""})
+
+
 @app.get("/api/ticker/{ticker}/chart")
 def api_ticker_chart(ticker: str, range: str = "1d", interval: str = "5m"):
     return JSONResponse(dd.ticker_chart_data(ticker, range_=range, interval=interval))

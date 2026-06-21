@@ -483,4 +483,15 @@ def send_briefing_email(
     clean_label = re.sub(r"[^\w가-힣 ]", "", label).strip()
     subject = f"[Sanjuk-Stock][{clean_label}] {title}"
 
+    # 브리핑 아카이브 저장 (실패해도 전송 계속)
+    try:
+        from core.briefing_archive import save_briefing_archive
+        save_briefing_archive(
+            briefing_type=briefing_type, title=title, subject=subject,
+            body_text=body_text, body_html=body_html,
+            raw_json=raw, channel="email",
+        )
+    except Exception as e:
+        log.warning("briefing archive hook failed: %s", e)
+
     return send_email(subject, body_text, body_html=body_html)

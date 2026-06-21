@@ -638,6 +638,101 @@ def test_mobile_read_only():
 
 
 # ═══════════════════════════════════════════════════════
+# 브리핑 아카이브 (19단계)
+# ═══════════════════════════════════════════════════════
+
+def test_briefing_archive_save_and_list(tmp_path, monkeypatch):
+    """아카이브 저장/조회 shape 확인."""
+    from core import briefing_archive as ba
+    monkeypatch.setattr(ba, "_db_path", lambda: tmp_path / "test_archive.db")
+
+    aid = ba.save_briefing_archive(
+        briefing_type="US_BEFORE", title="테스트 브리핑",
+        subject="[테스트]", body_text="본문입니다",
+        body_html="<p>HTML</p>", raw_json={"advisor_oneliner": "요약"},
+    )
+    assert aid is not None
+    items = ba.list_briefing_archives(limit=10, days=1)
+    assert len(items) >= 1
+    assert items[0]["briefing_type"] == "US_BEFORE"
+    assert "body_text" not in items[0]  # 목록에는 body 미포함
+
+
+def test_briefing_archive_get_detail(tmp_path, monkeypatch):
+    """상세 조회 시 body 포함."""
+    from core import briefing_archive as ba
+    monkeypatch.setattr(ba, "_db_path", lambda: tmp_path / "test_archive.db")
+
+    aid = ba.save_briefing_archive(
+        briefing_type="KR_NIGHT", title="야간",
+        body_text="텍스트", body_html="<b>HTML</b>",
+    )
+    detail = ba.get_briefing_archive(aid)
+    assert detail is not None
+    assert detail["body_text"] == "텍스트"
+    assert "<b>HTML</b>" in detail["body_html"]
+
+
+def test_briefing_archive_sanitize(tmp_path, monkeypatch):
+    """script 태그 제거, secret 패턴 마스킹."""
+    from core import briefing_archive as ba
+    monkeypatch.setattr(ba, "_db_path", lambda: tmp_path / "test_archive.db")
+
+    aid = ba.save_briefing_archive(
+        briefing_type="MANUAL", title="보안 테스트",
+        body_html='<p>ok</p><script>alert("xss")</script><p>app_key=ABC</p>',
+    )
+    detail = ba.get_briefing_archive(aid)
+    assert "<script" not in detail["body_html"]
+    assert "app_key" not in detail["body_html"]
+    assert "[REDACTED]" in detail["body_html"]
+
+
+def test_briefing_archive_api_routes():
+    """app.py에 아카이브 GET 라우트 존재."""
+    from pathlib import Path
+    code = (Path(__file__).parent.parent / "web" / "app.py").read_text(encoding="utf-8")
+    assert "/api/briefings" in code
+    assert "/api/briefings/{archive_id}" in code
+
+
+def test_briefing_archive_html_markers():
+    """HTML 아카이브 마커 존재."""
+    html = _mobile_html()
+    for marker in (
+        "briefing-archive-panel",
+        "briefing-archive-list",
+        "briefing-archive-card",
+        "briefing-archive-detail",
+        "briefing-email-body",
+        "briefing-text-body",
+        "briefing-archive-open",
+        "briefing-archive-limited",
+        "briefing-archive-empty",
+        "briefing-action-derived",
+    ):
+        assert marker in html, f"아카이브 마커 '{marker}' 없음"
+
+
+def test_briefing_archive_phrases():
+    """아카이브 문구 존재."""
+    html = _mobile_html()
+    assert "메일 브리핑 원문" in html
+    assert "최근 50개" in html
+    assert "90일" in html
+    assert "원문 보기" in html
+    assert "브리핑 원문 데이터 대기" in html
+
+
+def test_briefing_archive_no_post():
+    """POST/PUT/DELETE 없음."""
+    from pathlib import Path
+    code = (Path(__file__).parent.parent / "web" / "app.py").read_text(encoding="utf-8")
+    for verb in (".post(", ".put(", ".delete("):
+        assert verb not in code, f"{verb} 핸들러 발견"
+
+
+# ═══════════════════════════════════════════════════════
 # 브리핑 탭 가시성 + 미리보기 (18단계)
 # ═══════════════════════════════════════════════════════
 

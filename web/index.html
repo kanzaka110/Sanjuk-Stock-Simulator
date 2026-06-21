@@ -490,6 +490,22 @@ details[open] summary::before{transform:rotate(90deg)}
 .briefing-empty-state{font-size:12px;color:var(--mt);padding:16px 0;text-align:center}
 @media(min-width:720px){.briefing-history-list{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}}
 @media(min-width:1100px){.briefing-history-list{grid-template-columns:repeat(3,1fr)}}
+/* ── Briefing Archive ── */
+.briefing-archive-panel{margin-bottom:12px}
+.briefing-archive-list{display:flex;flex-direction:column;gap:8px}
+.briefing-archive-card{background:var(--sf);border:1px solid var(--ln);border-radius:10px;padding:12px;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.briefing-archive-card .bac-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
+.briefing-archive-card .bac-type{font-size:12px;font-weight:700}
+.briefing-archive-card .bac-time{font-size:10.5px;color:var(--mt)}
+.briefing-archive-card .bac-summary{font-size:12px;color:var(--mt);margin-top:4px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.5}
+.briefing-archive-card .bac-footer{display:flex;gap:6px;margin-top:6px;font-size:10.5px;align-items:center;flex-wrap:wrap}
+.briefing-archive-open{font-size:10px;color:var(--b);font-weight:700}
+.briefing-archive-empty{font-size:12px;color:var(--mt);padding:20px 0;text-align:center}
+.briefing-archive-detail{padding:4px 0}
+.briefing-archive-detail h3{font-size:16px;font-weight:800;margin:0 0 10px}
+.briefing-email-body{max-height:60vh;overflow-y:auto;background:var(--sf);border:1px solid var(--ln);border-radius:10px;padding:14px;font-size:12px;line-height:1.6}
+.briefing-text-body{white-space:pre-wrap;font-size:12px;line-height:1.6;color:var(--tx);max-height:60vh;overflow-y:auto}
+@media(min-width:720px){.briefing-archive-list{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}}
 
 /* 4. Priority Rail (가로 스와이프) */
 .priority-rail{display:flex;gap:9px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:4px;scroll-snap-type:x mandatory}
@@ -999,10 +1015,19 @@ details[open] summary::before{transform:rotate(90deg)}
 <!-- ═══ 브리핑 ═══ -->
 <div class="tc briefing-tab-panel briefing-stale-safe" id="t-briefing">
 <div class="briefing-tab-title" style="font-size:18px;font-weight:800;margin-bottom:4px">브리핑</div>
-<div class="briefing-tab-description" style="font-size:12px;color:var(--mt);margin-bottom:12px">최근 브리핑 액션을 날짜별로 모아봅니다 · 최근 50개 제한</div>
+<div class="briefing-tab-description" style="font-size:12px;color:var(--mt);margin-bottom:12px">메일 브리핑 원문 · 최근 50개 · 90일</div>
+<!-- 메일 브리핑 아카이브 (주 기능) -->
+<div class="briefing-archive-panel briefing-archive-limited" id="br-archive">
+<div class="briefing-archive-list" id="br-archive-list"><div class="briefing-archive-empty">브리핑 원문 데이터 대기</div></div>
+</div>
+<!-- 기존 액션 기반 보조 섹션 -->
+<details class="detail-drawer" style="margin-top:14px"><summary><span>브리핑 액션 요약 (DB 기반)</span></summary>
+<div class="briefing-action-derived">
 <div class="briefing-latest-summary" id="br-latest"><div class="emp">브리핑 데이터 대기</div></div>
 <div class="briefing-filter-bar" id="br-filter"></div>
 <div class="briefing-history-list briefing-limited-history" id="br-list"><div class="briefing-empty-state">브리핑 데이터 대기</div></div>
+</div>
+</details>
 </div>
 
 <!-- ═══ 시뮬레이터 ═══ -->
@@ -2207,7 +2232,38 @@ let _prevTlItems=[];
 const _BT_LBL={"KR_BEFORE":"한국장 전 브리핑","KR_NIGHT":"한국 야간 브리핑","KR_OPEN":"한국장중 브리핑","US_BEFORE":"미국장 전 브리핑","US_NIGHT":"미국 야간 브리핑","US_CLOSE":"미국장 마감 리뷰","MANUAL":"수시 브리핑"};
 let _brRows=[];let _brRange="7d";let _brType="all";
 
+/* ═══ 메일 브리핑 원문 아카이브 ═══ */
+async function loadBriefingArchive(){
+  const el=document.getElementById("br-archive-list");if(!el)return;
+  const d=await J("/api/briefings?limit=50&days=90");
+  if(!d||!d.items||!d.items.length){
+    el.innerHTML='<div class="briefing-archive-empty">브리핑 원문 데이터 대기</div>';return}
+  el.innerHTML=d.items.map(a=>{
+    const lbl=_BT_LBL[a.briefing_type]||a.briefing_type||"브리핑";
+    const tickers=(a.tickers||[]).slice(0,4).join(", ");
+    return`<div class="briefing-archive-card" onclick="openBriefingArchive('${E(a.id)}')"><div class="bac-top"><div class="bac-type">${E(lbl)}</div><div class="bac-time">${E((a.created_at||"").slice(0,16))}</div></div><div class="bac-summary">${E(a.summary||a.title||"")}</div><div class="bac-footer"><span>${a.action_count||0}건</span>${tickers?`<span>${E(tickers)}</span>`:""}<span class="briefing-archive-open">원문 보기 ›</span></div></div>`;
+  }).join("");
+}
+
+async function openBriefingArchive(id){
+  mo.classList.add("open");
+  document.getElementById("mc").innerHTML='<div class="emp">로딩…</div>';
+  const d=await J("/api/briefings/"+encodeURIComponent(id));
+  if(!d||d.error==="not found"){document.getElementById("mc").innerHTML='<div class="emp">브리핑 원문 없음</div>';return}
+  const lbl=_BT_LBL[d.briefing_type]||d.briefing_type||"브리핑";
+  const tickers=(d.tickers||[]);
+  let h=`<div class="briefing-archive-detail"><h3>${E(lbl)} · ${E((d.created_at||"").slice(0,16))}</h3>`;
+  if(d.subject)h+=`<div style="font-size:12px;color:var(--mt);margin-bottom:8px">${E(d.subject)}</div>`;
+  if(tickers.length)h+=`<div style="margin-bottom:8px;display:flex;gap:5px;flex-wrap:wrap">${tickers.map(t=>`<span class="briefing-related-ticker" onclick="event.stopPropagation();mo.classList.remove('open');setTimeout(()=>openM('${E(t)}'),200)">${E(t)}</span>`).join("")}</div>`;
+  if(d.body_html){h+=`<div class="briefing-email-body">${d.body_html}</div>`}
+  else if(d.body_text){h+=`<div class="briefing-text-body">${E(d.body_text)}</div>`}
+  else{h+=`<div class="briefing-archive-empty">본문 없음</div>`}
+  h+=`<div style="text-align:center;padding:12px 0"><button onclick="mo.classList.remove('open')" style="background:var(--sf2);color:var(--tx);border:none;padding:10px 32px;border-radius:10px;font-size:14px;cursor:pointer;min-height:44px">닫기</button></div></div>`;
+  document.getElementById("mc").innerHTML=h;
+}
+
 async function loadBriefing(){
+  loadBriefingArchive();
   const[db,pr,tl]=await Promise.allSettled([J("/api/decision-brief"),J("/api/predictions"),J("/api/recommendations/timeline?range=7d&order=desc")]);
   const brief=db.status==="fulfilled"?db.value:null;
   const pred=pr.status==="fulfilled"?pr.value:null;
