@@ -250,12 +250,24 @@ def _render_normalized_sections(lines: list, normalized: dict, sep: str, next_ac
         lines.append("🟡 *매도 취소·홀딩 전환*")
         for a in cancelled[:5]:
             if a.get("protected_hold"):
-                tag = "보유 관리"
+                tag = "보유 관리 · 실행 매도 아님"
             elif a.get("action_type") == "HOLD_REVIEW":
                 tag = "홀딩 전환"
             else:
                 tag = "매도 취소"
             lines.append(f"🟡 {a.get('account','')} *{a.get('name') or a.get('ticker','')}* — {tag}")
+            # 현재가/목표/손절 거리 표시
+            cur_p = a.get("current_price_num") or 0
+            tgt = _num_safe(a.get("target_price") or a.get("target"))
+            stp = _num_safe(a.get("stop_loss") or a.get("stop"))
+            if cur_p and (tgt or stp):
+                parts = []
+                if tgt and tgt > 0:
+                    parts.append(f"목표까지 {(tgt-cur_p)/cur_p*100:+.1f}%")
+                if stp and stp > 0:
+                    parts.append(f"손절까지 {(stp-cur_p)/cur_p*100:+.1f}%")
+                if parts:
+                    lines.append(f"  {' · '.join(parts)}")
             if a.get("hold_note"):
                 lines.append(f"  🔒 {a['hold_note']}")
             why = a.get("cancel_reason") or a.get("reason", "")

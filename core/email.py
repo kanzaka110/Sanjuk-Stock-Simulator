@@ -146,6 +146,20 @@ def _esc(text: object) -> str:
     )
 
 
+def _num_safe(v) -> float:
+    """문자열/None에서 숫자 추출. 실패 시 0."""
+    if v is None:
+        return 0
+    if isinstance(v, (int, float)):
+        return float(v)
+    try:
+        import re as _re
+        m = _re.search(r"[\d,.]+", str(v).replace(",", ""))
+        return float(m.group()) if m else 0
+    except Exception:
+        return 0
+
+
 def _build_briefing_html(
     result: BriefingResult,
     raw: dict,
@@ -326,14 +340,25 @@ def _build_briefing_html(
         if cond_buys:
             section += 1
             parts.append(f"<h2>{section}. 🕐 조건부 매수 후보</h2>")
-            parts.append("<table><tr><th>종목</th><th>계좌</th><th>수량</th><th>지정가</th><th>무효화</th><th>조건</th></tr>")
+            parts.append("<p style='color:#666;font-size:12px'>조건 도달 시만 체결 — 즉시 실행 아님</p>")
+            parts.append("<table><tr><th>종목</th><th>계좌</th><th>수량</th><th>지정가</th><th>현재가/거리</th><th>무효화</th></tr>")
             for a in cond_buys:
+                # 현재가/조건거리 계산
+                cur_p = a.get("current_price_num") or 0
+                entry_p = a.get("entry_price_num") or _num_safe(a.get("price"))
+                dist_str = ""
+                if cur_p and entry_p:
+                    gap = (cur_p - entry_p) / entry_p * 100
+                    status = "조건 도달" if cur_p <= entry_p else ("조건 근접" if gap <= 1.0 else "조건 대기")
+                    dist_str = f"{cur_p:,.0f} ({gap:+.1f}%) {status}"
+                else:
+                    dist_str = "데이터 부족"
                 parts.append(f"<tr><td><b>{_esc(a.get('name', ''))}</b></td>")
                 parts.append(f"<td>{_esc(a.get('account', ''))}</td>")
                 parts.append(f"<td>{_esc(a.get('qty', ''))}</td>")
                 parts.append(f"<td>{_esc(a.get('price', ''))}</td>")
-                parts.append(f"<td>{_esc(a.get('invalidation_note', ''))}</td>")
-                parts.append(f"<td>{_esc(a.get('block_reason', ''))}</td></tr>")
+                parts.append(f"<td>{_esc(dist_str)}</td>")
+                parts.append(f"<td>{_esc(a.get('invalidation_note', ''))}</td></tr>")
             parts.append("</table>")
 
         gate_blocked = [a for a in blocked if not a.get("incomplete_order")]

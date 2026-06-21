@@ -1209,6 +1209,82 @@ def portfolio_contribution_summary() -> dict:
     return {"text": "\n".join(lines), "lines": lines, "empty": False}
 
 
+# ─── 액션 현재가/조건거리 계산 (read-only) ─────────────
+def calc_price_context(
+    current_price: float | None,
+    entry_price: float | None,
+    target_price: float | None,
+    stop_loss: float | None,
+    action_type: str | None = None,
+) -> dict:
+    """현재가 기준 조건 거리/도달 상태를 계산. read-only 참고용."""
+    ctx: dict = {
+        "current_price": current_price or 0,
+        "entry_price": entry_price,
+        "target_price": target_price,
+        "stop_loss": stop_loss,
+        "distance_to_entry_pct": None,
+        "distance_to_target_pct": None,
+        "distance_to_stop_pct": None,
+        "condition_status": "unknown",
+        "condition_label": "데이터 부족",
+        "risk_label": "데이터 부족",
+        "summary": "",
+    }
+    cur = current_price or 0
+    if cur <= 0:
+        return ctx
+
+    parts = []
+
+    # entry distance
+    if entry_price and entry_price > 0:
+        d = round((cur - entry_price) / entry_price * 100, 2)
+        ctx["distance_to_entry_pct"] = d
+        parts.append(f"조건가까지 {d:+.2f}%")
+        # condition status (주로 조건부 매수에 사용)
+        is_cond = action_type in ("CONDITIONAL_NEW_BUY",)
+        if is_cond or action_type is None:
+            if cur <= entry_price:
+                ctx["condition_status"] = "reached"
+                ctx["condition_label"] = "조건 도달"
+            elif d <= 1.0:
+                ctx["condition_status"] = "near"
+                ctx["condition_label"] = "조건 근접"
+            else:
+                ctx["condition_status"] = "waiting"
+                ctx["condition_label"] = "조건 대기"
+
+    # target distance
+    if target_price and target_price > 0:
+        d = round((target_price - cur) / cur * 100, 2)
+        ctx["distance_to_target_pct"] = d
+        parts.append(f"목표까지 {d:+.2f}%")
+
+    # stop distance
+    if stop_loss and stop_loss > 0:
+        d = round((stop_loss - cur) / cur * 100, 2)
+        ctx["distance_to_stop_pct"] = d
+        parts.append(f"손절까지 {d:+.2f}%")
+
+    # risk label
+    stop_d = ctx["distance_to_stop_pct"]
+    target_d = ctx["distance_to_target_pct"]
+    if stop_d is not None and target_d is not None:
+        if abs(stop_d) <= 2.0:
+            ctx["risk_label"] = "손절 근접"
+        elif target_d is not None and target_d <= 2.0:
+            ctx["risk_label"] = "목표 근접"
+        else:
+            ctx["risk_label"] = "손절 여유"
+    # override for sell management
+    if action_type == "AI_SELL_MANAGEMENT":
+        ctx["condition_label"] = "보유 관리 · 실행 매도 아님"
+
+    ctx["summary"] = " · ".join(parts) if parts else "데이터 부족"
+    return ctx
+
+
 # ─── /api/decision-brief — 의사결정 브리핑 카드 ───────────
 _BUY_TYPES = ("AI_NEW_BUY", "AI_ADD_BUY", "CONDITIONAL_NEW_BUY")
 _SELL_TYPES = ("AI_SELL_MANAGEMENT",)
@@ -1238,6 +1314,18 @@ def _fetch_decision_brief_raw() -> dict:
     )
     conn.close()
 
+    # 현재가 일괄 조회 (캐시 재사용)
+    tickers_in_rows = list({r.get("ticker", "") for r in rows if r.get("ticker")})
+    cur_prices: dict[str, float] = {}
+    try:
+        from core.market import _get_quote_realtime
+        for tk in tickers_in_rows[:20]:
+            q = _get_quote_realtime(tk)
+            if q and q.price:
+                cur_prices[tk] = q.price
+    except Exception:
+        pass
+
     do_now, conditionals, dont, risks = [], [], [], []
     for r in rows:
         at = r.get("action_type", "")
@@ -1245,11 +1333,19 @@ def _fetch_decision_brief_raw() -> dict:
         acct = r.get("account_type", "")
         name = r.get("name") or r.get("ticker", "")
         entry = r.get("entry_price")
+        ticker = r.get("ticker", "")
+        cur_price = cur_prices.get(ticker, 0.0)
+        pctx = calc_price_context(cur_price, entry, r.get("target_price"),
+                                   r.get("stop_loss"), at)
         item = {
-            "ticker": r.get("ticker", ""), "name": name, "account": acct,
+            "ticker": ticker, "name": name, "account": acct,
             "action_type": at, "label": label, "signal": r.get("signal", ""),
             "entry_price": entry, "target_price": r.get("target_price"),
             "stop_loss": r.get("stop_loss"), "confidence": r.get("confidence"),
+            "current_price": cur_price,
+            "price_context": pctx,
+            "condition_label": pctx["condition_label"],
+            "distance_summary": pctx["summary"],
         }
         if at in ("AI_NEW_BUY", "AI_ADD_BUY"):
             do_now.append(item)

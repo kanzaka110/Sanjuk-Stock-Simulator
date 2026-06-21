@@ -638,6 +638,61 @@ def test_mobile_read_only():
 
 
 # ═══════════════════════════════════════════════════════
+# 액션 현재가/조건거리 계산 (20단계)
+# ═══════════════════════════════════════════════════════
+
+def test_calc_price_context_waiting():
+    """current > entry → 조건 대기."""
+    ctx = dd.calc_price_context(150.0, 145.0, 160.0, 140.0, "CONDITIONAL_NEW_BUY")
+    assert ctx["condition_status"] == "waiting"
+    assert ctx["condition_label"] == "조건 대기"
+    assert ctx["distance_to_entry_pct"] is not None
+    assert "%" not in ctx["condition_label"]  # 라벨에 % 없음
+    assert "조건가까지" in ctx["summary"]
+    assert "목표까지" in ctx["summary"]
+    assert "손절까지" in ctx["summary"]
+
+
+def test_calc_price_context_near():
+    """current close to entry within 1% → 조건 근접."""
+    ctx = dd.calc_price_context(146.0, 145.0, 160.0, 140.0, "CONDITIONAL_NEW_BUY")
+    assert ctx["condition_status"] == "near"
+    assert ctx["condition_label"] == "조건 근접"
+
+
+def test_calc_price_context_reached():
+    """current <= entry → 조건 도달."""
+    ctx = dd.calc_price_context(144.0, 145.0, 160.0, 140.0, "CONDITIONAL_NEW_BUY")
+    assert ctx["condition_status"] == "reached"
+    assert ctx["condition_label"] == "조건 도달"
+
+
+def test_calc_price_context_sell_mgmt():
+    """AI_SELL_MANAGEMENT → 보유 관리 라벨."""
+    ctx = dd.calc_price_context(100.0, 90.0, 120.0, 80.0, "AI_SELL_MANAGEMENT")
+    assert "보유 관리" in ctx["condition_label"]
+    assert "실행 매도 아님" in ctx["condition_label"]
+
+
+def test_calc_price_context_missing():
+    """missing values → 안전 반환."""
+    ctx = dd.calc_price_context(0, None, None, None)
+    assert ctx["condition_label"] == "데이터 부족"
+    assert ctx["summary"] == "" or ctx["summary"] == "데이터 부족"
+
+    ctx2 = dd.calc_price_context(None, 100, 110, 90)
+    assert ctx2["distance_to_entry_pct"] is None
+
+
+def test_calc_price_context_no_forbidden_labels():
+    """raw action_type이 라벨에 노출되지 않음."""
+    for at in ("AI_SELL_MANAGEMENT", "CONDITIONAL_NEW_BUY", "AI_NEW_BUY"):
+        ctx = dd.calc_price_context(100, 95, 110, 85, at)
+        assert at not in ctx["condition_label"]
+        assert at not in ctx["summary"]
+
+
+# ═══════════════════════════════════════════════════════
 # 브리핑 아카이브 (19단계)
 # ═══════════════════════════════════════════════════════
 
