@@ -404,6 +404,29 @@ details[open] summary::before{transform:rotate(90deg)}
 .performance-detail-empty{font-size:12px;color:var(--mt);padding:16px 0;text-align:center}
 .performance-tap-detail{cursor:pointer;-webkit-tap-highlight-color:transparent}
 .perf-more{font-size:9.5px;color:var(--mt);opacity:.7;margin-left:4px}
+/* ── Info Hub Panel ── */
+.info-hub-panel{margin-top:12px}
+.info-hub-panel>div{margin-bottom:10px}
+.info-empty-state{font-size:12px;color:var(--mt);padding:12px 0;text-align:center}
+.info-tap-detail{cursor:pointer;-webkit-tap-highlight-color:transparent}
+.info-open-ticker-detail{color:var(--b);font-weight:700;font-size:11px;cursor:pointer}
+.fold-info-hub-grid{display:block}
+@media(min-width:720px){.fold-info-hub-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}}
+@media(min-width:900px){.fold-info-hub-grid{grid-template-columns:1fr 1fr 1fr 1fr}}
+/* Info hub detail sheets */
+.news-detail-sheet,.signal-detail-sheet,.event-detail-sheet{padding:4px 0}
+.news-detail-sheet h3,.signal-detail-sheet h3,.event-detail-sheet h3{font-size:16px;font-weight:800;margin:0 0 10px}
+.news-detail-row,.signal-detail-row,.event-detail-row,.decision-timeline-row{background:var(--sf);border:1px solid var(--ln);border-radius:9px;padding:10px 12px;margin-bottom:6px;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.news-source-badge,.news-sentiment-badge,.signal-strength-badge,.event-date-badge,.event-impact-badge{display:inline-block;font-size:9px;font-weight:700;padding:2px 6px;border-radius:4px;background:var(--sf2);color:var(--mt)}
+.news-sentiment-badge.sent-pos{background:#1a3a2a;color:#4ddb8f}
+.news-sentiment-badge.sent-neg{background:#3a1a1a;color:#db4d4d}
+.news-published-at{font-size:10px;color:var(--mt)}
+.news-related-ticker{display:inline-block;font-size:10px;padding:1px 6px;border-radius:4px;background:var(--b2);color:var(--b);cursor:pointer;font-weight:600}
+.signal-risk-note{font-size:10.5px;margin-top:4px;padding:5px 8px;background:var(--sf2);border-radius:6px;color:var(--mt)}
+.decision-timeline-detail{font-size:11.5px;color:var(--mt);margin-top:4px;line-height:1.5}
+.decision-related-news,.decision-related-signal{font-size:10.5px;color:var(--mt);margin-top:3px;padding:4px 8px;background:var(--sf2);border-radius:6px}
+.fold-news-signal-layout{display:block}
+@media(min-width:720px){.fold-news-signal-layout{display:grid;grid-template-columns:1fr 1fr;gap:10px}}
 
 /* 4. Priority Rail (가로 스와이프) */
 .priority-rail{display:flex;gap:9px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:4px;scroll-snap-type:x mandatory}
@@ -794,6 +817,13 @@ details[open] summary::before{transform:rotate(90deg)}
 <details open class="detail-drawer"><summary><span>이벤트 캘린더</span></summary><div class="dd-body" id="h-cal"><div class="emp">불러오는 중…</div></div></details>
 <details open class="detail-drawer phone-only phone-collapsed"><summary><span>30일 성과</span></summary><div class="dd-body" id="h-perf"></div></details>
 <details open class="detail-drawer phone-only phone-collapsed"><summary><span>주요 뉴스</span></summary><div class="dd-body" id="h-news"></div></details>
+<!-- 정보 허브 패널 -->
+<div class="info-hub-panel fold-info-hub-grid">
+<div class="info-hub-news" id="ih-news"><div class="info-empty-state news-empty-state">뉴스 데이터 대기</div></div>
+<div class="info-hub-signals" id="ih-sig"><div class="info-empty-state signal-empty-state">신호 데이터 대기</div></div>
+<div class="info-hub-events" id="ih-events"><div class="info-empty-state event-empty-state">이벤트 데이터 대기</div></div>
+<div class="info-hub-timeline decision-timeline-panel" id="ih-timeline"><div class="info-empty-state timeline-empty-state">최근 판단 데이터 대기</div></div>
+</div>
 </div>
 </div>
 
@@ -1086,8 +1116,10 @@ function calRow(it){
 }
 async function loadCalendar(){
   const d=await J("/api/calendar");const items=(d&&d.items)||[];
+  _calCache=items;
   const el=document.getElementById("h-cal");if(!el)return;
   el.innerHTML=items.length?items.slice(0,8).map(calRow).join(""):'<div class="emp">예정 일정 없음</div>';
+  renderInfoEvents();
 }
 
 /* ═══ 성과 분석 — 벤치마크·기여도 (모바일) ═══ */
@@ -1139,6 +1171,7 @@ async function loadSignals(){
   const d=await J("/api/signals");
   if(!d)return;
   const its=d.items||[];
+  _signalCache=its;
   const ts=document.getElementById("sig-ts");if(ts)ts.textContent=d.generated_at?("· "+d.generated_at):"";
   const strong=its.filter(x=>Math.abs(x.confluence_score)>=2);
   const show=strong.length?strong:its.slice(0,6);
@@ -1149,6 +1182,7 @@ async function loadSignals(){
   // 폴드 신호 패널 (상위 5)
   const fsg=document.getElementById("fp-sig");
   if(fsg)fsg.innerHTML=show.length?show.slice(0,5).map(renderSignal).join(""):'<div class="emp">중립권 — 강한 신호 없음</div>';
+  renderInfoSignals();
 }
 
 /* ═══ PC 터미널 참조 컴포넌트 ═══ */
@@ -1823,6 +1857,7 @@ async function loadNews(){
     return;
   }
   _newsCache=d.articles;
+  renderInfoNews();
 
   // Home: importance 4+ top 3
   const top=d.articles.filter(a=>(a.importance||0)>=4).slice(0,3);
@@ -1884,7 +1919,8 @@ async function loadTimeline(){
   }
   _prevTlCount=items.length;
 
-  if(!items.length){document.getElementById("a-tl").innerHTML='<div class="emp">오늘 추천 없음</div>';return}
+  _prevTlItems=items;
+  if(!items.length){document.getElementById("a-tl").innerHTML='<div class="emp">오늘 추천 없음</div>';renderInfoTimeline([]);return}
 
   let html='<div class="rec-tl">';
   items.forEach(r=>{
@@ -1909,7 +1945,130 @@ async function loadTimeline(){
   });
   html+='</div>';
   document.getElementById("a-tl").innerHTML=html;
+  renderInfoTimeline(items);
 }
+
+/* ═══ 정보 허브 — 뉴스/신호/이벤트/타임라인 상세 ═══ */
+let _signalCache=[];let _calCache=[];
+
+/* 정보 허브 렌더링 (각 로더에서 호출) */
+function renderInfoNews(){
+  const el=document.getElementById("ih-news");if(!el)return;
+  const items=(_newsCache||[]).slice(0,4);
+  if(!items.length){el.innerHTML='<div class="info-empty-state news-empty-state">뉴스 데이터 대기</div>';return}
+  el.innerHTML=`<div style="font-size:11px;font-weight:700;margin-bottom:6px;color:var(--mt)">주요 뉴스</div>`+items.map((a,i)=>{
+    const sc=a.sentiment==="positive"?"sent-pos":a.sentiment==="negative"?"sent-neg":"";
+    const sl=a.sentiment==="positive"?"긍정":a.sentiment==="negative"?"부정":"중립";
+    return`<div class="news-detail-row info-tap-detail" onclick="openInfoDetail('news',${i})"><div style="font-size:12px;font-weight:600;line-height:1.4">${E(a.title).slice(0,60)}</div><div style="margin-top:3px;display:flex;gap:5px;flex-wrap:wrap;align-items:center"><span class="news-sentiment-badge ${sc}">${sl}</span><span class="news-source-badge">${E(a.source)}</span>${(a.tickers||[]).slice(0,2).map(t=>`<span class="news-related-ticker" onclick="event.stopPropagation();openM('${E(t)}')">${E(t)}</span>`).join("")}<span class="perf-more">상세 ›</span></div></div>`;
+  }).join("");
+}
+
+function renderInfoSignals(){
+  const el=document.getElementById("ih-sig");if(!el)return;
+  const items=_signalCache.slice(0,4);
+  if(!items.length){el.innerHTML='<div class="info-empty-state signal-empty-state">신호 데이터 대기</div>';return}
+  el.innerHTML=`<div style="font-size:11px;font-weight:700;margin-bottom:6px;color:var(--mt)">기술 신호</div>`+items.map((it,i)=>{
+    const dir=it.direction==="buy"?"매수 신호":it.direction==="sell"?"매도 신호":"중립";
+    return`<div class="signal-detail-row info-tap-detail" onclick="openInfoDetail('signal',${i})"><div style="display:flex;justify-content:space-between;align-items:center"><span style="font-size:12px;font-weight:600">${E(it.name)}</span><span class="signal-strength-badge">${dir} ${it.confluence_score>0?"+":""}${it.confluence_score}</span></div><div style="font-size:10.5px;color:var(--mt);margin-top:2px">RSI ${it.rsi} · ${E(it.rec)} · <span class="perf-more">상세 ›</span></div></div>`;
+  }).join("");
+}
+
+function renderInfoEvents(){
+  const el=document.getElementById("ih-events");if(!el)return;
+  const items=_calCache.slice(0,4);
+  if(!items.length){el.innerHTML='<div class="info-empty-state event-empty-state">이벤트 데이터 대기</div>';return}
+  el.innerHTML=`<div style="font-size:11px;font-weight:700;margin-bottom:6px;color:var(--mt)">이벤트/캘린더</div>`+items.map((it,i)=>{
+    const dd=it.d_day!=null?(it.d_day===0?"D-Day":it.d_day>0?`D-${it.d_day}`:`D+${-it.d_day}`):"";
+    return`<div class="event-detail-row info-tap-detail" onclick="openInfoDetail('event',${i})"><div style="display:flex;justify-content:space-between;align-items:center"><span style="font-size:12px;font-weight:600">${E(it.name).slice(0,40)}</span><span class="event-date-badge">${dd}</span></div><div style="font-size:10.5px;color:var(--mt);margin-top:2px">${E(it.date||"")} · <span class="perf-more">상세 ›</span></div></div>`;
+  }).join("");
+}
+
+function renderInfoTimeline(items){
+  const el=document.getElementById("ih-timeline");if(!el)return;
+  const show=(items||[]).slice(0,5);
+  if(!show.length){el.innerHTML='<div class="info-empty-state timeline-empty-state">최근 판단 데이터 대기</div>';return}
+  el.innerHTML=`<div style="font-size:11px;font-weight:700;margin-bottom:6px;color:var(--mt)">판단 타임라인</div>`+show.map((r,i)=>{
+    const cls=classify(r.action_type,r.signal);const lbl=BL[cls]||"기타";
+    const time=(r.created_at||"").slice(11,16);
+    return`<div class="decision-timeline-row info-tap-detail" onclick="openInfoDetail('timeline',${i})"><div style="display:flex;justify-content:space-between;align-items:center"><span style="font-size:12px;font-weight:600">${badge(cls)} ${E(r.name)}</span><span class="mt" style="font-size:10px">${time}</span></div><div class="decision-timeline-detail">${E((r.entry_price?`진입 ${r.entry_price}`:"")||lbl)} · <span class="info-open-ticker-detail" onclick="event.stopPropagation();openM('${E(r.ticker)}')">종목 상세 ›</span></div></div>`;
+  }).join("");
+}
+
+/* 정보 상세 모달 */
+function openInfoDetail(kind,idx){
+  mo.classList.add("open");
+  let h='<div class="info-hub-detail-sheet">';
+
+  if(kind==="news"){
+    const a=(_newsCache||[])[idx];
+    h+=`<div class="news-detail-sheet"><h3>뉴스 상세</h3>`;
+    if(!a){h+=`<div class="info-empty-state">뉴스 데이터 대기</div>`}
+    else{
+      const sc=a.sentiment==="positive"?"sent-pos":a.sentiment==="negative"?"sent-neg":"";
+      const sl=a.sentiment==="positive"?"긍정":a.sentiment==="negative"?"부정":"중립";
+      h+=`<div style="font-size:15px;font-weight:700;line-height:1.5;margin-bottom:10px">${E(a.title)}</div>`;
+      h+=`<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;align-items:center"><span class="news-sentiment-badge ${sc}">${sl}</span><span class="news-source-badge">${E(a.source)}</span><span class="news-published-at">${E((a.published_at||"").slice(0,16))}</span></div>`;
+      if(a.summary)h+=`<div style="font-size:12.5px;line-height:1.6;margin-bottom:10px;color:var(--tx)">${E(a.summary)}</div>`;
+      if(a.tickers&&a.tickers.length){h+=`<div style="margin-bottom:10px;display:flex;gap:5px;flex-wrap:wrap">`;a.tickers.forEach(t=>{h+=`<span class="news-related-ticker info-open-ticker-detail" onclick="mo.classList.remove('open');setTimeout(()=>openM('${E(t)}'),200)">${E(t)} · 관련 종목 ›</span>`});h+=`</div>`}
+      if(a.url)h+=`<div><a href="${E(a.url)}" target="_blank" rel="noopener" style="color:var(--b);font-size:12px;font-weight:600">원문 보기 ›</a></div>`;
+    }
+    h+=`</div>`;
+  }else if(kind==="signal"){
+    const it=_signalCache[idx];
+    h+=`<div class="signal-detail-sheet"><h3>신호 상세</h3>`;
+    if(!it){h+=`<div class="info-empty-state">신호 데이터 대기</div>`}
+    else{
+      const dir=it.direction==="buy"?"매수 신호":it.direction==="sell"?"매도 신호":"중립";
+      h+=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><div><div style="font-size:16px;font-weight:800">${E(it.name)}</div><div class="mt">${E(it.ticker)} · ${it.held?"보유":"관심"}</div></div><div class="signal-strength-badge" style="font-size:11px;padding:4px 10px">${dir}</div></div>`;
+      h+=`<div class="performance-detail-summary" style="margin-bottom:10px"><div class="pds-item"><div class="k">강도</div><div class="v">${it.confluence_score>0?"+":""}${it.confluence_score}</div></div><div class="pds-item"><div class="k">RSI</div><div class="v">${it.rsi}</div></div><div class="pds-item"><div class="k">근거</div><div class="v" style="font-size:11px">${E(it.confluence_label)}</div></div></div>`;
+      h+=`<div style="font-size:12px;line-height:1.5;margin-bottom:8px">${E(it.rec)}</div>`;
+      if(it.direction==="sell")h+=`<div class="signal-risk-note">리스크: 과열·약세 구간 — 보유 관리 관찰</div>`;
+      if(it.direction==="buy"&&!it.held)h+=`<div class="signal-risk-note">무효화: 합류 점수 하락 시 신호 소멸</div>`;
+      h+=`<div style="text-align:center;padding:8px 0"><span class="info-open-ticker-detail" onclick="mo.classList.remove('open');setTimeout(()=>openM('${E(it.ticker)}'),200)">종목 상세 ›</span></div>`;
+    }
+    h+=`</div>`;
+  }else if(kind==="event"){
+    const it=_calCache[idx];
+    h+=`<div class="event-detail-sheet"><h3>이벤트 상세</h3>`;
+    if(!it){h+=`<div class="info-empty-state">이벤트 데이터 대기</div>`}
+    else{
+      const dd=it.d_day!=null?(it.d_day===0?"D-Day":it.d_day>0?`D-${it.d_day}`:`D+${-it.d_day}`):"예정/확인 필요";
+      const imp=it.importance==="HIGH"?"높음":it.importance==="LOW"?"낮음":"보통";
+      h+=`<div style="font-size:16px;font-weight:800;margin-bottom:6px">${E(it.name)}</div>`;
+      h+=`<div style="display:flex;gap:6px;margin-bottom:10px"><span class="event-date-badge">${dd}</span><span class="event-impact-badge">예상 영향: ${imp}</span></div>`;
+      h+=`<div style="font-size:12px;color:var(--mt);margin-bottom:6px">날짜: ${E(it.date||"미정")}</div>`;
+      if(it.ticker)h+=`<div style="margin-bottom:6px"><span class="info-open-ticker-detail" onclick="mo.classList.remove('open');setTimeout(()=>openM('${E(it.ticker)}'),200)">${E(it.ticker)} · 종목 상세 ›</span></div>`;
+      h+=`<div style="font-size:11px;color:var(--mt);padding:8px;background:var(--sf2);border-radius:6px">대응 메모: 일정 전후 변동성 확대 가능 — 포지션 사이징 확인</div>`;
+    }
+    h+=`</div>`;
+  }else if(kind==="timeline"){
+    const tl=(_prevTlItems||[])[idx];
+    h+=`<div class="info-hub-detail-sheet"><h3>판단 타임라인</h3>`;
+    if(!tl){h+=`<div class="info-empty-state">최근 판단 데이터 대기</div>`}
+    else{
+      const cls=classify(tl.action_type,tl.signal);const lbl=BL[cls]||"기타";
+      h+=`<div style="display:flex;gap:6px;align-items:center;margin-bottom:10px">${badge(cls)}<span style="font-size:15px;font-weight:800">${E(tl.name)}</span></div>`;
+      h+=`<div style="font-size:12px;color:var(--mt);margin-bottom:8px">${E(tl.ticker)} · ${E((tl.created_at||"").slice(0,16))} · [${E(tl.account_type)}]</div>`;
+      if(tl.entry_price)h+=`<div style="font-size:12px;margin-bottom:6px">진입 ${tl.entry_price} → 목표 ${tl.target_price||"—"} / 손절 ${tl.stop_loss||"—"}</div>`;
+      if(tl.entry_price&&tl.stop_loss&&tl.target_price)h+=posBar(tl.stop_loss,tl.entry_price,tl.target_price);
+      h+=confBar(tl.confidence)+mn(cls);
+      /* 관련 뉴스 */
+      const relNews=(_newsCache||[]).filter(a=>(a.tickers||[]).includes(tl.ticker)).slice(0,2);
+      if(relNews.length){h+=`<div class="decision-related-news" style="margin-top:8px"><b>관련 뉴스:</b> ${relNews.map(a=>E(a.title).slice(0,40)).join(" / ")}</div>`}
+      /* 관련 신호 */
+      const relSig=_signalCache.find(s=>s.ticker===tl.ticker);
+      if(relSig){h+=`<div class="decision-related-signal" style="margin-top:4px"><b>관련 신호:</b> ${E(relSig.name)} RSI ${relSig.rsi} · ${E(relSig.rec)}</div>`}
+      h+=`<div style="text-align:center;padding:10px 0"><span class="info-open-ticker-detail" onclick="mo.classList.remove('open');setTimeout(()=>openM('${E(tl.ticker)}'),200)">종목 상세 ›</span></div>`;
+    }
+    h+=`</div>`;
+  }
+
+  h+=`<div style="text-align:center;padding:6px 0"><button onclick="mo.classList.remove('open')" style="background:var(--sf2);color:var(--tx);border:none;padding:10px 32px;border-radius:10px;font-size:14px;cursor:pointer;min-height:44px">닫기</button></div>`;
+  h+=`</div>`;
+  document.getElementById("mc").innerHTML=h;
+}
+
+let _prevTlItems=[];
 
 /* ═══ SIMULATOR — Webull Dark Trading Terminal ═══ */
 let _simItems=[];let _simSelected=null;let _simOrderSide="buy";let _simTd=null;let _simView="chart";

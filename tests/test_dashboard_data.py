@@ -638,6 +638,77 @@ def test_mobile_read_only():
 
 
 # ═══════════════════════════════════════════════════════
+# 정보 허브 (14단계) — 뉴스/신호/이벤트/타임라인
+# ═══════════════════════════════════════════════════════
+
+def test_info_hub_markers():
+    """정보 허브 패널 마커 존재."""
+    html = _mobile_html()
+    for marker in (
+        "info-hub-panel",
+        "info-hub-news",
+        "info-hub-signals",
+        "info-hub-events",
+        "info-hub-timeline",
+        "info-hub-detail-sheet",
+        "news-detail-sheet",
+        "signal-detail-sheet",
+        "event-detail-sheet",
+        "decision-timeline-panel",
+        "decision-timeline-row",
+        "info-tap-detail",
+        "info-open-ticker-detail",
+        "info-empty-state",
+        "fold-info-hub-grid",
+    ):
+        assert marker in html, f"정보 허브 마커 '{marker}' 없음"
+
+
+def test_info_hub_functions():
+    """정보 상세 함수 존재."""
+    html = _mobile_html()
+    assert "openInfoDetail" in html, "openInfoDetail 없음"
+    assert "renderInfoNews" in html, "renderInfoNews 없음"
+    assert "renderInfoSignals" in html, "renderInfoSignals 없음"
+    assert "renderInfoEvents" in html, "renderInfoEvents 없음"
+    assert "renderInfoTimeline" in html, "renderInfoTimeline 없음"
+
+
+def test_info_hub_phrases():
+    """정보 허브 표시 문구 존재."""
+    html = _mobile_html()
+    assert "뉴스 상세" in html
+    assert "신호 상세" in html
+    assert "이벤트 상세" in html
+    assert "판단 타임라인" in html
+    assert "관련 종목 ›" in html
+    assert "원문 보기" in html
+    assert "뉴스 데이터 대기" in html
+    assert "신호 데이터 대기" in html
+    assert "이벤트 데이터 대기" in html
+    assert "최근 판단 데이터 대기" in html
+
+
+def test_info_hub_empty_states():
+    """empty state 마커 존재."""
+    html = _mobile_html()
+    for marker in (
+        "news-empty-state",
+        "signal-empty-state",
+        "event-empty-state",
+        "timeline-empty-state",
+    ):
+        assert marker in html, f"empty state '{marker}' 없음"
+
+
+def test_info_hub_no_forbidden_cta():
+    """금지 CTA 없음."""
+    html = _mobile_html()
+    for cta in ("주문 실행", "매수하기", "매도하기"):
+        assert cta not in html, f"금지 CTA '{cta}' 존재"
+
+
+# ═══════════════════════════════════════════════════════
 # 성과 상세 시트 (13단계)
 # ═══════════════════════════════════════════════════════
 
