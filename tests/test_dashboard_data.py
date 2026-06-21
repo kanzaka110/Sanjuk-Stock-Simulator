@@ -638,6 +638,80 @@ def test_mobile_read_only():
 
 
 # ═══════════════════════════════════════════════════════
+# 종목 상세 터미널 (10단계) — HTML 마커 검증
+# ═══════════════════════════════════════════════════════
+
+def test_stock_detail_terminal_markers():
+    """증권앱형 종목 상세 구조 마커가 존재."""
+    html = _mobile_html()
+    for marker in (
+        "stock-detail-terminal",
+        "quote-source-badge",
+        "ticker-chart-panel",
+        "holding-snapshot",
+        "recommendation-snapshot",
+        "kis-freshness",
+    ):
+        assert marker in html, f"상세 터미널 마커 '{marker}' 없음"
+
+
+def test_stock_detail_chart_api_call():
+    """종목 상세에서 /api/ticker/{ticker}/chart 호출."""
+    html = _mobile_html()
+    assert "/api/ticker/" in html and "/chart?range=" in html, "차트 API 호출 없음"
+
+
+def test_stock_detail_cache_messages():
+    """캐시/준실시간 안내 문구 존재."""
+    html = _mobile_html()
+    assert "준실시간" in html, "'준실시간' 문구 없음"
+    assert "60초 캐시" in html, "'60초 캐시' 문구 없음"
+    assert "실시간 보장 아님" in html, "'실시간 보장 아님' 문구 없음"
+
+
+def test_stock_detail_protected_phrase():
+    """보유 관리 · 실행 매도 아님 문구 존재."""
+    html = _mobile_html()
+    assert "보유 관리 · 실행 매도 아님" in html
+
+
+def test_stock_detail_conditional_phrase():
+    """조건부 매수 '조건 도달 시만' 문구 존재."""
+    html = _mobile_html()
+    assert "조건 도달 시만" in html
+
+
+def test_stock_detail_no_forbidden_cta():
+    """종목 상세에서 금지 CTA 없음."""
+    html = _mobile_html()
+    for cta in ("주문 실행", "매수하기", "매도하기"):
+        assert cta not in html, f"금지 CTA '{cta}' 존재"
+
+
+def test_stock_detail_no_raw_action_type_display():
+    """action_type raw 코드가 사용자 표시 텍스트로 직접 노출되지 않음.
+
+    JS 매핑 상수 내부(classify 함수)는 허용, 화면 렌더 텍스트만 방지.
+    """
+    html = _mobile_html()
+    # badge/렌더 텍스트에 raw 코드가 직접 표시되면 안 됨
+    # BL={buy:"매수",...} 매핑 이후 badge() 함수로 변환하므로
+    # innerHTML/textContent에 직접 "AI_SELL_MANAGEMENT" 문자열이 표시되면 안 됨
+    # 단, classify 함수 내부 상수와 분기 판정은 허용
+    import re
+    # classify/BL/BC 정의 블록 제외한 나머지에서 raw 코드 노출 확인
+    # 렌더 함수 내부에서 action_type을 직접 textContent로 쓰는지 확인
+    # badge(cls)로 변환하므로 정상. 직접 문자열 출력 패턴만 금지:
+    # 예: `${r.action_type}` 이 innerHTML에 바로 들어가는 경우
+    render_sections = re.findall(r'innerHTML\s*[+=].*?;', html, re.S)
+    for section in render_sections:
+        # action_type 값을 직접 표시하는 패턴 (badge 없이)
+        if 'action_type}' in section and 'badge' not in section and 'classify' not in section:
+            # BL 매핑이나 badge 변환 없이 직접 표시
+            assert False, f"action_type raw 직접 표시 의심: {section[:100]}"
+
+
+# ═══════════════════════════════════════════════════════
 # 차트 API (ticker_chart_data) — OHLCV 조회 전용
 # ═══════════════════════════════════════════════════════
 
