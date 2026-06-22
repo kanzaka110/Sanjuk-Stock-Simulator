@@ -809,6 +809,27 @@ def test_web_portfolio_principal_visible():
     assert "principal" in pc
 
 
+def test_portfolio_principal_uses_deposit_history_constants():
+    """투자 원금은 보유종목 매입가가 아니라 사용자가 확인한 입금 내역 기준이다."""
+    from config.settings import ACCOUNT_PRINCIPAL_KRW
+
+    assert ACCOUNT_PRINCIPAL_KRW["일반"] == 35_000_000
+    assert ACCOUNT_PRINCIPAL_KRW["ISA"] == 20_000_000
+    assert ACCOUNT_PRINCIPAL_KRW["연금저축"] == 20_500_000
+    assert ACCOUNT_PRINCIPAL_KRW["IRP"] == 10_250_000
+    assert sum(ACCOUNT_PRINCIPAL_KRW.values()) == 85_750_000
+
+    from pathlib import Path
+    root = Path(__file__).parent.parent
+    dashboard = (root / "core" / "dashboard_data.py").read_text(encoding="utf-8")
+    mobile = (root / "web" / "index.html").read_text(encoding="utf-8")
+    pc = (root / "web" / "index_pc.html").read_text(encoding="utf-8")
+    assert "total_principal" in dashboard
+    assert '"principal"' in dashboard
+    assert "total_principal" in mobile
+    assert "total_principal" in pc
+
+
 def test_web_trade_ledger_visible_on_mobile_and_pc():
     """HTML PC/모바일도 거래 ledger와 미반영 거래 경고를 렌더한다."""
     from pathlib import Path

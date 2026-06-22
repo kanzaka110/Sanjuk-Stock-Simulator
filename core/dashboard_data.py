@@ -326,6 +326,7 @@ def _fetch_portfolio_raw() -> dict:
         DEFAULT_CASH, RIA_CASH, IRP_CASH, PENSION_MMF, ISA_CASH,
         IRP_DEFAULT_OPTION,
         PORTFOLIO, HOLDING_STRATEGY,
+        ACCOUNT_PRINCIPAL_KRW, TOTAL_PRINCIPAL_KRW,
     )
     from core.market import _batch_quotes
 
@@ -405,12 +406,14 @@ def _fetch_portfolio_raw() -> dict:
             acct_cost += cost_krw
 
         cash_krw = float(cash) if cash else 0
+        principal = float(ACCOUNT_PRINCIPAL_KRW.get(acct_name, 0) or 0)
         result_accounts.append({
             "name": acct_name,
             "cash": round(cash_krw),
             "items": items,
             "eval_total": round(acct_eval),
             "cost_total": round(acct_cost),
+            "principal": round(principal),
             "pnl_pct": round((acct_eval - acct_cost) / acct_cost * 100, 2) if acct_cost else 0,
         })
         total_eval += acct_eval + cash_krw
@@ -447,6 +450,7 @@ def _fetch_portfolio_raw() -> dict:
         "total_eval": round(_safe(total_eval)),
         "total_pnl_pct": round(_safe(raw_pnl), 2),
         "total_cash": round(total_cash),
+        "total_principal": round(float(TOTAL_PRINCIPAL_KRW)),
         "cash_weight": cash_weight,
         "allocation": allocation,
         "usdkrw": round(_safe(usdkrw), 2),
