@@ -78,6 +78,18 @@ def api_accuracy():
     return JSONResponse({"by_ticker": dd.accuracy_by_ticker()})
 
 
+@app.get("/api/trades")
+def api_trades(limit: int = 20):
+    from core.trade_log import list_trades
+    return JSONResponse(list_trades(limit=limit, pending_only=False))
+
+
+@app.get("/api/trades/pending")
+def api_trades_pending(limit: int = 20):
+    from core.trade_log import list_trades
+    return JSONResponse(list_trades(limit=limit, pending_only=True))
+
+
 @app.get("/api/market")
 def api_market():
     return JSONResponse(dd.market_data())

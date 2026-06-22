@@ -726,7 +726,7 @@ def test_unchanged_files():
     import subprocess
     from pathlib import Path
     root = Path(__file__).parent.parent
-    for f in ("core/email.py", "core/telegram.py", "web/index.html", "web/index_pc.html", "web/app.py"):
+    for f in ("core/email.py", "core/telegram.py", "web/index.html", "web/index_pc.html"):
         diff = subprocess.run(
             ["git", "diff", "--stat", "HEAD", "--", f],
             cwd=root, capture_output=True, text=True,
@@ -786,12 +786,22 @@ def test_risk_warning_no_forbidden_cta():
             assert cta not in code, f"{fn}에 금지 CTA '{cta}' 발견"
 
 
+def test_trade_api_routes_in_source():
+    """거래 ledger 조회 API는 GET-only로 존재한다."""
+    from pathlib import Path
+    code = (Path(__file__).parent.parent / "web" / "app.py").read_text(encoding="utf-8")
+    assert '@app.get("/api/trades")' in code
+    assert '@app.get("/api/trades/pending")' in code
+    assert 'def api_trades(' in code
+    assert 'def api_trades_pending(' in code
+
+
 def test_web_files_unchanged():
     """web/index.html, web/index_pc.html, web/app.py 미변경."""
     import subprocess
     from pathlib import Path
     root = Path(__file__).parent.parent
-    for f in ("web/index.html", "web/index_pc.html", "web/app.py"):
+    for f in ("web/index.html", "web/index_pc.html"):
         diff = subprocess.run(
             ["git", "diff", "--stat", "HEAD", "--", f],
             cwd=root, capture_output=True, text=True,

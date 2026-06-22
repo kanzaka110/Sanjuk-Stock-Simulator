@@ -195,3 +195,49 @@ def pending_trades_text() -> str:
         )
     lines.append("→ 보유 수량/예수금 판단 시 위 매매를 반영해서 계산하라.")
     return "\n".join(lines)
+
+
+
+def _trade_row_to_dict(row: sqlite3.Row) -> dict:
+    """trades row → read-only dashboard/mobile API item."""
+    ticker = row["ticker"]
+    price = float(row["price"] or 0)
+    shares = int(row["shares"] or 0)
+    return {
+        "id": int(row["id"]),
+        "created_at": row["created_at"],
+        "ticker": ticker,
+        "name": row["name"] or ticker,
+        "side": row["side"],
+        "shares": shares,
+        "price": price,
+        "account": row["account"] or "",
+        "applied": bool(row["applied"]),
+        "total_value": price * shares,
+        "currency": "KRW" if str(ticker).endswith((".KS", ".KQ")) else "USD",
+    }
+
+
+def pending_trade_count() -> int:
+    """미반영 매매 수."""
+    conn = _get_conn()
+    row = conn.execute("SELECT COUNT(*) AS n FROM trades WHERE applied = 0").fetchone()
+    return int(row["n"] if row else 0)
+
+
+def list_trades(limit: int = 20, pending_only: bool = False) -> dict:
+    """최근 매매 기록을 read-only API 형태로 반환."""
+    conn = _get_conn()
+    limit = max(1, min(int(limit or 20), 100))
+    where = "WHERE applied = 0" if pending_only else ""
+    rows = conn.execute(
+        f"SELECT * FROM trades {where} ORDER BY created_at DESC, id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    total_row = conn.execute(f"SELECT COUNT(*) AS n FROM trades {where}").fetchone()
+    items = [_trade_row_to_dict(r) for r in rows]
+    return {
+        "items": items,
+        "count": int(total_row["n"] if total_row else len(items)),
+        "pending_count": pending_trade_count(),
+    }
