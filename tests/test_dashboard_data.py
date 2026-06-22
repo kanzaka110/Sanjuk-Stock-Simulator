@@ -726,7 +726,7 @@ def test_unchanged_files():
     import subprocess
     from pathlib import Path
     root = Path(__file__).parent.parent
-    for f in ("core/email.py", "core/telegram.py", "web/index.html", "web/index_pc.html"):
+    for f in ("core/email.py", "core/telegram.py"):
         diff = subprocess.run(
             ["git", "diff", "--stat", "HEAD", "--", f],
             cwd=root, capture_output=True, text=True,
@@ -796,17 +796,17 @@ def test_trade_api_routes_in_source():
     assert 'def api_trades_pending(' in code
 
 
-def test_web_files_unchanged():
-    """web/index.html, web/index_pc.html, web/app.py 미변경."""
-    import subprocess
+def test_web_portfolio_principal_visible():
+    """HTML 대시보드에 투자 원금 표시가 존재한다."""
     from pathlib import Path
     root = Path(__file__).parent.parent
-    for f in ("web/index.html", "web/index_pc.html"):
-        diff = subprocess.run(
-            ["git", "diff", "--stat", "HEAD", "--", f],
-            cwd=root, capture_output=True, text=True,
-        ).stdout
-        assert diff.strip() == "", f"{f} 변경 감지:\n{diff}"
+    mobile = (root / "web" / "index.html").read_text(encoding="utf-8")
+    pc = (root / "web" / "index_pc.html").read_text(encoding="utf-8")
+    for code in (mobile, pc):
+        assert "투자 원금" in code
+        assert "cost_total" in code
+    assert "_principal" in mobile
+    assert "principal" in pc
 
 
 # ═══════════════════════════════════════════════════════

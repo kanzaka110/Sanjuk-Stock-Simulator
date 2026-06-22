@@ -1483,16 +1483,18 @@ function _todayPct(d){
 
 /* Bento Hero — 큰 숫자(총 평가액) 1 + 작은 숫자 3 (오늘변동/현금/시장모드) */
 let _heroPF=null;
+function _principal(d){return (d?.accounts||[]).reduce((sum,a)=>sum+(a.cost_total||0),0)}
 function renderHero(){
   const el=document.getElementById("h-hero");if(!el)return;
   const d=_heroPF,m=_mktCache;
   if(!d||!d.total_eval){el.innerHTML='<div class="bento-main"><div class="emp">데이터 대기</div></div>';return}
   const todayPct=_todayPct(d);
+  const principal=_principal(d);
   const mode=m?m.mode:null;const vix=m?m.vix:null;
   const modeBg=mode==="위험"?"var(--down2)":mode==="주의"?"var(--up2)":"var(--gy2)";
   const modeFg=mode==="위험"?"var(--down)":mode==="주의"?"var(--up)":"var(--gy)";
   const modeHTML=mode?`<div class="mode"><span class="mtag" style="background:${modeBg};color:${modeFg}">시장 ${E(mode)}</span>${vix!=null?`<div class="mvix">VIX ${E(vix)} · ${E(m.status_text||"")}</div>`:""}</div>`:"";
-  const main=`<div class="bento-main"><div class="l">총 평가액</div><div class="big">₩${(d.total_eval||0).toLocaleString()}</div><div class="sub ${cc(d.total_pnl_pct)}">평가손익 ${cs(d.total_pnl_pct)}</div>${modeHTML}</div>`;
+  const main=`<div class="bento-main"><div class="l">총 평가액</div><div class="big">₩${(d.total_eval||0).toLocaleString()}</div><div class="sub ${cc(d.total_pnl_pct)}">평가손익 ${cs(d.total_pnl_pct)}</div><div class="sub">투자 원금 ₩${principal.toLocaleString()}</div>${modeHTML}</div>`;
   const mini=[
     ["오늘 변동",cs(+todayPct.toFixed(2)),cc(todayPct)],
     ["현금 비중",(d.cash_weight||0)+"%",""],
@@ -1603,6 +1605,7 @@ function renderPortfolioBento(){
 async function loadPF(){
   const d=await J("/api/portfolio");if(!d){document.getElementById("h-pf").innerHTML='<div class="emp">로딩 실패</div>';return}
   const pc=cc(d.total_pnl_pct);
+  const principal=_principal(d);
   // 오늘 변동 (일간 손익): Σ 평가금액 × 당일 등락률
   let todayChg=0;
   (d.accounts||[]).forEach(a=>(a.items||[]).forEach(it=>{todayChg+=(it.eval_krw||0)*(it.day_pct||0)/100}));
@@ -1610,10 +1613,10 @@ async function loadPF(){
   const tc=cc(todayPct);const todayAmt=(todayChg>=0?"+":"")+Math.round(todayChg).toLocaleString();
   // Home summary + donut
   const alloc=d.allocation||[];
-  document.getElementById("h-pf").innerHTML=`<div class="g4"><div class="sb"><div class="v">${(d.total_eval||0).toLocaleString()}</div><div class="l">총 평가 (₩)</div></div><div class="sb"><div class="v ${tc}">${cs(+todayPct.toFixed(2))}</div><div class="l">오늘 ${todayAmt}₩</div></div><div class="sb"><div class="v ${pc}">${cs(d.total_pnl_pct)}</div><div class="l">수익률</div></div><div class="sb"><div class="v">${d.cash_weight||0}%</div><div class="l">현금 비중</div></div></div>${alloc.length?'<div style="margin-top:12px">'+donut(alloc,cs(d.total_pnl_pct))+'</div>':""}`;
+  document.getElementById("h-pf").innerHTML=`<div class="g4"><div class="sb"><div class="v">${(d.total_eval||0).toLocaleString()}</div><div class="l">총 평가 (₩)</div></div><div class="sb"><div class="v">${principal.toLocaleString()}</div><div class="l">투자 원금 (₩)</div></div><div class="sb"><div class="v ${tc}">${cs(+todayPct.toFixed(2))}</div><div class="l">오늘 ${todayAmt}₩</div></div><div class="sb"><div class="v ${pc}">${cs(d.total_pnl_pct)}</div><div class="l">수익률</div></div><div class="sb"><div class="v">${d.cash_weight||0}%</div><div class="l">현금 비중</div></div></div>${alloc.length?'<div style="margin-top:12px">'+donut(alloc,cs(d.total_pnl_pct))+'</div>':""}`;
 
   // PF tab summary
-  document.getElementById("pf-sum").innerHTML=`<div class="g4"><div class="sb"><div class="v">${(d.total_eval||0).toLocaleString()}</div><div class="l">총 평가</div></div><div class="sb"><div class="v ${tc}">${cs(+todayPct.toFixed(2))}</div><div class="l">오늘 ${todayAmt}₩</div></div><div class="sb"><div class="v ${pc}">${cs(d.total_pnl_pct)}</div><div class="l">수익률</div></div><div class="sb"><div class="v">${(d.total_cash||0).toLocaleString()}</div><div class="l">현금</div></div><div class="sb"><div class="v">${d.usdkrw}</div><div class="l">USD/KRW</div></div></div>`;
+  document.getElementById("pf-sum").innerHTML=`<div class="g4"><div class="sb"><div class="v">${(d.total_eval||0).toLocaleString()}</div><div class="l">총 평가</div></div><div class="sb"><div class="v">${principal.toLocaleString()}</div><div class="l">투자 원금</div></div><div class="sb"><div class="v ${tc}">${cs(+todayPct.toFixed(2))}</div><div class="l">오늘 ${todayAmt}₩</div></div><div class="sb"><div class="v ${pc}">${cs(d.total_pnl_pct)}</div><div class="l">수익률</div></div><div class="sb"><div class="v">${(d.total_cash||0).toLocaleString()}</div><div class="l">현금</div></div><div class="sb"><div class="v">${d.usdkrw}</div><div class="l">USD/KRW</div></div></div>`;
 
   // PF tab allocation donut
   document.getElementById("pf-alloc").innerHTML=alloc.length?donut(alloc,"₩"+(d.total_eval||0).toLocaleString()):'<div class="emp">데이터 없음</div>';
@@ -1637,7 +1640,7 @@ async function loadPF(){
       return`<div class="kis-holding-card ticker-tap-detail" onclick="openM('${E(it.ticker)}')"><div class="khc-top"><div><div class="khc-name">${E(it.name)}</div><div class="khc-ticker">${E(it.ticker)} · ${it.shares}주${it.horizon?" · "+E(it.horizon):""}</div></div><div><div class="holding-live-price">${cur}${it.current_price?it.current_price.toLocaleString():"—"}</div><div class="holding-day-change ${idc}">${it.day_pct>0?"▲ ":it.day_pct<0?"▼ ":""}${cs(it.day_pct)}</div></div></div><div class="holding-pnl-grid"><div class="pg-item"><div class="k">평단</div><div class="v">${cur}${it.avg_cost?it.avg_cost.toLocaleString():""}</div></div><div class="pg-item"><div class="k">수익률</div><div class="v ${ipc}">${cs(it.pnl_pct)}</div></div><div class="pg-item"><div class="k">평가</div><div class="v">₩${it.eval_krw?it.eval_krw.toLocaleString():""}</div></div><div class="pg-item"><div class="k">비중</div><div class="v">${it.weight||0}%</div></div><div class="pg-item"><div class="k">일간</div><div class="v ${idc}">${cs(it.day_pct)}</div></div><div class="pg-item"><div class="k">현재가</div><div class="v">${cur}${it.current_price?it.current_price.toLocaleString():"—"}</div></div></div><div class="holding-source-meta"><span class="quote-source-badge${isKr?" kis":""}">${src}</span><span>준실시간 · 60초 캐시 · 실시간 보장 아님</span></div></div>`;
     }).join("");
 
-    ah+=`<div class="c"><h3>${E(acct.name)} <span class="${ap}">${cs(acct.pnl_pct)}</span><span class="mt" style="float:right">₩${acct.eval_total?acct.eval_total.toLocaleString():0}</span></h3><table class="ptable"><tr><th>종목</th><th>현재가</th><th>등락</th><th>수량</th><th>평단</th><th>수익률</th><th>평가</th><th>비중</th></tr>${trows}</table><div class="cards-m">${mcards}</div></div>`;
+    ah+=`<div class="c"><h3>${E(acct.name)} <span class="${ap}">${cs(acct.pnl_pct)}</span><span class="mt" style="float:right">원금 ₩${(acct.cost_total||0).toLocaleString()} · 평가 ₩${acct.eval_total?acct.eval_total.toLocaleString():0}</span></h3><table class="ptable"><tr><th>종목</th><th>현재가</th><th>등락</th><th>수량</th><th>평단</th><th>수익률</th><th>평가</th><th>비중</th></tr>${trows}</table><div class="cards-m">${mcards}</div></div>`;
   }
   document.getElementById("pf-accts").innerHTML=ah;
   window._pfItems=allItems;

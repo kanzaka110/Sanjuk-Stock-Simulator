@@ -495,10 +495,12 @@ async function ldPF(){
   (d.accounts||[]).forEach(a=>(a.items||[]).forEach(it=>{todayChg+=(it.eval_krw||0)*(it.day_pct||0)/100;items.push({...it,account:a.name})}));
   _pf._today=todayChg;_pf._items=items;
   const todayPct=d.total_eval?todayChg/d.total_eval*100:0;
+  const principal=(d.accounts||[]).reduce((sum,a)=>sum+(a.cost_total||0),0);
   const maxW=Math.max(...items.map(x=>x.weight||0),0);
   // home KPI: 전체 평가액 / 총 손익률 / 오늘 가중 수익률 / 현금 비중 (analytics 실패해도 채워짐)
   setKPI("home-kpis",[
     ["전체 평가액",`₩${F(d.total_eval)}`,"",""],
+    ["투자 원금",`₩${F(principal)}`,"보유 종목 매입 원금",""],
     ["총 손익률",cs(d.total_pnl_pct),"",cc(d.total_pnl_pct)],
     ["오늘 가중 수익률",cs(todayPct),`${todayChg>=0?"+":""}${F(Math.round(todayChg))}₩`,cc(todayPct)],
     ["현금 비중",`${d.cash_weight}%`,`₩${F(d.total_cash)}`,""],
@@ -507,12 +509,13 @@ async function ldPF(){
   // pf KPI
   setKPI("pf-kpis",[
     ["총 평가자산",`₩${F(d.total_eval)}`,"",""],
+    ["투자 원금",`₩${F(principal)}`,"현금 제외",""],
     ["오늘 손익",cs(todayPct),`${todayChg>=0?"+":""}${F(Math.round(todayChg))}₩`,cc(todayPct)],
     ["누적 수익률",cs(d.total_pnl_pct),"",cc(d.total_pnl_pct)],
     ["현금 비중",`${d.cash_weight}%`,`₩${F(d.total_cash)}`,""],
   ]);
   // accounts
-  document.getElementById("home-accts").innerHTML=(d.accounts||[]).map(a=>`<div class="row"><div class="nm"><div class="t">${E(a.name)}</div><div class="s">비중 ${a.weight||0}% · 현금 ₩${F(a.cash)}</div></div><div class="px"><div class="pr">₩${F(a.eval_total)}</div><div class="ch ${cc(a.pnl_pct)}">${cs(a.pnl_pct)}</div></div></div>`).join("")||'<div class="emp">없음</div>';
+  document.getElementById("home-accts").innerHTML=(d.accounts||[]).map(a=>`<div class="row"><div class="nm"><div class="t">${E(a.name)}</div><div class="s">원금 ₩${F(a.cost_total||0)} · 비중 ${a.weight||0}% · 현금 ₩${F(a.cash)}</div></div><div class="px"><div class="pr">₩${F(a.eval_total)}</div><div class="ch ${cc(a.pnl_pct)}">${cs(a.pnl_pct)}</div></div></div>`).join("")||'<div class="emp">없음</div>';
   // alloc (도넛 + 범례)
   const alloc=d.allocation||[];
   const allocHTML=donut(alloc,d.total_eval);
