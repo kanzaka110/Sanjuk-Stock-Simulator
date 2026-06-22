@@ -877,6 +877,19 @@ details[open] summary::before{transform:rotate(90deg)}
 .pbar .val{font-size:11px;font-weight:700;text-align:right;font-variant-numeric:tabular-nums}
 
 /* 모바일 전용 — PC는 index_pc.html에서 별도 렌더 */
+
+/* 거래 ledger HTML 동기화 — PC/모바일 공통 */
+.trade-ledger-note{font-size:10.5px;color:var(--mt);margin:4px 0 8px;line-height:1.45}
+.trade-ledger-list{display:flex;flex-direction:column;gap:7px}
+.trade-ledger-row{background:var(--sf2);border:1px solid var(--ln);border-radius:10px;padding:10px 11px;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.trade-ledger-row .tl-top{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
+.trade-ledger-row .tl-name{font-size:13px;font-weight:800}
+.trade-ledger-row .tl-meta{font-size:10.5px;color:var(--mt);margin-top:2px}
+.trade-ledger-row .tl-value{text-align:right;font-size:12px;font-weight:800;font-variant-numeric:tabular-nums;white-space:nowrap}
+.trade-ledger-warning{background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.35);border-radius:10px;padding:10px 11px;margin-bottom:8px;color:var(--o);font-size:11.5px;line-height:1.45}
+.trade-ledger-complete{font-size:10px;font-weight:800;color:var(--up);background:rgba(34,197,94,.12);border-radius:999px;padding:2px 7px;margin-right:5px}
+.trade-ledger-pending{font-size:10px;font-weight:800;color:var(--o);background:rgba(245,158,11,.12);border-radius:999px;padding:2px 7px;margin-right:5px}
+
 </style>
 </head>
 <body>
@@ -966,6 +979,7 @@ details[open] summary::before{transform:rotate(90deg)}
 <details open class="detail-drawer ha-movers"><summary><span>오늘 많이 움직인 종목</span></summary><div class="dd-body" id="h-movers"></div></details>
 <details open class="detail-drawer ha-pf"><summary><span>포트폴리오 도넛</span></summary><div class="dd-body" id="h-pf"></div></details>
 <details open class="detail-drawer"><summary><span>오늘 주요 액션 전체</span></summary><div class="dd-body" id="h-act"></div></details>
+<details open class="detail-drawer"><summary><span>최근 거래 내역</span></summary><div class="dd-body" id="h-trades"><div class="emp">거래 내역 불러오는 중…</div></div></details>
 <details open class="detail-drawer"><summary><span>의사결정 브리핑 <span class="mt" id="db-sub"></span></span></summary><div class="dd-body" id="h-dbrief"><div class="emp">불러오는 중…</div></div></details>
 <details open class="detail-drawer"><summary><span>대표 지수 등락</span></summary><div class="dd-body" id="h-divg"></div></details>
 <details open class="detail-drawer phone-only phone-collapsed"><summary><span>실시간 기술 신호</span></summary><div class="dd-body" id="h-sig"></div></details>
@@ -999,12 +1013,15 @@ details[open] summary::before{transform:rotate(90deg)}
 <div class="c"><h3>총 평가</h3><div id="pf-sum"></div></div>
 <div class="c"><h3>자산 배분</h3><div id="pf-alloc"></div></div>
 <div id="pf-accts"></div>
+<div class="c"><h3>최근 거래 내역</h3><div id="pf-trades"><div class="emp">거래 내역 불러오는 중…</div></div></div>
 <div class="c"><h3>수익률 랭킹</h3><div id="pf-rank"></div></div>
 </div>
 
 <!-- ═══ 액션 ═══ -->
 <div class="tc" id="t-act">
 <div class="c"><h3>오늘 액션 요약</h3><div class="g4" id="a-sum"></div></div>
+<div class="c"><h3>미반영 거래</h3><div id="a-pending-trades"><div class="emp">확인 중…</div></div></div>
+<div class="c"><h3>최근 거래 내역</h3><div id="a-trades"><div class="emp">거래 내역 불러오는 중…</div></div></div>
 <div class="c"><h3>의사결정 브리핑 <span class="mt" id="db-sub2"></span></h3><div id="a-dbrief"><div class="emp">불러오는 중…</div></div></div>
 <div class="c"><h3>실행 필요</h3><div id="a-exec"></div></div>
 <div class="c"><h3>조건부 매수</h3><div id="a-cond"></div></div>
@@ -1683,8 +1700,19 @@ function renderKisStrip(items){
   }).join("");
 }
 
+
+/* ═══ 거래 ledger — 최근 거래/미반영 경고/오늘 실행 합산 ═══ */
+let _tradeLedger={items:[],pending:[],pending_count:0},_tradeLedgerLoaded=false;
+function kstTodayKey(){return new Date().toLocaleDateString("sv-SE",{timeZone:"Asia/Seoul"})}
+function todayExecTrades(){const day=kstTodayKey();return ((_tradeLedger&&_tradeLedger.items)||[]).filter(t=>t&&t.applied!==false&&(t.created_at||"").slice(0,10)===day)}
+function tradeMoney(t){const cur=t.currency==="USD"?"$":"₩";const v=t.total_value!=null?t.total_value:((t.price||0)*(t.shares||0));return cur+Number(v||0).toLocaleString(undefined,{maximumFractionDigits:t.currency==="USD"?2:0})}
+function tradeCard(t){const side=E(t.side||"");const isSell=side.includes("매도");const st=t.applied===false?'<span class="trade-ledger-pending">미반영 거래</span>':'<span class="trade-ledger-complete">거래완료</span>';const qty=t.shares?`${t.shares}주`:"";const px=t.price?`${t.currency==="USD"?"$":"₩"}${Number(t.price).toLocaleString(undefined,{maximumFractionDigits:t.currency==="USD"?2:0})}`:"—";return`<div class="trade-ledger-row" onclick="${t.ticker?`openM('${E(t.ticker)}')`:""}"><div class="tl-top"><div><div class="tl-name">${st}<span class="${isSell?"dn":"up"}">${side||"거래"}</span> · ${E(t.name||t.ticker||"")}</div><div class="tl-meta">${E(t.ticker||"")} · ${E(t.account||"")} · ${E((t.created_at||"").slice(5,16))} · ${qty} @ ${px}</div></div><div class="tl-value">${tradeMoney(t)}</div></div></div>`}
+function renderTradeLedger(){const items=(_tradeLedger.items||[]).slice(0,8);const pending=_tradeLedger.pending||[];const warn=pending.length?`<div class="trade-ledger-warning">⚠ 미반영 거래 ${pending.length}건 — 포트폴리오 반영 전이라 평가액/보유수량과 차이가 날 수 있음</div>`:"";const note='<div class="trade-ledger-note">매수/매도는 ledger 반영 거래 기준 · 주문 지시 아님 · GET-only 조회</div>';const html=warn+note+`<div class="trade-ledger-list">${items.length?items.map(tradeCard).join(""):'<div class="emp">최근 거래 내역 없음</div>'}</div>`;["pf-trades","a-trades","h-trades","pc-pf-trades","pc-act-trades"].forEach(id=>{const el=document.getElementById(id);if(el)el.innerHTML=html});const phtml=warn||'<div class="trade-ledger-note">미반영 거래 없음</div>';["a-pending-trades","pc-pending-trades"].forEach(id=>{const el=document.getElementById(id);if(el)el.innerHTML=phtml})}
+async function loadTrades(){const [all,pending]=await Promise.all([J("/api/trades?limit=20"),J("/api/trades/pending?limit=20")]);_tradeLedger={items:(all&&all.items)||[],pending:(pending&&pending.items)||[],pending_count:(pending&&pending.pending_count)||0};renderTradeLedger();_tradeLedgerLoaded=true;return _tradeLedger}
+
 /* ═══ LOAD ACTIONS ═══ */
 async function loadAct(){
+  if(!_tradeLedgerLoaded)await loadTrades();
   const[st,pr]=await Promise.all([J("/api/status"),J("/api/predictions")]);
   if(!st||!pr)return;
   const sv=st.service||{};const up=sv.active==="active";
@@ -1695,19 +1723,21 @@ async function loadAct(){
   const gr={buy:[],cond:[],sell:[],mgmt:[],watch:[]};
   rows.forEach(r=>{const c=classify(r.action_type,r.signal);(gr[c]=gr[c]||[]).push(r)});
 
-  // 액션 탭: 기존 stat box 그리드
-  const sumHTML=`<div class="sb"><div class="v" style="color:var(--g)">${gr.buy.length+gr.sell.length}</div><div class="l">실행</div></div><div class="sb"><div class="v" style="color:var(--b)">${gr.cond.length}</div><div class="l">조건부</div></div><div class="sb"><div class="v" style="color:var(--o)">${gr.mgmt.length}</div><div class="l">보유관리</div></div><div class="sb"><div class="v" style="color:var(--gy)">${gr.watch.length}</div><div class="l">관망</div></div>`;
+  const todayTrades=todayExecTrades();
+  const tradeExecCount=todayTrades.length;
+  // 액션 탭: 기존 stat box 그리드 + 오늘 실제 반영 거래 합산
+  const sumHTML=`<div class="sb"><div class="v" style="color:var(--g)">${gr.buy.length+gr.sell.length+tradeExecCount}</div><div class="l">실행</div><div class="x mt">추천 ${gr.buy.length+gr.sell.length}·거래 ${tradeExecCount}</div></div><div class="sb"><div class="v" style="color:var(--b)">${gr.cond.length}</div><div class="l">조건부</div></div><div class="sb"><div class="v" style="color:var(--o)">${gr.mgmt.length}</div><div class="l">보유관리</div></div><div class="sb"><div class="v" style="color:var(--gy)">${gr.watch.length}</div><div class="l">관망</div></div>`;
   document.getElementById("a-sum").innerHTML=sumHTML;
   // 홈: Action Tile Matrix (2x2) — 클릭 시 상세 시트
   window._actGroups=gr;
   const matrix=[
-    ["exec","실행",gr.buy.length+gr.sell.length,"지정가·조건 확인"],
+    ["exec","실행",gr.buy.length+gr.sell.length+tradeExecCount,"지정가·조건 확인"],
     ["cond","조건부",gr.cond.length,"조건 도달 시만"],
     ["mgmt","보유관리",gr.mgmt.length,"실행 매도 아님"],
     ["watch","관망",gr.watch.length,"대기 · 모니터"],
   ];
   document.getElementById("h-sum").innerHTML=matrix.map(([k,lb,n,ds])=>`<div class="action-tile action-tile-clickable t-${k}" onclick="openActionDetail('${k}')"><div class="n">${n}</div><div class="lb">${lb}</div><div class="ds">${ds}</div><div class="tile-more">상세 ›</div></div>`).join("");
-  window._actCounts={exec:gr.buy.length+gr.sell.length,cond:gr.cond.length,mgmt:gr.mgmt.length,watch:gr.watch.length};
+  window._actCounts={exec:gr.buy.length+gr.sell.length+tradeExecCount,cond:gr.cond.length,mgmt:gr.mgmt.length,watch:gr.watch.length};
   renderMCB();
   renderPrio(gr);
   renderDecide(gr);
@@ -1720,7 +1750,9 @@ async function loadAct(){
   document.getElementById("h-brief").innerHTML=`<div class="brief-ic">●</div><div class="brief-tx">${buildBrief(gr,_mktCache?_mktCache.mode:null,_mktCache?_mktCache.vix:null)}</div>`;
 
   const none='<div class="emp">없음</div>';
-  document.getElementById("a-exec").innerHTML=[...gr.buy,...gr.sell].map(r=>renderAct(r,true)).join("")||none;
+  const tradeExecHtml=todayTrades.map(tradeCard).join("");
+  const recExecHtml=[...gr.buy,...gr.sell].map(r=>renderAct(r,true)).join("");
+  document.getElementById("a-exec").innerHTML=(tradeExecHtml+recExecHtml)||none;
   document.getElementById("a-cond").innerHTML=gr.cond.map(r=>renderAct(r,true)).join("")||none;
   document.getElementById("a-mgmt").innerHTML=gr.mgmt.map(renderAct).join("")||none;
   document.getElementById("a-watch").innerHTML=gr.watch.map(renderAct).join("")||none;
@@ -2734,7 +2766,7 @@ async function refreshAllNow(){
   const btn=document.getElementById("refresh-btn");if(btn)btn.disabled=true;
   setRefreshState("ok",'<span class="refresh-last-updated">갱신 중…</span>');
   try{
-    await Promise.allSettled([loadMkt(),loadAct(),loadPF(),loadPerf(),loadTimeline(),loadSignals(),loadDBrief(),loadAnalytics(),loadBriefing()]);
+    await Promise.allSettled([loadMkt(),loadTrades(),loadAct(),loadPF(),loadPerf(),loadTimeline(),loadSignals(),loadDBrief(),loadAnalytics(),loadBriefing()]);
     markRefreshSuccess();
   }catch(e){markRefreshError("all")}
   _refreshing=false;if(btn)btn.disabled=false;
@@ -2763,11 +2795,11 @@ function safeInterval(fn,ms){
 
 /* ═══ INIT ═══ */
 async function init(){
-  await Promise.allSettled([loadMkt(),loadAct(),loadPF(),loadPerf(),loadNews(),loadTimeline(),loadSimList(),loadSignals(),loadDBrief(),loadCalendar(),loadAnalytics(),loadBriefing()]);
+  await Promise.allSettled([loadMkt(),loadTrades(),loadAct(),loadPF(),loadPerf(),loadNews(),loadTimeline(),loadSimList(),loadSignals(),loadDBrief(),loadCalendar(),loadAnalytics(),loadBriefing()]);
   markRefreshSuccess();
 }
 init();
-safeInterval(()=>{loadMkt();loadAct();loadTimeline();loadDBrief()},30000);
+safeInterval(()=>{loadMkt();loadTrades();loadAct();loadTimeline();loadDBrief()},30000);
 safeInterval(()=>{loadPF();loadPerf();loadSimList();loadAnalytics();loadBriefing()},120000);
 safeInterval(()=>{loadSignals()},300000);
 safeInterval(()=>{loadNews();loadCalendar()},600000);

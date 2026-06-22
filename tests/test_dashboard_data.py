@@ -809,6 +809,22 @@ def test_web_portfolio_principal_visible():
     assert "principal" in pc
 
 
+def test_web_trade_ledger_visible_on_mobile_and_pc():
+    """HTML PC/모바일도 거래 ledger와 미반영 거래 경고를 렌더한다."""
+    from pathlib import Path
+    root = Path(__file__).parent.parent
+    mobile = (root / "web" / "index.html").read_text(encoding="utf-8")
+    pc = (root / "web" / "index_pc.html").read_text(encoding="utf-8")
+    for label, code in (("mobile", mobile), ("pc", pc)):
+        assert "/api/trades" in code, f"{label} 거래 ledger API 호출 없음"
+        assert "/api/trades/pending" in code, f"{label} 미반영 거래 API 호출 없음"
+        assert "최근 거래 내역" in code, f"{label} 최근 거래 내역 UI 없음"
+        assert "미반영 거래" in code, f"{label} 미반영 거래 경고 UI 없음"
+        assert "todayExecTrades" in code, f"{label} 오늘 실행 거래 합산 로직 없음"
+        assert "거래완료" in code, f"{label} 거래완료 카드 없음"
+        assert "매수/매도는 ledger 반영 거래 기준" in code, f"{label} ledger 기준 설명 없음"
+
+
 # ═══════════════════════════════════════════════════════
 # 시장 상태/시세 신뢰도 (25단계)
 # ═══════════════════════════════════════════════════════

@@ -230,6 +230,19 @@ body{background:var(--bg);color:var(--tx);font-family:-apple-system,BlinkMacSyst
 .mo{position:fixed;inset:0;background:rgba(5,8,14,.62);display:none;z-index:200;align-items:center;justify-content:center;padding:24px}
 .mo.open{display:flex}
 .md{background:var(--panel);border:1px solid var(--border);border-radius:14px;width:100%;max-width:560px;max-height:84vh;overflow-y:auto;padding:22px}
+
+/* 거래 ledger HTML 동기화 — PC/모바일 공통 */
+.trade-ledger-note{font-size:10.5px;color:var(--mt);margin:4px 0 8px;line-height:1.45}
+.trade-ledger-list{display:flex;flex-direction:column;gap:7px}
+.trade-ledger-row{background:var(--sf2);border:1px solid var(--ln);border-radius:10px;padding:10px 11px;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.trade-ledger-row .tl-top{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
+.trade-ledger-row .tl-name{font-size:13px;font-weight:800}
+.trade-ledger-row .tl-meta{font-size:10.5px;color:var(--mt);margin-top:2px}
+.trade-ledger-row .tl-value{text-align:right;font-size:12px;font-weight:800;font-variant-numeric:tabular-nums;white-space:nowrap}
+.trade-ledger-warning{background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.35);border-radius:10px;padding:10px 11px;margin-bottom:8px;color:var(--o);font-size:11.5px;line-height:1.45}
+.trade-ledger-complete{font-size:10px;font-weight:800;color:var(--up);background:rgba(34,197,94,.12);border-radius:999px;padding:2px 7px;margin-right:5px}
+.trade-ledger-pending{font-size:10px;font-weight:800;color:var(--o);background:rgba(245,158,11,.12);border-radius:999px;padding:2px 7px;margin-right:5px}
+
 </style>
 </head>
 <body>
@@ -332,6 +345,10 @@ body{background:var(--bg);color:var(--tx);font-family:-apple-system,BlinkMacSyst
     <div id="act-dbrief"><div class="emp">불러오는 중…</div></div>
   </div>
   <div class="kpis" style="margin-bottom:14px" id="act-kpis"></div>
+  <div class="grid" style="grid-template-columns:1fr 1fr;margin-bottom:14px">
+    <div class="panel"><div class="ph"><h2>미반영 거래</h2><span class="sub">포트폴리오 반영 전</span></div><div id="pc-pending-trades"><div class="emp">확인 중…</div></div></div>
+    <div class="panel"><div class="ph"><h2>최근 거래 내역</h2><span class="sub">매수/매도는 ledger 반영 거래 기준</span></div><div id="pc-act-trades"><div class="emp">거래 내역 불러오는 중…</div></div></div>
+  </div>
   <div class="grid" style="grid-template-columns:1fr 1fr">
     <div class="panel"><div class="ph"><h2>실행 필요</h2><span class="sub">매수 · 매도</span></div><div id="act-exec"></div></div>
     <div class="panel"><div class="ph"><h2>조건부 매수</h2><span class="sub">트리거 대기</span></div><div id="act-cond"></div></div>
@@ -581,26 +598,70 @@ async function ldStatus(){
   document.getElementById("clk").textContent=" · "+new Date().toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit"});
 }
 
+
+/* ═══ 거래 ledger — 최근 거래/미반영 경고/오늘 실행 합산 ═══ */
+let _tradeLedger={items:[],pending:[],pending_count:0},_tradeLedgerLoaded=false;
+function kstTodayKey(){return new Date().toLocaleDateString("sv-SE",{timeZone:"Asia/Seoul"})}
+function todayExecTrades(){
+  const day=kstTodayKey();
+  return ((_tradeLedger&&_tradeLedger.items)||[]).filter(t=>t&&t.applied!==false&&(t.created_at||"").slice(0,10)===day);
+}
+function tradeMoney(t){
+  const cur=t.currency==="USD"?"$":"₩";
+  const v=t.total_value!=null?t.total_value:((t.price||0)*(t.shares||0));
+  return cur+Number(v||0).toLocaleString(undefined,{maximumFractionDigits:t.currency==="USD"?2:0});
+}
+function tradeCard(t){
+  const side=E(t.side||"");
+  const isSell=side.includes("매도");
+  const st=t.applied===false?'<span class="trade-ledger-pending">미반영 거래</span>':'<span class="trade-ledger-complete">거래완료</span>';
+  const qty=t.shares?`${t.shares}주`:"";
+  const px=t.price?`${t.currency==="USD"?"$":"₩"}${Number(t.price).toLocaleString(undefined,{maximumFractionDigits:t.currency==="USD"?2:0})}`:"—";
+  return`<div class="trade-ledger-row" onclick="${t.ticker?`openTk('${E(t.ticker)}')`:""}"><div class="tl-top"><div><div class="tl-name">${st}<span class="${isSell?"dn":"up"}">${side||"거래"}</span> · ${E(t.name||t.ticker||"")}</div><div class="tl-meta">${E(t.ticker||"")} · ${E(t.account||"")} · ${E((t.created_at||"").slice(5,16))} · ${qty} @ ${px}</div></div><div class="tl-value">${tradeMoney(t)}</div></div></div>`;
+}
+function renderTradeLedger(){
+  const items=(_tradeLedger.items||[]).slice(0,8);
+  const pending=_tradeLedger.pending||[];
+  const warn=pending.length?`<div class="trade-ledger-warning">⚠ 미반영 거래 ${pending.length}건 — 포트폴리오 반영 전이라 평가액/보유수량과 차이가 날 수 있음</div>`:"";
+  const note='<div class="trade-ledger-note">매수/매도는 ledger 반영 거래 기준 · 주문 지시 아님 · GET-only 조회</div>';
+  const html=warn+note+`<div class="trade-ledger-list">${items.length?items.map(tradeCard).join(""):'<div class="emp">최근 거래 내역 없음</div>'}</div>`;
+  ["pf-trades","a-trades","h-trades","pc-pf-trades","pc-act-trades"].forEach(id=>{const el=document.getElementById(id);if(el)el.innerHTML=html});
+  const phtml=warn||'<div class="trade-ledger-note">미반영 거래 없음</div>';
+  ["a-pending-trades","pc-pending-trades"].forEach(id=>{const el=document.getElementById(id);if(el)el.innerHTML=phtml});
+}
+async function loadTrades(){
+  const [all,pending]=await Promise.all([J("/api/trades?limit=20"),J("/api/trades/pending?limit=20")]);
+  _tradeLedger={items:(all&&all.items)||[],pending:(pending&&pending.items)||[],pending_count:(pending&&pending.pending_count)||0};
+  renderTradeLedger();
+  _tradeLedgerLoaded=true;
+  return _tradeLedger;
+}
+
 /* ════ ACTIONS + BRIEF ════ */
 async function ldAct(){
+  if(!_tradeLedgerLoaded)await loadTrades();
   const d=await J("/api/recommendations/timeline?range=today&order=desc");
   const items=(d&&d.items)||[];
   const gr={buy:[],sell:[],cond:[],mgmt:[],watch:[]};
   items.forEach(r=>gr[cls(r.action_type,r.signal)].push(r));
   window._tlItems=items;
   const exec=[...gr.buy,...gr.sell],cond=gr.cond,rest=[...gr.mgmt,...gr.watch];
+  const todayTrades=todayExecTrades();
+  const tradeExecCount=todayTrades.length;
   const brief=buildBrief(gr);
   document.getElementById("brief").innerHTML=brief;
   document.getElementById("act-brief").innerHTML=brief;
-  const n=exec.length;
+  const n=exec.length+tradeExecCount;
   // act KPIs
   setKPI("act-kpis",[
-    ["실행 필요",`${n}건`,`매수 ${gr.buy.length}·매도 ${gr.sell.length}`,n?"up":""],
+    ["실행 필요",`${n}건`,`추천 ${exec.length}·거래 ${tradeExecCount}`,n?"up":""],
     ["조건부 매수",`${cond.length}건`,"트리거 대기",cond.length?"b":""],
     ["보유 관리",`${gr.mgmt.length}건`,"",""],
     ["관망",`${gr.watch.length}건`,"",""],
   ]);
-  document.getElementById("act-exec").innerHTML=exec.length?exec.map(actCard).join(""):'<div class="emp">실행 액션 없음</div>';
+  const tradeExecHtml=todayTrades.map(tradeCard).join("");
+  const recExecHtml=exec.map(actCard).join("");
+  document.getElementById("act-exec").innerHTML=(tradeExecHtml+recExecHtml)||'<div class="emp">실행 액션 없음</div>';
   document.getElementById("act-cond").innerHTML=cond.length?cond.map(actCard).join(""):'<div class="emp">조건부 매수 없음</div>';
   document.getElementById("act-mgmt").innerHTML=rest.length?rest.map(actCard).join(""):'<div class="emp">해당 없음</div>';
   // timeline (home)
@@ -939,9 +1000,9 @@ function openBrDetail(day){
 }
 
 /* ════ INIT ════ */
-async function init(){ldStatus();ldMkt();await ldPF();ldAct();ldPerf();ldNews();ldDecisionBrief();ldCalendar();ldAnalytics();ldWorkspace();ldBriefing();}
+async function init(){ldStatus();ldMkt();await Promise.allSettled([loadTrades(),ldPF()]);ldAct();ldPerf();ldNews();ldDecisionBrief();ldCalendar();ldAnalytics();ldWorkspace();ldBriefing();}
 init();
-setInterval(()=>{ldMkt();ldAct();ldStatus();ldDecisionBrief();},30000);
+setInterval(()=>{ldMkt();loadTrades();ldAct();ldStatus();ldDecisionBrief();},30000);
 setInterval(()=>{ldPF();ldPerf();ldAnalytics();ldWorkspace();ldBriefing();},120000);
 setInterval(()=>{ldNews();ldCalendar();},600000);
 </script>
