@@ -420,6 +420,7 @@ def _fetch_portfolio_raw() -> dict:
         total_cost += acct_cost + cash_krw
 
     raw_pnl = (total_eval - total_cost) / total_cost * 100 if total_cost else 0
+    principal_pnl = (total_eval - TOTAL_PRINCIPAL_KRW) / TOTAL_PRINCIPAL_KRW * 100 if TOTAL_PRINCIPAL_KRW else 0
 
     # 비중 계산 (전체 평가금 대비)
     total_cash = sum(a["cash"] for a in result_accounts)
@@ -451,6 +452,7 @@ def _fetch_portfolio_raw() -> dict:
         "total_pnl_pct": round(_safe(raw_pnl), 2),
         "total_cash": round(total_cash),
         "total_principal": round(float(TOTAL_PRINCIPAL_KRW)),
+        "total_principal_pnl_pct": round(_safe(principal_pnl), 2),
         "cash_weight": cash_weight,
         "allocation": allocation,
         "usdkrw": round(_safe(usdkrw), 2),

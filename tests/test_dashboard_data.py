@@ -830,6 +830,24 @@ def test_portfolio_principal_uses_deposit_history_constants():
     assert "total_principal" in pc
 
 
+def test_principal_return_uses_non_price_direction_color():
+    """원금 대비 수익률은 한국식 상승/하락 빨강·파랑과 별도 색상 클래스를 쓴다."""
+    from pathlib import Path
+    root = Path(__file__).parent.parent
+    dashboard = (root / "core" / "dashboard_data.py").read_text(encoding="utf-8")
+    mobile = (root / "web" / "index.html").read_text(encoding="utf-8")
+    pc = (root / "web" / "index_pc.html").read_text(encoding="utf-8")
+
+    assert "total_principal_pnl_pct" in dashboard
+    for code in (mobile, pc):
+        assert "원금 대비" in code
+        assert "prc(" in code
+        assert "pr-up" in code
+        assert "pr-dn" in code
+    assert "--principal" in mobile
+    assert "--principal" in pc
+
+
 def test_web_trade_ledger_visible_on_mobile_and_pc():
     """HTML PC/모바일도 거래 ledger와 미반영 거래 경고를 렌더한다."""
     from pathlib import Path
