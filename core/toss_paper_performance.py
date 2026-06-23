@@ -38,7 +38,9 @@ def _get_quote(symbol: str) -> tuple[float | None, str]:
 def _get_quote_for_paper(symbol: str, entry_price: float | None = None) -> dict:
     """각 소스를 순서대로 시도하며 source_chain을 기록한다.
 
-    순서: KIS → yfinance_live → yfinance_daily
+    국내 종목 순서: KIS → naver_current → yfinance_live → yfinance_daily
+    해외 종목 순서: KIS → yfinance_live → yfinance_daily
+
     entry_price 제공 시 소스별로 ±50% 이상치 체크를 수행한다.
     이상치인 소스는 건너뛰고 다음 소스를 시도한다.
 
@@ -51,8 +53,13 @@ def _get_quote_for_paper(symbol: str, entry_price: float | None = None) -> dict:
         }
     """
     from core.market import _get_quote_kis, _get_quote_yf_live, _get_quote_daily
+    from core.kr_price_fallback import is_kr_ticker, get_kr_stock_price_fallback
 
-    steps = [
+    def _step_market(name: str, fn) -> tuple[str, object]:
+        """market 함수 래핑 — Quote 객체 반환."""
+        return (name, fn)
+
+    steps_market = [
         ("KIS", _get_quote_kis),
         ("yfinance_live", _get_quote_yf_live),
         ("yfinance_daily", _get_quote_daily),
@@ -61,45 +68,78 @@ def _get_quote_for_paper(symbol: str, entry_price: float | None = None) -> dict:
     source_chain: list[dict] = []
     accepted_price: float | None = None
     accepted_source: str | None = None
+    _is_kr = is_kr_ticker(symbol)
 
-    for source_name, fn in steps:
+    def _try_price(source_name: str, raw_price: float) -> bool:
+        """가격 이상치 체크 후 accepted 여부 반환. source_chain에 항목 추가."""
+        nonlocal accepted_price, accepted_source
+        entry: dict = {
+            "source": source_name,
+            "price": raw_price,
+            "accepted": False,
+            "reason": "",
+        }
+        if entry_price and entry_price > 0:
+            ratio = raw_price / entry_price
+            entry["ratio_to_entry"] = round(ratio, 4)
+            if ratio > 1.5 or ratio < 0.5:
+                entry["reason"] = f"이상치(ratio={ratio:.4f})"
+                source_chain.append(entry)
+                logger.debug(
+                    "paper price anomaly from %s [%s]: %.0f / %.0f = %.4f",
+                    source_name, symbol, raw_price, entry_price, ratio,
+                )
+                return False
+        entry["accepted"] = True
+        entry["reason"] = "정상" if (entry_price and entry_price > 0) else "entry 미제공(이상치 미검사)"
+        source_chain.append(entry)
+        accepted_price = raw_price
+        accepted_source = source_name
+        return True
+
+    # ─── market 함수 기반 소스 (KIS / yfinance) ─────────────────
+    # 국내: KIS → (naver 삽입) → yfinance_live → yfinance_daily
+    # 해외: KIS → yfinance_live → yfinance_daily
+    for source_name, fn in steps_market:
+        # 국내 종목 한정: KIS reject 후 naver_current 먼저 시도
+        if _is_kr and source_name == "yfinance_live" and accepted_price is None:
+            try:
+                fb = get_kr_stock_price_fallback(symbol)
+                if fb["ok"] and fb["price"] and fb["price"] > 0:
+                    if _try_price(fb["source"], float(fb["price"])):
+                        break
+                else:
+                    source_chain.append({
+                        "source": fb["source"],
+                        "price": None,
+                        "accepted": False,
+                        "reason": fb.get("warning") or "가격 없음",
+                    })
+            except Exception as exc:
+                source_chain.append({
+                    "source": "naver_current",
+                    "price": None,
+                    "accepted": False,
+                    "reason": f"오류: {exc}",
+                })
+                logger.debug("naver fallback error [%s]: %s", symbol, exc)
+
         entry: dict = {"source": source_name, "price": None, "accepted": False, "reason": ""}
         try:
             q = fn(symbol)
             if q and q.price and q.price > 0:
                 raw_price = float(q.price)
                 entry["price"] = raw_price
-
-                if entry_price and entry_price > 0:
-                    ratio = raw_price / entry_price
-                    entry["ratio_to_entry"] = round(ratio, 4)
-                    if ratio > 1.5 or ratio < 0.5:
-                        entry["accepted"] = False
-                        entry["reason"] = f"이상치(ratio={ratio:.4f})"
-                        source_chain.append(entry)
-                        logger.debug(
-                            "paper price anomaly from %s [%s]: %.0f / %.0f = %.4f",
-                            source_name, symbol, raw_price, entry_price, ratio,
-                        )
-                        continue
-                    else:
-                        entry["accepted"] = True
-                        entry["reason"] = "정상"
-                else:
-                    entry["accepted"] = True
-                    entry["reason"] = "entry 미제공(이상치 미검사)"
-
-                source_chain.append(entry)
-                accepted_price = raw_price
-                accepted_source = source_name
-                break
+                if _try_price(source_name, raw_price):
+                    break
+                # _try_price가 False면 이미 source_chain에 추가됨
             else:
                 entry["reason"] = "가격 없음"
+                source_chain.append(entry)
         except Exception as exc:
             entry["reason"] = f"오류: {exc}"
+            source_chain.append(entry)
             logger.debug("paper quote error from %s [%s]: %s", source_name, symbol, exc)
-
-        source_chain.append(entry)
 
     if accepted_price is None:
         return {

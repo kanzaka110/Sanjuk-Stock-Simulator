@@ -48,17 +48,53 @@ def _probe_single_source(source_name: str, fn, symbol: str, entry_price: float |
     return entry
 
 
+def _probe_naver(symbol: str, entry_price: float | None) -> dict:
+    """Naver fallback 개별 진단."""
+    from core.kr_price_fallback import is_kr_ticker, get_kr_stock_price_fallback
+    if not is_kr_ticker(symbol):
+        return {"source": "naver_current", "price": None, "accepted": False, "reason": "국내 종목 아님(skip)"}
+    entry: dict = {"source": "naver_current", "price": None, "accepted": False, "reason": ""}
+    try:
+        fb = get_kr_stock_price_fallback(symbol)
+        price = fb.get("price")
+        entry["price"] = price
+        entry["source"] = fb.get("source", "naver_current")
+        if fb["ok"] and price and price > 0:
+            if entry_price and entry_price > 0:
+                ratio = price / entry_price
+                entry["ratio_to_entry"] = round(ratio, 4)
+                if ratio > 1.5 or ratio < 0.5:
+                    entry["accepted"] = False
+                    entry["reason"] = f"이상치(ratio={ratio:.4f})"
+                else:
+                    entry["accepted"] = True
+                    entry["reason"] = "정상"
+            else:
+                entry["accepted"] = True
+                entry["reason"] = "entry 미제공(이상치 미검사)"
+        else:
+            entry["reason"] = fb.get("warning") or "가격 없음"
+    except Exception as exc:
+        entry["reason"] = f"오류: {exc}"
+    return entry
+
+
 def probe(symbol: str, entry_price: float | None = None) -> dict:
     """각 가격 소스를 개별 호출해 source_chain 반환."""
     from core.market import _get_quote_kis, _get_quote_yf_live, _get_quote_daily
+    from core.kr_price_fallback import is_kr_ticker
 
-    steps = [
+    market_steps = [
         ("KIS", _get_quote_kis),
         ("yfinance_live", _get_quote_yf_live),
         ("yfinance_daily", _get_quote_daily),
     ]
 
-    source_chain = [_probe_single_source(name, fn, symbol, entry_price) for name, fn in steps]
+    source_chain = [_probe_single_source(name, fn, symbol, entry_price) for name, fn in market_steps]
+
+    # 국내 종목이면 naver fallback도 개별 진단
+    if is_kr_ticker(symbol):
+        source_chain.insert(1, _probe_naver(symbol, entry_price))  # KIS 다음 위치
 
     # _get_quote_for_paper와 동일한 로직으로 accepted 소스 확인
     from core.toss_paper_performance import _get_quote_for_paper

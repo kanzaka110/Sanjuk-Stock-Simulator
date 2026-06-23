@@ -792,13 +792,16 @@ class TestSourceChain:
         anomaly_q = self._mock_quote(400000.0)
 
         with patch("core.market._get_quote_kis", return_value=anomaly_q), \
+             patch("core.kr_price_fallback.get_kr_stock_price_fallback",
+                   return_value={"price": 400000.0, "source": "naver_current", "ok": True, "warning": None}), \
              patch("core.market._get_quote_yf_live", return_value=anomaly_q), \
              patch("core.market._get_quote_daily", return_value=anomaly_q):
             result = perf._get_quote_for_paper("005930.KS", entry_price=72000.0)
 
         assert result["price"] is None
         assert result["accepted_price_source"] is None
-        assert len(result["source_chain"]) == 3
+        # 국내 종목은 naver_current 포함 4개 소스
+        assert len(result["source_chain"]) >= 3
         for entry in result["source_chain"]:
             assert entry["accepted"] is False
 
