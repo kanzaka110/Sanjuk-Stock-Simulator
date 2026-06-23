@@ -848,6 +848,22 @@ def test_principal_return_uses_non_price_direction_color():
     assert "--principal" in pc
 
 
+def test_current_return_visible_alongside_principal_return():
+    """원금 대비 추가 후에도 기존 현재/평가 수익률을 숨기지 않는다."""
+    from pathlib import Path
+    root = Path(__file__).parent.parent
+    mobile = (root / "web" / "index.html").read_text(encoding="utf-8")
+    pc = (root / "web" / "index_pc.html").read_text(encoding="utf-8")
+
+    assert "원금 대비" in mobile
+    assert "총 손익률" in mobile
+    assert "평가손익 ${cs(d.total_pnl_pct)}" in mobile
+    assert "cs(d.total_pnl_pct)" in mobile
+    assert "원금 대비" in pc
+    assert "총 손익률" in pc
+    assert "cs(d.total_pnl_pct)" in pc
+
+
 def test_web_trade_ledger_visible_on_mobile_and_pc():
     """HTML PC/모바일도 거래 ledger와 미반영 거래 경고를 렌더한다."""
     from pathlib import Path
