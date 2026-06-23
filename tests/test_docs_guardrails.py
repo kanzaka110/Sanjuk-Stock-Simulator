@@ -45,6 +45,8 @@ ALLOWED_TOSS_FILES = {
     "scripts/send_toss_paper_preview_test.py",
     "core/toss_paper_performance.py",
     "tests/test_toss_paper_performance.py",
+    "core/toss_paper_policy.py",
+    "tests/test_toss_paper_policy.py",
 }
 
 

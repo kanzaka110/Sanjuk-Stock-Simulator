@@ -1855,3 +1855,11 @@ def toss_paper_performance_data() -> dict:
         from core.toss_paper_performance import get_paper_performance_summary
         return get_paper_performance_summary()
     return _cached("toss_paper_performance", 120, _fetch)
+
+
+def toss_paper_policy_data() -> dict:
+    """Toss paper sizing/risk policy (120초 캐시). 실제 주문 0건."""
+    def _fetch():
+        from core.toss_paper_policy import compute_toss_paper_policy
+        return compute_toss_paper_policy()
+    return _cached("toss_paper_policy", 120, _fetch)

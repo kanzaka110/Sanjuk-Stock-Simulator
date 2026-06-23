@@ -89,6 +89,24 @@ def cross_check_candidate(
     if not toss_context.get("enabled"):
         warnings.append("toss_not_configured")
 
+    # ── 11. Paper 성과 policy — consensus_anomaly 차단 ──
+    try:
+        from core.toss_paper_policy import compute_toss_paper_policy, apply_toss_paper_policy_to_candidate
+        policy = compute_toss_paper_policy()
+        cand_stub = {"symbol": symbol, "side": side, "limit_price": 0, "quantity": 0,
+                     "estimated_amount_krw": estimated_amount_krw}
+        applied = apply_toss_paper_policy_to_candidate(cand_stub, policy)
+        pp = applied.get("paper_policy", {})
+        for b in pp.get("blocks", []):
+            if b not in blocks:
+                blocks.append(b)
+                adjustments.append({"factor": b, "delta": -50})
+        for w in pp.get("warnings", []):
+            if w not in warnings:
+                warnings.append(w)
+    except Exception as exc:
+        logger.debug("paper policy 적용 실패: %s", exc)
+
     readiness = "paper_only"
     if blocks:
         readiness = "blocked"

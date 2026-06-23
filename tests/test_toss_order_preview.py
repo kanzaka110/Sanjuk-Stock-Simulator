@@ -79,7 +79,29 @@ class TestPreviewId:
 
 # ═══ 정상 후보 렌더 ═══
 
+_EMPTY_POLICY = {
+    "mode": "paper_only", "live_order_allowed": False, "sample_status": "insufficient",
+    "base_budget_krw": 100_000, "max_budget_krw": 300_000, "min_budget_krw": 0,
+    "sizing_multiplier": 0.3, "evaluated_count": 0, "win_rate": 0.0, "avg_pnl_pct": 0.0,
+    "consensus_anomaly_count": 0, "consensus_anomaly_symbols": [], "data_error_count": 0,
+    "reason": "test", "blocks": [], "warnings": [],
+    "_note": "Paper sizing/risk policy · 실제 주문 아님 · live_order_allowed=False",
+}
+
+import unittest.mock as _mock
+
 class TestNormalCandidate:
+    # policy는 빈 상태 mock — consensus_anomaly 없는 정상 후보 렌더 검증용
+    def setup_method(self):
+        self._policy_patch = _mock.patch(
+            "core.toss_paper_policy.compute_toss_paper_policy",
+            return_value=_EMPTY_POLICY,
+        )
+        self._policy_patch.start()
+
+    def teardown_method(self):
+        self._policy_patch.stop()
+
     def test_renders_symbol(self):
         ctx = _ctx()
         cands = [_cand()]

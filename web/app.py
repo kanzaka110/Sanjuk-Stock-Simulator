@@ -198,6 +198,11 @@ def api_toss_paper_performance():
     return JSONResponse(dd.toss_paper_performance_data())
 
 
+@app.get("/api/toss/paper-policy")
+def api_toss_paper_policy():
+    return JSONResponse(dd.toss_paper_policy_data())
+
+
 @app.get("/api/recommendations/timeline")
 def api_timeline(
     range: str = "today",

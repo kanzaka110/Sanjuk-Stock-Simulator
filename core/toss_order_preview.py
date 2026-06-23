@@ -89,6 +89,16 @@ def _render_candidate(idx: int, cand: dict, cc: dict, ctx: dict) -> str:
     lines.append(f"  구분: {label}")
     lines.append(f"  계좌: Toss 실전 AI 자동거래 계좌")
 
+    # paper policy sizing 텍스트
+    _policy_text: str | None = None
+    try:
+        from core.toss_paper_policy import compute_toss_paper_policy, apply_toss_paper_policy_to_candidate, get_policy_sizing_text
+        _policy = compute_toss_paper_policy()
+        _applied = apply_toss_paper_policy_to_candidate(cand, _policy)
+        _policy_text = get_policy_sizing_text(_policy, _applied)
+    except Exception:
+        pass
+
     if not is_blocked:
         lines.append(f"  방향: paper {side}")
         lines.append(f"  지정가: ₩{limit_price:,.0f}")
@@ -100,12 +110,16 @@ def _render_candidate(idx: int, cand: dict, cc: dict, ctx: dict) -> str:
         if reason:
             lines.append(f"  사유: {reason}")
         lines.append(f"  교차검증: {readiness}")
+        if _policy_text:
+            lines.append(f"  정책: {_policy_text}")
         lines.append("  실주문: 비활성")
         lines.append(f"  액션: 승인해도 paper 기록만 가능")
     else:
         lines.append(f"  차단 사유: {', '.join(blocks)}")
         if warnings:
             lines.append(f"  경고: {', '.join(warnings)}")
+        if _policy_text:
+            lines.append(f"  정책: {_policy_text}")
         lines.append("  실주문: 비활성")
         lines.append(f"  액션: 대기")
 
