@@ -255,14 +255,14 @@ details summary::before{content:"▸";transition:transform .18s;color:var(--mt)}
 
 /* ── PC home bento layout: 모바일 정보 밀도를 PC용 대시보드로 재배치 ── */
 .home-hero{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(420px,.9fr);gap:16px;margin-bottom:16px;align-items:stretch}
-.portfolio-hero{position:relative;overflow:hidden;border-radius:22px;padding:20px;background:radial-gradient(circle at 18% 0%,rgba(59,130,246,.28),transparent 34%),linear-gradient(135deg,#121d33 0%,#0b111e 58%,#101827 100%);border:1px solid rgba(59,130,246,.25);box-shadow:0 24px 80px rgba(0,0,0,.28)}
-.hero-label{font-size:11px;font-weight:900;color:var(--b);letter-spacing:.8px;text-transform:uppercase;margin-bottom:12px}
-.portfolio-hero .brief{background:transparent;border:0;padding:0;margin-bottom:18px}
-.portfolio-hero .brief .ai{width:40px;height:40px;border-radius:14px;background:rgba(59,130,246,.18)}
-.portfolio-hero .brief .txt{font-size:22px;line-height:1.35;font-weight:800;max-width:920px}
-.hero-kpis{grid-template-columns:repeat(3,minmax(0,1fr))!important;margin-bottom:0!important}
-.hero-kpis .kpi{background:rgba(8,13,24,.72);border-color:rgba(255,255,255,.07);border-radius:15px}
-.hero-kpis .kpi:first-child{grid-column:span 2}.hero-kpis .kpi:first-child .v{font-size:34px}
+.portfolio-hero{position:relative;overflow:hidden;border-radius:18px;padding:15px;background:radial-gradient(circle at 18% 0%,rgba(59,130,246,.22),transparent 34%),linear-gradient(150deg,#15294a 0%,#0d1525 100%);border:1px solid rgba(59,130,246,.22);box-shadow:0 16px 48px rgba(0,0,0,.22)}
+.hero-label{font-size:10px;font-weight:900;color:var(--b);letter-spacing:.7px;text-transform:uppercase;margin-bottom:8px}
+.portfolio-hero .brief{background:transparent;border:0;padding:0;margin-bottom:10px}
+.portfolio-hero .brief .ai{width:30px;height:30px;border-radius:10px;background:rgba(59,130,246,.18);font-size:14px}
+.portfolio-hero .brief .txt{font-size:16px;line-height:1.35;font-weight:800;max-width:920px}
+.hero-kpis{display:grid;grid-template-columns:1.55fr 1fr;grid-template-rows:repeat(3,auto);gap:8px!important;margin-bottom:0!important}
+.hero-kpis .kpi{background:rgba(8,13,24,.72);border-color:rgba(255,255,255,.07);border-radius:12px;padding:10px 12px;box-shadow:none}
+.hero-kpis .kpi.hero-main{grid-row:1 / span 3;grid-column:1}.hero-kpis .kpi.hero-main .v{font-size:25px;line-height:1.08}.hero-kpis .kpi:not(.hero-main) .v{font-size:18px}.hero-kpis .kpi .x{font-size:10.5px}
 .hero-decision{border-radius:22px;padding:18px;max-height:100%;overflow:hidden}
 .hero-decision #home-dbrief{max-height:520px;overflow:auto;padding-right:4px}
 .market-strip{margin-bottom:16px;padding:2px 0 4px}
@@ -272,7 +272,7 @@ details summary::before{content:"▸";transition:transform .18s;color:var(--mt)}
 .home-wide-panel{min-height:280px}.home-rank-panel .tbl-scroll{max-height:620px}.home-chart-panel #home-chart{min-height:170px}
 .home-side-stack .panel{padding:15px}.home-side-stack .row{padding:10px 8px}.home-side-stack .panel h2{font-size:13px}
 .home-bottom-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.home-bottom-grid .panel{min-height:260px}
-@media(max-width:1180px){.home-hero,.home-bento{grid-template-columns:1fr}.home-side-stack{position:static}.hero-kpis{grid-template-columns:repeat(2,1fr)!important}.hero-kpis .kpi:first-child{grid-column:span 1}.home-bottom-grid{grid-template-columns:1fr}}
+@media(max-width:1180px){.home-hero,.home-bento{grid-template-columns:1fr}.home-side-stack{position:static}.hero-kpis{grid-template-columns:1fr 1fr!important}.hero-kpis .kpi.hero-main{grid-row:auto;grid-column:1 / -1}.home-bottom-grid{grid-template-columns:1fr}}
 
 /* 거래 ledger HTML 동기화 — PC/모바일 공통 */
 .trade-ledger-note{font-size:10.5px;color:var(--mt);margin:4px 0 8px;line-height:1.45}
@@ -624,7 +624,15 @@ function rowHome(it){
   const acct=it.account?` <span class="tk">[${E(it.account)}]</span>`:"";
   return`<tr onclick="openTk('${E(it.ticker)}')"><td><span class="nm">${E(it.name)}</span> <span class="tk">${E(it.ticker)}</span>${acct}</td><td>₩${F(it.eval_krw)}</td><td class="${cc(it.pnl_pct)}">${cs(it.pnl_pct)}</td><td class="${cc(pnlK)}">${pnlK>=0?"+":"-"}${F(Math.round(Math.abs(pnlK)))}</td><td>${it.weight||0}%</td><td class="${cc(dayC)}">${dayC>=0?"+":""}${(Math.round(dayC*100)/100)}%p</td><td>${st}</td></tr>`;
 }
-function setKPI(id,arr){document.getElementById(id).innerHTML=arr.map(([k,v,x,c])=>`<div class="kpi clickable" onclick="metricDetail('${E(k)}','${E(String(v))}','${E(String(x||""))}')"><div class="k">${k}</div><div class="v ${c||""}">${v}</div>${x?`<div class="x ${c||"mt"}">${x}</div>`:""}</div>`).join("")}
+function setKPI(id,arr){
+  if(id==="home-kpis"&&arr.length>=6){
+    const [total,principal,principalRet,totalRet,today,cash]=arr;
+    const card=([k,v,x,c])=>`<div class="kpi clickable" onclick="metricDetail('${E(k)}','${E(String(v))}','${E(String(x||""))}')"><div class="k">${k}</div><div class="v ${c||""}">${v}</div>${x?`<div class="x ${c||"mt"}">${x}</div>`:""}</div>`;
+    document.getElementById(id).innerHTML=`<div class="kpi hero-main clickable" onclick="metricDetail('${E(total[0])}','${E(String(total[1]))}','${E(String(principal[1]))}')"><div class="k">총 평가액</div><div class="v ${total[3]||""}">${total[1]}</div><div class="x ${principalRet[3]||""}">원금 대비 ${principalRet[1]}</div><div class="x ${totalRet[3]||""}">평가손익 ${totalRet[1]}</div><div class="x mt">투자 원금 ${principal[1]}</div></div>`+[today,cash,totalRet].map(card).join("");
+    return;
+  }
+  document.getElementById(id).innerHTML=arr.map(([k,v,x,c])=>`<div class="kpi clickable" onclick="metricDetail('${E(k)}','${E(String(v))}','${E(String(x||""))}')"><div class="k">${k}</div><div class="v ${c||""}">${v}</div>${x?`<div class="x ${c||"mt"}">${x}</div>`:""}</div>`).join("")
+}
 
 /* ════ RISK BOARD ════ */
 function renderRisk(){
