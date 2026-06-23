@@ -510,3 +510,143 @@ class TestEvaluateOpenPaperOrders:
         symbols = [e["symbol"] for e in result["evaluated"]]
         # MU는 blocked이므로 approve 안 됨 → 결과에 포함 안 됨
         assert "MU" not in symbols
+
+
+# ─── 13. format_toss_paper_performance_briefing ───────────
+
+
+class TestFormatBriefing:
+    def _zero_summary(self) -> dict:
+        return {
+            "summary": {
+                "total": 6, "open": 0, "wins": 0, "losses": 0,
+                "cancelled": 1, "blocked": 3, "previewed": 2,
+                "expired": 0, "data_error": 0,
+                "evaluated_count": 0, "win_rate": 0.0, "avg_pnl_pct": 0.0,
+            },
+            "recent": [],
+            "_note": "Paper 성과 · 실제 주문 아님 · 기존 포트폴리오 미합산 · 실주문 비활성",
+        }
+
+    def _nonzero_summary(self) -> dict:
+        return {
+            "summary": {
+                "total": 10, "open": 2, "wins": 3, "losses": 2,
+                "cancelled": 1, "blocked": 3, "previewed": 0,
+                "expired": 1, "data_error": 0,
+                "evaluated_count": 5, "win_rate": 60.0, "avg_pnl_pct": 1.8,
+            },
+            "recent": [],
+            "_note": "Paper 성과 · 실제 주문 아님 · 기존 포트폴리오 미합산 · 실주문 비활성",
+        }
+
+    # evaluated_count=0 케이스
+    def test_zero_evaluated_shows_sample_insufficient(self):
+        text = perf.format_toss_paper_performance_briefing(self._zero_summary())
+        assert "표본부족 / 평가 대기" in text
+
+    def test_zero_evaluated_no_zero_pct_winrate(self):
+        text = perf.format_toss_paper_performance_briefing(self._zero_summary())
+        assert "승률: 0.0%" not in text
+        assert "승률: 0%" not in text
+
+    def test_zero_evaluated_avg_pnl_dash(self):
+        text = perf.format_toss_paper_performance_briefing(self._zero_summary())
+        assert "평균손익: -" in text
+
+    # evaluated_count>0 케이스
+    def test_nonzero_shows_win_rate(self):
+        text = perf.format_toss_paper_performance_briefing(self._nonzero_summary())
+        assert "60.0%" in text
+
+    def test_nonzero_shows_avg_pnl(self):
+        text = perf.format_toss_paper_performance_briefing(self._nonzero_summary())
+        assert "1.8%" in text
+
+    def test_nonzero_shows_win_loss_counts(self):
+        text = perf.format_toss_paper_performance_briefing(self._nonzero_summary())
+        assert "win 3" in text
+        assert "loss 2" in text
+
+    def test_nonzero_shows_expired_data_error(self):
+        text = perf.format_toss_paper_performance_briefing(self._nonzero_summary())
+        assert "expired 1" in text
+        assert "data_error 0" in text
+
+    # excluded statuses — 실패로 표현하지 않음
+    def test_blocked_not_failure_label(self):
+        text = perf.format_toss_paper_performance_briefing(self._zero_summary())
+        # blocked는 상태 표시만 (실패/손실로 표현 금지)
+        assert "blocked 3" in text
+        assert "실패" not in text
+        assert "손실" not in text
+
+    def test_cancelled_not_failure_label(self):
+        text = perf.format_toss_paper_performance_briefing(self._zero_summary())
+        assert "cancelled 1" in text
+        assert "실패" not in text
+
+    # safety wording 항상 포함
+    def test_always_real_order_disclaimer(self):
+        for summary in [self._zero_summary(), self._nonzero_summary()]:
+            text = perf.format_toss_paper_performance_briefing(summary)
+            assert "실제 주문 아님" in text
+
+    def test_always_live_order_inactive(self):
+        for summary in [self._zero_summary(), self._nonzero_summary()]:
+            text = perf.format_toss_paper_performance_briefing(summary)
+            assert "실주문: 비활성" in text
+
+    def test_always_portfolio_not_combined(self):
+        for summary in [self._zero_summary(), self._nonzero_summary()]:
+            text = perf.format_toss_paper_performance_briefing(summary)
+            assert "기존 포트폴리오 미합산" in text
+
+    def test_none_summary_fallback(self):
+        """summary=None 전달 시 예외 없이 동작."""
+        with patch.object(perf, "get_paper_performance_summary",
+                          return_value=self._zero_summary()):
+            text = perf.format_toss_paper_performance_briefing(None)
+        assert "실제 주문 아님" in text
+
+    # briefing context — analyzer/multi_agent 주입 확인
+    def test_analyzer_has_paper_perf_injection(self):
+        src = (ROOT / "core" / "analyzer.py").read_text(encoding="utf-8")
+        assert "format_toss_paper_performance_briefing" in src
+        assert "Toss Paper 성과" in src
+
+    def test_multi_agent_has_paper_perf_block(self):
+        src = (ROOT / "core" / "multi_agent.py").read_text(encoding="utf-8")
+        assert "_toss_paper_performance_block" in src
+
+    def test_paper_not_merged_with_prediction_db(self):
+        """Paper 성과 문구가 기존 예측 DB accuracy_stats와 섞이지 않음."""
+        src = (ROOT / "core" / "toss_paper_performance.py").read_text(encoding="utf-8")
+        assert "accuracy_stats" not in src
+        assert "predictions" not in src
+
+    # 금지 CTA 확인
+    _FORBIDDEN_CTA = [
+        "주문 실행", "매수하기", "매도하기",
+        "자동매매 시작", "자동거래 시작", "실주문: 활성",
+    ]
+
+    def test_no_forbidden_cta_in_format_output_zero(self):
+        text = perf.format_toss_paper_performance_briefing(self._zero_summary())
+        for cta in self._FORBIDDEN_CTA:
+            assert cta not in text, f"Forbidden CTA '{cta}' in briefing output"
+
+    def test_no_forbidden_cta_in_format_output_nonzero(self):
+        text = perf.format_toss_paper_performance_briefing(self._nonzero_summary())
+        for cta in self._FORBIDDEN_CTA:
+            assert cta not in text, f"Forbidden CTA '{cta}' in briefing output"
+
+    def test_no_forbidden_fn_in_analyzer(self):
+        src = (ROOT / "core" / "analyzer.py").read_text(encoding="utf-8")
+        for fn in ("place_order", "submit_order", "execute_order"):
+            assert fn not in src
+
+    def test_no_forbidden_fn_in_multi_agent(self):
+        src = (ROOT / "core" / "multi_agent.py").read_text(encoding="utf-8")
+        for fn in ("place_order", "submit_order", "execute_order"):
+            assert fn not in src

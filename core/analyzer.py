@@ -769,6 +769,15 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
     except Exception as e:
         log.debug("Toss 계좌 컨텍스트 스킵: %s", e)
 
+    # Toss Paper 성과 (read-only, 기존 예측 DB·포트폴리오 합산 금지)
+    try:
+        from core.toss_paper_performance import format_toss_paper_performance_briefing
+        paper_perf_text = format_toss_paper_performance_briefing()
+        if paper_perf_text:
+            extra_context += f"\n\n━━━ Toss Paper 성과 ━━━\n{paper_perf_text}"
+    except Exception as e:
+        log.debug("Toss Paper 성과 스킵: %s", e)
+
     # 시장 기회 스캐너 결과 수합 (백그라운드)
     try:
         scanner_text = scanner_future.result(timeout=120)

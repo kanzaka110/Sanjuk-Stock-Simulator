@@ -227,3 +227,49 @@ def get_paper_performance_summary() -> dict:
         "evaluated_at": _now_kst(),
         "_note": "Paper 성과 · 실제 주문 아님 · 기존 포트폴리오 미합산 · 실주문 비활성",
     }
+
+
+def format_toss_paper_performance_briefing(summary: dict | None = None) -> str:
+    """브리핑/LLM 입력용 Toss Paper 성과 요약 텍스트.
+
+    - evaluated_count == 0 → '표본부족 / 평가 대기' (0.0%로 오해 방지)
+    - 항상 '실제 주문 아님', '실주문 비활성', '기존 포트폴리오 미합산' 포함
+    - blocked/cancelled/previewed는 실패로 표현하지 않음
+    - 기존 주식 예측 DB 승률과 합산 금지
+    """
+    if summary is None:
+        try:
+            summary = get_paper_performance_summary()
+        except Exception:
+            summary = {}
+
+    s = (summary or {}).get("summary", {})
+    evaluated = s.get("evaluated_count", 0)
+    wins = s.get("wins", 0)
+    losses = s.get("losses", 0)
+    open_ = s.get("open", 0)
+    win_rate = s.get("win_rate", 0.0)
+    avg_pnl = s.get("avg_pnl_pct", 0.0)
+    blocked = s.get("blocked", 0)
+    cancelled = s.get("cancelled", 0)
+    previewed = s.get("previewed", 0)
+    expired = s.get("expired", 0)
+    data_error = s.get("data_error", 0)
+
+    lines = ["[Toss Paper 성과 — 실제 주문 아님]"]
+    lines.append(f"- 평가 완료: {evaluated}건")
+    lines.append(f"- 진행 중: {open_}건")
+
+    if evaluated == 0:
+        lines.append("- 승률: 표본부족 / 평가 대기")
+        lines.append("- 평균손익: -")
+    else:
+        pnl_sign = "+" if avg_pnl > 0 else ""
+        lines.append(f"- 승률: {win_rate}%")
+        lines.append(f"- 평균손익: {pnl_sign}{avg_pnl}%")
+        lines.append(f"- 결과: win {wins} · loss {losses} · expired {expired} · data_error {data_error}")
+
+    lines.append(f"- 상태: previewed {previewed} · blocked {blocked} · cancelled {cancelled}")
+    lines.append("- 실주문: 비활성")
+    lines.append("- 기존 포트폴리오 미합산")
+    return "\n".join(lines)

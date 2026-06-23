@@ -453,6 +453,15 @@ def _toss_holdings_block() -> str:
         return ""
 
 
+def _toss_paper_performance_block() -> str:
+    """[토스 Paper 성과] 블록 (read-only, 기존 예측 DB·포트폴리오 합산 금지)."""
+    try:
+        from core.toss_paper_performance import format_toss_paper_performance_briefing
+        return format_toss_paper_performance_briefing()
+    except Exception:
+        return ""
+
+
 # ═══════════════════════════════════════════════════════
 # 종합 판단
 # ═══════════════════════════════════════════════════════
@@ -773,7 +782,9 @@ def synthesize(
 [연금저축] CMA (MMF ₩{PENSION_MMF:,.0f})
 {chr(10).join(pension_lines) if pension_lines else "  (해당 시장 보유 없음)"}
 
-{_toss_holdings_block()}"""
+{_toss_holdings_block()}
+
+{_toss_paper_performance_block()}"""
 
     # 투자 시계별 보유 논지 (장기/중기/단기 구분 + 관리 전략)
     _all_held: set[str] = set()
