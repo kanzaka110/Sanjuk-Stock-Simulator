@@ -252,6 +252,28 @@ details summary::before{content:"▸";transition:transform .18s;color:var(--mt)}
 .conf-bar{height:5px;border-radius:999px;background:var(--bg2);overflow:hidden;margin-top:7px}.conf-bar i{display:block;height:100%;background:var(--b)}
 @media(max-width:720px){.mo{align-items:flex-end;padding:0}.md{border-radius:18px 18px 0 0;max-height:88vh}.sdt-fold-grid{grid-template-columns:1fr}.sdt-stats{grid-template-columns:repeat(2,1fr)}}
 
+
+/* ── PC home bento layout: 모바일 정보 밀도를 PC용 대시보드로 재배치 ── */
+.home-hero{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(420px,.9fr);gap:16px;margin-bottom:16px;align-items:stretch}
+.portfolio-hero{position:relative;overflow:hidden;border-radius:22px;padding:20px;background:radial-gradient(circle at 18% 0%,rgba(59,130,246,.28),transparent 34%),linear-gradient(135deg,#121d33 0%,#0b111e 58%,#101827 100%);border:1px solid rgba(59,130,246,.25);box-shadow:0 24px 80px rgba(0,0,0,.28)}
+.hero-label{font-size:11px;font-weight:900;color:var(--b);letter-spacing:.8px;text-transform:uppercase;margin-bottom:12px}
+.portfolio-hero .brief{background:transparent;border:0;padding:0;margin-bottom:18px}
+.portfolio-hero .brief .ai{width:40px;height:40px;border-radius:14px;background:rgba(59,130,246,.18)}
+.portfolio-hero .brief .txt{font-size:22px;line-height:1.35;font-weight:800;max-width:920px}
+.hero-kpis{grid-template-columns:repeat(3,minmax(0,1fr))!important;margin-bottom:0!important}
+.hero-kpis .kpi{background:rgba(8,13,24,.72);border-color:rgba(255,255,255,.07);border-radius:15px}
+.hero-kpis .kpi:first-child{grid-column:span 2}.hero-kpis .kpi:first-child .v{font-size:34px}
+.hero-decision{border-radius:22px;padding:18px;max-height:100%;overflow:hidden}
+.hero-decision #home-dbrief{max-height:520px;overflow:auto;padding-right:4px}
+.market-strip{margin-bottom:16px;padding:2px 0 4px}
+.market-strip .icard{min-width:170px;border-radius:15px;background:linear-gradient(180deg,var(--panel),var(--bg2))}
+.home-bento{display:grid;grid-template-columns:minmax(0,1.42fr) minmax(360px,.78fr);gap:16px;align-items:start}
+.home-main-stack,.home-side-stack{display:flex;flex-direction:column;gap:16px}.home-side-stack{position:sticky;top:70px}
+.home-wide-panel{min-height:280px}.home-rank-panel .tbl-scroll{max-height:620px}.home-chart-panel #home-chart{min-height:170px}
+.home-side-stack .panel{padding:15px}.home-side-stack .row{padding:10px 8px}.home-side-stack .panel h2{font-size:13px}
+.home-bottom-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.home-bottom-grid .panel{min-height:260px}
+@media(max-width:1180px){.home-hero,.home-bento{grid-template-columns:1fr}.home-side-stack{position:static}.hero-kpis{grid-template-columns:repeat(2,1fr)!important}.hero-kpis .kpi:first-child{grid-column:span 1}.home-bottom-grid{grid-template-columns:1fr}}
+
 /* 거래 ledger HTML 동기화 — PC/모바일 공통 */
 .trade-ledger-note{font-size:10.5px;color:var(--mt);margin:4px 0 8px;line-height:1.45}
 .trade-ledger-list{display:flex;flex-direction:column;gap:7px}
@@ -288,48 +310,55 @@ details summary::before{content:"▸";transition:transform .18s;color:var(--mt)}
 
 <!-- ═══ 홈 ═══ -->
 <div class="page on" id="p-home">
-  <div class="brief" style="margin-bottom:14px"><div class="ai">✦</div><div class="txt" id="brief">오늘의 브리핑을 불러오는 중…</div></div>
-  <div class="kpis" style="margin-bottom:14px;grid-template-columns:repeat(6,1fr)" id="home-kpis">
-    <div class="kpi"><div class="k">전체 평가액</div><div class="v skl">&nbsp;</div></div>
-    <div class="kpi"><div class="k">투자 원금</div><div class="v skl">&nbsp;</div></div>
-    <div class="kpi"><div class="k">원금 대비</div><div class="v skl">&nbsp;</div></div>
-    <div class="kpi"><div class="k">총 손익률</div><div class="v skl">&nbsp;</div></div>
-    <div class="kpi"><div class="k">오늘 가중 수익률</div><div class="v skl">&nbsp;</div></div>
-    <div class="kpi"><div class="k">현금 비중</div><div class="v skl">&nbsp;</div></div>
-  </div>
-  <div class="strip" id="home-strip" style="margin-bottom:14px"></div>
-  <div class="panel" id="home-dbrief-panel" style="margin-bottom:14px">
-    <div class="ph"><h2>의사결정 브리핑</h2><span class="sub" id="dbrief-sub">참고용 · 실제 주문 아님</span></div>
-    <div id="home-dbrief"><div class="emp">브리핑을 불러오는 중…</div></div>
-  </div>
-  <div class="panel" id="home-contrib-panel" style="margin-bottom:14px">
-    <div class="ph"><h2>포트폴리오 기여도</h2><span class="sub">수익·손실을 만든 종목 · 참고용</span></div>
-    <div id="home-contrib"><div class="emp">기여도를 불러오는 중…</div></div>
-  </div>
-  <div class="grid" style="grid-template-columns:1fr 340px">
-    <div>
-      <div class="panel" style="margin-bottom:14px">
-        <div class="ph"><h2>대표 지수 등락</h2><span class="sub">오늘 기준</span></div>
-        <div id="home-chart"></div>
+  <section class="home-hero">
+    <div class="portfolio-hero">
+      <div class="hero-label">Portfolio Command Center</div>
+      <div class="brief"><div class="ai">✦</div><div class="txt" id="brief">오늘의 브리핑을 불러오는 중…</div></div>
+      <div class="kpis hero-kpis" id="home-kpis">
+        <div class="kpi"><div class="k">전체 평가액</div><div class="v skl">&nbsp;</div></div>
+        <div class="kpi"><div class="k">투자 원금</div><div class="v skl">&nbsp;</div></div>
+        <div class="kpi"><div class="k">원금 대비</div><div class="v skl">&nbsp;</div></div>
+        <div class="kpi"><div class="k">총 손익률</div><div class="v skl">&nbsp;</div></div>
+        <div class="kpi"><div class="k">오늘 가중 수익률</div><div class="v skl">&nbsp;</div></div>
+        <div class="kpi"><div class="k">현금 비중</div><div class="v skl">&nbsp;</div></div>
       </div>
-      <div class="panel">
+    </div>
+    <div class="panel hero-decision" id="home-dbrief-panel">
+      <div class="ph"><h2>의사결정 브리핑</h2><span class="sub" id="dbrief-sub">참고용 · 실제 주문 아님</span></div>
+      <div id="home-dbrief"><div class="emp">브리핑을 불러오는 중…</div></div>
+    </div>
+  </section>
+
+  <div class="strip market-strip" id="home-strip"></div>
+
+  <section class="home-bento">
+    <main class="home-main-stack">
+      <div class="panel home-wide-panel" id="home-contrib-panel">
+        <div class="ph"><h2>포트폴리오 기여도</h2><span class="sub">수익·손실을 만든 종목 · 참고용</span></div>
+        <div id="home-contrib"><div class="emp">기여도를 불러오는 중…</div></div>
+      </div>
+      <div class="panel home-rank-panel">
         <div class="ph"><h2>내 종목 랭킹</h2><span class="sub" id="home-tbl-sub"></span></div>
         <div class="tbl-scroll"><table class="tbl"><thead><tr><th>종목</th><th>평가(₩)</th><th>손익률</th><th>손익금액</th><th>비중</th><th>일간기여</th><th>상태</th></tr></thead><tbody id="home-rows"></tbody></table></div>
       </div>
-    </div>
-    <div>
-      <div class="panel" style="margin-bottom:14px"><div class="ph"><h2>내 계좌</h2></div><div id="home-accts"></div></div>
-      <div class="panel" style="margin-bottom:14px"><div class="ph"><h2>포트폴리오 비중</h2></div><div id="home-alloc"></div></div>
-      <div class="panel"><div class="ph"><h2>관련 뉴스</h2></div><div id="home-news"></div></div>
-    </div>
-  </div>
-  <div class="grid" style="grid-template-columns:1fr 1fr 1fr;margin-top:14px">
-    <div class="panel"><div class="ph"><h2>최근 추천 타임라인</h2></div><div id="home-tl" class="tbl-scroll" style="max-height:340px"></div></div>
-    <div class="panel"><div class="ph"><h2>리스크 보드</h2></div><div id="home-risk"></div></div>
-    <div class="panel"><div class="ph"><h2>이벤트 캘린더</h2><span class="sub" id="home-cal-sub"></span></div><div id="home-cal"></div></div>
-  </div>
-</div>
+      <div class="panel home-chart-panel">
+        <div class="ph"><h2>대표 지수 등락</h2><span class="sub">오늘 기준</span></div>
+        <div id="home-chart"></div>
+      </div>
+      <div class="home-bottom-grid">
+        <div class="panel"><div class="ph"><h2>최근 추천 타임라인</h2></div><div id="home-tl" class="tbl-scroll" style="max-height:340px"></div></div>
+        <div class="panel"><div class="ph"><h2>이벤트 캘린더</h2><span class="sub" id="home-cal-sub"></span></div><div id="home-cal"></div></div>
+      </div>
+    </main>
 
+    <aside class="home-side-stack">
+      <div class="panel"><div class="ph"><h2>내 계좌</h2></div><div id="home-accts"></div></div>
+      <div class="panel"><div class="ph"><h2>포트폴리오 비중</h2></div><div id="home-alloc"></div></div>
+      <div class="panel"><div class="ph"><h2>리스크 보드</h2></div><div id="home-risk"></div></div>
+      <div class="panel"><div class="ph"><h2>관련 뉴스</h2></div><div id="home-news"></div></div>
+    </aside>
+  </section>
+</div>
 <!-- ═══ 시장 ═══ -->
 <div class="page" id="p-mkt">
   <div class="panel" style="margin-bottom:14px"><div class="ph"><h2>장 상태</h2><span class="sub" id="mkt-now"></span></div><div id="mkt-sess"></div></div>
