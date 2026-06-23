@@ -126,8 +126,30 @@ def evaluate_paper_order(order: dict, quote: dict | None = None) -> dict:
     if cur_price is None or cur_price <= 0:
         result["outcome"] = "data_error"
         result["warnings"].append("가격 조회 실패")
+        result["price_anomaly"] = False
+        result["price_ratio"] = None
         return result
 
+    # 가격 이상치 guard — entry 대비 ±50% 초과 시 평가 보류
+    # (paper 직후 평가 안전 가드. 장기 보유 시 임계값 완화 가능)
+    price_ratio: float | None = None
+    price_anomaly = False
+    if entry_price > 0:
+        _raw_ratio = cur_price / entry_price
+        price_ratio = round(_raw_ratio, 4)
+        if _raw_ratio > 1.5 or _raw_ratio < 0.5:
+            price_anomaly = True
+            result["price_anomaly"] = True
+            result["price_ratio"] = price_ratio
+            result["current_price"] = cur_price
+            result["outcome"] = "data_error"
+            result["warnings"].append(
+                f"가격 이상치로 평가 보류 (entry={entry_price:,.0f}, current={cur_price:,.0f}, ratio={price_ratio:.2f})"
+            )
+            return result
+
+    result["price_anomaly"] = price_anomaly
+    result["price_ratio"] = price_ratio
     result["current_price"] = cur_price
     result["current_value_krw"] = round(cur_price * quantity, 2)
     result["unrealized_pnl_krw"] = round((cur_price - entry_price) * quantity, 2)

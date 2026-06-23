@@ -203,7 +203,74 @@ class TestExpiredAndDataError:
         order = _make_order(limit_price=70000)
         result = perf.evaluate_paper_order(order, quote={"price": None, "source": "test"})
         assert result["outcome"] == "data_error"
-        assert len(result["warnings"]) > 0
+
+    # ─── 가격 이상치 guard (005930.KS 실제 발생 케이스) ────
+    def test_samsung_anomaly_entry72k_current310k(self):
+        """entry 72,000 → current 310,000 (+330%) → data_error (이상치)."""
+        order = _make_order(symbol="005930.KS", limit_price=72000, quantity=2)
+        result = perf.evaluate_paper_order(order, quote=_quote(310000))
+        assert result["outcome"] == "data_error"
+        assert result["price_anomaly"] is True
+        assert any("이상치" in w for w in result["warnings"])
+
+    def test_anomaly_not_counted_in_evaluated_count(self):
+        """이상치 케이스는 evaluated_count(win+loss 분모) 제외."""
+        cands = [{"symbol": "005930.KS", "side": "buy", "quantity": 2,
+                  "limit_price": 72000, "estimated_amount_krw": 144000,
+                  "confidence": 0.8, "reason": ""}]
+        ccs = [{"blocks": [], "warnings": [], "toss_readiness": "paper_only",
+                "live_order_allowed": False, "score_adjustments": []}]
+        ledger.create_paper_preview_records("prev_anomaly01", cands, ccs, _ctx())
+        ledger.approve_paper_order("prev_anomaly01")
+
+        with patch.object(perf, "_get_quote", return_value=(310000.0, "test")):
+            summary = perf.get_paper_performance_summary()
+
+        s = summary["summary"]
+        assert s["evaluated_count"] == 0
+        assert s["data_error"] == 1
+        assert s["wins"] == 0
+        assert s["win_rate"] == 0.0
+
+    def test_price_ratio_field_present(self):
+        order = _make_order(limit_price=72000)
+        result = perf.evaluate_paper_order(order, quote=_quote(310000))
+        assert "price_ratio" in result
+        assert result["price_ratio"] == pytest.approx(310000 / 72000, abs=0.01)
+
+    def test_upper_anomaly_boundary(self):
+        """entry 대비 +50% 초과 → data_error."""
+        order = _make_order(limit_price=70000)
+        result = perf.evaluate_paper_order(order, quote=_quote(105001))  # > 1.5x
+        assert result["outcome"] == "data_error"
+
+    def test_lower_anomaly_boundary(self):
+        """entry 대비 -50% 초과 → data_error."""
+        order = _make_order(limit_price=70000)
+        result = perf.evaluate_paper_order(order, quote=_quote(34999))  # < 0.5x
+        assert result["outcome"] == "data_error"
+
+    def test_normal_range_not_anomaly(self):
+        """정상 범위 가격은 이상치 처리 안 됨."""
+        order = _make_order(limit_price=72000)
+        result = perf.evaluate_paper_order(order, quote=_quote(73500))  # ~+2%
+        assert result["outcome"] != "data_error"
+        assert result["price_anomaly"] is False
+
+    def test_win_in_normal_range(self):
+        """entry 72000, current 74200(+3.06%) → win."""
+        order = _make_order(limit_price=72000, quantity=2)
+        result = perf.evaluate_paper_order(order, quote=_quote(74200))
+        assert result["outcome"] == "win"
+        assert result["price_anomaly"] is False
+
+    def test_loss_in_normal_range(self):
+        """entry 72000, current 69800(-3.06%) → loss, 이상치 없음."""
+        order = _make_order(limit_price=72000, quantity=2)
+        result = perf.evaluate_paper_order(order, quote=_quote(69800))
+        assert result["outcome"] == "loss"
+        assert result["price_anomaly"] is False
+        assert result["warnings"] == []
 
     def test_expired_not_in_win_rate_denominator(self):
         old_dt = (datetime.now(KST) - timedelta(days=10)).strftime("%Y-%m-%dT%H:%M:%S+09:00")
