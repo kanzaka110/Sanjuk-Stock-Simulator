@@ -306,4 +306,4 @@ def format_approval_response(result: dict) -> str:
 def format_cancel_response(result: dict) -> str:
     """취소 결과를 Telegram 메시지 텍스트로 변환."""
     cnt = result.get("cancelled_count", 0)
-    return f"🟡 Paper 취소 완료 · 실제 주문 없음\n  취소: {cnt}건\n  상태: cancelled"
+    return f"🟡 Paper 취소 완료 · 실제 주문 없음\n  취소: {cnt}건\n  상태: cancelled\n  실주문: 비활성"

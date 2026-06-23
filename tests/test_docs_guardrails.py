@@ -37,6 +37,8 @@ ALLOWED_TOSS_FILES = {
     "core/toss_paper_ledger.py",
     "tests/test_toss_order_preview.py",
     "tests/test_toss_paper_ledger.py",
+    "core/toss_paper_telegram.py",
+    "tests/test_toss_paper_telegram.py",
 }
 
 
