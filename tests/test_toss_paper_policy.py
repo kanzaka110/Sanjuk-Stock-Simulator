@@ -192,6 +192,91 @@ class TestApplyPolicy:
         result = apply_toss_paper_policy_to_candidate(_candidate(), p)
         assert result["paper_policy"]["live_order_allowed"] is False
 
+    def test_max_possible_quantity_field_present(self):
+        p = self._base_policy(evaluated_count=0)
+        result = apply_toss_paper_policy_to_candidate(_candidate(symbol="A.KS"), p)
+        assert "max_possible_quantity" in result["paper_policy"]
+
+
+# ─── 2b. US ticker 통화 변환 sizing ──────────────────────
+
+
+class TestApplyPolicyCurrencySizing:
+    def _base_policy(self) -> dict:
+        return compute_toss_paper_policy(_summary(evaluated_count=0))
+
+    def _nvda_cand(self, usdkrw: float = 1_530.0) -> dict:
+        c = _candidate(symbol="NVDA", limit_price=135)
+        c["_usdkrw"] = usdkrw
+        return c
+
+    def test_us_ticker_recommended_qty_uses_usdkrw(self):
+        """recommended_budget=100,000 / (135*1530=206,550) = 0."""
+        p = self._base_policy()
+        result = apply_toss_paper_policy_to_candidate(self._nvda_cand(), p)
+        assert result["paper_policy"]["recommended_quantity"] == 0
+
+    def test_us_ticker_max_possible_qty_with_max_budget(self):
+        """max_budget=300,000 / 206,550 = 1."""
+        p = self._base_policy()
+        result = apply_toss_paper_policy_to_candidate(self._nvda_cand(), p)
+        assert result["paper_policy"]["max_possible_quantity"] == 1
+
+    def test_us_ticker_no_absurd_quantity(self):
+        """NVDA에서 100주 이상 수량 없음."""
+        p = self._base_policy()
+        result = apply_toss_paper_policy_to_candidate(self._nvda_cand(), p)
+        assert result["paper_policy"]["recommended_quantity"] < 100
+        assert result["paper_policy"]["max_possible_quantity"] < 100
+
+    def test_kr_ticker_unchanged(self):
+        """KR ticker는 기존 KRW 계산 유지."""
+        p = self._base_policy()
+        cand = _candidate(symbol="069500.KS", limit_price=30_000)
+        result = apply_toss_paper_policy_to_candidate(cand, p)
+        pp = result["paper_policy"]
+        import math
+        expected = math.floor(pp["recommended_budget_krw"] / 30_000)
+        assert pp["recommended_quantity"] == expected
+
+    def test_sizing_text_no_740_for_nvda(self):
+        """NVDA 정책 텍스트에 740주 없음."""
+        p = self._base_policy()
+        applied = apply_toss_paper_policy_to_candidate(self._nvda_cand(), p)
+        text = get_policy_sizing_text(p, applied)
+        assert "740" not in text
+
+    def test_sizing_text_shows_max_qty_when_rec_zero(self):
+        """권장 수량 0이면 최대 예산 기준 수량 표시."""
+        p = self._base_policy()
+        applied = apply_toss_paper_policy_to_candidate(self._nvda_cand(), p)
+        text = get_policy_sizing_text(p, applied)
+        # max_possible=1 → "1주" 포함
+        assert "1주" in text
+
+    def test_sizing_text_no_rec_qty_label_when_zero(self):
+        """권장 수량 0일 때 '권장 수량 0주' 혼란 표시 없음."""
+        p = self._base_policy()
+        applied = apply_toss_paper_policy_to_candidate(self._nvda_cand(), p)
+        text = get_policy_sizing_text(p, applied)
+        assert "권장 수량 0주" not in text
+
+    def test_us_ticker_affordable_quantity(self):
+        """NVDA $50, usdkrw=1000 → 1주에 ₩50,000 → recommended_qty=2."""
+        p = self._base_policy()  # recommended_budget=100,000
+        cand = _candidate(symbol="NVDA", limit_price=50)
+        cand["_usdkrw"] = 1_000.0
+        result = apply_toss_paper_policy_to_candidate(cand, p)
+        # floor(100000 / 50000) = 2
+        assert result["paper_policy"]["recommended_quantity"] == 2
+
+    def test_fallback_usdkrw_when_missing(self):
+        """_usdkrw 미포함 US ticker → fallback 1350으로 계산, 수량 < 100."""
+        p = self._base_policy()
+        cand = _candidate(symbol="NVDA", limit_price=135)  # no _usdkrw
+        result = apply_toss_paper_policy_to_candidate(cand, p)
+        assert result["paper_policy"]["recommended_quantity"] < 100
+
 
 # ─── 3. get_policy_sizing_text ───────────────────────────
 

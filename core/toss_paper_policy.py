@@ -12,8 +12,14 @@ from __future__ import annotations
 
 import logging
 import math
+import re as _re
 
 logger = logging.getLogger(__name__)
+
+
+def _is_kr_ticker(symbol: str) -> bool:
+    """KR 종목 여부 (KRW 가격 간주)."""
+    return symbol.endswith((".KS", ".KQ")) or bool(_re.match(r"^\d{6}$", symbol))
 
 # ─── 정책 상수 ─────────────────────────────────────────
 _SAMPLE_INSUFFICIENT_THRESHOLD = 5    # evaluated_count < 5 → insufficient
@@ -194,23 +200,36 @@ def apply_toss_paper_policy_to_candidate(
     if is_consensus_anomaly:
         recommended_budget = 0
         recommended_quantity = 0
+        max_possible_quantity = 0
     else:
         recommended_budget = min(int(base_budget * sizing_multiplier / 0.3), max_budget)
         # 최소 base_budget 보장
         recommended_budget = max(recommended_budget, base_budget) if not is_consensus_anomaly else 0
         recommended_budget = min(recommended_budget, max_budget)
 
-        # 수량 계산 (buy 기준)
+        # 수량 계산 (buy 기준) — 통화 변환 포함
         if side == "buy" and limit_price > 0:
-            recommended_quantity = max(0, math.floor(recommended_budget / limit_price))
+            if _is_kr_ticker(symbol):
+                price_krw_per_share = limit_price
+            else:
+                # US ticker: USD × usdkrw → KRW 환산
+                usdkrw = float(candidate.get("_usdkrw") or 0)
+                if usdkrw <= 0:
+                    usdkrw = 1_350.0  # conservative fallback
+                price_krw_per_share = limit_price * usdkrw
+            recommended_quantity = max(0, math.floor(recommended_budget / price_krw_per_share))
+            max_possible_quantity = max(0, math.floor(max_budget / price_krw_per_share))
         else:
+            price_krw_per_share = 0.0
             recommended_quantity = candidate.get("quantity", 0)
+            max_possible_quantity = recommended_quantity
 
     result = dict(candidate)
     result["paper_policy"] = {
         "recommended_budget_krw": recommended_budget,
         "max_budget_krw": max_budget,
         "recommended_quantity": recommended_quantity,
+        "max_possible_quantity": max_possible_quantity,
         "sizing_multiplier": sizing_multiplier,
         "sample_status": policy.get("sample_status", "insufficient"),
         "blocks": candidate_blocks,
@@ -232,9 +251,15 @@ def get_policy_sizing_text(policy: dict, candidate: dict | None = None) -> str:
         pp = candidate.get("paper_policy", {})
         rec_budget = pp.get("recommended_budget_krw", 0)
         rec_qty = pp.get("recommended_quantity", 0)
+        max_qty = pp.get("max_possible_quantity", rec_qty)
         pp_blocks = pp.get("blocks", [])
         if "price_consensus_anomaly" in pp_blocks:
             return "정책 차단: price_consensus_anomaly — 기업행동/entry_price 재확인 전 paper 제외"
+        if rec_qty == 0 and max_qty > 0:
+            return (
+                f"Paper sizing: {sample_status} · 최대 ₩{max_budget:,} · "
+                f"권장 예산으로 1주 불가 · 최대 예산 기준 {max_qty}주 가능"
+            )
         return (
             f"Paper sizing: {sample_status} · 최대 ₩{max_budget:,} · "
             f"권장 수량 {rec_qty}주 · 권장 금액 ₩{rec_budget:,}"
