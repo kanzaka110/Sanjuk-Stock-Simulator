@@ -4,6 +4,7 @@ Toss Paper 주문표 테스트 발송 — dry-run / 실제 주문 아님
 - consensus_anomaly 종목은 자동 제외
 - 정상 accepted price source 확인 후 후보 생성
 - policy max_budget_krw 이하 수량 계산
+- 미국 주식은 USD × USD/KRW로 KRW 환산 (KRW budget / USD price 직접 나누기 금지)
 - live_order_allowed=false 유지
 
 사용법:
@@ -14,6 +15,7 @@ Toss Paper 주문표 테스트 발송 — dry-run / 실제 주문 아님
 from __future__ import annotations
 
 import math
+import re
 import sys
 from pathlib import Path
 from typing import Literal
@@ -29,15 +31,46 @@ except ImportError:
 
 # ─── 정상 후보 pool (005930.KS 제외) ──────────────────────
 # 가격 source 검증 후 통과한 것만 사용
+# limit_price: KR 종목은 KRW, 미국 종목은 USD
 _CANDIDATE_POOL = [
-    {"symbol": "069500.KS",  "side": "buy", "limit_price": 30000, "reason": "KOSPI200 ETF · [TEST] Paper 운영 샘플"},
-    {"symbol": "360750.KS",  "side": "buy", "limit_price": 15000, "reason": "S&P500 ETF · [TEST] Paper 운영 샘플"},
-    {"symbol": "NVDA",        "side": "buy", "limit_price": 135,   "reason": "반도체 · [TEST] Paper 운영 샘플"},
-    {"symbol": "GOOGL",       "side": "buy", "limit_price": 190,   "reason": "빅테크 · [TEST] Paper 운영 샘플"},
+    {"symbol": "069500.KS",  "side": "buy", "limit_price": 30000,  "reason": "KOSPI200 ETF · [TEST] Paper 운영 샘플"},
+    {"symbol": "360750.KS",  "side": "buy", "limit_price": 15000,  "reason": "S&P500 ETF · [TEST] Paper 운영 샘플"},
+    {"symbol": "NVDA",        "side": "buy", "limit_price": 135,    "reason": "반도체 · [TEST] Paper 운영 샘플"},
+    {"symbol": "GOOGL",       "side": "buy", "limit_price": 190,    "reason": "빅테크 · [TEST] Paper 운영 샘플"},
     {"symbol": "000660.KS",  "side": "buy", "limit_price": 195000, "reason": "SK하이닉스 · [TEST] Paper 운영 샘플"},
 ]
 
 _MAX_CANDIDATES = 2
+_KR_SUFFIXES = (".KS", ".KQ")
+_KR_CODE_RE = re.compile(r"^\d{6}$")
+
+
+def _is_us_ticker(symbol: str) -> bool:
+    """KR 종목이 아니면 US로 간주 (USDKRW=X, 지수 제외)."""
+    if any(symbol.endswith(s) for s in _KR_SUFFIXES):
+        return False
+    if _KR_CODE_RE.match(symbol):
+        return False
+    if symbol.startswith("^"):
+        return False
+    return True
+
+
+def _get_usdkrw(ctx: dict) -> float:
+    """USD/KRW 환율 조회. ctx → yfinance → 1,350 fallback."""
+    rate = ctx.get("usdkrw")
+    if rate and float(rate) > 0:
+        return float(rate)
+    try:
+        import yfinance as yf
+        info = yf.Ticker("USDKRW=X").fast_info
+        p = getattr(info, "last_price", None) or getattr(info, "regularMarketPrice", None)
+        if p and float(p) > 0:
+            return float(p)
+    except Exception:
+        pass
+    print("  ⚠️  USD/KRW 환율 조회 실패 — 1,350원 fallback 사용")
+    return 1_350.0
 
 
 def _validate_candidate(symbol: str, limit_price: float, consensus_symbols: set[str]) -> dict:
@@ -62,10 +95,21 @@ def _validate_candidate(symbol: str, limit_price: float, consensus_symbols: set[
         return {"ok": False, "price": None, "source": "", "reason": f"조회 오류: {exc}"}
 
 
-def _build_candidates(policy: dict, max_n: int = _MAX_CANDIDATES) -> list[dict]:
-    """정상 가격 검증된 후보 리스트 생성. consensus_anomaly 제외."""
+def _build_candidates(
+    policy: dict,
+    ctx: dict | None = None,
+    max_n: int = _MAX_CANDIDATES,
+) -> tuple[list[dict], list[dict]]:
+    """정상 가격 검증된 후보 리스트 생성. consensus_anomaly 제외.
+
+    미국 주식: limit_price(USD) × usdkrw → KRW 환산 후 수량 계산.
+    KR 주식: limit_price(KRW) 그대로 사용.
+    """
+    if ctx is None:
+        ctx = {}
     consensus_symbols = set(policy.get("consensus_anomaly_symbols", []))
     max_budget = policy.get("max_budget_krw", 300_000)
+    usdkrw = _get_usdkrw(ctx)
 
     candidates: list[dict] = []
     rejected: list[dict] = []
@@ -80,25 +124,59 @@ def _build_candidates(policy: dict, max_n: int = _MAX_CANDIDATES) -> list[dict]:
         side = pool_entry["side"]
 
         val = _validate_candidate(symbol, limit_price, consensus_symbols)
-
         if not val["ok"]:
             rejected.append({"symbol": symbol, "reject_reason": val["reason"]})
             print(f"  ❌ {symbol}: {val['reason']}")
             continue
 
+        # 통화 변환: 미국 주식은 USD × usdkrw
+        is_us = _is_us_ticker(symbol)
+        if is_us:
+            price_krw_per_share = limit_price * usdkrw
+        else:
+            price_krw_per_share = limit_price
+
+        # 1주 금액이 최대 예산 초과 → 제외
+        if price_krw_per_share > max_budget:
+            reject_reason = (
+                f"budget_too_small_for_one_share: "
+                f"1주 예상금액 ₩{price_krw_per_share:,.0f} > 최대 ₩{max_budget:,}"
+            )
+            rejected.append({"symbol": symbol, "reject_reason": reject_reason})
+            print(
+                f"  ❌ {symbol}: 예산 부족 "
+                f"(1주 ₩{price_krw_per_share:,.0f} > ₩{max_budget:,})"
+            )
+            continue
+
         # 수량 계산 (policy max budget 이하)
-        quantity = max(1, math.floor(max_budget / limit_price))
-        estimated = round(limit_price * quantity, 2)
+        quantity = max(1, math.floor(max_budget / price_krw_per_share))
+        estimated = round(price_krw_per_share * quantity, 2)
 
         # max_budget 초과 방지
         while estimated > max_budget and quantity > 0:
             quantity -= 1
-            estimated = round(limit_price * quantity, 2)
+            estimated = round(price_krw_per_share * quantity, 2)
 
         if quantity <= 0:
-            rejected.append({"symbol": symbol, "reject_reason": f"지정가({limit_price:,.0f})가 max_budget({max_budget:,}) 초과"})
+            rejected.append({
+                "symbol": symbol,
+                "reject_reason": f"지정가 환산금액(₩{price_krw_per_share:,.0f})이 max_budget({max_budget:,}) 초과",
+            })
             print(f"  ❌ {symbol}: 가격이 예산 초과")
             continue
+
+        if is_us:
+            val_price_str = f"${val['price']:,.2f}"
+            print(
+                f"  ✅ {symbol}: price={val_price_str} via {val['source']} "
+                f"· qty={quantity} · ₩{estimated:,.0f} (환율 {usdkrw:,.0f})"
+            )
+        else:
+            print(
+                f"  ✅ {symbol}: price={val['price']:,.0f} via {val['source']} "
+                f"· qty={quantity} · ₩{estimated:,.0f}"
+            )
 
         candidates.append({
             "symbol": symbol,
@@ -112,8 +190,10 @@ def _build_candidates(policy: dict, max_n: int = _MAX_CANDIDATES) -> list[dict]:
             "_validated_price": val["price"],
             "_accepted_source": val["source"],
             "_is_test_sample": True,
+            "_price_currency": "USD" if is_us else "KRW",
+            "_usdkrw": usdkrw if is_us else None,
+            "_limit_price_usd": limit_price if is_us else None,
         })
-        print(f"  ✅ {symbol}: price={val['price']:,.2f} via {val['source']} · qty={quantity} · ₩{estimated:,.0f}")
 
     return candidates, rejected
 
@@ -144,10 +224,13 @@ def main() -> None:
     # ── Toss 컨텍스트 ──
     ctx = get_toss_decision_context()
     print(f"  Toss 현금: ₩{ctx.get('cash_krw', 0):,.0f}")
+    usdkrw = ctx.get("usdkrw", 0)
+    if usdkrw:
+        print(f"  USD/KRW: {usdkrw:,.0f}")
 
     # ── 후보 생성 ──
     print("\n[후보 가격 검증]")
-    candidates, rejected = _build_candidates(policy)
+    candidates, rejected = _build_candidates(policy, ctx)
 
     if not candidates:
         print("\n⚠️  정상 후보 없음 — 발송 중단")

@@ -99,9 +99,18 @@ def _render_candidate(idx: int, cand: dict, cc: dict, ctx: dict) -> str:
     except Exception:
         pass
 
+    price_currency = cand.get("_price_currency", "KRW")
+    limit_price_usd = cand.get("_limit_price_usd")
+    cand_usdkrw = cand.get("_usdkrw")
+
     if not is_blocked:
         lines.append(f"  방향: paper {side}")
-        lines.append(f"  지정가: ₩{limit_price:,.0f}")
+        if price_currency == "USD" and limit_price_usd is not None:
+            lines.append(f"  지정가: ${limit_price_usd:,.2f}")
+            if cand_usdkrw:
+                lines.append(f"  환율: {cand_usdkrw:,.0f}원")
+        else:
+            lines.append(f"  지정가: ₩{limit_price:,.0f}")
         lines.append(f"  수량: {quantity}주")
         lines.append(f"  예상금액: ₩{amount:,.0f}")
         lines.append(f"  Toss 현금: ₩{cash_krw:,.0f}")

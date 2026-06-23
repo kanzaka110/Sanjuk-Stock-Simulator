@@ -47,6 +47,7 @@ ALLOWED_TOSS_FILES = {
     "tests/test_toss_paper_performance.py",
     "core/toss_paper_policy.py",
     "tests/test_toss_paper_policy.py",
+    "tests/test_toss_paper_currency_sizing.py",
 }
 
 
