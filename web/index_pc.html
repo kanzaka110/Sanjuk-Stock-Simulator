@@ -254,16 +254,16 @@ details summary::before{content:"▸";transition:transform .18s;color:var(--mt)}
 
 
 /* ── PC home bento layout: 모바일 정보 밀도를 PC용 대시보드로 재배치 ── */
-.home-hero{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(420px,.9fr);gap:16px;margin-bottom:16px;align-items:stretch}
+.home-hero{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(420px,.9fr);gap:16px;margin-bottom:16px;align-items:start}
 .portfolio-hero{position:relative;overflow:hidden;border-radius:18px;padding:15px;background:radial-gradient(circle at 18% 0%,rgba(59,130,246,.22),transparent 34%),linear-gradient(150deg,#15294a 0%,#0d1525 100%);border:1px solid rgba(59,130,246,.22);box-shadow:0 16px 48px rgba(0,0,0,.22)}
 .hero-label{font-size:10px;font-weight:900;color:var(--b);letter-spacing:.7px;text-transform:uppercase;margin-bottom:8px}
 .portfolio-hero .brief{background:transparent;border:0;padding:0;margin-bottom:10px}
 .portfolio-hero .brief .ai{width:30px;height:30px;border-radius:10px;background:rgba(59,130,246,.18);font-size:14px}
 .portfolio-hero .brief .txt{font-size:16px;line-height:1.35;font-weight:800;max-width:920px}
-.hero-kpis{display:grid;grid-template-columns:1.55fr 1fr;grid-template-rows:repeat(3,auto);gap:8px!important;margin-bottom:0!important}
+.hero-kpis{display:grid;grid-template-columns:1.45fr 1fr 1fr;grid-template-rows:repeat(2,minmax(96px,auto));gap:8px!important;margin-bottom:0!important}
 .hero-kpis .kpi{background:rgba(8,13,24,.72);border-color:rgba(255,255,255,.07);border-radius:12px;padding:10px 12px;box-shadow:none}
-.hero-kpis .kpi.hero-main{grid-row:1 / span 3;grid-column:1}.hero-kpis .kpi.hero-main .v{font-size:25px;line-height:1.08}.hero-kpis .kpi:not(.hero-main) .v{font-size:18px}.hero-kpis .kpi .x{font-size:10.5px}
-.hero-decision{border-radius:22px;padding:18px;max-height:100%;overflow:hidden}
+.hero-kpis .kpi.hero-main{grid-row:1 / span 2;grid-column:1;display:flex;flex-direction:column;justify-content:center}.hero-kpis .kpi.hero-main .v{font-size:25px;line-height:1.08}.hero-kpis .kpi:not(.hero-main) .v{font-size:18px}.hero-kpis .kpi .x{font-size:10.5px}.hero-kpis .kpi:nth-child(2){grid-column:2;grid-row:1}.hero-kpis .kpi:nth-child(3){grid-column:3;grid-row:1}.hero-kpis .kpi:nth-child(4){grid-column:2 / span 2;grid-row:2}
+.hero-decision{border-radius:22px;padding:18px;overflow:hidden}
 .hero-decision #home-dbrief{max-height:520px;overflow:auto;padding-right:4px}
 .market-strip{margin-bottom:16px;padding:2px 0 4px}
 .market-strip .icard{min-width:170px;border-radius:15px;background:linear-gradient(180deg,var(--panel),var(--bg2))}
@@ -272,7 +272,7 @@ details summary::before{content:"▸";transition:transform .18s;color:var(--mt)}
 .home-wide-panel{min-height:280px}.home-rank-panel .tbl-scroll{max-height:620px}.home-chart-panel #home-chart{min-height:170px}
 .home-side-stack .panel{padding:15px}.home-side-stack .row{padding:10px 8px}.home-side-stack .panel h2{font-size:13px}
 .home-bottom-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.home-bottom-grid .panel{min-height:260px}
-@media(max-width:1180px){.home-hero,.home-bento{grid-template-columns:1fr}.home-side-stack{position:static}.hero-kpis{grid-template-columns:1fr 1fr!important}.hero-kpis .kpi.hero-main{grid-row:auto;grid-column:1 / -1}.home-bottom-grid{grid-template-columns:1fr}}
+@media(max-width:1180px){.home-hero,.home-bento{grid-template-columns:1fr}.home-side-stack{position:static}.hero-kpis{grid-template-columns:1fr 1fr!important;grid-template-rows:auto!important}.hero-kpis .kpi.hero-main{grid-row:auto;grid-column:1 / -1}.hero-kpis .kpi:nth-child(n){grid-column:auto;grid-row:auto}.home-bottom-grid{grid-template-columns:1fr}}
 
 /* 거래 ledger HTML 동기화 — PC/모바일 공통 */
 .trade-ledger-note{font-size:10.5px;color:var(--mt);margin:4px 0 8px;line-height:1.45}
