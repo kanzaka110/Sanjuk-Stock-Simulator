@@ -193,6 +193,11 @@ def api_toss_paper_ledger():
     return JSONResponse(dd.toss_paper_ledger_data())
 
 
+@app.get("/api/toss/paper-performance")
+def api_toss_paper_performance():
+    return JSONResponse(dd.toss_paper_performance_data())
+
+
 @app.get("/api/recommendations/timeline")
 def api_timeline(
     range: str = "today",

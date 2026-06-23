@@ -43,6 +43,8 @@ ALLOWED_TOSS_FILES = {
     "core/toss_paper_telegram_send.py",
     "tests/test_toss_paper_telegram_send.py",
     "scripts/send_toss_paper_preview_test.py",
+    "core/toss_paper_performance.py",
+    "tests/test_toss_paper_performance.py",
 }
 
 

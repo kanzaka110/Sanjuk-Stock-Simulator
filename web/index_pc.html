@@ -1239,7 +1239,34 @@ async function ldToss(){
       <div style="margin-bottom:8px">${chips}</div>
       <div class="tbl-scroll" style="max-height:260px"><table class="tbl"><thead><tr><th>시각</th><th>방향</th><th>종목</th><th>금액</th><th>상태</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
   }
-  box.innerHTML+=autoHtml+ptHtml+dcHtml+ccHtml+plHtml;
+  // paper 성과 채점
+  const pp=await J("/api/toss/paper-performance");
+  let ppHtml="";
+  if(pp&&pp.summary){
+    const s=pp.summary;
+    const wrColor=s.evaluated_count>0?(s.win_rate>=50?"var(--up)":"var(--dn)"):"var(--mt)";
+    const pnlColor=s.avg_pnl_pct>0?"var(--up)":s.avg_pnl_pct<0?"var(--dn)":"var(--mt)";
+    const recentRows=(pp.recent||[]).slice(0,8).map(r=>{
+      const oc=r.outcome;const ocColor=oc==="win"?"var(--up)":oc==="loss"?"var(--dn)":"var(--mt)";
+      const pnl=r.unrealized_pnl_pct!=null?`${r.unrealized_pnl_pct>0?"+":""}${r.unrealized_pnl_pct.toFixed(2)}%`:"—";
+      const pnlC=r.unrealized_pnl_pct>0?"up":r.unrealized_pnl_pct<0?"dn":"";
+      return`<tr><td class="nm">${E(r.symbol)}</td><td><span class="${r.side==="buy"?"up":"dn"}" style="font-weight:700">${E(r.side)}</span></td><td style="font-weight:700;color:${ocColor}">${E(oc)}</td><td>₩${F(Math.round(r.entry_price||0))}</td><td>${r.current_price!=null?`₩${F(Math.round(r.current_price))}`:"—"}</td><td class="${pnlC}">${pnl}</td><td style="font-size:10px;color:var(--mt)">${E(r.data_source||"—")}</td></tr>`;
+    }).join("");
+    ppHtml=`<div class="panel" style="margin-top:14px"><div class="ph"><h2>Paper 성과</h2><span class="sub">Paper 성과 · 실제 주문 아님 · 실주문 비활성 · 기존 포트폴리오 미합산</span></div>
+      <div class="kpis" style="grid-template-columns:repeat(6,1fr);margin-bottom:12px">
+        <div class="kpi"><div class="k">진행 중</div><div class="v" style="font-size:18px">${s.open}</div></div>
+        <div class="kpi"><div class="k">Win</div><div class="v" style="font-size:18px;color:var(--up)">${s.wins}</div></div>
+        <div class="kpi"><div class="k">Loss</div><div class="v" style="font-size:18px;color:var(--dn)">${s.losses}</div></div>
+        <div class="kpi"><div class="k">평가 건수</div><div class="v" style="font-size:18px">${s.evaluated_count}</div><div class="x mt">분모: win+loss</div></div>
+        <div class="kpi"><div class="k">승률</div><div class="v" style="font-size:18px;color:${wrColor}">${s.evaluated_count>0?s.win_rate+"%" :"—"}</div></div>
+        <div class="kpi"><div class="k">평균 손익</div><div class="v" style="font-size:18px;color:${pnlColor}">${s.evaluated_count>0?(s.avg_pnl_pct>0?"+":"")+s.avg_pnl_pct+"%":"—"}</div></div>
+      </div>
+      <div style="margin-bottom:8px;font-size:11px;color:var(--mt)">만료 ${s.expired} · 데이터오류 ${s.data_error} · 차단 ${s.blocked} · 취소 ${s.cancelled}</div>
+      ${recentRows?`<div class="tbl-scroll" style="max-height:260px"><table class="tbl"><thead><tr><th>종목</th><th>방향</th><th>결과</th><th>진입가</th><th>현재가</th><th>손익</th><th>출처</th></tr></thead><tbody>${recentRows}</tbody></table></div>`:'<div class="emp">평가 데이터 없음</div>'}
+      <div style="margin-top:8px;font-size:10px;color:var(--mt)">평가시각: ${E(pp.evaluated_at||"—")} · ${E(pp._note||"")}</div>
+    </div>`;
+  }
+  box.innerHTML+=autoHtml+ptHtml+dcHtml+ccHtml+plHtml+ppHtml;
 }
 
 /* ════ INIT ════ */

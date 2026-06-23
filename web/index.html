@@ -2878,6 +2878,30 @@ async function ldToss(){
     const rows=(pl.recent||[]).slice(0,5).map(r=>`<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--ln);font-size:11px"><span><span class="${r.side==="buy"?"up":"dn"}" style="font-weight:700">${E(r.side)}</span> ${E(r.symbol)}</span><span style="font-weight:600">${E(r.status)}</span></div>`).join("");
     box.innerHTML+=`<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--ln)"><div style="font-size:12px;font-weight:700;margin-bottom:6px">Paper 승인 이력 <span style="font-size:10px;color:var(--mt);font-weight:400">${pl.total}건 · 실제 주문 아님</span></div>${rows}</div>`;
   }
+  // paper 성과
+  const pp=await J("/api/toss/paper-performance");
+  if(pp&&pp.summary){
+    const s=pp.summary;
+    const wrColor=s.evaluated_count>0?(s.win_rate>=50?"var(--up)":"var(--dn)"):"var(--mt)";
+    const pnlColor=s.avg_pnl_pct>0?"var(--up)":s.avg_pnl_pct<0?"var(--dn)":"var(--mt)";
+    const recentRows=(pp.recent||[]).slice(0,5).map(r=>{
+      const oc=r.outcome;const ocColor=oc==="win"?"var(--up)":oc==="loss"?"var(--dn)":"var(--mt)";
+      const pnl=r.unrealized_pnl_pct!=null?`${r.unrealized_pnl_pct>0?"+":""}${r.unrealized_pnl_pct.toFixed(2)}%`:"—";
+      const pnlC=r.unrealized_pnl_pct>0?"up":r.unrealized_pnl_pct<0?"dn":"";
+      return`<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--ln);font-size:11px"><span><span class="${r.side==="buy"?"up":"dn"}" style="font-weight:700">${E(r.side)}</span> ${E(r.symbol)} <span style="color:${ocColor}">${E(oc)}</span></span><span class="${pnlC}">${pnl}</span></div>`;
+    }).join("");
+    box.innerHTML+=`<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--ln)">
+      <div style="font-size:12px;font-weight:700;margin-bottom:6px">Paper 성과 <span style="font-size:10px;color:var(--mt);font-weight:400">실제 주문 아님 · 실주문 비활성</span></div>
+      <div style="display:flex;gap:6px;margin-bottom:8px">
+        <div style="flex:1;background:var(--sf2);border-radius:8px;padding:6px;text-align:center"><div style="font-size:9px;color:var(--mt)">진행 중</div><div style="font-size:13px;font-weight:800">${s.open}</div></div>
+        <div style="flex:1;background:var(--sf2);border-radius:8px;padding:6px;text-align:center"><div style="font-size:9px;color:var(--mt)">W/L</div><div style="font-size:13px;font-weight:800"><span style="color:var(--up)">${s.wins}</span>/<span style="color:var(--dn)">${s.losses}</span></div></div>
+        <div style="flex:1;background:var(--sf2);border-radius:8px;padding:6px;text-align:center"><div style="font-size:9px;color:var(--mt)">승률</div><div style="font-size:13px;font-weight:800;color:${wrColor}">${s.evaluated_count>0?s.win_rate+"%":"—"}</div></div>
+        <div style="flex:1;background:var(--sf2);border-radius:8px;padding:6px;text-align:center"><div style="font-size:9px;color:var(--mt)">평균손익</div><div style="font-size:13px;font-weight:800;color:${pnlColor}">${s.evaluated_count>0?(s.avg_pnl_pct>0?"+":"")+s.avg_pnl_pct+"%":"—"}</div></div>
+      </div>
+      ${recentRows}
+      <div style="font-size:9.5px;color:var(--mt);margin-top:4px">기존 포트폴리오 미합산 · 차단 ${s.blocked} · 취소 ${s.cancelled}</div>
+    </div>`;
+  }
 }
 
 /* ═══ INIT ═══ */

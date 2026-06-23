@@ -1847,3 +1847,11 @@ def toss_paper_ledger_data(limit: int = 50) -> dict:
     """Toss paper ledger 조회 (dashboard용)."""
     from core.toss_paper_ledger import paper_ledger_summary
     return paper_ledger_summary()
+
+
+def toss_paper_performance_data() -> dict:
+    """Toss paper 성과 요약 (120초 캐시). 실제 주문 0건. 기존 포트폴리오 미합산."""
+    def _fetch():
+        from core.toss_paper_performance import get_paper_performance_summary
+        return get_paper_performance_summary()
+    return _cached("toss_paper_performance", 120, _fetch)
