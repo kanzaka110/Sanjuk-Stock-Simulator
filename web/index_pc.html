@@ -260,19 +260,26 @@ details summary::before{content:"▸";transition:transform .18s;color:var(--mt)}
 .portfolio-hero .brief{background:transparent;border:0;padding:0;margin-bottom:10px}
 .portfolio-hero .brief .ai{width:30px;height:30px;border-radius:10px;background:rgba(59,130,246,.18);font-size:14px}
 .portfolio-hero .brief .txt{font-size:16px;line-height:1.35;font-weight:800;max-width:920px}
-.hero-kpis{display:grid;grid-template-columns:1.45fr 1fr 1fr;grid-template-rows:repeat(2,minmax(96px,auto));gap:8px!important;margin-bottom:0!important}
+.hero-kpis{display:grid;grid-template-columns:1.2fr .85fr .85fr 1.1fr;grid-template-rows:minmax(88px,auto);gap:8px!important;margin-bottom:0!important}
 .hero-kpis .kpi{background:rgba(8,13,24,.72);border-color:rgba(255,255,255,.07);border-radius:12px;padding:10px 12px;box-shadow:none}
-.hero-kpis .kpi.hero-main{grid-row:1 / span 2;grid-column:1;display:flex;flex-direction:column;justify-content:center}.hero-kpis .kpi.hero-main .v{font-size:25px;line-height:1.08}.hero-kpis .kpi:not(.hero-main) .v{font-size:18px}.hero-kpis .kpi .x{font-size:10.5px}.hero-kpis .kpi:nth-child(2){grid-column:2;grid-row:1}.hero-kpis .kpi:nth-child(3){grid-column:3;grid-row:1}.hero-kpis .kpi:nth-child(4){grid-column:2 / span 2;grid-row:2}
+.hero-kpis .kpi.hero-main{grid-row:1;grid-column:1;display:flex;flex-direction:column;justify-content:center}.hero-kpis .kpi.hero-main .v{font-size:24px;line-height:1.08}.hero-kpis .kpi.hero-main .x{font-size:12.5px;font-weight:700}.hero-kpis .kpi:not(.hero-main) .v{font-size:17px}.hero-kpis .kpi .x{font-size:10.5px}.hero-kpis .kpi:nth-child(2){grid-column:2;grid-row:1}.hero-kpis .kpi:nth-child(3){grid-column:3;grid-row:1}.hero-kpis .kpi:nth-child(4){grid-column:4;grid-row:1}
+.hero-today-trades{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
+.hero-today-trades .panel{padding:10px 12px;min-height:0;background:rgba(8,13,24,.72);border-color:rgba(255,255,255,.07);border-radius:12px}
+.hero-today-trades .panel h3{font-size:11.5px;font-weight:800;margin:0 0 7px;color:var(--fg2)}
+.hero-today-trades .trade-ledger-row{padding:7px 9px}
+.hero-today-trades .tl-name{font-size:12px}.hero-today-trades .tl-meta{font-size:9.5px}.hero-today-trades .tl-value{font-size:11px}
+.hero-today-trades .act-mini{background:var(--sf2);border:1px solid var(--ln);border-radius:8px;padding:7px 9px;font-size:12px;line-height:1.45;cursor:pointer}
+.hero-today-trades .act-mini .side{font-weight:800}.hero-today-trades .act-mini .meta{font-size:10px;color:var(--mt);margin-top:2px}
 .hero-decision{border-radius:22px;padding:18px;overflow:hidden}
 .hero-decision #home-dbrief{max-height:520px;overflow:auto;padding-right:4px}
-.market-strip{margin-bottom:16px;padding:2px 0 4px}
-.market-strip .icard{min-width:170px;border-radius:15px;background:linear-gradient(180deg,var(--panel),var(--bg2))}
+.market-strip{margin-bottom:16px;padding:2px 0 4px;flex-wrap:wrap}
+.market-strip .icard{min-width:140px;flex:1 1 140px;border-radius:15px;background:linear-gradient(180deg,var(--panel),var(--bg2))}
 .home-bento{display:grid;grid-template-columns:minmax(0,1.42fr) minmax(360px,.78fr);gap:16px;align-items:start}
 .home-main-stack,.home-side-stack{display:flex;flex-direction:column;gap:16px}.home-side-stack{position:sticky;top:70px}
 .home-wide-panel{min-height:280px}.home-rank-panel .tbl-scroll{max-height:620px}.home-chart-panel #home-chart{min-height:170px}
 .home-side-stack .panel{padding:15px}.home-side-stack .row{padding:10px 8px}.home-side-stack .panel h2{font-size:13px}
 .home-bottom-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.home-bottom-grid .panel{min-height:260px}
-@media(max-width:1180px){.home-hero,.home-bento{grid-template-columns:1fr}.home-side-stack{position:static}.hero-kpis{grid-template-columns:1fr 1fr!important;grid-template-rows:auto!important}.hero-kpis .kpi.hero-main{grid-row:auto;grid-column:1 / -1}.hero-kpis .kpi:nth-child(n){grid-column:auto;grid-row:auto}.home-bottom-grid{grid-template-columns:1fr}}
+@media(max-width:1180px){.home-hero,.home-bento{grid-template-columns:1fr}.home-side-stack{position:static}.hero-kpis{grid-template-columns:1fr 1fr!important;grid-template-rows:auto!important}.hero-kpis .kpi.hero-main{grid-row:auto;grid-column:1 / -1}.hero-kpis .kpi:nth-child(n){grid-column:auto;grid-row:auto}.home-bottom-grid{grid-template-columns:1fr}.hero-today-trades{grid-template-columns:1fr}}
 
 /* 거래 ledger HTML 동기화 — PC/모바일 공통 */
 .trade-ledger-note{font-size:10.5px;color:var(--mt);margin:4px 0 8px;line-height:1.45}
@@ -316,11 +323,13 @@ details summary::before{content:"▸";transition:transform .18s;color:var(--mt)}
       <div class="brief"><div class="ai">✦</div><div class="txt" id="brief">오늘의 브리핑을 불러오는 중…</div></div>
       <div class="kpis hero-kpis" id="home-kpis">
         <div class="kpi"><div class="k">전체 평가액</div><div class="v skl">&nbsp;</div></div>
-        <div class="kpi"><div class="k">투자 원금</div><div class="v skl">&nbsp;</div></div>
-        <div class="kpi"><div class="k">원금 대비</div><div class="v skl">&nbsp;</div></div>
-        <div class="kpi"><div class="k">총 손익률</div><div class="v skl">&nbsp;</div></div>
-        <div class="kpi"><div class="k">오늘 가중 수익률</div><div class="v skl">&nbsp;</div></div>
+        <div class="kpi"><div class="k">평가 손익</div><div class="v skl">&nbsp;</div></div>
+        <div class="kpi"><div class="k">오늘 수익률</div><div class="v skl">&nbsp;</div></div>
         <div class="kpi"><div class="k">현금 비중</div><div class="v skl">&nbsp;</div></div>
+      </div>
+      <div class="hero-today-trades">
+        <div class="panel"><h3>📋 오늘 거래 지시</h3><div id="home-actions"><div class="emp">불러오는 중…</div></div></div>
+        <div class="panel"><h3>✅ 실제 체결 내역</h3><div id="home-exec-trades"><div class="emp">불러오는 중…</div></div></div>
       </div>
     </div>
     <div class="panel hero-decision" id="home-dbrief-panel">
@@ -575,13 +584,12 @@ async function ldPF(){
   const principal=d.total_principal ?? (d.accounts||[]).reduce((sum,a)=>sum+(a.principal ?? a.cost_total ?? 0),0);
   const principalPct=d.total_principal_pnl_pct ?? d.total_pnl_pct;
   const maxW=Math.max(...items.map(x=>x.weight||0),0);
-  // home KPI: 전체 평가액 / 총 손익률 / 오늘 가중 수익률 / 현금 비중 (analytics 실패해도 채워짐)
+  // home KPI: 전체 평가액 / 평가 손익 / 오늘 수익률 / 현금 비중
+  const pnlAmt=d.total_eval&&principal?(d.total_eval-principal):0;
   setKPI("home-kpis",[
-    ["전체 평가액",`₩${F(d.total_eval)}`,"",""],
-    ["투자 원금",`₩${F(principal)}`,"입금 원금 기준",""],
-    ["원금 대비",cs(principalPct),"입금 원금 기준",prc(principalPct)],
-    ["총 손익률",cs(d.total_pnl_pct),"",cc(d.total_pnl_pct)],
-    ["오늘 가중 수익률",cs(todayPct),`${todayChg>=0?"+":""}${F(Math.round(todayChg))}₩`,cc(todayPct)],
+    ["전체 평가액",`₩${F(d.total_eval)}`,`원금 대비 ${cs(principalPct)}<br>투자 원금 ₩${F(principal)}`,prc(principalPct)],
+    ["평가 손익",`${pnlAmt>=0?"+":""}₩${F(Math.abs(Math.round(pnlAmt)))}`,`총 손익률 ${cs(d.total_pnl_pct)}`,cc(d.total_pnl_pct)],
+    ["오늘 수익률",cs(todayPct),`${todayChg>=0?"+":""}${F(Math.round(todayChg))}₩`,cc(todayPct)],
     ["현금 비중",`${d.cash_weight}%`,`₩${F(d.total_cash)}`,""],
   ]);
   window._kpiToday={pct:todayPct,amt:todayChg,maxW:maxW};
@@ -625,10 +633,10 @@ function rowHome(it){
   return`<tr onclick="openTk('${E(it.ticker)}')"><td><span class="nm">${E(it.name)}</span> <span class="tk">${E(it.ticker)}</span>${acct}</td><td>₩${F(it.eval_krw)}</td><td class="${cc(it.pnl_pct)}">${cs(it.pnl_pct)}</td><td class="${cc(pnlK)}">${pnlK>=0?"+":"-"}${F(Math.round(Math.abs(pnlK)))}</td><td>${it.weight||0}%</td><td class="${cc(dayC)}">${dayC>=0?"+":""}${(Math.round(dayC*100)/100)}%p</td><td>${st}</td></tr>`;
 }
 function setKPI(id,arr){
-  if(id==="home-kpis"&&arr.length>=6){
-    const [total,principal,principalRet,totalRet,today,cash]=arr;
+  if(id==="home-kpis"&&arr.length>=4){
+    const [total,pnl,today,cash]=arr;
     const card=([k,v,x,c])=>`<div class="kpi clickable" onclick="metricDetail('${E(k)}','${E(String(v))}','${E(String(x||""))}')"><div class="k">${k}</div><div class="v ${c||""}">${v}</div>${x?`<div class="x ${c||"mt"}">${x}</div>`:""}</div>`;
-    document.getElementById(id).innerHTML=`<div class="kpi hero-main clickable" onclick="metricDetail('${E(total[0])}','${E(String(total[1]))}','${E(String(principal[1]))}')"><div class="k">총 평가액</div><div class="v ${total[3]||""}">${total[1]}</div><div class="x ${principalRet[3]||""}">원금 대비 ${principalRet[1]}</div><div class="x ${totalRet[3]||""}">평가손익 ${totalRet[1]}</div><div class="x mt">투자 원금 ${principal[1]}</div></div>`+[today,cash,totalRet].map(card).join("");
+    document.getElementById(id).innerHTML=`<div class="kpi hero-main clickable" onclick="metricDetail('${E(total[0])}','${E(String(total[1]))}','')"><div class="k">총 평가액</div><div class="v">${total[1]}</div><div class="x ${total[3]||"mt"}">${total[2]}</div></div>`+[pnl,today,cash].map(card).join("");
     return;
   }
   document.getElementById(id).innerHTML=arr.map(([k,v,x,c])=>`<div class="kpi clickable" onclick="metricDetail('${E(k)}','${E(String(v))}','${E(String(x||""))}')"><div class="k">${k}</div><div class="v ${c||""}">${v}</div>${x?`<div class="x ${c||"mt"}">${x}</div>`:""}</div>`).join("")
@@ -734,6 +742,19 @@ async function ldAct(){
   document.getElementById("act-exec").innerHTML=(tradeExecHtml+recExecHtml)||'<div class="emp">실행 액션 없음</div>';
   document.getElementById("act-cond").innerHTML=cond.length?cond.map(actCard).join(""):'<div class="emp">조건부 매수 없음</div>';
   document.getElementById("act-mgmt").innerHTML=rest.length?rest.map(actCard).join(""):'<div class="emp">해당 없음</div>';
+  // home: 오늘 거래 지시 + 실제 체결
+  const actEl=document.getElementById("home-actions");
+  const execEl=document.getElementById("home-exec-trades");
+  if(actEl){
+    const allActions=[...exec,...cond,...gr.mgmt].slice(0,5);
+    actEl.innerHTML=allActions.length?allActions.map(r=>{
+      const c=cls(r.action_type,r.signal),acct=r.account_type?`[${E(r.account_type)}] `:"";
+      return`<div class="act-mini" onclick="openTk('${E(r.ticker)}')"><span class="side ${c==="sell"?"dn":"up"}">${E(LB(r.action_type))}</span> ${acct}${E(r.name)}${r.entry_price?` · ${F(r.entry_price)}`:""}<div class="meta">${r.reasoning?(E(r.reasoning).slice(0,60)+"…"):""}</div></div>`;
+    }).join(""):'<div class="emp">오늘 거래 지시 없음</div>';
+  }
+  if(execEl){
+    execEl.innerHTML=todayTrades.length?todayTrades.map(tradeCard).join(""):'<div class="emp">오늘 체결 내역 없음</div>';
+  }
   // timeline (home)
   document.getElementById("home-tl").innerHTML=items.length?items.slice(0,7).map(r=>{
     const c=cls(r.action_type,r.signal);return`<div class="row" onclick="openTk('${E(r.ticker)}')"><div>${tag(c)}</div><div class="nm"><div class="t">${E(r.name)}</div><div class="s">${E((r.created_at||"").slice(11,16))} · ${E(LB(r.action_type))}</div></div>${r.confidence?`<div class="px"><div class="ch mt">${r.confidence}%</div></div>`:""}</div>`;
