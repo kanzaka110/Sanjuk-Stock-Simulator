@@ -207,3 +207,161 @@ class TestNoOrderFunctions:
             src = (ROOT / f).read_text(encoding="utf-8")
             for fn in ("place_order", "submit_order", "execute_order"):
                 assert fn not in src, f"'{fn}' in {f}"
+
+
+# ═══ 정상 샘플 생성 (scripts/send_toss_paper_preview_test.py) ═══
+
+class TestNormalSampleGeneration:
+    """스크립트의 _build_candidates / _validate_candidate 로직 검증."""
+
+    def _policy_no_anomaly(self) -> dict:
+        from core.toss_paper_policy import compute_toss_paper_policy
+        # consensus_anomaly 없는 policy 반환
+        return {
+            "mode": "paper_only", "live_order_allowed": False,
+            "sample_status": "insufficient",
+            "base_budget_krw": 100_000, "max_budget_krw": 300_000,
+            "min_budget_krw": 0, "sizing_multiplier": 0.3,
+            "evaluated_count": 0, "win_rate": 0.0, "avg_pnl_pct": 0.0,
+            "consensus_anomaly_count": 0,
+            "consensus_anomaly_symbols": [],
+            "data_error_count": 0,
+            "reason": "표본부족", "blocks": [], "warnings": [],
+            "_note": "test",
+        }
+
+    def _policy_with_anomaly(self, symbols: list[str]) -> dict:
+        p = self._policy_no_anomaly()
+        p["consensus_anomaly_count"] = len(symbols)
+        p["consensus_anomaly_symbols"] = symbols
+        return p
+
+    def test_consensus_anomaly_ticker_excluded(self):
+        """consensus_anomaly 종목은 validate에서 제외된다."""
+        import sys; sys.path.insert(0, str(ROOT / "scripts"))
+        from send_toss_paper_preview_test import _validate_candidate
+        result = _validate_candidate("005930.KS", 72000.0, {"005930.KS"})
+        assert result["ok"] is False
+        assert "consensus_anomaly" in result["reason"]
+
+    def test_no_accepted_source_excluded(self):
+        """accepted source 없으면 후보 제외."""
+        import sys; sys.path.insert(0, str(ROOT / "scripts"))
+        from send_toss_paper_preview_test import _validate_candidate
+        with patch("core.toss_paper_performance._get_quote_for_paper",
+                   return_value={"price": None, "source": "unavailable",
+                                 "accepted_price_source": None, "source_chain": []}):
+            result = _validate_candidate("TEST.KS", 70000.0, set())
+        assert result["ok"] is False
+
+    def test_normal_price_accepted(self):
+        """정상 가격 source → ok=True."""
+        import sys; sys.path.insert(0, str(ROOT / "scripts"))
+        from send_toss_paper_preview_test import _validate_candidate
+        with patch("core.toss_paper_performance._get_quote_for_paper",
+                   return_value={"price": 70500.0, "source": "KIS",
+                                 "accepted_price_source": "KIS", "source_chain": []}):
+            result = _validate_candidate("A.KS", 70000.0, set())
+        assert result["ok"] is True
+        assert result["price"] == 70500.0
+        assert result["source"] == "KIS"
+
+    def test_build_candidates_excludes_anomaly(self):
+        """_build_candidates: consensus_anomaly 종목은 결과에 없다."""
+        import sys; sys.path.insert(0, str(ROOT / "scripts"))
+        from send_toss_paper_preview_test import _build_candidates, _CANDIDATE_POOL
+        policy = self._policy_with_anomaly(["005930.KS"])
+
+        # 모든 후보 가격을 정상으로 mock
+        with patch("core.toss_paper_performance._get_quote_for_paper",
+                   return_value={"price": 30000.0, "source": "KIS",
+                                 "accepted_price_source": "KIS", "source_chain": []}):
+            candidates, rejected = _build_candidates(policy, max_n=5)
+
+        symbols = [c["symbol"] for c in candidates]
+        assert "005930.KS" not in symbols
+
+    def test_build_candidates_max_budget_respected(self):
+        """후보 estimated_amount_krw <= max_budget_krw."""
+        import sys; sys.path.insert(0, str(ROOT / "scripts"))
+        from send_toss_paper_preview_test import _build_candidates
+        policy = self._policy_no_anomaly()  # max 300,000
+
+        with patch("core.toss_paper_performance._get_quote_for_paper",
+                   return_value={"price": 30000.0, "source": "KIS",
+                                 "accepted_price_source": "KIS", "source_chain": []}):
+            candidates, _ = _build_candidates(policy, max_n=5)
+
+        for c in candidates:
+            assert c["estimated_amount_krw"] <= 300_000, \
+                f"{c['symbol']}: {c['estimated_amount_krw']} > 300,000"
+
+    def test_build_candidates_quantity_positive(self):
+        """후보 quantity > 0."""
+        import sys; sys.path.insert(0, str(ROOT / "scripts"))
+        from send_toss_paper_preview_test import _build_candidates
+        policy = self._policy_no_anomaly()
+
+        with patch("core.toss_paper_performance._get_quote_for_paper",
+                   return_value={"price": 30000.0, "source": "KIS",
+                                 "accepted_price_source": "KIS", "source_chain": []}):
+            candidates, _ = _build_candidates(policy, max_n=3)
+
+        for c in candidates:
+            assert c["quantity"] > 0
+
+    def test_script_message_contains_sample_disclaimer(self):
+        """생성된 후보 주문표 메시지에 필수 문구가 포함된다."""
+        from core.toss_order_preview import build_toss_paper_order_preview
+
+        cand = {
+            "symbol": "069500.KS", "side": "buy", "quantity": 10,
+            "limit_price": 28000, "estimated_amount_krw": 280000,
+            "confidence": 0.0, "reason": "[TEST] Paper 운영 샘플",
+            "quote_age_sec": 0, "_is_test_sample": True,
+        }
+        cc = {"blocks": [], "warnings": [], "toss_readiness": "paper_only",
+              "live_order_allowed": False, "score_adjustments": []}
+        ctx = _ctx()
+        text = build_toss_paper_order_preview([cand], ctx, [cc])
+
+        assert "실제 주문 아님" in text
+        assert "비활성" in text
+
+    def test_script_header_contains_required_phrases(self):
+        """스크립트 header 문구 — 표본부족, 실제 주문 아님, 실주문: 비활성."""
+        header = (
+            "[TEST] Toss Paper 운영 샘플\n"
+            "실제 주문 아님\n"
+            "실주문: 비활성\n"
+            "표본부족 — 최대 ₩300,000 paper 검증\n\n"
+        )
+        assert "표본부족" in header
+        assert "실제 주문 아님" in header
+        assert "실주문: 비활성" in header
+
+    def test_script_no_forbidden_cta(self):
+        """스크립트 소스에 금지 CTA 없음."""
+        src = (ROOT / "scripts" / "send_toss_paper_preview_test.py").read_text(encoding="utf-8")
+        for cta in ["주문 실행", "매수하기", "매도하기", "자동매매 시작", "자동거래 시작", "실주문: 활성"]:
+            assert cta not in src
+
+    def test_script_no_order_functions(self):
+        """스크립트에 금지 함수명 없음."""
+        src = (ROOT / "scripts" / "send_toss_paper_preview_test.py").read_text(encoding="utf-8")
+        for fn in ("place_order", "submit_order", "execute_order"):
+            assert fn not in src
+
+    def test_is_test_sample_flag_set(self):
+        """_build_candidates 결과 후보에 _is_test_sample=True."""
+        import sys; sys.path.insert(0, str(ROOT / "scripts"))
+        from send_toss_paper_preview_test import _build_candidates
+        policy = self._policy_no_anomaly()
+
+        with patch("core.toss_paper_performance._get_quote_for_paper",
+                   return_value={"price": 30000.0, "source": "KIS",
+                                 "accepted_price_source": "KIS", "source_chain": []}):
+            candidates, _ = _build_candidates(policy, max_n=2)
+
+        for c in candidates:
+            assert c.get("_is_test_sample") is True
