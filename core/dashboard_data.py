@@ -1656,3 +1656,87 @@ def ticker_chart_data(ticker: str, range_: str, interval: str) -> dict:
         base["error"] = "no data points"
 
     return base
+
+
+# ─── /api/toss/account-summary (읽기 전용, 기존 포트폴리오 미합산) ──
+def _fetch_toss_account_summary_raw() -> dict:
+    """Toss AI 실험 계좌 요약. 기존 포트폴리오에 절대 합산하지 않음."""
+    from core import toss_client as tc
+
+    now_str = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
+    base = {
+        "enabled": tc.is_configured(),
+        "label": "Toss AI 실험 계좌",
+        "separate_from_portfolio": True,
+        "included_in_total_portfolio": False,
+        "trading_enabled": False,
+        "automation_status": "disabled",
+        "account_count": 0,
+        "accounts": [],
+        "holdings_count": 0,
+        "holdings_items": [],
+        "market_value": {"krw": 0, "usd": None},
+        "cash": None,
+        "exchange_rate": None,
+        "warnings": [
+            "기존 삼성증권/수동 포트폴리오에 합산하지 않음",
+            "주문 기능 없음",
+            "AI 자동거래 실험 준비용 read-only 계좌",
+        ],
+        "updated_at": now_str,
+        "error": "",
+    }
+
+    if not tc.is_configured():
+        base["error"] = "Toss API 미설정"
+        return base
+
+    # 계좌 목록
+    accounts = tc.get_accounts()
+    base["account_count"] = len(accounts)
+    base["accounts"] = [
+        {
+            "account_seq": a.get("accountSeq"),
+            "account_type": a.get("accountType", ""),
+            "account_no_masked": "[REDACTED]",
+        }
+        for a in accounts
+    ]
+
+    # 보유종목 (첫 번째 계좌)
+    if accounts:
+        seq = str(accounts[0].get("accountSeq", ""))
+        holdings = tc.get_holdings(seq)
+        items = holdings.get("items", [])
+        base["holdings_count"] = len(items)
+        base["holdings_items"] = tc.sanitize_dict(items)
+
+        mv = holdings.get("marketValue", {})
+        mv_amt = mv.get("amount", {}) if isinstance(mv, dict) else {}
+        krw_val = mv_amt.get("krw", "0") if isinstance(mv_amt, dict) else "0"
+        usd_val = mv_amt.get("usd") if isinstance(mv_amt, dict) else None
+        try:
+            base["market_value"]["krw"] = float(krw_val) if krw_val else 0
+        except (ValueError, TypeError):
+            base["market_value"]["krw"] = 0
+        base["market_value"]["usd"] = float(usd_val) if usd_val else None
+
+    # 환율
+    fx = tc.get_exchange_rate("USD", "KRW")
+    if fx:
+        try:
+            base["exchange_rate"] = {
+                "base": fx.get("baseCurrency", "USD"),
+                "quote": fx.get("quoteCurrency", "KRW"),
+                "rate": float(fx.get("rate", 0)),
+                "source": "Toss",
+            }
+        except (ValueError, TypeError):
+            pass
+
+    return base
+
+
+def toss_account_summary() -> dict:
+    """Toss AI 실험 계좌 요약 (60초 캐시). 기존 포트폴리오 미합산."""
+    return _cached("toss_account_summary", 60, _fetch_toss_account_summary_raw)

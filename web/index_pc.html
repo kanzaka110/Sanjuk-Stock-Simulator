@@ -370,6 +370,10 @@ details summary::before{content:"▸";transition:transform .18s;color:var(--mt)}
       <div class="panel"><div class="ph"><h2>포트폴리오 비중</h2></div><div id="home-alloc"></div></div>
       <div class="panel"><div class="ph"><h2>리스크 보드</h2></div><div id="home-risk"></div></div>
       <div class="panel"><div class="ph"><h2>관련 뉴스</h2></div><div id="home-news"></div></div>
+      <div class="panel" id="toss-exp-panel" style="display:none;border:1px dashed var(--border)">
+        <div class="ph"><h2>🧪 Toss AI 실험 계좌</h2><span class="sub">기존 포트폴리오 미합산 · 주문 기능 없음 · AI 자동거래 준비용</span></div>
+        <div id="toss-exp"></div>
+      </div>
     </aside>
   </section>
 </div>
@@ -1145,8 +1149,40 @@ function openBrDetail(day){
   if(items.length&&items[0].ticker)openTk(items[0].ticker);
 }
 
+/* ════ TOSS AI 실험 계좌 (기존 포트폴리오 미합산) ════ */
+async function ldToss(){
+  const d=await J("/api/toss/account-summary");
+  const panel=document.getElementById("toss-exp-panel");
+  const box=document.getElementById("toss-exp");
+  if(!d||!d.enabled){if(panel)panel.style.display="none";return;}
+  if(panel)panel.style.display="";
+  const mv=d.market_value||{};const krw=mv.krw||0;
+  const hc=d.holdings_count||0;
+  const fx=d.exchange_rate;const fxTxt=fx?`USD/KRW ${F(fx.rate)}`:"—";
+  const warns=(d.warnings||[]).map(w=>`<div style="font-size:10.5px;color:var(--mt);line-height:1.5">⚠ ${E(w)}</div>`).join("");
+  const accts=(d.accounts||[]).map(a=>`<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:12px"><span style="font-weight:600">${E(a.account_type)}</span><span class="mt">seq ${a.account_seq}</span></div>`).join("");
+  let items="";
+  if(hc>0&&d.holdings_items){
+    items=(d.holdings_items||[]).map(it=>{
+      const nm=it.name||it.symbol||"—";
+      return`<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--border2);font-size:12px"><span style="font-weight:600">${E(nm)}</span><span>${it.quantity||0}주</span></div>`;
+    }).join("");
+  }
+  box.innerHTML=`
+    <div style="margin-bottom:10px">
+      <div style="font-size:20px;font-weight:900;letter-spacing:-.5px">₩${F(Math.round(krw))}</div>
+      <div style="font-size:11px;color:var(--mt);margin-top:2px">평가금액 · ${fxTxt}</div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
+      <div style="background:var(--bg2);border-radius:8px;padding:8px;text-align:center"><div style="font-size:10px;color:var(--mt)">보유종목</div><div style="font-size:15px;font-weight:800">${hc}</div></div>
+      <div style="background:var(--bg2);border-radius:8px;padding:8px;text-align:center"><div style="font-size:10px;color:var(--mt)">자동거래</div><div style="font-size:13px;font-weight:700;color:var(--mt)">비활성</div></div>
+    </div>
+    ${accts}${items?`<div style="margin-top:8px">${items}</div>`:""}
+    <div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border2)">${warns}</div>`;
+}
+
 /* ════ INIT ════ */
-async function init(){ldStatus();ldMkt();await Promise.allSettled([loadTrades(),ldPF()]);ldAct();ldPerf();ldNews();ldDecisionBrief();ldCalendar();ldAnalytics();ldWorkspace();ldBriefing();}
+async function init(){ldStatus();ldMkt();await Promise.allSettled([loadTrades(),ldPF()]);ldAct();ldPerf();ldNews();ldDecisionBrief();ldCalendar();ldAnalytics();ldWorkspace();ldBriefing();ldToss();}
 init();
 setInterval(()=>{ldMkt();loadTrades();ldAct();ldStatus();ldDecisionBrief();},30000);
 setInterval(()=>{ldPF();ldPerf();ldAnalytics();ldWorkspace();ldBriefing();},120000);

@@ -1017,6 +1017,10 @@ details[open] summary::before{transform:rotate(90deg)}
 <div class="c"><h3>총 평가</h3><div id="pf-sum"></div></div>
 <div class="c"><h3>자산 배분</h3><div id="pf-alloc"></div></div>
 <div id="pf-accts"></div>
+<div class="c" id="toss-exp-m-panel" style="display:none;border:1px dashed var(--ln);border-radius:12px;margin-top:12px">
+  <h3>🧪 Toss AI 실험 계좌 <span class="mt" style="font-size:10px;font-weight:400">기존 포트폴리오 미합산 · 주문 기능 없음</span></h3>
+  <div id="toss-exp-m"><div class="emp">확인 중…</div></div>
+</div>
 <div class="c"><h3>최근 거래 내역</h3><div id="pf-trades"><div class="emp">거래 내역 불러오는 중…</div></div></div>
 <div class="c"><h3>수익률 랭킹</h3><div id="pf-rank"></div></div>
 </div>
@@ -2811,9 +2815,30 @@ function safeInterval(fn,ms){
   _intervals.push(setInterval(()=>{if(!_paused&&!document.hidden)fn()},ms));
 }
 
+/* ═══ TOSS AI 실험 계좌 (기존 포트폴리오 미합산) ═══ */
+async function ldToss(){
+  const d=await J("/api/toss/account-summary");
+  const panel=document.getElementById("toss-exp-m-panel");
+  const box=document.getElementById("toss-exp-m");
+  if(!d||!d.enabled){if(panel)panel.style.display="none";return}
+  if(panel)panel.style.display="";
+  const mv=d.market_value||{};const krw=mv.krw||0;const hc=d.holdings_count||0;
+  const fx=d.exchange_rate;const fxTxt=fx?`USD/KRW ${fx.rate.toLocaleString()}`:"—";
+  const warns=(d.warnings||[]).map(w=>`<div style="font-size:10px;color:var(--mt);line-height:1.5">⚠ ${E(w)}</div>`).join("");
+  box.innerHTML=`
+    <div style="font-size:18px;font-weight:900;letter-spacing:-.4px">₩${Math.round(krw).toLocaleString()}</div>
+    <div style="font-size:10.5px;color:var(--mt);margin:2px 0 8px">평가금액 · ${E(fxTxt)}</div>
+    <div style="display:flex;gap:8px;margin-bottom:8px">
+      <div style="flex:1;background:var(--sf2);border-radius:8px;padding:7px;text-align:center"><div style="font-size:9.5px;color:var(--mt)">보유종목</div><div style="font-size:14px;font-weight:800">${hc}</div></div>
+      <div style="flex:1;background:var(--sf2);border-radius:8px;padding:7px;text-align:center"><div style="font-size:9.5px;color:var(--mt)">자동거래</div><div style="font-size:12px;font-weight:700;color:var(--mt)">비활성</div></div>
+    </div>
+    ${hc===0?'<div class="emp" style="font-size:11px">현재 보유종목 없음</div>':""}
+    <div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--ln)">${warns}</div>`;
+}
+
 /* ═══ INIT ═══ */
 async function init(){
-  await Promise.allSettled([loadMkt(),loadTrades(),loadAct(),loadPF(),loadPerf(),loadNews(),loadTimeline(),loadSimList(),loadSignals(),loadDBrief(),loadCalendar(),loadAnalytics(),loadBriefing()]);
+  await Promise.allSettled([loadMkt(),loadTrades(),loadAct(),loadPF(),loadPerf(),loadNews(),loadTimeline(),loadSimList(),loadSignals(),loadDBrief(),loadCalendar(),loadAnalytics(),loadBriefing(),ldToss()]);
   markRefreshSuccess();
 }
 init();

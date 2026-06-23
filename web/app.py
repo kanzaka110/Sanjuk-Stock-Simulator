@@ -163,6 +163,11 @@ def api_decision_brief():
     return JSONResponse(dd.decision_brief())
 
 
+@app.get("/api/toss/account-summary")
+def api_toss_account_summary():
+    return JSONResponse(dd.toss_account_summary())
+
+
 @app.get("/api/recommendations/timeline")
 def api_timeline(
     range: str = "today",

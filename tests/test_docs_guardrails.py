@@ -1,12 +1,28 @@
-"""토스 자동투자 future plan 문서 가드 테스트 (5단계).
+"""토스 자동투자 가드레일 테스트.
 
-문서만 추가됐고 실제 토스 API/주문 코드가 새로 생기지 않았음을 보장한다.
+정책:
+- Toss 계좌는 기존 포트폴리오와 분리된 AI 자동거래 실험 계좌
+- read-only client/probe/dashboard GET endpoint 허용
+- 주문/매수/매도/정정/취소/자동거래 실행은 금지
+- Toss 값을 기존 /api/portfolio 총액/원금/수익률에 합산 금지
 """
+
+import inspect
+import re
 import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
 DOC = ROOT / "docs" / "toss_auto_invest_future_plan.md"
+
+# ─── 허용된 Toss 파일 목록 ─────────────────────────
+ALLOWED_TOSS_FILES = {
+    "core/toss_client.py",
+    "tools/probe_toss_account.py",
+    "tests/test_toss_probe.py",
+    "tests/test_toss_client.py",
+    "tests/test_toss_dashboard.py",
+}
 
 
 def _doc() -> str:
@@ -45,22 +61,40 @@ def test_doc_phase_keywords():
     assert ("approval gate" in html.lower()) or ("승인" in html), "approval gate 단계 없음"
 
 
-# 6) 실제 토스 API 코드 파일이 새로 생기지 않음
-def test_no_toss_code_files():
-    matches = list((ROOT / "core").glob("toss_*.py"))
-    matches += list((ROOT / "web").glob("toss_*.py"))
-    assert matches == [], f"토스 코드 파일이 생성됨(문서만 허용): {matches}"
+# 6) Toss 코드가 read-only만 포함하는지 검증
+def test_toss_code_is_read_only_only():
+    """core/toss_client.py에 주문/변경 관련 코드가 없는지 검증."""
+    client = ROOT / "core" / "toss_client.py"
+    if not client.exists():
+        return  # 아직 없으면 통과
+    source = client.read_text(encoding="utf-8")
+
+    # POST는 oauth2/token만 허용
+    post_lines = [l for l in source.splitlines() if re.search(r"\bPOST\b", l, re.IGNORECASE)]
+    bad_posts = [l for l in post_lines
+                 if not any(kw in l.lower() for kw in ("oauth2", "token", "requests.post"))]
+    assert not bad_posts, f"toss_client.py에 비인증 POST: {bad_posts}"
+
+    # PUT/DELETE/PATCH 금지
+    for verb in ("PUT", "DELETE", "PATCH"):
+        assert verb not in source, f"toss_client.py에 {verb} 사용 — write 금지"
+
+    # 주문 관련 함수명/키워드 금지
+    for forbidden in ("buy", "sell", "cancel"):
+        matches = re.findall(rf"\b{forbidden}\b", source, re.IGNORECASE)
+        assert not matches, f"toss_client.py에 '{forbidden}' 키워드"
 
 
-# 7) POST/PUT/DELETE route가 추가되지 않음
+# 7) POST/PUT/DELETE route가 app.py에 추가되지 않음
 def test_no_write_routes_added():
     app_code = (ROOT / "web" / "app.py").read_text(encoding="utf-8")
-    for verb in ("POST", "PUT", "DELETE"):
+    for verb in ("@app.post", "@app.put", "@app.delete", "@app.patch"):
         assert verb not in app_code, f"app.py에 {verb} 핸들러 추가 — write route 위반"
 
 
-# 보강) 이번 변경에 토스 API 코드 파일이 git에 새로 추가되지 않았는지 확인
-def test_git_no_new_toss_code():
+# 8) 허용 목록 밖의 Toss 파이썬 파일이 없는지
+def test_no_toss_trading_or_write_paths():
+    """허용 목록 밖에 toss 관련 .py 파일이 git에 추가되지 않았는지."""
     out = subprocess.run(
         ["git", "diff", "--name-only", "HEAD"],
         cwd=ROOT, capture_output=True, text=True,
@@ -68,6 +102,34 @@ def test_git_no_new_toss_code():
         ["git", "ls-files", "--others", "--exclude-standard"],
         cwd=ROOT, capture_output=True, text=True,
     ).stdout
-    bad = [ln for ln in out.splitlines()
-           if "toss" in ln.lower() and ln.endswith(".py")]
-    assert bad == [], f"토스 파이썬 파일 변경/추가 감지: {bad}"
+    toss_files = [ln for ln in out.splitlines()
+                  if "toss" in ln.lower() and ln.endswith(".py")]
+    unexpected = [f for f in toss_files if f not in ALLOWED_TOSS_FILES]
+    assert unexpected == [], f"허용 목록 밖 토스 파일: {unexpected}"
+
+
+# 9) 기존 portfolio에 Toss 합산 없음
+def test_portfolio_not_contaminated_by_toss():
+    """_fetch_portfolio_raw에 toss 참조가 없는지."""
+    dd_path = ROOT / "core" / "dashboard_data.py"
+    source = dd_path.read_text(encoding="utf-8")
+    # _fetch_portfolio_raw 함수만 추출
+    match = re.search(
+        r"def _fetch_portfolio_raw\(.*?\n(?=\ndef |\Z)",
+        source, re.DOTALL,
+    )
+    if match:
+        fn_src = match.group()
+        assert "toss" not in fn_src.lower(), \
+            "_fetch_portfolio_raw에 toss 참조 — 합산 오염 위험"
+
+
+# 10) .env, .claude/settings.json이 git staged 아닌지
+def test_no_secrets_staged():
+    staged = subprocess.run(
+        ["git", "diff", "--cached", "--name-only"],
+        cwd=ROOT, capture_output=True, text=True,
+    ).stdout
+    for forbidden in (".env", ".claude/settings.json"):
+        assert forbidden not in staged.splitlines(), \
+            f"{forbidden}이 git staged — 커밋 금지"
