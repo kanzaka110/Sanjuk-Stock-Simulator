@@ -214,7 +214,7 @@ class TestHtmlLabels:
         assert "기존 포트폴리오 미합산" in self._read_pc()
 
     def test_pc_has_no_trading_label(self):
-        assert "주문 실행 기능 없음" in self._read_pc()
+        assert "실주문 기능 없음" in self._read_pc()
 
     def test_pc_has_api_call(self):
         assert "/api/toss/account-summary" in self._read_pc()

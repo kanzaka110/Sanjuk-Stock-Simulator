@@ -1,7 +1,7 @@
 """
 읽기 전용 웹 대시보드 (FastAPI).
 
-조회 전용 — 주문 실행/DB 수정 엔드포인트 없음. 기본 127.0.0.1:8787 바인드.
+조회 전용 — 실주문/DB 수정 엔드포인트 없음. 기본 127.0.0.1:8787 바인드.
 외부 공개 시 Basic Auth 필수 (DASHBOARD_USER + DASHBOARD_PASS 환경변수).
 
 실행:
@@ -186,6 +186,11 @@ def api_toss_decision_context():
 @app.get("/api/toss/cross-check")
 def api_toss_cross_check():
     return JSONResponse(dd.toss_cross_check())
+
+
+@app.get("/api/toss/paper-ledger")
+def api_toss_paper_ledger():
+    return JSONResponse(dd.toss_paper_ledger_data())
 
 
 @app.get("/api/recommendations/timeline")

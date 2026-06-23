@@ -1,7 +1,7 @@
 """
 대시보드 데이터 수집 — 조회 전용 (읽기 전용)
 
-웹 대시보드(web/app.py)와 헬스체크용. 주문 실행/DB 수정 일절 없음.
+웹 대시보드(web/app.py)와 헬스체크용. 실주문/DB 수정 일절 없음.
 DB가 없거나 비어 있어도 절대 예외를 던지지 않고 빈 구조를 반환한다.
 """
 
@@ -1681,7 +1681,7 @@ def _fetch_toss_account_summary_raw() -> dict:
         "exchange_rate": None,
         "warnings": [
             "기존 삼성증권/수동 포트폴리오에 합산하지 않음",
-            "주문 실행 기능 없음",
+            "실주문 기능 없음",
             "실전 계좌 · 별도 성과 추적",
             "자동거래 비활성",
         ],
@@ -1841,3 +1841,9 @@ def _fetch_toss_cross_check_raw() -> dict:
 def toss_cross_check() -> dict:
     """Toss/KIS 교차 검증 (30초 캐시)."""
     return _cached("toss_cross_check", 30, _fetch_toss_cross_check_raw)
+
+
+def toss_paper_ledger_data(limit: int = 50) -> dict:
+    """Toss paper ledger 조회 (dashboard용)."""
+    from core.toss_paper_ledger import paper_ledger_summary
+    return paper_ledger_summary()

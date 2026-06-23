@@ -1179,7 +1179,7 @@ async function ldToss(){
       <div class="kpi"><div class="k">총 Toss 자산</div><div class="v">₩${F(Math.round(totalKrw))}</div><div class="x mt">${fxTxt}</div></div>
       <div class="kpi"><div class="k">예수금/현금</div><div class="v">₩${F(Math.round(cashKrw))}</div><div class="x mt">${cashUsd?'$'+F(cashUsd):""}</div></div>
       <div class="kpi"><div class="k">보유종목 평가</div><div class="v">₩${F(Math.round(mvKrw))}</div><div class="x mt">${hc}종목</div></div>
-      <div class="kpi"><div class="k">자동거래</div><div class="v" style="font-size:18px;color:var(--mt)">비활성</div><div class="x mt">주문 실행 기능 없음</div></div>
+      <div class="kpi"><div class="k">자동거래</div><div class="v" style="font-size:18px;color:var(--mt)">비활성</div><div class="x mt">실주문 기능 없음</div></div>
       <div class="kpi"><div class="k">거래 활성화</div><div class="v" style="font-size:18px;color:var(--mt)">OFF</div><div class="x mt">별도 성과 추적</div></div>
     </div>
     <div class="grid" style="grid-template-columns:1fr 1fr;gap:14px">
@@ -1228,7 +1228,18 @@ async function ldToss(){
     ccHtml=`<div class="panel" style="margin-top:14px"><div class="ph"><h2>교차 검증</h2><span class="sub">KIS/Toss data status</span></div>${cks}
       <div style="margin-top:6px;font-size:11px;color:var(--mt)">readiness: ${E(cc2.toss_readiness||"—")}</div></div>`;
   }
-  box.innerHTML+=autoHtml+ptHtml+dcHtml+ccHtml;
+  // paper ledger 승인 이력
+  const pl=await J("/api/toss/paper-ledger");
+  let plHtml="";
+  if(pl&&pl.total>0){
+    const cts=pl.counts||{};const st=["approved","cancelled","expired","blocked","previewed"];
+    const chips=st.filter(s=>cts[s]).map(s=>`<span style="font-size:11px;padding:3px 8px;border-radius:6px;background:var(--bg2);margin-right:4px">${s} ${cts[s]}</span>`).join("");
+    const rows=(pl.recent||[]).slice(0,8).map(r=>`<tr><td>${E((r.created_at||"").slice(5,16))}</td><td><span class="${r.side==="buy"?"up":"dn"}" style="font-weight:700">${E(r.side)}</span></td><td class="nm">${E(r.symbol)}</td><td>₩${F(Math.round(r.estimated_amount_krw||0))}</td><td style="font-weight:600">${E(r.status)}</td></tr>`).join("");
+    plHtml=`<div class="panel" style="margin-top:14px"><div class="ph"><h2>Paper 승인 이력</h2><span class="sub">${pl.total}건 · 실제 주문 아님 · paper ledger only</span></div>
+      <div style="margin-bottom:8px">${chips}</div>
+      <div class="tbl-scroll" style="max-height:260px"><table class="tbl"><thead><tr><th>시각</th><th>방향</th><th>종목</th><th>금액</th><th>상태</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+  }
+  box.innerHTML+=autoHtml+ptHtml+dcHtml+ccHtml+plHtml;
 }
 
 /* ════ INIT ════ */
