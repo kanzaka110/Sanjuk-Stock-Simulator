@@ -105,7 +105,7 @@ class TelegramBot:
         params = {
             "offset": self._offset,
             "timeout": self._poll_timeout,
-            "allowed_updates": ["message"],
+            "allowed_updates": ["message", "callback_query"],
         }
         resp = requests.get(url, params=params, timeout=self._poll_timeout + 10)
         data = resp.json()
@@ -121,6 +121,10 @@ class TelegramBot:
 
     def _process_update(self, update: dict) -> None:
         """수신된 업데이트 처리."""
+        if "callback_query" in update:
+            self._process_callback_query(update["callback_query"])
+            return
+
         message = update.get("message", {})
         chat_id = str(message.get("chat", {}).get("id", ""))
         text = (message.get("text") or "").strip()
@@ -218,6 +222,52 @@ class TelegramBot:
         """텔레그램 메시지 전송."""
         from core.telegram import send_simple_message
         send_simple_message(text)
+
+    def _process_callback_query(self, callback_query: dict) -> None:
+        """callback_query 처리. tp: prefix만 paper handler로 라우팅."""
+        data = callback_query.get("data", "")
+        callback_id = callback_query.get("id", "")
+        chat_id = str(
+            callback_query.get("message", {}).get("chat", {}).get("id", "")
+        )
+
+        # 인증: 설정된 chat_id만 허용
+        if chat_id and chat_id != TELEGRAM_CHAT_ID:
+            log.warning(f"미인증 callback: chat_id={chat_id}")
+            return
+
+        # tp: prefix만 처리
+        if not data.startswith("tp:"):
+            return
+
+        log.info(f"Paper callback 수신: {data}")
+
+        try:
+            from core.toss_paper_telegram import handle_toss_paper_callback
+            result = handle_toss_paper_callback(data)
+            message = result.get("message", "처리 결과 없음\n실주문: 비활성")
+        except Exception as e:
+            log.error(f"Paper callback 처리 오류: {e}")
+            message = f"⚠ Paper 처리 오류\n실주문: 비활성"
+
+        # answerCallbackQuery
+        if callback_id:
+            self._answer_callback(callback_id, result.get("ok", False))
+
+        # 결과 메시지 전송
+        self._reply(message)
+
+    def _answer_callback(self, callback_id: str, ok: bool) -> None:
+        """Telegram answerCallbackQuery 호출."""
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
+        try:
+            requests.post(url, json={
+                "callback_query_id": callback_id,
+                "text": "Paper 처리 완료" if ok else "Paper 처리 실패",
+                "show_alert": False,
+            }, timeout=5)
+        except Exception as e:
+            log.warning(f"answerCallbackQuery 실패: {e}")
 
 
 # ─── 보유종목 메시지 빌더 ─────────────────────────────

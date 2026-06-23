@@ -39,6 +39,7 @@ ALLOWED_TOSS_FILES = {
     "tests/test_toss_paper_ledger.py",
     "core/toss_paper_telegram.py",
     "tests/test_toss_paper_telegram.py",
+    "tests/test_telegram_bot_callback_wiring.py",
 }
 
 
