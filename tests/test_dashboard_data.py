@@ -2259,3 +2259,17 @@ def test_pc_home_uses_strict_four_column_grid():
     assert "marketCards.slice(4)" in pc
     assert ".market-strip{display:grid;grid-template-columns:repeat(4,minmax(0,1fr))" in pc
     assert ".market-strip .icard{min-width:0;flex:none" in pc
+
+
+
+def test_pc_trade_card_opens_price_and_pnl_detail():
+    """PC 실제 체결 내역 클릭 시 매수가/매도가와 손익 상세 모달을 연다."""
+    from pathlib import Path
+    pc = (Path(__file__).parent.parent / "web" / "index_pc.html").read_text(encoding="utf-8")
+
+    assert "function openTradeDetail(t)" in pc
+    assert "매수가" in pc
+    assert "매도가" in pc
+    assert "실현손익" in pc
+    assert "평가손익" in pc
+    assert "openTradeDetail" in pc.split("function tradeCard(t){", 1)[1].split("function renderTradeLedger", 1)[0]

@@ -697,13 +697,37 @@ function tradeMoney(t){
   const v=t.total_value!=null?t.total_value:((t.price||0)*(t.shares||0));
   return cur+Number(v||0).toLocaleString(undefined,{maximumFractionDigits:t.currency==="USD"?2:0});
 }
+function tradeUnit(t,v){return `${t.currency==="USD"?"$":"₩"}${Number(v||0).toLocaleString(undefined,{maximumFractionDigits:t.currency==="USD"?2:0})}`}
+function tradePnlInfo(t){
+  const it=pfItem(t.ticker)||{};
+  const side=String(t.side||""),isSell=side.includes("매도"),price=Number(t.price||0),shares=Number(t.shares||0);
+  const avg=Number(it.avg_cost||0),curP=Number(it.current_price||0);
+  if(isSell&&avg>0){const pnl=(price-avg)*shares,pct=avg?((price-avg)/avg*100):0;return{label:"실현손익",pnl,pct,basis:`평단 ${tradeUnit(t,avg)} 기준 추정`};}
+  if(!isSell&&curP>0&&price>0){const pnl=(curP-price)*shares,pct=price?((curP-price)/price*100):0;return{label:"평가손익",pnl,pct,basis:`현재가 ${tradeUnit(t,curP)} 기준`};}
+  return{label:isSell?"실현손익":"평가손익",pnl:null,pct:null,basis:"평단/현재가 데이터 부족"};
+}
+function openTradeDetail(t){
+  const side=String(t.side||""),isSell=side.includes("매도"),qty=t.shares?`${t.shares}주`:"—",pnl=tradePnlInfo(t);
+  const priceLabel=isSell?"매도가":"매수가";
+  const pnlClass=pnl.pnl==null?"":cc(pnl.pnl);
+  const pnlText=pnl.pnl==null?"—":`${pnl.pnl>=0?"+":"-"}${tradeUnit(t,Math.abs(pnl.pnl))} (${pnl.pct>=0?"+":""}${(Math.round(pnl.pct*10)/10)}%)`;
+  openInfo(`${side||"거래"} 상세 · ${t.name||t.ticker||""}`,
+    `${kv("종목",E(`${t.name||""} ${t.ticker?`(${t.ticker})`:""}`))}`+
+    `${kv("계좌",E(t.account||"—"))}`+
+    `${kv("수량",E(qty))}`+
+    `${kv(priceLabel,tradeUnit(t,t.price))}`+
+    `${kv("거래금액",tradeMoney(t))}`+
+    `${kv(pnl.label,`<span class="${pnlClass}">${pnlText}</span>`)}`+
+    `${kv("계산 기준",E(pnl.basis))}`+
+    `<div class="mt" style="margin-top:10px;line-height:1.6">매도 손익은 현재 포트폴리오 평단 기준의 추정값이야. 분할매수/분할매도, 수수료, 세금은 별도 반영 안 됐어.</div>`);
+}
 function tradeCard(t){
   const side=E(t.side||"");
   const isSell=side.includes("매도");
   const st=t.applied===false?'<span class="trade-ledger-pending">미반영 거래</span>':'<span class="trade-ledger-complete">거래완료</span>';
   const qty=t.shares?`${t.shares}주`:"";
-  const px=t.price?`${t.currency==="USD"?"$":"₩"}${Number(t.price).toLocaleString(undefined,{maximumFractionDigits:t.currency==="USD"?2:0})}`:"—";
-  return`<div class="trade-ledger-row" onclick="${t.ticker?`openTk('${E(t.ticker)}')`:""}"><div class="tl-top"><div><div class="tl-name">${st}<span class="${isSell?"dn":"up"}">${side||"거래"}</span> · ${E(t.name||t.ticker||"")}</div><div class="tl-meta">${E(t.ticker||"")} · ${E(t.account||"")} · ${E((t.created_at||"").slice(5,16))} · ${qty} @ ${px}</div></div><div class="tl-value">${tradeMoney(t)}</div></div></div>`;
+  const px=t.price?tradeUnit(t,t.price):"—";
+  return`<div class="trade-ledger-row" onclick='openTradeDetail(${JSON.stringify(t).replace(/'/g,"&#39;")})'><div class="tl-top"><div><div class="tl-name">${st}<span class="${isSell?"dn":"up"}">${side||"거래"}</span> · ${E(t.name||t.ticker||"")}</div><div class="tl-meta">${E(t.ticker||"")} · ${E(t.account||"")} · ${E((t.created_at||"").slice(5,16))} · ${qty} @ ${px}</div></div><div class="tl-value">${tradeMoney(t)}</div></div></div>`;
 }
 function renderTradeLedger(){
   const items=(_tradeLedger.items||[]).slice(0,8);
