@@ -33,6 +33,8 @@ ALLOWED_TOSS_FILES = {
     "tests/test_toss_paper_trading.py",
     "tests/test_toss_decision_context.py",
     "tests/test_toss_cross_check.py",
+    "core/toss_order_preview.py",
+    "tests/test_toss_order_preview.py",
 }
 
 
