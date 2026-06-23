@@ -2273,3 +2273,18 @@ def test_pc_trade_card_opens_price_and_pnl_detail():
     assert "실현손익" in pc
     assert "평가손익" in pc
     assert "openTradeDetail" in pc.split("function tradeCard(t){", 1)[1].split("function renderTradeLedger", 1)[0]
+
+
+
+def test_mobile_trade_card_opens_price_and_pnl_detail():
+    """모바일 실제 체결 내역 클릭 시 매수가/매도가와 손익 상세 바텀시트를 연다."""
+    from pathlib import Path
+    mobile = (Path(__file__).parent.parent / "web" / "index.html").read_text(encoding="utf-8")
+
+    assert "function openTradeDetail(t)" in mobile
+    assert "매수가" in mobile
+    assert "매도가" in mobile
+    assert "실현손익" in mobile
+    assert "평가손익" in mobile
+    block = mobile.split("function tradeCard(t){", 1)[1].split("function renderTradeLedger", 1)[0]
+    assert "openTradeDetail" in block
