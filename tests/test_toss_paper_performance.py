@@ -176,7 +176,7 @@ class TestExcludedStatuses:
         ledger.approve_paper_order("prev_perf01", "005930.KS")
 
         # 목표가(72100) 이상 가격 주입
-        with patch.object(perf, "_get_quote", return_value=(72200.0, "test")):
+        with patch.object(perf, "_get_quote_for_paper", return_value={"price": 72200.0, "source": "test", "accepted_price_source": "test", "source_chain": []}):
             summary = perf.get_paper_performance_summary()
 
         s = summary["summary"]
@@ -223,7 +223,7 @@ class TestExpiredAndDataError:
         ledger.create_paper_preview_records("prev_anomaly01", cands, ccs, _ctx())
         ledger.approve_paper_order("prev_anomaly01")
 
-        with patch.object(perf, "_get_quote", return_value=(310000.0, "test")):
+        with patch.object(perf, "_get_quote_for_paper", return_value={"price": 310000.0, "source": "test", "accepted_price_source": "test", "source_chain": []}):
             summary = perf.get_paper_performance_summary()
 
         s = summary["summary"]
@@ -286,7 +286,7 @@ class TestExpiredAndDataError:
         ledger.create_paper_preview_records("prev_exp01", cands, ccs, _ctx())
         ledger.approve_paper_order("prev_exp01")
 
-        with patch.object(perf, "_get_quote", return_value=(71000.0, "test")):
+        with patch.object(perf, "_get_quote_for_paper", return_value={"price": 71000.0, "source": "test", "accepted_price_source": "test", "source_chain": []}):
             with patch.object(perf, "_parse_kst") as mock_parse:
                 # created 10일 전으로 만들어 만료 처리
                 old = datetime.now(KST) - timedelta(days=10)
@@ -322,7 +322,7 @@ class TestSummaryCalculation:
     def test_win_loss_counts(self):
         self._setup_approved("A.KS", 70000)
         # target = 72100 → win
-        with patch.object(perf, "_get_quote", return_value=(72200.0, "test")):
+        with patch.object(perf, "_get_quote_for_paper", return_value={"price": 72200.0, "source": "test", "accepted_price_source": "test", "source_chain": []}):
             summary = perf.get_paper_performance_summary()
         s = summary["summary"]
         assert s["wins"] == 1
@@ -331,14 +331,14 @@ class TestSummaryCalculation:
     def test_evaluated_count_equals_win_plus_loss(self):
         self._setup_approved("B.KS", 70000)
         # stop = 67900 → loss
-        with patch.object(perf, "_get_quote", return_value=(67000.0, "test")):
+        with patch.object(perf, "_get_quote_for_paper", return_value={"price": 67000.0, "source": "test", "accepted_price_source": "test", "source_chain": []}):
             summary = perf.get_paper_performance_summary()
         s = summary["summary"]
         assert s["evaluated_count"] == s["wins"] + s["losses"]
 
     def test_win_rate_formula(self):
         self._setup_approved("C.KS", 70000)
-        with patch.object(perf, "_get_quote", return_value=(72200.0, "test")):
+        with patch.object(perf, "_get_quote_for_paper", return_value={"price": 72200.0, "source": "test", "accepted_price_source": "test", "source_chain": []}):
             summary = perf.get_paper_performance_summary()
         s = summary["summary"]
         if s["evaluated_count"] > 0:
@@ -348,7 +348,7 @@ class TestSummaryCalculation:
     def test_avg_pnl_pct_calculation(self):
         self._setup_approved("D.KS", 70000)
         win_price = 72200.0
-        with patch.object(perf, "_get_quote", return_value=(win_price, "test")):
+        with patch.object(perf, "_get_quote_for_paper", return_value={"price": win_price, "source": "test", "accepted_price_source": "test", "source_chain": []}):
             summary = perf.get_paper_performance_summary()
         s = summary["summary"]
         if s["evaluated_count"] > 0:
@@ -357,7 +357,7 @@ class TestSummaryCalculation:
 
     def test_small_sample_not_marked_as_risk(self):
         """표본부족은 위험으로 표시하지 않음."""
-        with patch.object(perf, "_get_quote", return_value=(71000.0, "test")):
+        with patch.object(perf, "_get_quote_for_paper", return_value={"price": 71000.0, "source": "test", "accepted_price_source": "test", "source_chain": []}):
             summary = perf.get_paper_performance_summary()
         s = summary["summary"]
         # evaluated_count=0이어도 win_rate=0.0 (위험 플래그 없음)
@@ -366,14 +366,14 @@ class TestSummaryCalculation:
         assert "danger" not in str(s)
 
     def test_note_field_present(self):
-        with patch.object(perf, "_get_quote", return_value=(71000.0, "test")):
+        with patch.object(perf, "_get_quote_for_paper", return_value={"price": 71000.0, "source": "test", "accepted_price_source": "test", "source_chain": []}):
             summary = perf.get_paper_performance_summary()
         assert "실제 주문 아님" in summary.get("_note", "")
         assert "실주문 비활성" in summary.get("_note", "")
 
     def test_portfolio_not_included(self):
         """기존 포트폴리오 합산 없음을 _note로 확인."""
-        with patch.object(perf, "_get_quote", return_value=(71000.0, "test")):
+        with patch.object(perf, "_get_quote_for_paper", return_value={"price": 71000.0, "source": "test", "accepted_price_source": "test", "source_chain": []}):
             summary = perf.get_paper_performance_summary()
         assert "포트폴리오 미합산" in summary.get("_note", "")
 
@@ -546,7 +546,7 @@ class TestEvaluateOpenPaperOrders:
         ledger.create_paper_preview_records("prev_open01", cands, ccs, _ctx())
         ledger.approve_paper_order("prev_open01")
 
-        with patch.object(perf, "_get_quote", return_value=(71000.0, "test")):
+        with patch.object(perf, "_get_quote_for_paper", return_value={"price": 71000.0, "source": "test", "accepted_price_source": "test", "source_chain": []}):
             result = perf.evaluate_open_paper_orders()
 
         assert result["count"] >= 1
@@ -571,7 +571,7 @@ class TestEvaluateOpenPaperOrders:
         # F.KS만 approve
         ledger.approve_paper_order("prev_open02", "F.KS")
 
-        with patch.object(perf, "_get_quote", return_value=(71000.0, "test")):
+        with patch.object(perf, "_get_quote_for_paper", return_value={"price": 71000.0, "source": "test", "accepted_price_source": "test", "source_chain": []}):
             result = perf.evaluate_open_paper_orders()
 
         symbols = [e["symbol"] for e in result["evaluated"]]
@@ -717,3 +717,138 @@ class TestFormatBriefing:
         src = (ROOT / "core" / "multi_agent.py").read_text(encoding="utf-8")
         for fn in ("place_order", "submit_order", "execute_order"):
             assert fn not in src
+
+
+# ─── 13. source_chain 추적 ────────────────────────────────
+
+
+class TestSourceChain:
+    """_get_quote_for_paper 소스 체인 — 이상치 소스 건너뛰기 및 추적."""
+
+    def _mock_quote(self, price: float):
+        from core.models import Quote
+        return Quote(ticker="TEST", name="TEST", price=price, change=0.0, pct=0.0, high=price, low=price)
+
+    def test_source_chain_present_in_result(self):
+        """evaluate_paper_order 결과에 source_chain 필드가 존재한다."""
+        order = _make_order(symbol="005930.KS", limit_price=72000, quantity=1)
+        result = perf.evaluate_paper_order(order, quote=_quote(74000.0))
+        assert "source_chain" in result
+
+    def test_accepted_price_source_present(self):
+        """evaluate_paper_order 결과에 accepted_price_source 필드가 존재한다."""
+        order = _make_order(symbol="005930.KS", limit_price=72000, quantity=1)
+        result = perf.evaluate_paper_order(order, quote=_quote(74000.0))
+        assert "accepted_price_source" in result
+
+    def test_injected_quote_source_chain_empty(self):
+        """외부 주입 quote 사용 시 source_chain은 빈 리스트다."""
+        order = _make_order(limit_price=72000, quantity=1)
+        result = perf.evaluate_paper_order(order, quote=_quote(73000.0))
+        assert result["source_chain"] == []
+
+    def test_injected_quote_accepted_price_source(self):
+        """외부 주입 quote 사용 시 accepted_price_source는 'test_injected'다."""
+        order = _make_order(limit_price=72000, quantity=1)
+        result = perf.evaluate_paper_order(order, quote=_quote(73000.0))
+        assert result["accepted_price_source"] == "test_injected"
+
+    def test_get_quote_for_paper_accepts_normal_price(self):
+        """정상 가격 소스는 accepted=True로 기록된다."""
+        mock_q = self._mock_quote(75000.0)
+        with patch("core.market._get_quote_kis", return_value=mock_q), \
+             patch("core.market._get_quote_yf_live", return_value=None), \
+             patch("core.market._get_quote_daily", return_value=None):
+            result = perf._get_quote_for_paper("005930.KS", entry_price=72000.0)
+
+        assert result["price"] == 75000.0
+        assert result["accepted_price_source"] == "KIS"
+        assert result["source_chain"][0]["accepted"] is True
+        assert result["source_chain"][0]["source"] == "KIS"
+
+    def test_get_quote_for_paper_skips_anomaly_and_tries_next(self):
+        """이상치 소스(KIS 310,000)는 건너뛰고 다음 소스(yfinance_live)를 사용한다."""
+        kis_q = self._mock_quote(310000.0)   # 이상치: 72000 대비 ratio=4.3
+        yf_q = self._mock_quote(74500.0)     # 정상
+
+        with patch("core.market._get_quote_kis", return_value=kis_q), \
+             patch("core.market._get_quote_yf_live", return_value=yf_q), \
+             patch("core.market._get_quote_daily", return_value=None):
+            result = perf._get_quote_for_paper("005930.KS", entry_price=72000.0)
+
+        assert result["price"] == 74500.0
+        assert result["accepted_price_source"] == "yfinance_live"
+
+        chain = result["source_chain"]
+        kis_entry = next(e for e in chain if e["source"] == "KIS")
+        yf_entry = next(e for e in chain if e["source"] == "yfinance_live")
+
+        assert kis_entry["accepted"] is False
+        assert "이상치" in kis_entry["reason"]
+        assert yf_entry["accepted"] is True
+
+    def test_get_quote_for_paper_all_anomaly_returns_none(self):
+        """모든 소스가 이상치면 price=None, accepted_price_source=None."""
+        anomaly_q = self._mock_quote(400000.0)
+
+        with patch("core.market._get_quote_kis", return_value=anomaly_q), \
+             patch("core.market._get_quote_yf_live", return_value=anomaly_q), \
+             patch("core.market._get_quote_daily", return_value=anomaly_q):
+            result = perf._get_quote_for_paper("005930.KS", entry_price=72000.0)
+
+        assert result["price"] is None
+        assert result["accepted_price_source"] is None
+        assert len(result["source_chain"]) == 3
+        for entry in result["source_chain"]:
+            assert entry["accepted"] is False
+
+    def test_get_quote_for_paper_no_entry_skips_anomaly_check(self):
+        """entry_price 미제공 시 이상치 체크 없이 첫 소스를 수락한다."""
+        mock_q = self._mock_quote(310000.0)
+
+        with patch("core.market._get_quote_kis", return_value=mock_q), \
+             patch("core.market._get_quote_yf_live", return_value=None), \
+             patch("core.market._get_quote_daily", return_value=None):
+            result = perf._get_quote_for_paper("005930.KS", entry_price=None)
+
+        assert result["price"] == 310000.0
+        assert result["accepted_price_source"] == "KIS"
+        assert "entry 미제공" in result["source_chain"][0]["reason"]
+
+    def test_source_chain_has_ratio_to_entry(self):
+        """이상치 체크 시 source_chain에 ratio_to_entry가 포함된다."""
+        kis_q = self._mock_quote(310000.0)
+
+        with patch("core.market._get_quote_kis", return_value=kis_q), \
+             patch("core.market._get_quote_yf_live", return_value=None), \
+             patch("core.market._get_quote_daily", return_value=None):
+            result = perf._get_quote_for_paper("005930.KS", entry_price=72000.0)
+
+        assert "ratio_to_entry" in result["source_chain"][0]
+        assert result["source_chain"][0]["ratio_to_entry"] == pytest.approx(310000 / 72000, rel=1e-3)
+
+    def test_evaluate_paper_order_source_chain_via_get_quote_for_paper(self):
+        """_get_quote_for_paper 결과가 evaluate_paper_order result에 반영된다."""
+        normal_q = self._mock_quote(75000.0)
+
+        with patch("core.market._get_quote_kis", return_value=None), \
+             patch("core.market._get_quote_yf_live", return_value=normal_q), \
+             patch("core.market._get_quote_daily", return_value=None):
+            order = _make_order(symbol="005930.KS", limit_price=72000, quantity=2)
+            result = perf.evaluate_paper_order(order)
+
+        assert result["accepted_price_source"] == "yfinance_live"
+        assert result["current_price"] == 75000.0
+        assert len(result["source_chain"]) >= 1
+
+    def test_probe_tool_importable(self):
+        """probe_paper_price_sources 툴이 임포트 가능하다."""
+        import importlib
+        import sys
+        sys.path.insert(0, str(ROOT / "tools"))
+        spec = importlib.util.find_spec("probe_paper_price_sources") or \
+               importlib.util.spec_from_file_location(
+                   "probe_paper_price_sources",
+                   ROOT / "tools" / "probe_paper_price_sources.py"
+               )
+        assert spec is not None

@@ -31,14 +31,90 @@ def _now_kst() -> str:
 
 def _get_quote(symbol: str) -> tuple[float | None, str]:
     """read-only 가격 조회. 실패해도 전체 실패 없음."""
-    try:
-        from core.market import _get_quote_realtime
-        q = _get_quote_realtime(symbol)
-        if q and q.price and q.price > 0:
-            return q.price, "KIS|yfinance"
-    except Exception as exc:
-        logger.debug("quote unavailable for %s: %s", symbol, exc)
-    return None, "unavailable"
+    result = _get_quote_for_paper(symbol)
+    return result["price"], result["source"]
+
+
+def _get_quote_for_paper(symbol: str, entry_price: float | None = None) -> dict:
+    """각 소스를 순서대로 시도하며 source_chain을 기록한다.
+
+    순서: KIS → yfinance_live → yfinance_daily
+    entry_price 제공 시 소스별로 ±50% 이상치 체크를 수행한다.
+    이상치인 소스는 건너뛰고 다음 소스를 시도한다.
+
+    Returns:
+        {
+            "price": float | None,
+            "source": str,
+            "accepted_price_source": str | None,
+            "source_chain": list[dict],
+        }
+    """
+    from core.market import _get_quote_kis, _get_quote_yf_live, _get_quote_daily
+
+    steps = [
+        ("KIS", _get_quote_kis),
+        ("yfinance_live", _get_quote_yf_live),
+        ("yfinance_daily", _get_quote_daily),
+    ]
+
+    source_chain: list[dict] = []
+    accepted_price: float | None = None
+    accepted_source: str | None = None
+
+    for source_name, fn in steps:
+        entry: dict = {"source": source_name, "price": None, "accepted": False, "reason": ""}
+        try:
+            q = fn(symbol)
+            if q and q.price and q.price > 0:
+                raw_price = float(q.price)
+                entry["price"] = raw_price
+
+                if entry_price and entry_price > 0:
+                    ratio = raw_price / entry_price
+                    entry["ratio_to_entry"] = round(ratio, 4)
+                    if ratio > 1.5 or ratio < 0.5:
+                        entry["accepted"] = False
+                        entry["reason"] = f"이상치(ratio={ratio:.4f})"
+                        source_chain.append(entry)
+                        logger.debug(
+                            "paper price anomaly from %s [%s]: %.0f / %.0f = %.4f",
+                            source_name, symbol, raw_price, entry_price, ratio,
+                        )
+                        continue
+                    else:
+                        entry["accepted"] = True
+                        entry["reason"] = "정상"
+                else:
+                    entry["accepted"] = True
+                    entry["reason"] = "entry 미제공(이상치 미검사)"
+
+                source_chain.append(entry)
+                accepted_price = raw_price
+                accepted_source = source_name
+                break
+            else:
+                entry["reason"] = "가격 없음"
+        except Exception as exc:
+            entry["reason"] = f"오류: {exc}"
+            logger.debug("paper quote error from %s [%s]: %s", source_name, symbol, exc)
+
+        source_chain.append(entry)
+
+    if accepted_price is None:
+        return {
+            "price": None,
+            "source": "unavailable",
+            "accepted_price_source": None,
+            "source_chain": source_chain,
+        }
+
+    return {
+        "price": accepted_price,
+        "source": accepted_source,
+        "accepted_price_source": accepted_source,
+        "source_chain": source_chain,
+    }
 
 
 def _parse_kst(ts: str | None) -> datetime | None:
@@ -91,6 +167,8 @@ def evaluate_paper_order(order: dict, quote: dict | None = None) -> dict:
         "outcome": "open",
         "evaluated_at": _now_kst(),
         "data_source": "unavailable",
+        "accepted_price_source": None,
+        "source_chain": [],
         "warnings": [],
         "_note": "Paper 성과 · 실제 주문 아님 · 기존 포트폴리오 미합산 · 실주문 비활성",
     }
@@ -114,14 +192,22 @@ def evaluate_paper_order(order: dict, quote: dict | None = None) -> dict:
         result["expires_at"] = expires_dt.strftime("%Y-%m-%dT%H:%M:%S+09:00")
         is_expired = datetime.now(KST) > expires_dt
 
-    # 가격 조회 (read-only)
+    # 가격 조회 (read-only) — source_chain으로 어느 소스가 틀렸는지 추적
     if quote is not None:
         cur_price = quote.get("price")
         data_source = quote.get("source", "injected")
+        source_chain: list[dict] = []
+        accepted_price_source: str | None = data_source if cur_price else None
     else:
-        cur_price, data_source = _get_quote(symbol)
+        _q = _get_quote_for_paper(symbol, entry_price if entry_price > 0 else None)
+        cur_price = _q["price"]
+        data_source = _q["source"]
+        source_chain = _q["source_chain"]
+        accepted_price_source = _q["accepted_price_source"]
 
     result["data_source"] = data_source
+    result["accepted_price_source"] = accepted_price_source
+    result["source_chain"] = source_chain
 
     if cur_price is None or cur_price <= 0:
         result["outcome"] = "data_error"
@@ -131,7 +217,7 @@ def evaluate_paper_order(order: dict, quote: dict | None = None) -> dict:
         return result
 
     # 가격 이상치 guard — entry 대비 ±50% 초과 시 평가 보류
-    # (paper 직후 평가 안전 가드. 장기 보유 시 임계값 완화 가능)
+    # _get_quote_for_paper가 소스별 이상치를 걸러주지만, 외부 quote 주입 시에도 방어
     price_ratio: float | None = None
     price_anomaly = False
     if entry_price > 0:
