@@ -29,6 +29,44 @@ def _now_kst() -> str:
     return datetime.now(KST).strftime("%Y-%m-%dT%H:%M:%S+09:00")
 
 
+def _classify_error_type(source_chain: list[dict], cur_price: float | None) -> dict:
+    """source_chain 분석으로 data_error 세부 유형을 반환한다.
+
+    Returns:
+        {
+            "error_type": "price_unavailable" | "consensus_anomaly" | "price_anomaly",
+            "consensus_price": float | None,
+            "consensus_sources": list[str],
+        }
+    """
+    # price가 있는 rejected 항목만
+    anomaly_entries = [
+        e for e in source_chain
+        if e.get("price") and e.get("price", 0) > 0 and not e.get("accepted") and "이상치" in e.get("reason", "")
+    ]
+
+    if not anomaly_entries:
+        # 가격 자체를 못 얻음
+        return {"error_type": "price_unavailable", "consensus_price": None, "consensus_sources": []}
+
+    if len(anomaly_entries) < 2:
+        # 단일 소스만 이상치
+        return {"error_type": "price_anomaly", "consensus_price": None, "consensus_sources": []}
+
+    # 여러 소스 이상치 — 가격이 거의 동일한지 확인 (max/min 1% 이내)
+    prices = [e["price"] for e in anomaly_entries]
+    price_min, price_max = min(prices), max(prices)
+    if price_min > 0 and (price_max - price_min) / price_min <= 0.01:
+        return {
+            "error_type": "consensus_anomaly",
+            "consensus_price": round(price_max, 2),
+            "consensus_sources": [e["source"] for e in anomaly_entries],
+        }
+
+    # 여러 소스지만 가격이 서로 다름
+    return {"error_type": "price_anomaly", "consensus_price": None, "consensus_sources": []}
+
+
 def _get_quote(symbol: str) -> tuple[float | None, str]:
     """read-only 가격 조회. 실패해도 전체 실패 없음."""
     result = _get_quote_for_paper(symbol)
@@ -209,6 +247,9 @@ def evaluate_paper_order(order: dict, quote: dict | None = None) -> dict:
         "data_source": "unavailable",
         "accepted_price_source": None,
         "source_chain": [],
+        "error_type": None,
+        "consensus_price": None,
+        "consensus_sources": [],
         "warnings": [],
         "_note": "Paper 성과 · 실제 주문 아님 · 기존 포트폴리오 미합산 · 실주문 비활성",
     }
@@ -251,7 +292,16 @@ def evaluate_paper_order(order: dict, quote: dict | None = None) -> dict:
 
     if cur_price is None or cur_price <= 0:
         result["outcome"] = "data_error"
-        result["warnings"].append("가격 조회 실패")
+        classification = _classify_error_type(source_chain, cur_price)
+        result["error_type"] = classification["error_type"]
+        result["consensus_price"] = classification["consensus_price"]
+        result["consensus_sources"] = classification["consensus_sources"]
+        if classification["error_type"] == "consensus_anomaly":
+            result["warnings"].append(
+                "여러 가격 소스가 entry 대비 이상치 가격에 합의 — 기업행동/entry_price 재확인 필요"
+            )
+        else:
+            result["warnings"].append("가격 조회 실패")
         result["price_anomaly"] = False
         result["price_ratio"] = None
         return result
@@ -265,10 +315,12 @@ def evaluate_paper_order(order: dict, quote: dict | None = None) -> dict:
         price_ratio = round(_raw_ratio, 4)
         if _raw_ratio > 1.5 or _raw_ratio < 0.5:
             price_anomaly = True
+            # 외부 quote 주입 시에는 단일 소스 이상치
             result["price_anomaly"] = True
             result["price_ratio"] = price_ratio
             result["current_price"] = cur_price
             result["outcome"] = "data_error"
+            result["error_type"] = "price_anomaly"
             result["warnings"].append(
                 f"가격 이상치로 평가 보류 (entry={entry_price:,.0f}, current={cur_price:,.0f}, ratio={price_ratio:.2f})"
             )
@@ -340,6 +392,7 @@ def get_paper_performance_summary() -> dict:
     open_orders = [e for e in evaluated if e["outcome"] == "open"]
     expired_orders = [e for e in evaluated if e["outcome"] == "expired"]
     data_errors = [e for e in evaluated if e["outcome"] == "data_error"]
+    consensus_anomalies = [e for e in data_errors if e.get("error_type") == "consensus_anomaly"]
 
     # win_rate 분모 = win + loss만 (cancelled/blocked/previewed/expired/data_error 제외)
     denominator = len(wins) + len(losses)
@@ -367,6 +420,7 @@ def get_paper_performance_summary() -> dict:
             "previewed": counts.get("previewed", 0),
             "expired": len(expired_orders),
             "data_error": len(data_errors),
+            "consensus_anomaly": len(consensus_anomalies),
             "evaluated_count": denominator,
             "win_rate": win_rate,
             "avg_pnl_pct": avg_pnl_pct,
@@ -403,6 +457,14 @@ def format_toss_paper_performance_briefing(summary: dict | None = None) -> str:
     previewed = s.get("previewed", 0)
     expired = s.get("expired", 0)
     data_error = s.get("data_error", 0)
+    consensus_anomaly = s.get("consensus_anomaly", 0)
+
+    # consensus_anomaly 발생 종목 이름 수집 (recent에서 추출)
+    recent = (summary or {}).get("recent", [])
+    consensus_symbols = [
+        r.get("symbol", "") for r in recent
+        if r.get("error_type") == "consensus_anomaly"
+    ]
 
     lines = ["[Toss Paper 성과 — 실제 주문 아님]"]
     lines.append(f"- 평가 완료: {evaluated}건")
@@ -418,6 +480,11 @@ def format_toss_paper_performance_briefing(summary: dict | None = None) -> str:
         lines.append(f"- 결과: win {wins} · loss {losses} · expired {expired} · data_error {data_error}")
 
     lines.append(f"- 상태: previewed {previewed} · blocked {blocked} · cancelled {cancelled}")
+
+    if consensus_anomaly > 0:
+        symbols_str = " · ".join(consensus_symbols) if consensus_symbols else f"{consensus_anomaly}건"
+        lines.append(f"- ⚠️ 기업행동 의심/entry_price 재확인 필요: {symbols_str}")
+
     lines.append("- 실주문: 비활성")
     lines.append("- 기존 포트폴리오 미합산")
     return "\n".join(lines)

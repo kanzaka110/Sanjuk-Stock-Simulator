@@ -855,3 +855,196 @@ class TestSourceChain:
                    ROOT / "tools" / "probe_paper_price_sources.py"
                )
         assert spec is not None
+
+
+# ─── 14. consensus_anomaly 분류 ────────────────────────────
+
+
+class TestConsensusAnomaly:
+    """_classify_error_type + consensus_anomaly 필드 검증."""
+
+    def _make_anomaly_entry(self, source: str, price: float) -> dict:
+        return {
+            "source": source,
+            "price": price,
+            "accepted": False,
+            "reason": f"이상치(ratio={price/72000:.4f})",
+            "ratio_to_entry": round(price / 72000, 4),
+        }
+
+    def _make_unavailable_entry(self, source: str) -> dict:
+        return {"source": source, "price": None, "accepted": False, "reason": "가격 없음"}
+
+    # ─── _classify_error_type 단위 테스트 ─────────────
+
+    def test_price_unavailable_all_none(self):
+        chain = [self._make_unavailable_entry(s) for s in ["KIS", "naver", "yf_live", "yf_daily"]]
+        r = perf._classify_error_type(chain, None)
+        assert r["error_type"] == "price_unavailable"
+        assert r["consensus_price"] is None
+
+    def test_price_anomaly_single_source(self):
+        chain = [
+            self._make_anomaly_entry("KIS", 310000.0),
+            self._make_unavailable_entry("naver"),
+            self._make_unavailable_entry("yf_live"),
+        ]
+        r = perf._classify_error_type(chain, None)
+        assert r["error_type"] == "price_anomaly"
+        assert r["consensus_sources"] == []
+
+    def test_consensus_anomaly_multiple_same_price(self):
+        chain = [
+            self._make_anomaly_entry("KIS", 310000.0),
+            self._make_anomaly_entry("naver_current", 310000.0),
+            self._make_anomaly_entry("yfinance_live", 310000.0),
+            self._make_unavailable_entry("yfinance_daily"),
+        ]
+        r = perf._classify_error_type(chain, None)
+        assert r["error_type"] == "consensus_anomaly"
+        assert r["consensus_price"] == 310000.0
+        assert "KIS" in r["consensus_sources"]
+        assert "naver_current" in r["consensus_sources"]
+        assert len(r["consensus_sources"]) == 3
+
+    def test_consensus_anomaly_prices_within_1pct(self):
+        """가격이 1% 이내 차이면 합의로 간주."""
+        chain = [
+            self._make_anomaly_entry("KIS", 310000.0),
+            self._make_anomaly_entry("naver_current", 311000.0),  # 0.32% 차이
+        ]
+        r = perf._classify_error_type(chain, None)
+        assert r["error_type"] == "consensus_anomaly"
+
+    def test_not_consensus_when_prices_differ(self):
+        """가격이 1% 초과 차이면 consensus_anomaly 아님."""
+        chain = [
+            self._make_anomaly_entry("KIS", 310000.0),
+            self._make_anomaly_entry("naver_current", 150000.0),  # 50% 차이
+        ]
+        r = perf._classify_error_type(chain, None)
+        assert r["error_type"] == "price_anomaly"
+
+    # ─── evaluate_paper_order 통합 테스트 ─────────────
+
+    def test_evaluate_consensus_anomaly_fields(self):
+        """KIS/naver/yfinance 모두 310,000 → consensus_anomaly."""
+        from core.models import Quote
+        anomaly_q = Quote(ticker="T", name="T", price=310000.0, change=0.0, pct=0.0, high=310000.0, low=310000.0)
+
+        with patch("core.market._get_quote_kis", return_value=anomaly_q), \
+             patch("core.kr_price_fallback.get_kr_stock_price_fallback",
+                   return_value={"price": 310000.0, "source": "naver_current", "ok": True, "warning": None}), \
+             patch("core.market._get_quote_yf_live", return_value=anomaly_q), \
+             patch("core.market._get_quote_daily", return_value=None):
+            order = _make_order(symbol="005930.KS", limit_price=72000, quantity=1)
+            result = perf.evaluate_paper_order(order)
+
+        assert result["outcome"] == "data_error"
+        assert result["error_type"] == "consensus_anomaly"
+        assert result["consensus_price"] == 310000.0
+        assert len(result["consensus_sources"]) >= 2
+        assert any("기업행동" in w for w in result["warnings"])
+        assert any("entry_price" in w for w in result["warnings"])
+
+    def test_evaluate_price_unavailable(self):
+        """모든 소스 None → price_unavailable."""
+        with patch("core.market._get_quote_kis", return_value=None), \
+             patch("core.kr_price_fallback.get_kr_stock_price_fallback",
+                   return_value={"price": None, "source": "naver_unavailable", "ok": False, "warning": "실패"}), \
+             patch("core.market._get_quote_yf_live", return_value=None), \
+             patch("core.market._get_quote_daily", return_value=None):
+            order = _make_order(symbol="005930.KS", limit_price=72000, quantity=1)
+            result = perf.evaluate_paper_order(order)
+
+        assert result["outcome"] == "data_error"
+        assert result["error_type"] == "price_unavailable"
+        assert result["consensus_price"] is None
+
+    def test_evaluate_normal_fallback_no_error_type(self):
+        """KIS 이상치, naver 정상 → outcome open, error_type None."""
+        from core.models import Quote
+        anomaly_q = Quote(ticker="T", name="T", price=310000.0, change=0.0, pct=0.0, high=310000.0, low=310000.0)
+
+        with patch("core.market._get_quote_kis", return_value=anomaly_q), \
+             patch("core.kr_price_fallback.get_kr_stock_price_fallback",
+                   return_value={"price": 72500.0, "source": "naver_current", "ok": True, "warning": None}), \
+             patch("core.market._get_quote_yf_live", return_value=None), \
+             patch("core.market._get_quote_daily", return_value=None):
+            order = _make_order(symbol="005930.KS", limit_price=72000, quantity=1)
+            result = perf.evaluate_paper_order(order)
+
+        assert result["outcome"] == "open"
+        assert result["error_type"] is None
+        assert result["current_price"] == 72500.0
+
+    def test_evaluated_count_zero_for_consensus_anomaly(self):
+        """consensus_anomaly는 evaluated_count(win+loss 분모)에 포함 안 됨."""
+        from core.models import Quote
+        anomaly_q = Quote(ticker="T", name="T", price=310000.0, change=0.0, pct=0.0, high=310000.0, low=310000.0)
+
+        with patch("core.market._get_quote_kis", return_value=anomaly_q), \
+             patch("core.kr_price_fallback.get_kr_stock_price_fallback",
+                   return_value={"price": 310000.0, "source": "naver_current", "ok": True, "warning": None}), \
+             patch("core.market._get_quote_yf_live", return_value=anomaly_q), \
+             patch("core.market._get_quote_daily", return_value=None):
+            import core.toss_paper_ledger as ledger2
+            from unittest.mock import patch as mock_patch
+            cands = [{"symbol": "005930.KS", "side": "buy", "quantity": 1,
+                      "limit_price": 72000, "estimated_amount_krw": 72000,
+                      "confidence": 0.8, "reason": "test"}]
+            ccs = [{"blocks": [], "warnings": [], "toss_readiness": "paper_only",
+                    "live_order_allowed": False, "score_adjustments": []}]
+            ledger2.create_paper_preview_records("prev_ca01", cands, ccs, _ctx())
+            ledger2.approve_paper_order("prev_ca01")
+            summary = perf.get_paper_performance_summary()
+
+        s = summary["summary"]
+        assert s["evaluated_count"] == 0
+        assert s["consensus_anomaly"] >= 1
+        assert s["data_error"] >= 1
+
+    # ─── briefing format 테스트 ───────────────────────
+
+    def _summary_with_consensus(self, symbols=None) -> dict:
+        recent = []
+        if symbols:
+            for sym in symbols:
+                recent.append({
+                    "symbol": sym, "outcome": "data_error",
+                    "error_type": "consensus_anomaly",
+                    "consensus_price": 310000.0,
+                    "consensus_sources": ["KIS", "naver_current", "yfinance_live"],
+                })
+        return {
+            "summary": {
+                "total": 1, "open": 0, "wins": 0, "losses": 0,
+                "cancelled": 0, "blocked": 0, "previewed": 0,
+                "expired": 0, "data_error": 1, "consensus_anomaly": len(symbols or []),
+                "evaluated_count": 0, "win_rate": 0.0, "avg_pnl_pct": 0.0,
+            },
+            "recent": recent,
+        }
+
+    def test_briefing_shows_consensus_anomaly_warning(self):
+        text = perf.format_toss_paper_performance_briefing(self._summary_with_consensus(["005930.KS"]))
+        assert "기업행동" in text or "entry_price" in text or "재확인" in text
+
+    def test_briefing_shows_symbol_in_warning(self):
+        text = perf.format_toss_paper_performance_briefing(self._summary_with_consensus(["005930.KS"]))
+        assert "005930.KS" in text
+
+    def test_briefing_no_consensus_anomaly_no_warning(self):
+        """consensus_anomaly=0이면 기업행동 경고 없음."""
+        summary = self._summary_with_consensus([])
+        text = perf.format_toss_paper_performance_briefing(summary)
+        assert "기업행동" not in text
+
+    def test_briefing_sample_shortage_still_shown_on_consensus(self):
+        """consensus_anomaly가 있어도 평가 완료=0이면 표본부족 표시."""
+        text = perf.format_toss_paper_performance_briefing(self._summary_with_consensus(["005930.KS"]))
+        assert "표본부족" in text
+
+    def test_briefing_always_live_order_inactive(self):
+        text = perf.format_toss_paper_performance_briefing(self._summary_with_consensus(["X.KS"]))
+        assert "실주문: 비활성" in text
