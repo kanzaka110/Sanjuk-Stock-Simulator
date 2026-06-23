@@ -2249,7 +2249,12 @@ def test_pc_home_uses_strict_four_column_grid():
     pc = (Path(__file__).parent.parent / "web" / "index_pc.html").read_text(encoding="utf-8")
 
     assert ".home-hero{display:grid;grid-template-columns:repeat(4,minmax(0,1fr))" in pc
-    assert ".portfolio-hero{grid-column:span 2" in pc
-    assert ".hero-decision{grid-column:span 2" in pc
+    assert ".portfolio-hero{grid-column:1 / span 2;grid-row:1" in pc
+    assert ".hero-market-strip{grid-column:1 / span 2;grid-row:2" in pc
+    assert ".hero-decision{grid-column:3 / span 2;grid-row:1 / span 2" in pc
+    assert "home-strip-top" in pc
+    assert "home-strip-rest" in pc
+    assert "marketCards.slice(0,4)" in pc
+    assert "marketCards.slice(4)" in pc
     assert ".market-strip{display:grid;grid-template-columns:repeat(4,minmax(0,1fr))" in pc
     assert ".market-strip .icard{min-width:0;flex:none" in pc

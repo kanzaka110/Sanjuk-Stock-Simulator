@@ -255,7 +255,7 @@ details summary::before{content:"▸";transition:transform .18s;color:var(--mt)}
 
 /* ── PC home bento layout: 모바일 정보 밀도를 PC용 대시보드로 재배치 ── */
 .home-hero{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin-bottom:16px;align-items:start}
-.portfolio-hero{grid-column:span 2;position:relative;overflow:hidden;border-radius:18px;padding:15px;background:radial-gradient(circle at 18% 0%,rgba(59,130,246,.22),transparent 34%),linear-gradient(150deg,#15294a 0%,#0d1525 100%);border:1px solid rgba(59,130,246,.22);box-shadow:0 16px 48px rgba(0,0,0,.22)}
+.portfolio-hero{grid-column:1 / span 2;grid-row:1;position:relative;overflow:hidden;border-radius:18px;padding:15px;background:radial-gradient(circle at 18% 0%,rgba(59,130,246,.22),transparent 34%),linear-gradient(150deg,#15294a 0%,#0d1525 100%);border:1px solid rgba(59,130,246,.22);box-shadow:0 16px 48px rgba(0,0,0,.22)}
 .hero-label{font-size:10px;font-weight:900;color:var(--b);letter-spacing:.7px;text-transform:uppercase;margin-bottom:8px}
 .portfolio-hero .brief{background:transparent;border:0;padding:0;margin-bottom:10px}
 .portfolio-hero .brief .ai{width:30px;height:30px;border-radius:10px;background:rgba(59,130,246,.18);font-size:14px}
@@ -270,16 +270,17 @@ details summary::before{content:"▸";transition:transform .18s;color:var(--mt)}
 .hero-today-trades .tl-name{font-size:12px}.hero-today-trades .tl-meta{font-size:9.5px}.hero-today-trades .tl-value{font-size:11px}
 .hero-today-trades .act-mini{background:var(--sf2);border:1px solid var(--ln);border-radius:8px;padding:7px 9px;font-size:12px;line-height:1.45;cursor:pointer}
 .hero-today-trades .act-mini .side{font-weight:800}.hero-today-trades .act-mini .meta{font-size:10px;color:var(--mt);margin-top:2px}
-.hero-decision{grid-column:span 2;border-radius:22px;padding:18px;overflow:hidden}
+.hero-decision{grid-column:3 / span 2;grid-row:1 / span 2;border-radius:22px;padding:18px;overflow:hidden}
 .hero-decision #home-dbrief{max-height:520px;overflow:auto;padding-right:4px}
 .market-strip{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:16px;padding:2px 0 4px;overflow:visible}
+.hero-market-strip{grid-column:1 / span 2;grid-row:2;grid-template-columns:repeat(2,minmax(0,1fr));margin-bottom:0}
 .market-strip .icard{min-width:0;flex:none;border-radius:15px;background:linear-gradient(180deg,var(--panel),var(--bg2))}
 .home-bento{display:grid;grid-template-columns:minmax(0,1.42fr) minmax(360px,.78fr);gap:16px;align-items:start}
 .home-main-stack,.home-side-stack{display:flex;flex-direction:column;gap:16px}.home-side-stack{position:sticky;top:70px}
 .home-wide-panel{min-height:280px}.home-rank-panel .tbl-scroll{max-height:620px}.home-chart-panel #home-chart{min-height:170px}
 .home-side-stack .panel{padding:15px}.home-side-stack .row{padding:10px 8px}.home-side-stack .panel h2{font-size:13px}
 .home-bottom-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.home-bottom-grid .panel{min-height:260px}
-@media(max-width:1180px){.home-hero,.home-bento{grid-template-columns:1fr}.portfolio-hero,.hero-decision{grid-column:auto}.home-side-stack{position:static}.hero-kpis{grid-template-columns:1fr 1fr!important;grid-template-rows:auto!important}.hero-kpis .kpi.hero-main{grid-row:auto;grid-column:1 / -1}.hero-kpis .kpi:nth-child(n){grid-column:auto;grid-row:auto}.market-strip{grid-template-columns:repeat(2,minmax(0,1fr))}.home-bottom-grid{grid-template-columns:1fr}.hero-today-trades{grid-template-columns:1fr}}
+@media(max-width:1180px){.home-hero,.home-bento{grid-template-columns:1fr}.portfolio-hero,.hero-decision,.hero-market-strip{grid-column:auto;grid-row:auto}.home-side-stack{position:static}.hero-kpis{grid-template-columns:1fr 1fr!important;grid-template-rows:auto!important}.hero-kpis .kpi.hero-main{grid-row:auto;grid-column:1 / -1}.hero-kpis .kpi:nth-child(n){grid-column:auto;grid-row:auto}.market-strip{grid-template-columns:repeat(2,minmax(0,1fr))}.home-bottom-grid{grid-template-columns:1fr}.hero-today-trades{grid-template-columns:1fr}}
 @media(max-width:720px){.market-strip{grid-template-columns:1fr}}
 
 /* 거래 ledger HTML 동기화 — PC/모바일 공통 */
@@ -333,13 +334,14 @@ details summary::before{content:"▸";transition:transform .18s;color:var(--mt)}
         <div class="panel"><h3>✅ 실제 체결 내역</h3><div id="home-exec-trades"><div class="emp">불러오는 중…</div></div></div>
       </div>
     </div>
+    <div class="strip market-strip hero-market-strip" id="home-strip-top"></div>
     <div class="panel hero-decision" id="home-dbrief-panel">
       <div class="ph"><h2>의사결정 브리핑</h2><span class="sub" id="dbrief-sub">참고용 · 실제 주문 아님</span></div>
       <div id="home-dbrief"><div class="emp">브리핑을 불러오는 중…</div></div>
     </div>
   </section>
 
-  <div class="strip market-strip" id="home-strip"></div>
+  <div class="strip market-strip" id="home-strip-rest"></div>
 
   <section class="home-bento">
     <main class="home-main-stack">
@@ -541,8 +543,11 @@ let _mkt=null,_rk="up";
 async function ldMkt(){
   const d=await J("/api/market");if(!d)return;_mkt=d;
   const idx=d.indices||{},mac=d.macro||{};
-  const strip=[...Object.entries(idx),...Object.entries(mac)].map(([n,q])=>icard(n,q)).join("");
-  document.getElementById("home-strip").innerHTML=strip;
+  const marketCards=[...Object.entries(idx),...Object.entries(mac)].map(([n,q])=>icard(n,q));
+  const strip=marketCards.join("");
+  const homeTop=document.getElementById("home-strip-top"),homeRest=document.getElementById("home-strip-rest");
+  if(homeTop)homeTop.innerHTML=marketCards.slice(0,4).join("");
+  if(homeRest)homeRest.innerHTML=marketCards.slice(4).join("");
   document.getElementById("mkt-strip").innerHTML=strip;
   const chart=perfChart(Object.entries(idx));
   document.getElementById("home-chart").innerHTML=chart||'<div class="emp">데이터 없음</div>';
