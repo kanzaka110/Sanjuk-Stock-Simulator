@@ -519,7 +519,7 @@ async function ldPF(){
   // home KPI: 전체 평가액 / 총 손익률 / 오늘 가중 수익률 / 현금 비중 (analytics 실패해도 채워짐)
   setKPI("home-kpis",[
     ["전체 평가액",`₩${F(d.total_eval)}`,"",""],
-    ["투자 원금",`₩${F(principal)}`,"보유 종목 매입 원금",""],
+    ["투자 원금",`₩${F(principal)}`,"입금 원금 기준",""],
     ["총 손익률",cs(d.total_pnl_pct),"",cc(d.total_pnl_pct)],
     ["오늘 가중 수익률",cs(todayPct),`${todayChg>=0?"+":""}${F(Math.round(todayChg))}₩`,cc(todayPct)],
     ["현금 비중",`${d.cash_weight}%`,`₩${F(d.total_cash)}`,""],
@@ -528,7 +528,7 @@ async function ldPF(){
   // pf KPI
   setKPI("pf-kpis",[
     ["총 평가자산",`₩${F(d.total_eval)}`,"",""],
-    ["투자 원금",`₩${F(principal)}`,"현금 제외",""],
+    ["투자 원금",`₩${F(principal)}`,"입금 원금 기준",""],
     ["오늘 손익",cs(todayPct),`${todayChg>=0?"+":""}${F(Math.round(todayChg))}₩`,cc(todayPct)],
     ["원금 대비",cs(principalPct),"입금 원금 기준",prc(principalPct)],
     ["현금 비중",`${d.cash_weight}%`,`₩${F(d.total_cash)}`,""],

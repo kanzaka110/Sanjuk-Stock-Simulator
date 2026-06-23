@@ -842,6 +842,17 @@ def test_portfolio_principal_uses_deposit_history_constants():
     assert "total_principal" in pc
 
 
+
+
+def test_pc_principal_label_uses_deposit_basis():
+    """PC판 투자 원금 설명도 보유 매입가/현금 제외가 아니라 입금 원금 기준으로 표기한다."""
+    from pathlib import Path
+    pc = (Path(__file__).parent.parent / "web" / "index_pc.html").read_text(encoding="utf-8")
+
+    assert "입금 원금 기준" in pc
+    assert "보유 종목 매입 원금" not in pc
+    assert "현금 제외" not in pc
+
 def test_principal_return_uses_non_price_direction_color():
     """원금 대비 수익률은 한국식 상승/하락 빨강·파랑과 별도 색상 클래스를 쓴다."""
     from pathlib import Path
