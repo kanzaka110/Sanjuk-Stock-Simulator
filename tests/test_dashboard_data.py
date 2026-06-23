@@ -2288,3 +2288,18 @@ def test_mobile_trade_card_opens_price_and_pnl_detail():
     assert "평가손익" in mobile
     block = mobile.split("function tradeCard(t){", 1)[1].split("function renderTradeLedger", 1)[0]
     assert "openTradeDetail" in block
+
+
+
+def test_mobile_home_shows_today_exec_trades_under_total_eval():
+    """모바일 홈 총 평가액 박스 아래에 당일 실제 체결 내역만 표시한다."""
+    from pathlib import Path
+    mobile = (Path(__file__).parent.parent / "web" / "index.html").read_text(encoding="utf-8")
+
+    assert "home-exec-tab" in mobile
+    assert "실제 체결 내역" in mobile
+    assert "오늘 체결 내역 없음" in mobile
+    assert "todayExecTrades().slice(0,4)" in mobile
+    assert "function renderHomeExecTrades()" in mobile
+    assert "renderHomeExecTrades();renderMCB" in mobile
+    assert "renderHomeExecTrades();_tradeLedgerLoaded=true" in mobile
