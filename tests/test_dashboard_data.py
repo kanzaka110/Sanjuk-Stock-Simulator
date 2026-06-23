@@ -2241,3 +2241,15 @@ def test_mobile_fold_home_grid_gated_by_on():
         "900+ 홈 그리드가 .on 게이트 안 됨 — 펼친 상태 탭 클릭 무효"
     assert "#t-home.fold-layout.on{display:block" in h, \
         "720~899 홈 블록이 .on 게이트 안 됨 — 탭 클릭 무효"
+
+
+def test_pc_home_uses_strict_four_column_grid():
+    """PC 홈은 4열 카드 그리드 기준으로 상단과 시장 카드를 배치한다."""
+    from pathlib import Path
+    pc = (Path(__file__).parent.parent / "web" / "index_pc.html").read_text(encoding="utf-8")
+
+    assert ".home-hero{display:grid;grid-template-columns:repeat(4,minmax(0,1fr))" in pc
+    assert ".portfolio-hero{grid-column:span 2" in pc
+    assert ".hero-decision{grid-column:span 2" in pc
+    assert ".market-strip{display:grid;grid-template-columns:repeat(4,minmax(0,1fr))" in pc
+    assert ".market-strip .icard{min-width:0;flex:none" in pc
