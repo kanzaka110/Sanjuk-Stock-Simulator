@@ -844,6 +844,20 @@ def test_portfolio_principal_uses_deposit_history_constants():
 
 
 
+
+
+def test_pc_home_kpis_show_principal_return():
+    """PC 홈 KPI도 투자 원금 옆에 원금 대비 수익률을 직접 보여준다."""
+    from pathlib import Path
+    pc = (Path(__file__).parent.parent / "web" / "index_pc.html").read_text(encoding="utf-8")
+
+    home_block = pc.split('setKPI("home-kpis",[', 1)[1].split(']);', 1)[0]
+    skeleton = pc.split('id="home-kpis"', 1)[1].split('</div>\n  <div class="strip"', 1)[0]
+    assert '"투자 원금"' in home_block
+    assert '"원금 대비"' in home_block
+    assert 'prc(principalPct)' in home_block
+    assert '원금 대비' in skeleton
+
 def test_pc_principal_label_uses_deposit_basis():
     """PC판 투자 원금 설명도 보유 매입가/현금 제외가 아니라 입금 원금 기준으로 표기한다."""
     from pathlib import Path

@@ -269,8 +269,10 @@ body{background:var(--bg);color:var(--tx);font-family:-apple-system,BlinkMacSyst
 <!-- ═══ 홈 ═══ -->
 <div class="page on" id="p-home">
   <div class="brief" style="margin-bottom:14px"><div class="ai">✦</div><div class="txt" id="brief">오늘의 브리핑을 불러오는 중…</div></div>
-  <div class="kpis" style="margin-bottom:14px" id="home-kpis">
+  <div class="kpis" style="margin-bottom:14px;grid-template-columns:repeat(6,1fr)" id="home-kpis">
     <div class="kpi"><div class="k">전체 평가액</div><div class="v skl">&nbsp;</div></div>
+    <div class="kpi"><div class="k">투자 원금</div><div class="v skl">&nbsp;</div></div>
+    <div class="kpi"><div class="k">원금 대비</div><div class="v skl">&nbsp;</div></div>
     <div class="kpi"><div class="k">총 손익률</div><div class="v skl">&nbsp;</div></div>
     <div class="kpi"><div class="k">오늘 가중 수익률</div><div class="v skl">&nbsp;</div></div>
     <div class="kpi"><div class="k">현금 비중</div><div class="v skl">&nbsp;</div></div>
@@ -520,6 +522,7 @@ async function ldPF(){
   setKPI("home-kpis",[
     ["전체 평가액",`₩${F(d.total_eval)}`,"",""],
     ["투자 원금",`₩${F(principal)}`,"입금 원금 기준",""],
+    ["원금 대비",cs(principalPct),"입금 원금 기준",prc(principalPct)],
     ["총 손익률",cs(d.total_pnl_pct),"",cc(d.total_pnl_pct)],
     ["오늘 가중 수익률",cs(todayPct),`${todayChg>=0?"+":""}${F(Math.round(todayChg))}₩`,cc(todayPct)],
     ["현금 비중",`${d.cash_weight}%`,`₩${F(d.total_cash)}`,""],
