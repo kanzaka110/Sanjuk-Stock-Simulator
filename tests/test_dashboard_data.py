@@ -786,6 +786,18 @@ def test_risk_warning_no_forbidden_cta():
             assert cta not in code, f"{fn}에 금지 CTA '{cta}' 발견"
 
 
+
+
+def test_samsung_screenshot_trades_reflected_in_settings():
+    """2026-06-23 삼성증권 체결 스샷 기준 보유/현금이 PC·모바일 공통 API 원본에 반영된다."""
+    from config.settings import HOLDINGS_ISA, HOLDINGS_RIA, ISA_CASH, RIA_CASH
+
+    assert "161510.KS" not in HOLDINGS_ISA
+    assert HOLDINGS_RIA["069500.KS"]["shares"] == 12
+    assert HOLDINGS_RIA["069500.KS"]["avg_cost_krw"] == 142_000
+    assert ISA_CASH == 4_545_735.0
+    assert RIA_CASH == 17_214_636.0
+
 def test_trade_api_routes_in_source():
     """거래 ledger 조회 API는 GET-only로 존재한다."""
     from pathlib import Path
