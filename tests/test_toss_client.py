@@ -141,6 +141,23 @@ class TestGetExchangeRate:
             })
 
 
+class TestGetBuyingPower:
+    def test_returns_empty_on_failure(self):
+        with patch.object(tc, "_get", return_value=None):
+            assert tc.get_buying_power("1") == {}
+
+    def test_extracts_result(self):
+        with patch.object(tc, "_get", return_value={"result": {"currency": "KRW", "cashBuyingPower": "10000000"}}):
+            r = tc.get_buying_power("1", "KRW")
+            assert r["cashBuyingPower"] == "10000000"
+
+    def test_passes_params(self):
+        mock_get = MagicMock(return_value={"result": {"currency": "USD", "cashBuyingPower": "5.67"}})
+        with patch.object(tc, "_get", mock_get):
+            tc.get_buying_power("1", "USD")
+            mock_get.assert_called_once_with("/api/v1/buying-power", account_seq="1", params={"currency": "USD"})
+
+
 class TestGetMarketCalendar:
     def test_returns_empty_on_failure(self):
         with patch.object(tc, "_get", return_value=None):

@@ -1,7 +1,7 @@
 """토스 자동투자 가드레일 테스트.
 
 정책:
-- Toss 계좌는 기존 포트폴리오와 분리된 AI 자동거래 실험 계좌
+- Toss 계좌는 기존 포트폴리오와 분리된 실전 AI 자동거래 계좌
 - read-only client/probe/dashboard GET endpoint 허용
 - 주문/매수/매도/정정/취소/자동거래 실행은 금지
 - Toss 값을 기존 /api/portfolio 총액/원금/수익률에 합산 금지

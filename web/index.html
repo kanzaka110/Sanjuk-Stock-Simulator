@@ -908,6 +908,7 @@ details[open] summary::before{transform:rotate(90deg)}
 <button class="tb" data-t="perf">성과</button>
 <button class="tb briefing-tab-button briefing-tab-visible briefing-tab-priority" data-t="briefing">브리핑</button>
 <button class="tb" data-t="sim">시뮬레이터</button>
+<button class="tb" data-t="toss">토스 AI</button>
 <span class="tab-scroll-hint"></span>
 </div>
 <!-- Refresh Status Bar -->
@@ -1017,10 +1018,6 @@ details[open] summary::before{transform:rotate(90deg)}
 <div class="c"><h3>총 평가</h3><div id="pf-sum"></div></div>
 <div class="c"><h3>자산 배분</h3><div id="pf-alloc"></div></div>
 <div id="pf-accts"></div>
-<div class="c" id="toss-exp-m-panel" style="display:none;border:1px dashed var(--ln);border-radius:12px;margin-top:12px">
-  <h3>🧪 Toss AI 실험 계좌 <span class="mt" style="font-size:10px;font-weight:400">기존 포트폴리오 미합산 · 주문 기능 없음</span></h3>
-  <div id="toss-exp-m"><div class="emp">확인 중…</div></div>
-</div>
 <div class="c"><h3>최근 거래 내역</h3><div id="pf-trades"><div class="emp">거래 내역 불러오는 중…</div></div></div>
 <div class="c"><h3>수익률 랭킹</h3><div id="pf-rank"></div></div>
 </div>
@@ -1111,6 +1108,14 @@ details[open] summary::before{transform:rotate(90deg)}
       </div>
     </div>
   </div>
+</div>
+</div>
+
+<!-- ═══ 토스 AI ═══ -->
+<div class="tc" id="t-toss">
+<div class="c">
+  <h3>Toss 실전 AI 자동거래 계좌 <span class="mt" style="font-size:10px;font-weight:400">기존 포트폴리오 미합산 · 자동거래 비활성 · 실전 계좌</span></h3>
+  <div id="toss-page-m"><div class="emp">불러오는 중…</div></div>
 </div>
 </div>
 
@@ -2815,25 +2820,31 @@ function safeInterval(fn,ms){
   _intervals.push(setInterval(()=>{if(!_paused&&!document.hidden)fn()},ms));
 }
 
-/* ═══ TOSS AI 실험 계좌 (기존 포트폴리오 미합산) ═══ */
+/* ═══ TOSS 실전 AI 자동거래 계좌 (기존 포트폴리오 미합산) ═══ */
 async function ldToss(){
   const d=await J("/api/toss/account-summary");
-  const panel=document.getElementById("toss-exp-m-panel");
-  const box=document.getElementById("toss-exp-m");
-  if(!d||!d.enabled){if(panel)panel.style.display="none";return}
-  if(panel)panel.style.display="";
-  const mv=d.market_value||{};const krw=mv.krw||0;const hc=d.holdings_count||0;
+  const box=document.getElementById("toss-page-m");
+  if(!box)return;
+  if(!d||!d.enabled){box.innerHTML='<div class="emp">Toss API 미설정</div>';return}
+  const mv=d.market_value||{};const mvKrw=mv.krw||0;
+  const cash=d.cash||{};const cashKrw=cash.krw||0;const cashUsd=cash.usd;
+  const total=d.total_account_value||{};const totalKrw=total.krw||0;
+  const hc=d.holdings_count||0;
   const fx=d.exchange_rate;const fxTxt=fx?`USD/KRW ${fx.rate.toLocaleString()}`:"—";
-  const warns=(d.warnings||[]).map(w=>`<div style="font-size:10px;color:var(--mt);line-height:1.5">⚠ ${E(w)}</div>`).join("");
+  const warns=(d.warnings||[]).map(w=>`<div style="font-size:10.5px;color:var(--mt);line-height:1.5">⚠ ${E(w)}</div>`).join("");
+  const accts=(d.accounts||[]).map(a=>`<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--ln);font-size:12px"><span style="font-weight:700">${E(a.account_type)}</span><span class="mt">계좌 #${a.account_seq}</span></div>`).join("");
   box.innerHTML=`
-    <div style="font-size:18px;font-weight:900;letter-spacing:-.4px">₩${Math.round(krw).toLocaleString()}</div>
-    <div style="font-size:10.5px;color:var(--mt);margin:2px 0 8px">평가금액 · ${E(fxTxt)}</div>
-    <div style="display:flex;gap:8px;margin-bottom:8px">
-      <div style="flex:1;background:var(--sf2);border-radius:8px;padding:7px;text-align:center"><div style="font-size:9.5px;color:var(--mt)">보유종목</div><div style="font-size:14px;font-weight:800">${hc}</div></div>
-      <div style="flex:1;background:var(--sf2);border-radius:8px;padding:7px;text-align:center"><div style="font-size:9.5px;color:var(--mt)">자동거래</div><div style="font-size:12px;font-weight:700;color:var(--mt)">비활성</div></div>
+    <div style="font-size:22px;font-weight:900;letter-spacing:-.5px">₩${Math.round(totalKrw).toLocaleString()}</div>
+    <div style="font-size:10.5px;color:var(--mt);margin:2px 0 10px">총 Toss 자산 · ${E(fxTxt)}</div>
+    <div style="display:flex;gap:8px;margin-bottom:10px">
+      <div style="flex:1;background:var(--sf2);border-radius:8px;padding:8px;text-align:center"><div style="font-size:9.5px;color:var(--mt)">예수금</div><div style="font-size:14px;font-weight:800">₩${Math.round(cashKrw).toLocaleString()}</div>${cashUsd?'<div style="font-size:10px;color:var(--mt)">$'+cashUsd.toLocaleString()+'</div>':""}</div>
+      <div style="flex:1;background:var(--sf2);border-radius:8px;padding:8px;text-align:center"><div style="font-size:9.5px;color:var(--mt)">보유종목 평가</div><div style="font-size:14px;font-weight:800">₩${Math.round(mvKrw).toLocaleString()}</div><div style="font-size:10px;color:var(--mt)">${hc}종목</div></div>
+      <div style="flex:1;background:var(--sf2);border-radius:8px;padding:8px;text-align:center"><div style="font-size:9.5px;color:var(--mt)">자동거래</div><div style="font-size:12px;font-weight:700;color:var(--mt)">비활성</div></div>
     </div>
-    ${hc===0?'<div class="emp" style="font-size:11px">현재 보유종목 없음</div>':""}
-    <div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--ln)">${warns}</div>`;
+    ${accts}
+    ${hc===0?'<div class="emp" style="font-size:11px;margin:8px 0">현재 보유종목 없음</div>':""}
+    <div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--ln)">${warns}</div>
+    <div style="font-size:10px;color:var(--mt);margin-top:6px">갱신: ${E(d.updated_at||"—")}</div>`;
 }
 
 /* ═══ INIT ═══ */

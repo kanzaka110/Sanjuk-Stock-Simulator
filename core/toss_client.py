@@ -19,6 +19,14 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+# ─── .env 안전 로드 (기존 환경변수 override 안 함) ───
+from pathlib import Path as _Path
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(_Path(__file__).resolve().parents[1] / ".env", override=False)
+except Exception:
+    pass
+
 # ─── 환경변수 ────────────────────────────────────────
 TOSS_APP_KEY: str = os.environ.get("TOSS_APP_KEY", "")
 TOSS_APP_SECRET: str = os.environ.get("TOSS_APP_SECRET", "")
@@ -165,6 +173,17 @@ def get_exchange_rate(base_currency: str = "USD", quote_currency: str = "KRW") -
     data = _get("/api/v1/exchange-rate", params={
         "baseCurrency": base_currency,
         "quoteCurrency": quote_currency,
+    })
+    if not data:
+        return {}
+    result = data.get("result", {}) if isinstance(data, dict) else {}
+    return result if isinstance(result, dict) else {}
+
+
+def get_buying_power(account_seq: str, currency: str = "KRW") -> dict:
+    """현금/예수금 조회. {currency, cashBuyingPower}"""
+    data = _get("/api/v1/buying-power", account_seq=account_seq, params={
+        "currency": currency,
     })
     if not data:
         return {}

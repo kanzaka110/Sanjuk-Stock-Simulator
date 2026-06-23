@@ -312,6 +312,7 @@ details summary::before{content:"▸";transition:transform .18s;color:var(--mt)}
     <button data-p="perf">성과</button>
     <button data-p="briefing">브리핑</button>
     <button data-p="sim">시뮬레이터</button>
+    <button data-p="toss">토스 AI</button>
   </div>
   <div class="search"><span class="ic">🔍</span><input id="q" placeholder="종목 검색" autocomplete="off"/><span class="kbd">/</span></div>
   <div class="svc"><span class="dot dot-y" id="svc-dot"></span><span id="svc-tx">확인 중</span><span id="clk"></span></div>
@@ -370,10 +371,6 @@ details summary::before{content:"▸";transition:transform .18s;color:var(--mt)}
       <div class="panel"><div class="ph"><h2>포트폴리오 비중</h2></div><div id="home-alloc"></div></div>
       <div class="panel"><div class="ph"><h2>리스크 보드</h2></div><div id="home-risk"></div></div>
       <div class="panel"><div class="ph"><h2>관련 뉴스</h2></div><div id="home-news"></div></div>
-      <div class="panel" id="toss-exp-panel" style="display:none;border:1px dashed var(--border)">
-        <div class="ph"><h2>🧪 Toss AI 실험 계좌</h2><span class="sub">기존 포트폴리오 미합산 · 주문 기능 없음 · AI 자동거래 준비용</span></div>
-        <div id="toss-exp"></div>
-      </div>
     </aside>
   </section>
 </div>
@@ -475,6 +472,14 @@ details summary::before{content:"▸";transition:transform .18s;color:var(--mt)}
     <div class="panel"><div class="ph"><h2>추천 타임라인</h2><span class="sub">오늘</span></div><div id="sim-tl"></div></div>
     <div class="panel"><div class="ph"><h2>성과 로그</h2><span class="sub">종목별 30일</span></div><div id="sim-perf"></div></div>
     <div class="panel"><div class="ph"><h2>알림 · 뉴스</h2></div><div id="sim-news"></div></div>
+  </div>
+</div>
+
+<!-- ═══ 토스 AI ═══ -->
+<div class="page" id="p-toss">
+  <div class="panel" style="margin-bottom:16px">
+    <div class="ph"><h2>Toss 실전 AI 자동거래 계좌</h2><span class="sub">기존 포트폴리오 미합산 · 자동거래 비활성 · 실전 계좌</span></div>
+    <div id="toss-page"></div>
   </div>
 </div>
 
@@ -1149,36 +1154,39 @@ function openBrDetail(day){
   if(items.length&&items[0].ticker)openTk(items[0].ticker);
 }
 
-/* ════ TOSS AI 실험 계좌 (기존 포트폴리오 미합산) ════ */
+/* ════ TOSS 실전 AI 자동거래 계좌 (기존 포트폴리오 미합산) ════ */
 async function ldToss(){
   const d=await J("/api/toss/account-summary");
-  const panel=document.getElementById("toss-exp-panel");
-  const box=document.getElementById("toss-exp");
-  if(!d||!d.enabled){if(panel)panel.style.display="none";return;}
-  if(panel)panel.style.display="";
-  const mv=d.market_value||{};const krw=mv.krw||0;
+  const box=document.getElementById("toss-page");
+  if(!box)return;
+  if(!d||!d.enabled){box.innerHTML='<div class="emp">Toss API 미설정</div>';return;}
+  const mv=d.market_value||{};const mvKrw=mv.krw||0;
+  const cash=d.cash||{};const cashKrw=cash.krw||0;const cashUsd=cash.usd;
+  const total=d.total_account_value||{};const totalKrw=total.krw||0;
   const hc=d.holdings_count||0;
   const fx=d.exchange_rate;const fxTxt=fx?`USD/KRW ${F(fx.rate)}`:"—";
-  const warns=(d.warnings||[]).map(w=>`<div style="font-size:10.5px;color:var(--mt);line-height:1.5">⚠ ${E(w)}</div>`).join("");
-  const accts=(d.accounts||[]).map(a=>`<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:12px"><span style="font-weight:600">${E(a.account_type)}</span><span class="mt">seq ${a.account_seq}</span></div>`).join("");
-  let items="";
+  const warns=(d.warnings||[]).map(w=>`<div style="font-size:11px;color:var(--mt);line-height:1.6">⚠ ${E(w)}</div>`).join("");
+  const accts=(d.accounts||[]).map(a=>`<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border2);font-size:12.5px"><span style="font-weight:700">${E(a.account_type)}</span><span class="mt">계좌 #${a.account_seq}</span></div>`).join("");
+  let holdingsHtml="";
   if(hc>0&&d.holdings_items){
-    items=(d.holdings_items||[]).map(it=>{
+    holdingsHtml='<div class="panel" style="margin-top:14px"><div class="ph"><h2>보유종목</h2><span class="sub">'+hc+'종목</span></div>'+(d.holdings_items||[]).map(it=>{
       const nm=it.name||it.symbol||"—";
-      return`<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--border2);font-size:12px"><span style="font-weight:600">${E(nm)}</span><span>${it.quantity||0}주</span></div>`;
-    }).join("");
+      return'<div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--border2);font-size:12.5px"><span style="font-weight:700">'+E(nm)+'</span><span>'+(it.quantity||0)+'주</span></div>';
+    }).join("")+'</div>';
   }
   box.innerHTML=`
-    <div style="margin-bottom:10px">
-      <div style="font-size:20px;font-weight:900;letter-spacing:-.5px">₩${F(Math.round(krw))}</div>
-      <div style="font-size:11px;color:var(--mt);margin-top:2px">평가금액 · ${fxTxt}</div>
+    <div class="kpis" style="grid-template-columns:repeat(5,1fr);margin-bottom:16px">
+      <div class="kpi"><div class="k">총 Toss 자산</div><div class="v">₩${F(Math.round(totalKrw))}</div><div class="x mt">${fxTxt}</div></div>
+      <div class="kpi"><div class="k">예수금/현금</div><div class="v">₩${F(Math.round(cashKrw))}</div><div class="x mt">${cashUsd?'$'+F(cashUsd):""}</div></div>
+      <div class="kpi"><div class="k">보유종목 평가</div><div class="v">₩${F(Math.round(mvKrw))}</div><div class="x mt">${hc}종목</div></div>
+      <div class="kpi"><div class="k">자동거래</div><div class="v" style="font-size:18px;color:var(--mt)">비활성</div><div class="x mt">주문 실행 기능 없음</div></div>
+      <div class="kpi"><div class="k">거래 활성화</div><div class="v" style="font-size:18px;color:var(--mt)">OFF</div><div class="x mt">별도 성과 추적</div></div>
     </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
-      <div style="background:var(--bg2);border-radius:8px;padding:8px;text-align:center"><div style="font-size:10px;color:var(--mt)">보유종목</div><div style="font-size:15px;font-weight:800">${hc}</div></div>
-      <div style="background:var(--bg2);border-radius:8px;padding:8px;text-align:center"><div style="font-size:10px;color:var(--mt)">자동거래</div><div style="font-size:13px;font-weight:700;color:var(--mt)">비활성</div></div>
+    <div class="grid" style="grid-template-columns:1fr 1fr;gap:14px">
+      <div class="panel"><div class="ph"><h2>계좌 정보</h2></div>${accts||'<div class="emp">계좌 없음</div>'}<div style="margin-top:8px;font-size:11px;color:var(--mt)">갱신: ${E(d.updated_at||"—")}</div></div>
+      <div class="panel"><div class="ph"><h2>안내</h2></div>${warns}</div>
     </div>
-    ${accts}${items?`<div style="margin-top:8px">${items}</div>`:""}
-    <div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border2)">${warns}</div>`;
+    ${holdingsHtml}`;
 }
 
 /* ════ INIT ════ */

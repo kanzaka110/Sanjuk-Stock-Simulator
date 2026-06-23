@@ -36,6 +36,8 @@ TIMEOUT = 10
 READ_ONLY_ENDPOINTS: list[tuple[str, str, bool, dict]] = [
     ("계좌 목록", "/api/v1/accounts", False, {}),
     ("보유종목", "/api/v1/holdings", True, {}),
+    ("예수금(KRW)", "/api/v1/buying-power", True, {"currency": "KRW"}),
+    ("예수금(USD)", "/api/v1/buying-power", True, {"currency": "USD"}),
     ("환율", "/api/v1/exchange-rate", False, {
         "baseCurrency": "USD", "quoteCurrency": "KRW",
     }),

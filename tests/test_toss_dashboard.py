@@ -27,7 +27,8 @@ sys.path.insert(0, str(ROOT))
 class TestTossAccountSummary:
     """toss_account_summary 응답 구조 검증."""
 
-    def _get_summary(self, configured=True, accounts=None, holdings=None, fx=None):
+    def _get_summary(self, configured=True, accounts=None, holdings=None, fx=None,
+                     buying_power=None):
         """mock된 toss_client로 summary 생성."""
         if accounts is None:
             accounts = [{"accountSeq": 1, "accountType": "BROKERAGE", "accountNo": "17401007263"}]
@@ -35,6 +36,8 @@ class TestTossAccountSummary:
             holdings = {"items": [], "marketValue": {"amount": {"krw": "0", "usd": None}}}
         if fx is None:
             fx = {"baseCurrency": "USD", "quoteCurrency": "KRW", "rate": "1538.5"}
+        if buying_power is None:
+            buying_power = {"currency": "KRW", "cashBuyingPower": "10000000"}
 
         from core.dashboard_data import _fetch_toss_account_summary_raw
 
@@ -42,6 +45,7 @@ class TestTossAccountSummary:
              patch("core.toss_client.get_accounts", return_value=accounts), \
              patch("core.toss_client.get_holdings", return_value=holdings), \
              patch("core.toss_client.get_exchange_rate", return_value=fx), \
+             patch("core.toss_client.get_buying_power", return_value=buying_power), \
              patch("core.toss_client.sanitize_dict", side_effect=lambda x: x):
             return _fetch_toss_account_summary_raw()
 
@@ -63,7 +67,12 @@ class TestTossAccountSummary:
 
     def test_label(self):
         d = self._get_summary()
-        assert "실험" in d["label"] or "Toss" in d["label"]
+        assert d["label"] == "Toss 실전 AI 자동거래 계좌"
+
+    def test_label_no_experiment_wording(self):
+        d = self._get_summary()
+        assert "실험" not in d["label"]
+        assert "모의" not in d["label"]
 
     def test_account_no_masked(self):
         d = self._get_summary()
@@ -109,6 +118,34 @@ class TestTossAccountSummary:
         assert fx["rate"] == 1538.5
         assert fx["source"] == "Toss"
 
+    def test_cash_field_present(self):
+        d = self._get_summary()
+        assert "cash" in d
+        assert d["cash"]["krw"] == 10000000.0
+        assert d["cash"]["source"] == "Toss"
+
+    def test_total_account_value_present(self):
+        d = self._get_summary()
+        assert "total_account_value" in d
+        # cash 10M + market_value 0 = 10M
+        assert d["total_account_value"]["krw"] == 10000000.0
+
+    def test_total_with_holdings(self):
+        holdings = {
+            "items": [{"symbol": "AAPL", "quantity": 10}],
+            "marketValue": {"amount": {"krw": "5000000", "usd": "3500"}},
+        }
+        bp = {"currency": "KRW", "cashBuyingPower": "2000000"}
+        d = self._get_summary(holdings=holdings, buying_power=bp)
+        assert d["market_value"]["krw"] == 5000000.0
+        assert d["cash"]["krw"] == 2000000.0
+        assert d["total_account_value"]["krw"] == 7000000.0
+
+    def test_no_experiment_wording_in_warnings(self):
+        d = self._get_summary()
+        warns = " ".join(d.get("warnings", []))
+        assert "실험" not in warns
+
 
 # ═══ 기존 포트폴리오 오염 없음 ═══
 
@@ -152,10 +189,10 @@ class TestApiEndpoint:
         assert "@app.post" not in source or "toss" not in source.split("@app.post")[1].split("\n")[0] if "@app.post" in source else True
 
 
-# ═══ HTML 문구 검증 ═══
+# ═══ HTML 탭/문구 검증 ═══
 
 class TestHtmlLabels:
-    """PC/Mobile HTML에 필수 문구 존재, CTA 금지."""
+    """PC/Mobile HTML에 필수 문구/탭 존재, CTA 금지."""
 
     def _read_pc(self) -> str:
         return (ROOT / "web" / "index_pc.html").read_text(encoding="utf-8")
@@ -163,51 +200,77 @@ class TestHtmlLabels:
     def _read_mobile(self) -> str:
         return (ROOT / "web" / "index.html").read_text(encoding="utf-8")
 
+    # ── PC 탭 ──
+    def test_pc_nav_has_toss_tab(self):
+        assert "토스 AI" in self._read_pc()
+
+    def test_pc_has_toss_page(self):
+        assert 'id="p-toss"' in self._read_pc()
+
     def test_pc_has_toss_label(self):
-        html = self._read_pc()
-        assert "Toss AI 실험 계좌" in html
+        assert "Toss 실전 AI 자동거래 계좌" in self._read_pc()
 
     def test_pc_has_not_included_label(self):
-        html = self._read_pc()
-        assert "기존 포트폴리오 미합산" in html
+        assert "기존 포트폴리오 미합산" in self._read_pc()
 
     def test_pc_has_no_trading_label(self):
+        assert "주문 실행 기능 없음" in self._read_pc()
+
+    def test_pc_has_api_call(self):
+        assert "/api/toss/account-summary" in self._read_pc()
+
+    def test_pc_no_experiment_wording(self):
         html = self._read_pc()
-        # JS 코드에서 "주문 기능 없음" 경고가 렌더링됨
-        assert "주문 기능 없음" in html
+        # p-toss 페이지 안에 '실험' 없어야
+        assert "실험 계좌" not in html
+        assert "실험 준비용" not in html
+
+    # ── Mobile 탭 ──
+    def test_mobile_nav_has_toss_tab(self):
+        assert "토스 AI" in self._read_mobile()
+
+    def test_mobile_has_toss_section(self):
+        html = self._read_mobile()
+        assert 't-toss' in html or 'toss-page-m' in html
 
     def test_mobile_has_toss_label(self):
-        html = self._read_mobile()
-        assert "Toss AI 실험 계좌" in html
+        assert "Toss 실전 AI 자동거래 계좌" in self._read_mobile()
 
     def test_mobile_has_not_included_label(self):
-        html = self._read_mobile()
-        assert "기존 포트폴리오 미합산" in html
+        assert "기존 포트폴리오 미합산" in self._read_mobile()
 
     def test_mobile_has_no_trading_label(self):
         html = self._read_mobile()
-        assert "주문 기능 없음" in html
+        # 정적 HTML 또는 JS 렌더링 코드에 주문 관련 제한 문구 존재
+        assert "자동거래 비활성" in html
 
+    def test_mobile_has_api_call(self):
+        assert "/api/toss/account-summary" in self._read_mobile()
+
+    def test_mobile_no_experiment_wording(self):
+        html = self._read_mobile()
+        assert "실험 계좌" not in html
+        assert "실험 준비용" not in html
+
+    # ── CTA 금지 ──
     def test_no_buy_sell_cta_in_toss_section_pc(self):
-        """PC Toss 섹션에 매수/매도/주문 CTA 버튼 없음."""
+        """PC Toss 페이지에 매수/매도/주문실행/자동매매시작 CTA 버튼 없음."""
         html = self._read_pc()
-        # Toss 관련 섹션만 추출 (toss-exp-panel ~ 다음 aside)
-        toss_match = re.search(r'id="toss-exp-panel".*?</aside>', html, re.DOTALL)
+        toss_match = re.search(r'id="p-toss".*?</div>\s*</div>', html, re.DOTALL)
         if toss_match:
             section = toss_match.group()
-            # button 태그 안에 매수/매도/주문/자동매매 없어야
             buttons = re.findall(r'<button[^>]*>.*?</button>', section, re.DOTALL)
             for btn in buttons:
-                for word in ["매수", "매도", "주문", "자동매매"]:
-                    assert word not in btn, f"CTA '{word}' found in Toss section"
+                for word in ["매수", "매도", "주문 실행", "자동매매 시작"]:
+                    assert word not in btn, f"CTA '{word}' found in PC Toss page"
 
     def test_no_buy_sell_cta_in_toss_section_mobile(self):
-        """Mobile Toss 섹션에 매수/매도/주문 CTA 버튼 없음."""
+        """Mobile Toss 섹션에 매수/매도/주문실행/자동매매시작 CTA 버튼 없음."""
         html = self._read_mobile()
-        toss_match = re.search(r'id="toss-exp-m-panel".*?</div>\s*<div class="c">', html, re.DOTALL)
+        toss_match = re.search(r'id="t-toss".*?</div>\s*</div>', html, re.DOTALL)
         if toss_match:
             section = toss_match.group()
             buttons = re.findall(r'<button[^>]*>.*?</button>', section, re.DOTALL)
             for btn in buttons:
-                for word in ["매수", "매도", "주문", "자동매매"]:
+                for word in ["매수", "매도", "주문 실행", "자동매매 시작"]:
                     assert word not in btn, f"CTA '{word}' found in mobile Toss section"
