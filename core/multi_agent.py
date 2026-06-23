@@ -430,6 +430,29 @@ def _build_debate_context(results: list[PersonaAnalysis]) -> str:
     return "\n".join(lines)
 
 
+def _toss_holdings_block() -> str:
+    """[토스] 계좌 정보 블록 (read-only, 기존 포트폴리오 미합산)."""
+    try:
+        from core.toss_decision_context import get_toss_decision_context
+        ctx = get_toss_decision_context()
+        if not ctx.get("enabled"):
+            return ""
+        auto = ctx.get("automation", {})
+        lines = [
+            f"[토스] 실전 AI 자동거래 계좌 (예수금 ₩{ctx['cash_krw']:,.0f}) — 기존 포트폴리오 미합산 · 별도 관리",
+            f"  자동거래: {'활성' if auto.get('enabled') else '비활성'} / {auto.get('mode', 'paper')} / 실주문={'허용' if auto.get('live_orders_allowed') else '차단'}",
+        ]
+        if ctx["holdings_count"] > 0:
+            for h in ctx.get("holdings", []):
+                nm = h.get("name", h.get("symbol", "?"))
+                lines.append(f"  - {nm}")
+        else:
+            lines.append("  (보유 종목 없음)")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
 # ═══════════════════════════════════════════════════════
 # 종합 판단
 # ═══════════════════════════════════════════════════════
@@ -748,7 +771,9 @@ def synthesize(
 {chr(10).join(irp_lines) if irp_lines else "  (해당 시장 보유 없음)"}
 
 [연금저축] CMA (MMF ₩{PENSION_MMF:,.0f})
-{chr(10).join(pension_lines) if pension_lines else "  (해당 시장 보유 없음)"}"""
+{chr(10).join(pension_lines) if pension_lines else "  (해당 시장 보유 없음)"}
+
+{_toss_holdings_block()}"""
 
     # 투자 시계별 보유 논지 (장기/중기/단기 구분 + 관리 전략)
     _all_held: set[str] = set()
@@ -890,6 +915,7 @@ def synthesize(
 - [RIA]: 현금 ₩{RIA_CASH:,.0f} 1년 의무 보유 (인출 시 전체 면제 취소). 국내자산 편입 ETF·국내주식·예탁금만 매수 가능 — 해외편입 ETF(TIGER 미국 시리즈·KODEX MSCI선진국·TIGER 차이나 등) 매수 불가. 누적 실현 차익 ${RIA_REALIZED_GAIN_USD:,.2f}.
 - [일반]: 예수금 ₩{DEFAULT_CASH:,.0f}. 한국·미국·ETF 자유 매수 가능. 단 미국주·해외 ETF 매수는 사용자 B안 룰 적용 (아래 참조).
 - [IRP/연금저축]: 해외 ETF 자동매수 설정 있다면 정지 권장 (RIA 혜택 보호용, B안 룰).
+- [토스]: 실전 AI 자동거래 계좌. 삼성증권과 별도 관리. 현재 자동거래 비활성/paper. 이 계좌 기준 추천 시 반드시 [토스] 태그. 실주문 불가 명시.
 
 ━━━ 🎯 사용자 B안 전략 (2026-05-18 결정) ━━━
 - **기본 방침**: 2026-08-01 전까지 일반·ISA·IRP·연금저축에서 해외 ETF·해외주식·해외주식형 펀드 신규 매수 자제 (RIA 세제혜택 보호)

@@ -21,6 +21,8 @@ ALLOWED_TOSS_FILES = {
     "core/toss_automation_guard.py",
     "core/toss_paper_trading.py",
     "core/toss_candidate_builder.py",
+    "core/toss_decision_context.py",
+    "core/toss_cross_check.py",
     "config/toss_automation.py",
     "tools/probe_toss_account.py",
     "tests/test_toss_probe.py",
@@ -29,6 +31,8 @@ ALLOWED_TOSS_FILES = {
     "tests/test_toss_automation_config.py",
     "tests/test_toss_automation_guard.py",
     "tests/test_toss_paper_trading.py",
+    "tests/test_toss_decision_context.py",
+    "tests/test_toss_cross_check.py",
 }
 
 

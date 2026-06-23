@@ -67,7 +67,7 @@ class TestReadOnlyGuard:
 
 class TestSanitizer:
     def test_sanitize_accountno(self):
-        data = {"accountNo": "17401007263", "seq": 1}
+        data = {"accountNo": "99900001234", "seq": 1}
         result = tc.sanitize_dict(data)
         assert result["accountNo"] == "[REDACTED]"
         assert result["seq"] == 1

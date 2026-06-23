@@ -1817,3 +1817,27 @@ def toss_paper_trades(limit: int = 50) -> dict:
     from core.toss_paper_trading import list_paper_trades
     trades = list_paper_trades(limit=limit)
     return {"trades": trades, "count": len(trades)}
+
+
+def _fetch_toss_decision_context_raw() -> dict:
+    """Toss 판단 컨텍스트 (dashboard 표시용)."""
+    from core.toss_decision_context import get_toss_decision_context
+    return get_toss_decision_context()
+
+
+def toss_decision_context() -> dict:
+    """Toss 판단 컨텍스트 (60초 캐시)."""
+    return _cached("toss_decision_context", 60, _fetch_toss_decision_context_raw)
+
+
+def _fetch_toss_cross_check_raw() -> dict:
+    """Toss/KIS 교차 검증 요약."""
+    from core.toss_decision_context import get_toss_decision_context
+    from core.toss_cross_check import cross_check_summary
+    ctx = get_toss_decision_context()
+    return cross_check_summary(ctx)
+
+
+def toss_cross_check() -> dict:
+    """Toss/KIS 교차 검증 (30초 캐시)."""
+    return _cached("toss_cross_check", 30, _fetch_toss_cross_check_raw)

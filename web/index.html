@@ -2865,6 +2865,12 @@ async function ldToss(){
     const rows=pt.trades.slice(0,5).map(t=>`<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--ln);font-size:11px"><span><span class="${t.side==="buy"?"up":"dn"}" style="font-weight:700">${E(t.side)}</span> ${E(t.symbol)}</span><span>₩${Math.round(t.estimated_amount_krw||0).toLocaleString()}</span></div>`).join("");
     box.innerHTML+=`<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--ln)"><div style="font-size:12px;font-weight:700;margin-bottom:6px">최근 paper 거래 <span style="font-size:10px;color:var(--mt);font-weight:400">${pt.count}건</span></div>${rows}</div>`;
   }
+  // 교차 검증
+  const cc2=await J("/api/toss/cross-check");
+  if(cc2&&cc2.checks){
+    const cks=cc2.checks.map(c=>`<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--ln);font-size:11px"><span>${E(c.name)}</span><span style="font-weight:700;color:${c.ok?"var(--up)":"var(--dn)"}">${E(c.status)}</span></div>`).join("");
+    box.innerHTML+=`<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--ln)"><div style="font-size:12px;font-weight:700;margin-bottom:6px">교차 검증</div>${cks}<div style="font-size:10px;color:var(--mt);margin-top:4px">readiness: ${E(cc2.toss_readiness||"—")}</div></div>`;
+  }
 }
 
 /* ═══ INIT ═══ */

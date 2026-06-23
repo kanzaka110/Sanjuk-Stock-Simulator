@@ -760,6 +760,15 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
     except Exception as e:
         log.debug("잔고 검증 스킵: %s", e)
 
+    # Toss 실전 AI 자동거래 계좌 컨텍스트 (read-only, 기존 포트폴리오 미합산)
+    try:
+        from core.toss_decision_context import context_to_briefing_text
+        toss_text = context_to_briefing_text()
+        if toss_text:
+            extra_context += f"\n\n━━━ Toss 실전 AI 자동거래 계좌 ━━━\n{toss_text}"
+    except Exception as e:
+        log.debug("Toss 계좌 컨텍스트 스킵: %s", e)
+
     # 시장 기회 스캐너 결과 수합 (백그라운드)
     try:
         scanner_text = scanner_future.result(timeout=120)

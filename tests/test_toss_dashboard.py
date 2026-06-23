@@ -31,7 +31,7 @@ class TestTossAccountSummary:
                      buying_power=None):
         """mock된 toss_client로 summary 생성."""
         if accounts is None:
-            accounts = [{"accountSeq": 1, "accountType": "BROKERAGE", "accountNo": "17401007263"}]
+            accounts = [{"accountSeq": 1, "accountType": "BROKERAGE", "accountNo": "99900001234"}]
         if holdings is None:
             holdings = {"items": [], "marketValue": {"amount": {"krw": "0", "usd": None}}}
         if fx is None:
@@ -78,12 +78,12 @@ class TestTossAccountSummary:
         d = self._get_summary()
         for acct in d["accounts"]:
             assert acct["account_no_masked"] == "[REDACTED]"
-            assert "17401007263" not in str(acct)
+            assert "99900001234" not in str(acct)
 
     def test_no_raw_account_no_in_response(self):
         d = self._get_summary()
         s = str(d)
-        assert "17401007263" not in s
+        assert "99900001234" not in s
 
     def test_no_token_in_response(self):
         d = self._get_summary()

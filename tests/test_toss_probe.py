@@ -70,9 +70,9 @@ class TestSanitizeResponse:
         assert "refresh-abc" not in result
 
     def test_masks_accountno_top_level(self):
-        data = {"accountNo": "17401007263", "accountSeq": 1}
+        data = {"accountNo": "99900001234", "accountSeq": 1}
         result = probe.sanitize_response(data)
-        assert "17401007263" not in result
+        assert "99900001234" not in result
         assert "REDACTED" in result
 
     def test_masks_accountnumber(self):
@@ -100,11 +100,11 @@ class TestSanitizeResponse:
         """nested list 안의 계좌번호도 마스킹."""
         data = {
             "result": [
-                {"accountNo": "17401007263", "accountSeq": 1, "accountType": "BROKERAGE"}
+                {"accountNo": "99900001234", "accountSeq": 1, "accountType": "BROKERAGE"}
             ]
         }
         result = probe.sanitize_response(data)
-        assert "17401007263" not in result
+        assert "99900001234" not in result
 
     def test_masks_deeply_nested_dict(self):
         """깊은 중첩 dict 안의 민감 키도 마스킹."""
@@ -148,7 +148,7 @@ class TestSanitizeResponse:
 
     def test_sanitized_preview_no_raw_account(self):
         """sanitize 결과에 실제 계좌번호 패턴이 남으면 실패."""
-        acct = "17401007263"
+        acct = "99900001234"
         data = {"result": [{"accountNo": acct, "seq": 1}]}
         result = probe.sanitize_response(data)
         assert acct not in result

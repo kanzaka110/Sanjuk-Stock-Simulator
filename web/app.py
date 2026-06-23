@@ -178,6 +178,16 @@ def api_toss_paper_trades(limit: int = 50):
     return JSONResponse(dd.toss_paper_trades(min(limit, 200)))
 
 
+@app.get("/api/toss/decision-context")
+def api_toss_decision_context():
+    return JSONResponse(dd.toss_decision_context())
+
+
+@app.get("/api/toss/cross-check")
+def api_toss_cross_check():
+    return JSONResponse(dd.toss_cross_check())
+
+
 @app.get("/api/recommendations/timeline")
 def api_timeline(
     range: str = "today",
