@@ -1772,3 +1772,48 @@ def _fetch_toss_account_summary_raw() -> dict:
 def toss_account_summary() -> dict:
     """Toss 실전 AI 자동거래 계좌 요약 (60초 캐시). 기존 포트폴리오 미합산."""
     return _cached("toss_account_summary", 60, _fetch_toss_account_summary_raw)
+
+
+def _fetch_toss_automation_status_raw() -> dict:
+    """Toss 자동거래 상태 + 가드레일 목록."""
+    from config import toss_automation as cfg
+    from core.toss_paper_trading import today_paper_stats
+
+    stats = today_paper_stats()
+    guards = []
+    if cfg.TOSS_KILL_SWITCH:
+        guards.append({"name": "킬스위치", "status": "ON", "ok": False})
+    else:
+        guards.append({"name": "킬스위치", "status": "OFF", "ok": True})
+    guards.append({"name": "실주문 허용", "status": str(cfg.TOSS_ALLOW_LIVE_ORDERS), "ok": False})
+    guards.append({"name": "Telegram 승인", "status": "필수" if cfg.TOSS_REQUIRE_TELEGRAM_APPROVAL else "불필요", "ok": True})
+    guards.append({"name": "1회 한도", "status": f"₩{cfg.TOSS_MAX_ORDER_KRW:,}", "ok": True})
+    guards.append({"name": "일일 한도", "status": f"₩{cfg.TOSS_MAX_DAILY_ORDER_KRW:,}", "ok": True})
+    guards.append({"name": "현금 하한", "status": f"₩{cfg.TOSS_MIN_CASH_BUFFER_KRW:,}", "ok": True})
+    guards.append({"name": "최대 포지션", "status": str(cfg.TOSS_MAX_POSITIONS), "ok": True})
+    guards.append({"name": "블랙리스트", "status": ", ".join(cfg.TOSS_SYMBOL_BLACKLIST) or "없음", "ok": True})
+
+    return {
+        "automation_enabled": cfg.TOSS_AUTOMATION_ENABLED,
+        "mode": cfg.TOSS_AUTOMATION_MODE,
+        "dry_run": cfg.TOSS_DRY_RUN,
+        "live_orders_allowed": cfg.TOSS_ALLOW_LIVE_ORDERS,
+        "kill_switch": cfg.TOSS_KILL_SWITCH,
+        "telegram_approval_required": cfg.TOSS_REQUIRE_TELEGRAM_APPROVAL,
+        "paper_trades_count_today": stats.get("count", 0),
+        "daily_budget_used_krw": stats.get("daily_amount_krw", 0),
+        "daily_budget_max_krw": cfg.TOSS_MAX_DAILY_ORDER_KRW,
+        "guards": guards,
+    }
+
+
+def toss_automation_status() -> dict:
+    """Toss 자동거래 상태 (30초 캐시)."""
+    return _cached("toss_automation_status", 30, _fetch_toss_automation_status_raw)
+
+
+def toss_paper_trades(limit: int = 50) -> dict:
+    """Toss paper trade 목록."""
+    from core.toss_paper_trading import list_paper_trades
+    trades = list_paper_trades(limit=limit)
+    return {"trades": trades, "count": len(trades)}

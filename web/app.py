@@ -168,6 +168,16 @@ def api_toss_account_summary():
     return JSONResponse(dd.toss_account_summary())
 
 
+@app.get("/api/toss/automation-status")
+def api_toss_automation_status():
+    return JSONResponse(dd.toss_automation_status())
+
+
+@app.get("/api/toss/paper-trades")
+def api_toss_paper_trades(limit: int = 50):
+    return JSONResponse(dd.toss_paper_trades(min(limit, 200)))
+
+
 @app.get("/api/recommendations/timeline")
 def api_timeline(
     range: str = "today",

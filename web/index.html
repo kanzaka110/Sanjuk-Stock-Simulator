@@ -2845,6 +2845,26 @@ async function ldToss(){
     ${hc===0?'<div class="emp" style="font-size:11px;margin:8px 0">현재 보유종목 없음</div>':""}
     <div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--ln)">${warns}</div>
     <div style="font-size:10px;color:var(--mt);margin-top:6px">갱신: ${E(d.updated_at||"—")}</div>`;
+  // 자동거래 상태 + paper trades
+  const [as2,pt]=await Promise.all([J("/api/toss/automation-status"),J("/api/toss/paper-trades")]);
+  if(as2){
+    const gs=(as2.guards||[]).map(g=>`<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--ln);font-size:11px"><span>${E(g.name)}</span><span style="font-weight:700;color:${g.ok?"var(--up)":"var(--mt)"}">${E(g.status)}</span></div>`).join("");
+    box.innerHTML+=`
+      <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--ln)">
+        <div style="font-size:12px;font-weight:700;margin-bottom:6px">자동거래 상태 <span style="font-size:10px;color:var(--mt);font-weight:400">실주문 비활성 · paper trading만 기록</span></div>
+        <div style="display:flex;gap:8px;margin-bottom:8px">
+          <div style="flex:1;background:var(--sf2);border-radius:8px;padding:6px;text-align:center"><div style="font-size:9px;color:var(--mt)">모드</div><div style="font-size:12px;font-weight:800">${E(as2.mode)}</div></div>
+          <div style="flex:1;background:var(--sf2);border-radius:8px;padding:6px;text-align:center"><div style="font-size:9px;color:var(--mt)">킬스위치</div><div style="font-size:12px;font-weight:800;color:${as2.kill_switch?"var(--dn)":"var(--up)"}">${as2.kill_switch?"ON":"OFF"}</div></div>
+          <div style="flex:1;background:var(--sf2);border-radius:8px;padding:6px;text-align:center"><div style="font-size:9px;color:var(--mt)">오늘 paper</div><div style="font-size:12px;font-weight:800">${as2.paper_trades_count_today}</div></div>
+        </div>
+        <div style="font-size:10px;color:var(--mt);margin-bottom:6px">Telegram 승인 전 실제 주문 불가</div>
+        ${gs}
+      </div>`;
+  }
+  if(pt&&pt.trades&&pt.trades.length){
+    const rows=pt.trades.slice(0,5).map(t=>`<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--ln);font-size:11px"><span><span class="${t.side==="buy"?"up":"dn"}" style="font-weight:700">${E(t.side)}</span> ${E(t.symbol)}</span><span>₩${Math.round(t.estimated_amount_krw||0).toLocaleString()}</span></div>`).join("");
+    box.innerHTML+=`<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--ln)"><div style="font-size:12px;font-weight:700;margin-bottom:6px">최근 paper 거래 <span style="font-size:10px;color:var(--mt);font-weight:400">${pt.count}건</span></div>${rows}</div>`;
+  }
 }
 
 /* ═══ INIT ═══ */

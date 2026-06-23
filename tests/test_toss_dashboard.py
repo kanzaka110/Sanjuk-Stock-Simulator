@@ -274,3 +274,48 @@ class TestHtmlLabels:
             for btn in buttons:
                 for word in ["매수", "매도", "주문 실행", "자동매매 시작"]:
                     assert word not in btn, f"CTA '{word}' found in mobile Toss section"
+
+    # ── 자동거래 문구 ──
+    def test_pc_has_paper_trading_text(self):
+        assert "paper trading" in self._read_pc() or "paper" in self._read_pc()
+
+    def test_pc_has_kill_switch_text(self):
+        assert "킬스위치" in self._read_pc()
+
+    def test_pc_has_live_disabled_text(self):
+        assert "실주문 비활성" in self._read_pc()
+
+    def test_mobile_has_paper_trading_text(self):
+        assert "paper trading" in self._read_mobile() or "paper" in self._read_mobile()
+
+    def test_mobile_has_live_disabled_text(self):
+        assert "실주문 비활성" in self._read_mobile()
+
+    # ── API endpoints ──
+    def test_pc_has_automation_api(self):
+        assert "/api/toss/automation-status" in self._read_pc()
+
+    def test_pc_has_paper_trades_api(self):
+        assert "/api/toss/paper-trades" in self._read_pc()
+
+    def test_mobile_has_automation_api(self):
+        assert "/api/toss/automation-status" in self._read_mobile()
+
+
+# ═══ API endpoint 검증 (automation) ═══
+
+class TestApiAutomationEndpoint:
+    def test_automation_status_exists(self):
+        source = (ROOT / "web" / "app.py").read_text()
+        assert "/api/toss/automation-status" in source
+
+    def test_paper_trades_exists(self):
+        source = (ROOT / "web" / "app.py").read_text()
+        assert "/api/toss/paper-trades" in source
+
+    def test_all_toss_endpoints_are_get(self):
+        source = (ROOT / "web" / "app.py").read_text()
+        lines = source.splitlines()
+        for i, line in enumerate(lines):
+            if "/api/toss/" in line and "def " not in line:
+                assert "@app.get" in line, f"non-GET toss endpoint: {line}"
