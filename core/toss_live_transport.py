@@ -21,11 +21,13 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import re
 
 log = logging.getLogger(__name__)
 
-# 전역 transport 상태 — endpoint 확인 전까지 not_configured 유지
+# 전역 transport 상태 — 기본 not_configured.
+# 명시적으로 armed된 runtime(아래 _runtime_live_transport_armed)에서만 configured로 승격.
 LIVE_TRANSPORT_STATUS: str = "not_configured"
 
 # 주문 schema 상수 (BUY_ONLY 지정가 고정)
@@ -292,8 +294,32 @@ class LiveTossTransport(TossLiveTransportBase):
         )
 
 
-# 기본 transport 인스턴스 (항상 not_configured — Live 자동 주입 금지)
-DEFAULT_LIVE_TRANSPORT = NotConfiguredTossLiveTransport()
+def _runtime_live_transport_armed() -> bool:
+    """실 transport(LiveTossTransport)를 기본 주입할 수 있는 armed runtime 여부.
+
+    안전 설계:
+    - stock-bot 등 실제 운영 프로세스는 systemd Environment로 TOSS_LIVE_TRANSPORT_ARMED=true
+      + gate 3종을 받아 armed 상태로 import된다.
+    - pytest/import/dev shell은 TOSS_LIVE_TRANSPORT_ARMED가 없으므로 항상 false.
+      (테스트가 gate 3종을 patch.dict로 켜도 ARMED가 없으면 실 transport 미구성.)
+    - 따라서 PASS/preview/콜백만으로 실주문 경로가 열리지 않는다.
+    """
+    if os.environ.get("TOSS_LIVE_TRANSPORT_ARMED", "").strip().lower() != "true":
+        return False
+    return (
+        os.environ.get("TOSS_LIVE_PILOT_ENABLED", "").strip().lower() == "true"
+        and os.environ.get("TOSS_LIVE_ORDER_ALLOWED", "").strip().lower() == "true"
+        and os.environ.get("TOSS_LIVE_ADAPTER_ENABLED", "").strip().lower() == "true"
+    )
+
+
+# 기본 transport 인스턴스.
+# armed runtime에서만 실 LiveTossTransport, 그 외에는 NotConfigured(차단) 유지.
+if _runtime_live_transport_armed():
+    DEFAULT_LIVE_TRANSPORT: TossLiveTransportBase = LiveTossTransport()
+    LIVE_TRANSPORT_STATUS = "configured"
+else:
+    DEFAULT_LIVE_TRANSPORT = NotConfiguredTossLiveTransport()
 
 
 def get_transport_status() -> dict:

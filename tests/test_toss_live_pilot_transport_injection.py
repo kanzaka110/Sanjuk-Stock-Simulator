@@ -336,5 +336,56 @@ class TestAmountOverLimitEvenEnabled(unittest.TestCase):
         self.assertTrue(any("amount_over_limit" in r for r in reasons))
 
 
+# ── 9. runtime arming 안전 불변식 ──
+
+class TestRuntimeArmingSafety(unittest.TestCase):
+    """실 transport는 명시적 armed runtime에서만 구성되고, pytest/.env는 unarmed 유지."""
+
+    def test_env_file_has_no_live_gates(self):
+        # .env에 gate가 들어가면 settings.py/toss_client.py가 import 시 load_dotenv로
+        # pytest까지 armed시킬 수 있으므로 절대 금지.
+        env = _ROOT / ".env"
+        if not env.exists():
+            return
+        text = env.read_text(encoding="utf-8")
+        for key in (
+            "TOSS_LIVE_PILOT_ENABLED",
+            "TOSS_LIVE_ORDER_ALLOWED",
+            "TOSS_LIVE_ADAPTER_ENABLED",
+            "TOSS_LIVE_TRANSPORT_ARMED",
+        ):
+            offenders = [
+                ln for ln in text.splitlines()
+                if ln.strip().startswith(key + "=")
+                and ln.split("=", 1)[1].strip().lower() == "true"
+            ]
+            self.assertEqual(offenders, [], f"{key}=true 가 .env에 있음 — pytest armed 위험")
+
+    def test_default_transport_not_configured_in_pytest(self):
+        from core.toss_live_transport import (
+            DEFAULT_LIVE_TRANSPORT,
+            NotConfiguredTossLiveTransport,
+        )
+        self.assertIsInstance(DEFAULT_LIVE_TRANSPORT, NotConfiguredTossLiveTransport)
+
+    def test_armed_false_without_armed_flag_even_with_gates(self):
+        from core.toss_live_transport import _runtime_live_transport_armed
+        with patch.dict(os.environ, _ALL_GATES_ENV):
+            # gate 3종이 켜져도 TOSS_LIVE_TRANSPORT_ARMED 없으면 unarmed
+            self.assertFalse(_runtime_live_transport_armed())
+
+    def test_armed_false_with_only_armed_flag(self):
+        from core.toss_live_transport import _runtime_live_transport_armed
+        with patch.dict(os.environ, {"TOSS_LIVE_TRANSPORT_ARMED": "true"}, clear=False), \
+             patch.dict(os.environ, _CLEARED_ENV):
+            self.assertFalse(_runtime_live_transport_armed())
+
+    def test_armed_true_only_with_flag_and_all_gates(self):
+        from core.toss_live_transport import _runtime_live_transport_armed
+        armed_env = dict(_ALL_GATES_ENV, TOSS_LIVE_TRANSPORT_ARMED="true")
+        with patch.dict(os.environ, armed_env):
+            self.assertTrue(_runtime_live_transport_armed())
+
+
 if __name__ == "__main__":
     unittest.main()
