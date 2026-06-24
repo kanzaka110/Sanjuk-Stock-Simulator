@@ -455,3 +455,143 @@ class TestEntryPriceMatchesAccepted:
             assert "limit_price" not in entry, (
                 f"{entry['symbol']}: _CANDIDATE_POOL에 limit_price 필드 남아 있음"
             )
+
+
+# ═══ 저가 US 후보 sizing ═══
+
+class TestLowPriceUsCandidates:
+    """30만원 이하 저가 US 후보 생성 검증."""
+
+    def _policy(self) -> dict:
+        return {
+            "mode": "paper_only", "live_order_allowed": False,
+            "sample_status": "insufficient",
+            "base_budget_krw": 100_000, "max_budget_krw": 300_000,
+            "min_budget_krw": 0, "sizing_multiplier": 0.3,
+            "evaluated_count": 0, "win_rate": 0.0, "avg_pnl_pct": 0.0,
+            "consensus_anomaly_count": 0, "consensus_anomaly_symbols": [],
+            "data_error_count": 0, "reason": "표본부족",
+            "blocks": [], "warnings": [], "_note": "test",
+        }
+
+    def _build(self, accepted_usd: float, usdkrw: float = 1_530.0, budget: int = 300_000):
+        import sys; sys.path.insert(0, str(ROOT / "scripts"))
+        from send_toss_paper_preview_test import _build_candidates
+        p = {**self._policy(), "max_budget_krw": budget}
+        ctx = {"usdkrw": usdkrw}
+        q = {"price": accepted_usd, "source": "KIS",
+             "accepted_price_source": "KIS", "source_chain": []}
+        with patch("core.toss_paper_performance._get_quote_for_paper", return_value=q):
+            return _build_candidates(p, ctx, max_n=10)
+
+    def test_sofi_20usd_usdkrw1530_qty9(self):
+        """SOFI $20 × 1530 = ₩30,600/주 → qty=9 (₩275,400 < ₩300,000)."""
+        candidates, rejected = self._build(accepted_usd=20.0, usdkrw=1_530.0)
+        sofi = next((c for c in candidates if c["symbol"] == "SOFI"), None)
+        if sofi:
+            assert sofi["quantity"] >= 1
+            assert sofi["estimated_amount_krw"] <= 300_000
+            assert sofi["limit_price"] == 20.0  # accepted price
+
+    def test_low_price_us_estimated_within_budget(self):
+        """모든 저가 US 후보 estimated_amount_krw <= 300,000."""
+        candidates, _ = self._build(accepted_usd=20.0)
+        for c in candidates:
+            assert c["estimated_amount_krw"] <= 300_000, (
+                f"{c['symbol']}: ₩{c['estimated_amount_krw']:,} > ₩300,000"
+            )
+
+    def test_low_price_us_quantity_realistic(self):
+        """저가 US 후보 수량 < 1000 (비정상 수량 방지). KR 종목은 제외."""
+        import sys; sys.path.insert(0, str(ROOT / "scripts"))
+        from send_toss_paper_preview_test import _is_us_ticker
+        candidates, _ = self._build(accepted_usd=20.0)
+        for c in candidates:
+            if _is_us_ticker(c["symbol"]):
+                assert c["quantity"] < 1_000, (
+                    f"{c['symbol']}: qty={c['quantity']} — 비정상 수량"
+                )
+
+    def test_low_price_us_price_currency_usd(self):
+        """저가 US 후보 _price_currency == 'USD'."""
+        import sys; sys.path.insert(0, str(ROOT / "scripts"))
+        from send_toss_paper_preview_test import _is_us_ticker
+        candidates, _ = self._build(accepted_usd=20.0)
+        for c in candidates:
+            if _is_us_ticker(c["symbol"]):
+                assert c.get("_price_currency") == "USD"
+
+    def test_high_price_us_rejected_when_over_budget(self):
+        """고가 US: $220 × 1530 = ₩336,600 > ₩300,000 → rejected."""
+        candidates, rejected = self._build(accepted_usd=220.0)
+        rejected_syms = [r["symbol"] for r in rejected]
+        # NVDA at $220 must be rejected
+        assert "NVDA" in rejected_syms
+
+    def test_high_price_us_rejection_reason(self):
+        """고가 US rejected reason에 budget_too_small_for_one_share 포함."""
+        _, rejected = self._build(accepted_usd=220.0)
+        nvda_r = next((r for r in rejected if r["symbol"] == "NVDA"), None)
+        if nvda_r:
+            assert "budget_too_small_for_one_share" in nvda_r["reject_reason"]
+
+    def test_preview_shows_dollar_for_low_price_us(self):
+        """저가 US 후보 주문표에 $ 지정가 표시."""
+        import sys; sys.path.insert(0, str(ROOT / "scripts"))
+        from send_toss_paper_preview_test import _build_candidates, _is_us_ticker
+        from core.toss_order_preview import build_toss_paper_order_preview
+        p = self._policy()
+        ctx = {"usdkrw": 1_530.0, "cash_krw": 10_000_000,
+               "automation": {"mode": "paper", "dry_run": True}}
+        q = {"price": 15.0, "source": "KIS",
+             "accepted_price_source": "KIS", "source_chain": []}
+        with patch("core.toss_paper_performance._get_quote_for_paper", return_value=q):
+            candidates, _ = _build_candidates(p, ctx, max_n=5)
+        us_cands = [c for c in candidates if _is_us_ticker(c["symbol"])]
+        if us_cands:
+            cc = [{"blocks": [], "warnings": [], "toss_readiness": "paper_only",
+                   "live_order_allowed": False, "score_adjustments": []}
+                  for _ in us_cands]
+            with patch("core.toss_paper_policy.compute_toss_paper_policy",
+                       return_value={**p, "evaluated_count": 0, "win_rate": 0.0,
+                                     "avg_pnl_pct": 0.0, "consensus_anomaly_count": 0,
+                                     "data_error_count": 0}):
+                text = build_toss_paper_order_preview(us_cands, ctx, cc)
+            assert "$" in text
+            assert "환율" in text
+
+    def test_pool_has_low_price_us_symbols(self):
+        """pool에 저가 US 종목(SOFI/PLTR/INTC/F/AMD 중 하나 이상)이 있다."""
+        import sys; sys.path.insert(0, str(ROOT / "scripts"))
+        import importlib
+        mod = importlib.import_module("send_toss_paper_preview_test")
+        pool_syms = {e["symbol"] for e in mod._CANDIDATE_POOL}
+        low_price_us = {"SOFI", "PLTR", "INTC", "F", "AMD", "NU", "RIVN"}
+        assert pool_syms & low_price_us, (
+            f"Pool에 저가 US 종목 없음. 현재 pool: {pool_syms}"
+        )
+
+    def test_no_forbidden_quantity_in_preview(self):
+        """주문표 텍스트에 740주/2222주 없음."""
+        import sys; sys.path.insert(0, str(ROOT / "scripts"))
+        from send_toss_paper_preview_test import _build_candidates
+        from core.toss_order_preview import build_toss_paper_order_preview
+        p = self._policy()
+        ctx = {"usdkrw": 1_530.0, "cash_krw": 10_000_000,
+               "automation": {"mode": "paper", "dry_run": True}}
+        q = {"price": 20.0, "source": "KIS",
+             "accepted_price_source": "KIS", "source_chain": []}
+        with patch("core.toss_paper_performance._get_quote_for_paper", return_value=q):
+            candidates, _ = _build_candidates(p, ctx, max_n=2)
+        if candidates:
+            cc = [{"blocks": [], "warnings": [], "toss_readiness": "paper_only",
+                   "live_order_allowed": False, "score_adjustments": []}
+                  for _ in candidates]
+            with patch("core.toss_paper_policy.compute_toss_paper_policy",
+                       return_value={**p, "evaluated_count": 0, "win_rate": 0.0,
+                                     "avg_pnl_pct": 0.0, "consensus_anomaly_count": 0,
+                                     "data_error_count": 0}):
+                text = build_toss_paper_order_preview(candidates, ctx, cc)
+            assert "740주" not in text
+            assert "2222주" not in text
+            assert "지정가: ₩135" not in text

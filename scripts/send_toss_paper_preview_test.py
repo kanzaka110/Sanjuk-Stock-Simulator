@@ -32,11 +32,21 @@ except ImportError:
 # ─── 정상 후보 pool (005930.KS 제외) ──────────────────────
 # _ref_price: 이상치 탐지용 기준가 (KR=KRW, US=USD).
 # 실제 paper entry는 accepted market price 사용 — 즉시 win 방지.
+# 순서: KR ETF(장중) → 저가 US(항상 조회 가능) → 고가 US → KR 개별주
 _CANDIDATE_POOL = [
+    # KR ETF (KR 장 시간대)
     {"symbol": "069500.KS",  "side": "buy", "_ref_price": 30000,  "reason": "KOSPI200 ETF · [TEST] Paper 운영 샘플"},
     {"symbol": "360750.KS",  "side": "buy", "_ref_price": 15000,  "reason": "S&P500 ETF · [TEST] Paper 운영 샘플"},
-    {"symbol": "NVDA",        "side": "buy", "_ref_price": 135,    "reason": "반도체 · [TEST] Paper 운영 샘플"},
+    # 저가 US (30만원 이하 1주 가능 — [TEST] 파이프라인 검증용)
+    {"symbol": "SOFI",        "side": "buy", "_ref_price": 15,     "reason": "핀테크 저가 · [TEST] Paper 운영 샘플"},
+    {"symbol": "PLTR",        "side": "buy", "_ref_price": 35,     "reason": "데이터분석 · [TEST] Paper 운영 샘플"},
+    {"symbol": "INTC",        "side": "buy", "_ref_price": 22,     "reason": "반도체 저가 · [TEST] Paper 운영 샘플"},
+    {"symbol": "F",           "side": "buy", "_ref_price": 11,     "reason": "자동차 저가 · [TEST] Paper 운영 샘플"},
+    {"symbol": "AMD",         "side": "buy", "_ref_price": 110,    "reason": "반도체 · [TEST] Paper 운영 샘플"},
+    # 고가 US (환율 따라 예산 초과 가능)
+    {"symbol": "NVDA",        "side": "buy", "_ref_price": 200,    "reason": "반도체 · [TEST] Paper 운영 샘플"},
     {"symbol": "GOOGL",       "side": "buy", "_ref_price": 190,    "reason": "빅테크 · [TEST] Paper 운영 샘플"},
+    # KR 개별주 (KR 장 시간대)
     {"symbol": "000660.KS",  "side": "buy", "_ref_price": 195000, "reason": "SK하이닉스 · [TEST] Paper 운영 샘플"},
 ]
 
