@@ -28,6 +28,25 @@ import os
 
 log = logging.getLogger(__name__)
 
+# ─── 종목명 매핑 ─────────────────────────────────────────
+
+SYMBOL_NAMES: dict[str, str] = {
+    "091180.KS": "KODEX 자동차",
+    "360750.KS": "TIGER 미국S&P500",
+    "069500.KS": "KODEX 200",
+    "091160.KS": "KODEX 반도체",
+    "005930.KS": "삼성전자",
+    "161510.KS": "PLUS 고배당주",
+    "MU": "Micron Technology",
+}
+
+
+def get_symbol_display(symbol: str) -> str:
+    """종목명 병기 표시. 예: KODEX 자동차 (091180.KS). 미등록이면 ticker만."""
+    name = SYMBOL_NAMES.get(symbol, "")
+    return f"{name} ({symbol})" if name else symbol
+
+
 _FORBIDDEN_CTA = frozenset([
     "자동매매 시작",
     "자동거래 시작",
@@ -99,6 +118,8 @@ def format_hermes_live_pilot_verify_message(context: dict) -> str:
     paper_count = context.get("paper_evaluated_count", 0)
     sample_status = context.get("sample_status", "insufficient")
     expires_in = context.get("expires_in_minutes", 10)
+    symbol_name = context.get("symbol_name", "") or SYMBOL_NAMES.get(symbol, "")
+    symbol_display = f"{symbol_name} ({symbol})" if symbol_name else symbol
 
     price_str = f"₩{limit_price:,.0f}" if limit_price > 0 else "미확인"
     amount_str = f"₩{estimated:,.0f}" if estimated > 0 else "미확인"
@@ -110,7 +131,7 @@ def format_hermes_live_pilot_verify_message(context: dict) -> str:
         "아직 주문 전송 안 함",
         "",
         "요약:",
-        f"- 종목: {symbol}",
+        f"- 종목: {symbol_display}",
         f"- 방향: {side}",
         f"- 수량: {quantity}",
         f"- 지정가: {price_str}",
@@ -126,6 +147,7 @@ def format_hermes_live_pilot_verify_message(context: dict) -> str:
         f"pilot_id: {pilot_id}",
         f"preview_id: {preview_id}",
         f"symbol: {symbol}",
+        f"symbol_name: {symbol_name}",
         f"side: {side}",
         f"quantity: {quantity}",
         f"limit_price: {limit_price}",
@@ -230,11 +252,13 @@ def _build_mirror_context(
     """Hermes 메시지용 컨텍스트 dict 빌드."""
     blocked = policy.get("blocked_symbols") or []
     allowed = [s for s in ["091180.KS", "360750.KS"] if s not in blocked]
+    sym = preview_record.get("symbol", "")
     return {
         "verification_id": verification.get("verification_id", ""),
         "pilot_id": verification.get("pilot_id", preview_record.get("pilot_id", "")),
         "preview_id": verification.get("preview_id", preview_record.get("preview_id", "")),
-        "symbol": preview_record.get("symbol", ""),
+        "symbol": sym,
+        "symbol_name": SYMBOL_NAMES.get(sym, ""),
         "side": preview_record.get("side", "buy"),
         "quantity": preview_record.get("quantity", 0),
         "limit_price": float(preview_record.get("limit_price") or 0),

@@ -59,7 +59,9 @@ def format_live_pilot_preview_message(
 
     금지 CTA 없음 — 매수하기/매도하기/주문 실행/실주문: 활성 절대 미포함.
     """
+    from core.toss_live_pilot_hermes_bridge import get_symbol_display
     symbol = preview.get("symbol", "")
+    symbol_display = get_symbol_display(symbol)
     side = preview.get("side", "buy")
     side_label = "매수 후보" if side == "buy" else "매도 후보"
     qty = preview.get("quantity", 0)
@@ -81,12 +83,12 @@ def format_live_pilot_preview_message(
     ]
 
     if not ok:
-        lines.append(f"차단: {symbol}")
+        lines.append(f"차단: {symbol_display}")
         for b in blocks:
             lines.append(f"  · {b}")
         lines.append("dry-run payload 생성 불가")
     else:
-        lines.append(f"{symbol}")
+        lines.append(f"{symbol_display}")
         lines.append(f"- 방향: {side_label}")
         lines.append("- 주문유형: 지정가")
         lines.append(f"- 지정가: ₩{price:,.0f}")

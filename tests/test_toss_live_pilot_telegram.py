@@ -87,6 +87,12 @@ class TestPreviewMessageRequiredPhrases(unittest.TestCase):
     def test_symbol_present(self):
         self.assertIn("069500.KS", self.msg)
 
+    def test_symbol_name_present(self):
+        self.assertIn("KODEX 200", self.msg)
+
+    def test_symbol_display_format(self):
+        self.assertIn("KODEX 200 (069500.KS)", self.msg)
+
     def test_price_present(self):
         self.assertIn("40,000", self.msg)
 
@@ -132,6 +138,12 @@ class TestBlockedPreviewMessage(unittest.TestCase):
 
     def test_symbol_in_blocked_msg(self):
         self.assertIn("005930.KS", self.msg)
+
+    def test_symbol_name_in_blocked_msg(self):
+        self.assertIn("삼성전자", self.msg)
+
+    def test_symbol_display_in_blocked_msg(self):
+        self.assertIn("삼성전자 (005930.KS)", self.msg)
 
     def test_blocked_still_has_not_sent(self):
         self.assertIn("아직 주문 전송 안 함", self.msg)

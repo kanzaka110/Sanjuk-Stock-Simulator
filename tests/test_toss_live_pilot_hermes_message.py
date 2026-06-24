@@ -79,6 +79,22 @@ class TestFormatHermesVerifyMessage(unittest.TestCase):
     def test_has_symbol(self):
         self.assertIn("091180.KS", self._msg)
 
+    def test_has_symbol_name_in_summary(self):
+        # 사람용 요약에 종목명 병기
+        self.assertIn("KODEX 자동차", self._msg)
+
+    def test_has_symbol_display_format(self):
+        # KODEX 자동차 (091180.KS) 형식
+        self.assertIn("KODEX 자동차 (091180.KS)", self._msg)
+
+    def test_symbol_name_in_machine_block(self):
+        # 기계 블록에 symbol_name 필드
+        self.assertIn("symbol_name: KODEX 자동차", self._msg)
+
+    def test_symbol_field_unchanged_in_block(self):
+        # 기계 블록에 원래 ticker 유지
+        self.assertIn("symbol: 091180.KS", self._msg)
+
     def test_has_side(self):
         self.assertIn("side: buy", self._msg)
 
