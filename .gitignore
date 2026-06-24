@@ -33,3 +33,6 @@ db/data/kis_token.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Generated reconciliation reports
+reports/samsung_reconciliation_*.md
