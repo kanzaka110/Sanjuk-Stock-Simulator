@@ -50,6 +50,13 @@ ALLOWED_TOSS_FILES = {
     "tests/test_toss_paper_currency_sizing.py",
     "scripts/cleanup_toss_paper_ledger.py",
     "tests/test_toss_paper_cleanup.py",
+    "core/toss_live_pilot_policy.py",
+    "core/toss_live_pilot_preview.py",
+    "core/toss_live_pilot_ledger.py",
+    "core/toss_live_pilot_adapter.py",
+    "tests/test_toss_live_pilot_policy.py",
+    "tests/test_toss_live_pilot_preview.py",
+    "tests/test_toss_live_pilot_guardrails.py",
 }
 
 
