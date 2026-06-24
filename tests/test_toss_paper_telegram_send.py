@@ -595,3 +595,100 @@ class TestLowPriceUsCandidates:
             assert "740주" not in text
             assert "2222주" not in text
             assert "지정가: ₩135" not in text
+
+
+# ═══ dry-run no ledger write ═══
+
+class TestDryRunNoLedgerWrite:
+    """dry-run 모드(--send 없음)에서는 ledger에 기록하지 않아야 한다."""
+
+    def _mock_quote(self, price=17.0):
+        return {
+            "price": price, "source": "KIS",
+            "accepted_price_source": "KIS", "source_chain": [],
+        }
+
+    def test_dry_run_does_not_write_to_ledger(self):
+        """scripts/send_toss_paper_preview_test.py의 main() dry-run 경로에서
+        create_paper_preview_records가 호출되지 않아야 한다."""
+        import sys
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import importlib, types
+
+        # Patch 모든 외부 의존
+        with patch("core.toss_paper_performance._get_quote_for_paper",
+                   return_value=self._mock_quote()):
+            with patch("core.toss_decision_context.get_toss_decision_context",
+                       return_value={"cash_krw": 5_000_000, "usdkrw": 1530.0}):
+                with patch("core.toss_paper_policy.compute_toss_paper_policy",
+                           return_value={
+                               "sample_status": "insufficient",
+                               "max_budget_krw": 300_000,
+                               "consensus_anomaly_symbols": [],
+                               "evaluated_count": 0,
+                               "win_rate": 0.0, "avg_pnl_pct": 0.0,
+                               "consensus_anomaly_count": 0, "data_error_count": 0,
+                           }):
+                    with patch("core.toss_cross_check.cross_check_candidate",
+                               return_value={"blocks": [], "warnings": [],
+                                             "toss_readiness": "paper_only",
+                                             "live_order_allowed": False,
+                                             "score_adjustments": []}):
+                        with patch("core.toss_paper_ledger.create_paper_preview_records") as mock_create:
+                            mod = importlib.import_module("send_toss_paper_preview_test")
+                            # sys.argv に --send なし = dry-run
+                            with patch.object(sys, "argv", ["send_toss_paper_preview_test.py"]):
+                                try:
+                                    mod.main()
+                                except SystemExit:
+                                    pass
+                            # dry-run → create_paper_preview_records 호출 없음
+                            mock_create.assert_not_called()
+
+    def test_send_mode_writes_to_ledger(self):
+        """--send 플래그가 있을 때는 create_paper_preview_records가 호출된다."""
+        import sys
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import importlib
+
+        with patch("core.toss_paper_performance._get_quote_for_paper",
+                   return_value=self._mock_quote()):
+            with patch("core.toss_decision_context.get_toss_decision_context",
+                       return_value={"cash_krw": 5_000_000, "usdkrw": 1530.0}):
+                with patch("core.toss_paper_policy.compute_toss_paper_policy",
+                           return_value={
+                               "sample_status": "insufficient",
+                               "max_budget_krw": 300_000,
+                               "consensus_anomaly_symbols": [],
+                               "evaluated_count": 0,
+                               "win_rate": 0.0, "avg_pnl_pct": 0.0,
+                               "consensus_anomaly_count": 0, "data_error_count": 0,
+                           }):
+                    with patch("core.toss_cross_check.cross_check_candidate",
+                               return_value={"blocks": [], "warnings": [],
+                                             "toss_readiness": "paper_only",
+                                             "live_order_allowed": False,
+                                             "score_adjustments": []}):
+                        with patch("core.toss_paper_ledger.create_paper_preview_records",
+                                   return_value=[{"symbol": "SOFI", "status": "previewed",
+                                                  "paper_id": "p1", "preview_id": "prev_1"}]) as mock_create:
+                            with patch("core.toss_paper_telegram_send.send_toss_paper_preview_message",
+                                       return_value=True):
+                                mod = importlib.import_module("send_toss_paper_preview_test")
+                                with patch.object(sys, "argv",
+                                                  ["send_toss_paper_preview_test.py", "--send"]):
+                                    try:
+                                        mod.main()
+                                    except SystemExit:
+                                        pass
+                            mock_create.assert_called_once()
+
+    def test_no_create_call_in_dry_run_script_source(self):
+        """스크립트 소스: dry-run 경로에서 create_paper_preview_records 직접 호출 없어야 함."""
+        src = (ROOT / "scripts" / "send_toss_paper_preview_test.py").read_text(encoding="utf-8")
+        # create_paper_preview_records는 send_mode 블록 안에만 있어야 함
+        # "if send_mode:" 이전에 create_paper_preview_records 호출이 없어야 함
+        before_send_block = src.split("if send_mode:")[0]
+        assert "create_paper_preview_records(" not in before_send_block, (
+            "dry-run 경로에 create_paper_preview_records 호출 존재"
+        )

@@ -355,6 +355,145 @@ class TestNoSensitiveData:
         assert "TOSS_APP_SECRET" not in source
 
 
+# ═══ expire_stale_previews ═══
+
+class TestExpireStale:
+    def test_expire_stale_moves_old_to_expired(self):
+        """60분 이상 경과한 previewed → expired 전환."""
+        from datetime import datetime, timezone, timedelta
+        KST = timezone(timedelta(hours=9))
+        old_ts = (datetime.now(KST) - timedelta(minutes=90)).strftime("%Y-%m-%dT%H:%M:%S+09:00")
+        cands = [{"symbol": "OLD.KS", "side": "buy", "quantity": 1, "limit_price": 1000,
+                  "estimated_amount_krw": 1000, "confidence": 0.0, "reason": ""}]
+        ccs = [{"blocks": [], "warnings": [], "toss_readiness": "paper_only",
+                "live_order_allowed": False, "score_adjustments": []}]
+        # manually insert with old timestamp
+        import sqlite3
+        from unittest.mock import patch as _patch
+        from pathlib import Path as _Path
+        import json as _json
+        db_path = _Path(ledger._DB_PATH)
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        conn.execute("""CREATE TABLE IF NOT EXISTS paper_ledger (
+            paper_id TEXT PRIMARY KEY, preview_id TEXT NOT NULL, symbol TEXT NOT NULL,
+            side TEXT NOT NULL, quantity INTEGER DEFAULT 0, limit_price REAL DEFAULT 0,
+            estimated_amount_krw REAL DEFAULT 0, status TEXT NOT NULL DEFAULT 'previewed',
+            source TEXT DEFAULT '', account_label TEXT DEFAULT 'Toss 실전 AI 자동거래 계좌',
+            live_order_allowed INTEGER NOT NULL DEFAULT 0, dry_run INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL, approved_at TEXT, cancelled_at TEXT,
+            reason TEXT DEFAULT '', confidence REAL DEFAULT 0,
+            blocks TEXT DEFAULT '[]', warnings TEXT DEFAULT '[]', metadata TEXT DEFAULT '{}'
+        )""")
+        conn.execute(
+            "INSERT INTO paper_ledger (paper_id, preview_id, symbol, side, quantity, "
+            "limit_price, estimated_amount_krw, status, source, live_order_allowed, dry_run, "
+            "created_at, reason, confidence, blocks, warnings, metadata) "
+            "VALUES (?,?,?,?,?,?,?,?,?,0,1,?,?,?,?,?,?)",
+            ("paper_old_001", "prev_stale_001", "OLD.KS", "buy", 1, 1000, 1000,
+             "previewed", "test_source", old_ts, "", 0.0, "[]", "[]", "{}")
+        )
+        conn.commit()
+        conn.close()
+
+        result = ledger.expire_stale_previews(older_than_minutes=60)
+        assert result["ok"] is True
+        assert result["expired_count"] == 1
+        assert result["kept_count"] == 0
+
+    def test_expire_stale_keeps_recent(self):
+        """최근 previewed는 keep."""
+        from datetime import datetime, timezone, timedelta
+        KST = timezone(timedelta(hours=9))
+        recent_ts = datetime.now(KST).strftime("%Y-%m-%dT%H:%M:%S+09:00")
+        import sqlite3
+        from pathlib import Path as _Path
+        db_path = _Path(ledger._DB_PATH)
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        conn.execute("""CREATE TABLE IF NOT EXISTS paper_ledger (
+            paper_id TEXT PRIMARY KEY, preview_id TEXT NOT NULL, symbol TEXT NOT NULL,
+            side TEXT NOT NULL, quantity INTEGER DEFAULT 0, limit_price REAL DEFAULT 0,
+            estimated_amount_krw REAL DEFAULT 0, status TEXT NOT NULL DEFAULT 'previewed',
+            source TEXT DEFAULT '', account_label TEXT DEFAULT 'Toss 실전 AI 자동거래 계좌',
+            live_order_allowed INTEGER NOT NULL DEFAULT 0, dry_run INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL, approved_at TEXT, cancelled_at TEXT,
+            reason TEXT DEFAULT '', confidence REAL DEFAULT 0,
+            blocks TEXT DEFAULT '[]', warnings TEXT DEFAULT '[]', metadata TEXT DEFAULT '{}'
+        )""")
+        conn.execute(
+            "INSERT INTO paper_ledger (paper_id, preview_id, symbol, side, quantity, "
+            "limit_price, estimated_amount_krw, status, source, live_order_allowed, dry_run, "
+            "created_at, reason, confidence, blocks, warnings, metadata) "
+            "VALUES (?,?,?,?,?,?,?,?,?,0,1,?,?,?,?,?,?)",
+            ("paper_recent_001", "prev_recent_001", "NEW.KS", "buy", 1, 1000, 1000,
+             "previewed", "test_source", recent_ts, "", 0.0, "[]", "[]", "{}")
+        )
+        conn.commit()
+        conn.close()
+
+        result = ledger.expire_stale_previews(older_than_minutes=60)
+        assert result["ok"] is True
+        assert result["expired_count"] == 0
+        assert result["kept_count"] == 1
+
+    def test_expire_stale_source_filter(self):
+        """source_filter로 특정 source만 만료."""
+        from datetime import datetime, timezone, timedelta
+        KST = timezone(timedelta(hours=9))
+        old_ts = (datetime.now(KST) - timedelta(minutes=90)).strftime("%Y-%m-%dT%H:%M:%S+09:00")
+        import sqlite3
+        from pathlib import Path as _Path
+        db_path = _Path(ledger._DB_PATH)
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        conn.execute("""CREATE TABLE IF NOT EXISTS paper_ledger (
+            paper_id TEXT PRIMARY KEY, preview_id TEXT NOT NULL, symbol TEXT NOT NULL,
+            side TEXT NOT NULL, quantity INTEGER DEFAULT 0, limit_price REAL DEFAULT 0,
+            estimated_amount_krw REAL DEFAULT 0, status TEXT NOT NULL DEFAULT 'previewed',
+            source TEXT DEFAULT '', account_label TEXT DEFAULT 'Toss 실전 AI 자동거래 계좌',
+            live_order_allowed INTEGER NOT NULL DEFAULT 0, dry_run INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL, approved_at TEXT, cancelled_at TEXT,
+            reason TEXT DEFAULT '', confidence REAL DEFAULT 0,
+            blocks TEXT DEFAULT '[]', warnings TEXT DEFAULT '[]', metadata TEXT DEFAULT '{}'
+        )""")
+        conn.executemany(
+            "INSERT INTO paper_ledger (paper_id, preview_id, symbol, side, quantity, "
+            "limit_price, estimated_amount_krw, status, source, live_order_allowed, dry_run, "
+            "created_at, reason, confidence, blocks, warnings, metadata) "
+            "VALUES (?,?,?,?,?,?,?,?,?,0,1,?,?,?,?,?,?)",
+            [
+                ("paper_sf_001", "prev_sf_001", "A.KS", "buy", 1, 1000, 1000,
+                 "previewed", "telegram_paper_preview", old_ts, "", 0.0, "[]", "[]", "{}"),
+                ("paper_sf_002", "prev_sf_002", "B.KS", "buy", 1, 1000, 1000,
+                 "previewed", "other_source", old_ts, "", 0.0, "[]", "[]", "{}"),
+            ]
+        )
+        conn.commit()
+        conn.close()
+
+        result = ledger.expire_stale_previews(
+            older_than_minutes=60,
+            source_filter="telegram_paper_preview",
+        )
+        assert result["expired_count"] == 1
+        assert result["kept_count"] == 1
+
+    def test_expire_stale_does_not_touch_approved(self):
+        """approved 상태는 expire_stale_previews가 건드리지 않는다."""
+        cands, ccs = _cands_and_ccs()
+        ledger.create_paper_preview_records("prev_stale_safe", cands, ccs, _ctx())
+        ledger.approve_paper_order("prev_stale_safe", "005930.KS")
+        result = ledger.expire_stale_previews(older_than_minutes=0)
+        orders = ledger.list_paper_orders()
+        approved = [o for o in orders if o["status"] == "approved"]
+        assert len(approved) == 1
+
+    def test_expire_stale_returns_ok_true(self):
+        result = ledger.expire_stale_previews(older_than_minutes=60)
+        assert result["ok"] is True
+
+
 # ═══ write routes ═══
 
 class TestNoWriteRoutes:

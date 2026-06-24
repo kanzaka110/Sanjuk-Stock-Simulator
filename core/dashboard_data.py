@@ -1844,9 +1844,13 @@ def toss_cross_check() -> dict:
 
 
 def toss_paper_ledger_data(limit: int = 50) -> dict:
-    """Toss paper ledger 조회 (dashboard용)."""
+    """Toss paper ledger 조회 (dashboard용). expired/stale 카운트 포함."""
     from core.toss_paper_ledger import paper_ledger_summary
-    return paper_ledger_summary()
+    summary = paper_ledger_summary()
+    counts = summary.get("counts", {})
+    summary["stale_preview_count"] = counts.get("previewed", 0)
+    summary["expired_count"] = counts.get("expired", 0)
+    return summary
 
 
 def toss_paper_performance_data() -> dict:

@@ -461,6 +461,72 @@ class TestDashboardContent:
         assert "기존 포트폴리오 미합산" in src
 
 
+# ─── 8b. duplicate_open_symbols 감지 ─────────────────────────────────
+
+
+class TestDuplicateOpenSymbols:
+    def test_no_duplicates_returns_empty(self):
+        order = _make_order(symbol="005930.KS", limit_price=70000, status="approved")
+        with patch.object(perf, "_get_quote_for_paper", return_value={
+            "price": 71000.0, "source": "test", "accepted_price_source": "test", "source_chain": [],
+        }):
+            with patch("core.toss_paper_ledger.list_paper_orders", return_value=[order]):
+                with patch("core.toss_paper_ledger.paper_ledger_summary", return_value={
+                    "counts": {"approved": 1}, "total": 1,
+                }):
+                    summary = perf.get_paper_performance_summary()
+        assert summary["summary"]["duplicate_open_symbols"] == []
+
+    def test_two_open_same_symbol_detected(self):
+        # entry=17.0 → target=17.51, stop=16.49
+        # entry=17.5 → target=18.025, stop=16.975
+        # price=17.2 → both are between target and stop → both outcome=open
+        orders = [
+            _make_order(symbol="SOFI", limit_price=17.0, status="approved", paper_id="p1"),
+            _make_order(symbol="SOFI", limit_price=17.5, status="approved", paper_id="p2"),
+        ]
+        with patch.object(perf, "_get_quote_for_paper", return_value={
+            "price": 17.2, "source": "test", "accepted_price_source": "test", "source_chain": [],
+        }):
+            with patch("core.toss_paper_ledger.list_paper_orders", return_value=orders):
+                with patch("core.toss_paper_ledger.paper_ledger_summary", return_value={
+                    "counts": {"approved": 2}, "total": 2,
+                }):
+                    summary = perf.get_paper_performance_summary()
+        assert "SOFI" in summary["summary"]["duplicate_open_symbols"]
+
+    def test_two_different_symbols_not_duplicate(self):
+        orders = [
+            _make_order(symbol="SOFI", limit_price=17.0, status="approved", paper_id="p1"),
+            _make_order(symbol="PLTR", limit_price=35.0, status="approved", paper_id="p2"),
+        ]
+        with patch.object(perf, "_get_quote_for_paper", return_value={
+            "price": 18.0, "source": "test", "accepted_price_source": "test", "source_chain": [],
+        }):
+            with patch("core.toss_paper_ledger.list_paper_orders", return_value=orders):
+                with patch("core.toss_paper_ledger.paper_ledger_summary", return_value={
+                    "counts": {"approved": 2}, "total": 2,
+                }):
+                    summary = perf.get_paper_performance_summary()
+        assert summary["summary"]["duplicate_open_symbols"] == []
+
+    def test_stale_preview_count_in_summary(self):
+        with patch("core.toss_paper_ledger.list_paper_orders", return_value=[]):
+            with patch("core.toss_paper_ledger.paper_ledger_summary", return_value={
+                "counts": {"previewed": 5, "approved": 0}, "total": 5,
+            }):
+                summary = perf.get_paper_performance_summary()
+        assert summary["summary"]["stale_preview_count"] == 5
+
+    def test_duplicate_open_symbols_field_present(self):
+        with patch("core.toss_paper_ledger.list_paper_orders", return_value=[]):
+            with patch("core.toss_paper_ledger.paper_ledger_summary", return_value={
+                "counts": {}, "total": 0,
+            }):
+                summary = perf.get_paper_performance_summary()
+        assert "duplicate_open_symbols" in summary["summary"]
+
+
 # ─── 9. 금지 CTA 부재 ─────────────────────────────────────
 
 

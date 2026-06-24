@@ -231,6 +231,45 @@ def expire_paper_preview(preview_id: str) -> dict:
             conn.close()
 
 
+def expire_stale_previews(
+    older_than_minutes: int = 60,
+    source_filter: str | None = None,
+) -> dict:
+    """N분 이상 경과한 previewed 레코드를 expired로 전환한다. 삭제 없음.
+
+    Args:
+        older_than_minutes: 이 값(분) 이상 경과한 previewed만 만료 처리.
+        source_filter: source 컬럼 값이 이 문자열인 것만 처리 (None=전체).
+
+    Returns:
+        {"ok": True, "expired_count": int, "kept_count": int}
+    """
+    cutoff_dt = datetime.now(KST) - timedelta(minutes=older_than_minutes)
+    cutoff_str = cutoff_dt.strftime("%Y-%m-%dT%H:%M:%S+09:00")
+
+    with _db_lock:
+        conn = _conn()
+        try:
+            # 전체 previewed 수 (만료 전, 필터 무관)
+            total_previewed = conn.execute(
+                "SELECT COUNT(*) FROM paper_ledger WHERE status='previewed'"
+            ).fetchone()[0]
+
+            expire_q = "UPDATE paper_ledger SET status='expired' WHERE status='previewed' AND created_at < ?"
+            expire_params: list = [cutoff_str]
+            if source_filter:
+                expire_q += " AND source=?"
+                expire_params.append(source_filter)
+
+            cur = conn.execute(expire_q, expire_params)
+            conn.commit()
+            expired_count = cur.rowcount
+            kept_count = total_previewed - expired_count
+            return {"ok": True, "expired_count": expired_count, "kept_count": kept_count}
+        finally:
+            conn.close()
+
+
 # ─── 조회 ────────────────────────────────────────────
 def list_paper_orders(status: str | None = None, limit: int = 50) -> list[dict]:
     """paper ledger 조회."""

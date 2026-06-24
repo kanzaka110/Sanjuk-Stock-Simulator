@@ -406,6 +406,16 @@ def get_paper_performance_summary() -> dict:
     ]
     avg_pnl_pct = round(sum(pnl_list) / len(pnl_list), 2) if pnl_list else 0.0
 
+    # duplicate open 감지: 동일 symbol에 approved(open) 2건 이상
+    from collections import Counter as _Counter
+    open_symbol_counts = _Counter(e["symbol"] for e in open_orders)
+    duplicate_open_symbols = sorted(
+        sym for sym, cnt in open_symbol_counts.items() if cnt >= 2
+    )
+
+    # stale previewed count (not yet auto-expired — just a count for dashboard)
+    stale_preview_count = counts.get("previewed", 0)
+
     # recent: 최근 10건
     recent = list(reversed(evaluated[-10:])) if evaluated else []
 
@@ -424,6 +434,8 @@ def get_paper_performance_summary() -> dict:
             "evaluated_count": denominator,
             "win_rate": win_rate,
             "avg_pnl_pct": avg_pnl_pct,
+            "duplicate_open_symbols": duplicate_open_symbols,
+            "stale_preview_count": stale_preview_count,
         },
         "recent": recent,
         "evaluated_at": _now_kst(),

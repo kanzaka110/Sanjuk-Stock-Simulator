@@ -259,12 +259,9 @@ def main() -> None:
         for c in candidates
     ]
 
-    # ── preview 생성 ──
+    # ── preview ID 생성 (ledger write는 --send 시에만) ──
     preview_id = generate_preview_id()
-    records = create_paper_preview_records(preview_id, candidates, cross_checks, ctx)
-    print(f"\n[Preview ID] {preview_id}")
-    for r in records:
-        print(f"  {r['symbol']}: {r['status']}")
+    print(f"\n[Preview ID] {preview_id}  (dry-run: ledger write 없음)")
 
     # ── 메시지 구성 ──
     header = (
@@ -290,12 +287,18 @@ def main() -> None:
             print(f"  - {r['symbol']}: {r['reject_reason']}")
 
     if send_mode:
+        # --send 시에만 ledger에 기록 + Telegram 발송
+        print("\n→ Ledger 기록 중...")
+        records = create_paper_preview_records(preview_id, candidates, cross_checks, ctx)
+        for r in records:
+            print(f"  {r['symbol']}: {r['status']}")
+
         print("\n→ Telegram 발송 중...")
         from core.toss_paper_telegram_send import send_toss_paper_preview_message
         ok = send_toss_paper_preview_message(text, keyboard)
         print(f"→ 발송 결과: {'OK' if ok else 'FAIL'}")
     else:
-        print("\n→ dry-run 모드. --send 옵션으로 실제 발송 가능.")
+        print("\n→ dry-run 모드. ledger 미기록. --send 옵션으로 실제 발송 가능.")
 
 
 if __name__ == "__main__":

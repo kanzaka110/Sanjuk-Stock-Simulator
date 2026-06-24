@@ -48,6 +48,8 @@ ALLOWED_TOSS_FILES = {
     "core/toss_paper_policy.py",
     "tests/test_toss_paper_policy.py",
     "tests/test_toss_paper_currency_sizing.py",
+    "scripts/cleanup_toss_paper_ledger.py",
+    "tests/test_toss_paper_cleanup.py",
 }
 
 
