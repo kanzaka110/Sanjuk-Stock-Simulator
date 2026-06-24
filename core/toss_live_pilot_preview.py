@@ -79,7 +79,7 @@ def _check_price_source(candidate: dict) -> list[str]:
     return blocks
 
 
-def build_live_pilot_preview(candidate: dict) -> dict:
+def build_live_pilot_preview(candidate: dict, policy: dict | None = None) -> dict:
     """승인형 Live Pilot 미리보기 생성.
 
     Args:
@@ -89,12 +89,15 @@ def build_live_pilot_preview(candidate: dict) -> dict:
             "quantity": int,
             "limit_price": float,
             "source_disagreement_pct": float (optional),
+            "currency": str (optional, default KRW),
         }
+        policy: optional — 미지정 시 compute_toss_live_pilot_policy() 호출.
 
     Returns:
         preview dict — live_order_allowed 항상 False.
     """
-    policy = _get_live_pilot_policy()
+    if policy is None:
+        policy = _get_live_pilot_policy()
     preview_id = _gen_preview_id()
 
     symbol = candidate.get("symbol", "")
