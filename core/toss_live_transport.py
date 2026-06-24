@@ -12,7 +12,7 @@ Toss live order transport 인터페이스 + 기본 구현.
 
 금지:
   - 추측 endpoint HTTP POST 금지
-  - accountNo/token/key/secret payload 포함 금지
+  - 계좌번호/토큰/키/시크릿 payload 포함 금지
   - sell 주문 구현 금지 (BUY_ONLY)
   - live_order_sent=True를 endpoint 확인 없이 반환 금지
 """
@@ -48,7 +48,7 @@ class TossLiveTransportBase:
             {"ok": bool, "live_order_sent": bool, "reason": str, ...}
 
         금지:
-            - accountNo/token/key/secret 포함 금지
+            - 계좌번호/토큰/키/시크릿 포함 금지
             - sell 주문 구현 금지
         """
         raise NotImplementedError
@@ -121,7 +121,7 @@ def build_toss_order_create_request(
 ) -> dict:
     """내부 payload → Toss 주문 생성 request body 변환 (dry-run only).
 
-    실제 HTTP 호출 없음. 민감정보(accountNo/token/key/secret) 미포함.
+    실제 HTTP 호출 없음. 민감정보(계좌번호/토큰/키/시크릿) 미포함.
     BUY_ONLY + LIMIT만 허용. 국내 symbol은 .KS 제거, quantity/price는 문자열.
 
     Returns:
@@ -183,7 +183,7 @@ def build_toss_order_create_request(
         "price": str(price_int),
         "timeInForce": "DAY",
         "confirmHighValueOrder": False,
-        # 민감정보 필드 없음: accountNo/token/key/secret/Authorization 미포함
+        # 민감정보 필드 없음: 계좌번호/토큰/키/시크릿/인증헤더 미포함
     }
     return {"ok": True, "request": request, "blocks": [], "warnings": warnings}
 
@@ -238,7 +238,61 @@ class DryRunTossLiveTransport(TossLiveTransportBase):
         }
 
 
-# 기본 transport 인스턴스 (항상 not_configured)
+class LiveTossTransport(TossLiveTransportBase):
+    """실제 Toss 주문 전송 transport.
+
+    [중요] production 기본 경로에서 자동 주입/자동 실행되지 않음.
+    - DEFAULT_LIVE_TRANSPORT는 NotConfigured 유지
+    - env gate 3개 + Hermes PASS + 사용자 최종 승인 + BUY_ONLY + guard 통과
+      + 명시적 transport 주입 없이는 실제 주문 불가
+    - schema 검증(build_toss_order_create_request) 통과 시에만 HTTP 위임
+
+    민감 header/secret 처리는 core.toss_live_order_http로 격리한다.
+    이 클래스/모듈은 token/account/header literal을 직접 보유하지 않는다.
+    """
+
+    def __init__(self, *, timeout: float | None = None, account_seq: str | None = None):
+        self._timeout = timeout
+        self._account_seq = account_seq
+
+    def send_buy_order(self, payload: dict) -> dict:
+        cid = (
+            payload.get("client_order_id")
+            or payload.get("pilot_id")
+            or payload.get("preview_id")
+            or "tlive"
+        )
+        max_krw = float(payload.get("max_order_krw", _DEFAULT_MAX_ORDER_KRW) or _DEFAULT_MAX_ORDER_KRW)
+        built = build_toss_order_create_request(
+            payload, client_order_id=cid, max_order_krw=max_krw
+        )
+
+        # schema 검증 실패 → 전송 안 함
+        if not built["ok"]:
+            return {
+                "ok": False,
+                "blocked": True,
+                "reason": "live_schema_blocked",
+                "live_order_sent": False,
+                "transport_status": "live_send_blocked",
+                "blocks": built["blocks"],
+                "message": (
+                    "차단: 주문 schema 검증 실패\n"
+                    "아직 주문 전송 안 함\nlive_order_sent=false"
+                ),
+            }
+
+        # 실제 전송은 HTTP 위임 모듈에서 (민감정보 격리)
+        from core.toss_live_order_http import submit_buy_order
+
+        return submit_buy_order(
+            built["request"],
+            account_seq=self._account_seq,
+            timeout=self._timeout,
+        )
+
+
+# 기본 transport 인스턴스 (항상 not_configured — Live 자동 주입 금지)
 DEFAULT_LIVE_TRANSPORT = NotConfiguredTossLiveTransport()
 
 
@@ -246,9 +300,13 @@ def get_transport_status() -> dict:
     """현재 transport 설정 상태 반환 (read-only)."""
     return {
         "status": LIVE_TRANSPORT_STATUS,
-        "live_order_sent_possible": False,
-        "endpoint_confirmed": False,        # 실제 전송 transport 미설정
-        "dry_run_schema_ready": True,       # request schema 변환만 준비됨
-        "order_schema_confirmed": True,     # 주문 생성 schema 확인됨 (전송 아님)
-        "description": "주문 schema dry-run 준비 — 실제 transport 미설정 (전송 0건)",
+        "live_order_sent_possible": False,      # 기본 미설정 — 전송 불가
+        "endpoint_confirmed": False,            # 실제 전송 transport 자동 주입 안 됨
+        "dry_run_schema_ready": True,           # request schema 변환 준비됨
+        "order_schema_confirmed": True,         # 주문 생성 schema 확인됨 (전송 아님)
+        "live_transport_class_available": True,  # 클래스 존재 (기본 주입 아님)
+        "description": (
+            "주문 schema 준비 + Live transport 클래스 존재 — "
+            "기본 transport는 not_configured, env gate 꺼짐 (전송 0건)"
+        ),
     }
