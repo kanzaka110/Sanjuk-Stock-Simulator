@@ -75,6 +75,8 @@ ALLOWED_TOSS_FILES = {
     "core/toss_live_transport.py",
     "tests/test_toss_live_pilot_buy_only.py",
     "tests/test_toss_live_transport_config.py",
+    "scripts/cleanup_toss_live_pilot_verifications.py",
+    "tests/test_toss_live_pilot_verification_cleanup.py",
 }
 
 

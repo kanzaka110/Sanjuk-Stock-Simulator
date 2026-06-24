@@ -14,12 +14,14 @@ Hermes 교차검증 게이트 — Live Pilot 최종 승인 전 2차 검증 ledge
   HOLD     : Hermes가 보류 판정 → 최종 승인 차단
   BLOCK    : Hermes가 차단 판정 → 최종 승인 차단
   ERROR    : 검증 오류 → 최종 승인 차단
+  EXPIRED  : (DB 상태) PENDING 상태로 일정 시간 초과 → 검증 기회 만료
   STALE    : (계산 상태) PASS이지만 expires_at 초과 → 차단
 
 금지:
   - accountNo/token/key/secret 저장 금지
   - verification status로 live_order_allowed를 true로 바꾸지 않음
   - 자동매매 실행 금지
+  - row 삭제 금지
 """
 
 from __future__ import annotations
@@ -36,10 +38,12 @@ log = logging.getLogger(__name__)
 
 KST = timezone(timedelta(hours=9))
 
-_VALID_STATUSES = frozenset(["PENDING", "PASS", "HOLD", "BLOCK", "ERROR"])
+_VALID_STATUSES = frozenset(["PENDING", "PASS", "HOLD", "BLOCK", "ERROR", "EXPIRED"])
 _PASS_STATUS = "PASS"
+_EXPIRED_STATUS = "EXPIRED"
 
 _DEFAULT_TTL_MINUTES = 10
+PENDING_EXPIRE_MINUTES: int = 15   # PENDING 기본 만료 시간 (분)
 
 
 def _db_path() -> Path:
@@ -259,6 +263,9 @@ def is_verification_passed(
     if status == "PENDING":
         return False, ["hermes_verification_pending"], rec
 
+    if status == _EXPIRED_STATUS:
+        return False, ["hermes_verification_expired"], rec
+
     if status in ("HOLD", "BLOCK", "ERROR"):
         return False, [f"hermes_verification_{status.lower()}"], rec
 
@@ -370,6 +377,103 @@ def format_hermes_verification_request(context: dict) -> str:
     )
 
 
+# ── PENDING 만료 처리 ────────────────────────────────────────────
+
+def expire_pending_verifications(
+    older_than_minutes: int = PENDING_EXPIRE_MINUTES,
+    source_filter: str | None = None,
+    dry_run: bool = False,
+    now: datetime | None = None,
+) -> dict:
+    """오래된 PENDING 검증 요청을 EXPIRED로 전환 (삭제 없음).
+
+    Args:
+        older_than_minutes: 이 분수 이상 된 PENDING을 만료 처리
+        source_filter: None이면 전체, 문자열이면 source 칼럼 필터
+        dry_run: True면 DB 변경 없음, 예측 수치만 반환
+        now: 기준 시각 (None이면 KST 현재)
+
+    Returns:
+        {"ok": bool, "expired_count": int, "kept_count": int,
+         "older_than_minutes": int, "dry_run": bool, "live_order_sent": 0}
+
+    금지: row 삭제 없음, PASS/HOLD/BLOCK/ERROR 건드리지 않음.
+    """
+    if now is None:
+        now = datetime.now(KST)
+
+    cutoff = now - timedelta(minutes=older_than_minutes)
+    cutoff_str = cutoff.strftime("%Y-%m-%dT%H:%M:%S+09:00")
+    expire_at_str = now.strftime("%Y-%m-%dT%H:%M:%S+09:00")
+
+    try:
+        with _db_lock:
+            conn = _conn()
+
+            # 만료 대상 조회 (PENDING + cutoff 이전)
+            if source_filter:
+                candidates = conn.execute(
+                    "SELECT verification_id FROM live_pilot_verification "
+                    "WHERE status='PENDING' AND requested_at < ? AND source=?",
+                    (cutoff_str, source_filter),
+                ).fetchall()
+                total_pending = conn.execute(
+                    "SELECT COUNT(*) FROM live_pilot_verification WHERE status='PENDING' AND source=?",
+                    (source_filter,),
+                ).fetchone()[0]
+            else:
+                candidates = conn.execute(
+                    "SELECT verification_id FROM live_pilot_verification "
+                    "WHERE status='PENDING' AND requested_at < ?",
+                    (cutoff_str,),
+                ).fetchall()
+                total_pending = conn.execute(
+                    "SELECT COUNT(*) FROM live_pilot_verification WHERE status='PENDING'"
+                ).fetchone()[0]
+
+            expired_ids = [r["verification_id"] for r in candidates]
+            expired_count = len(expired_ids)
+            kept_count = total_pending - expired_count
+
+            if not dry_run and expired_ids:
+                reasons_json = json.dumps(["pending_expired"], ensure_ascii=False)
+                for vid in expired_ids:
+                    conn.execute(
+                        """UPDATE live_pilot_verification
+                           SET status=?, verified_at=?, reasons=?, live_order_allowed=0
+                           WHERE verification_id=? AND status='PENDING'""",
+                        (_EXPIRED_STATUS, expire_at_str, reasons_json, vid),
+                    )
+                conn.commit()
+                log.info(
+                    "expire_pending_verifications: %d PENDING → EXPIRED (cutoff=%s)",
+                    expired_count, cutoff_str,
+                )
+
+            conn.close()
+
+    except Exception as e:
+        log.warning("expire_pending_verifications failed: %s", e)
+        return {
+            "ok": False,
+            "error": str(e),
+            "expired_count": 0,
+            "kept_count": 0,
+            "older_than_minutes": older_than_minutes,
+            "dry_run": dry_run,
+            "live_order_sent": 0,
+        }
+
+    return {
+        "ok": True,
+        "expired_count": expired_count,
+        "kept_count": kept_count,
+        "older_than_minutes": older_than_minutes,
+        "dry_run": dry_run,
+        "live_order_sent": 0,
+    }
+
+
 # ── 목록 / 요약 ───────────────────────────────────────────────────
 
 def list_verifications(limit: int = 50) -> list[dict]:
@@ -395,17 +499,24 @@ def list_verifications(limit: int = 50) -> list[dict]:
 
 
 def verification_summary() -> dict:
-    """검증 상태 요약 (read-only)."""
+    """검증 상태 요약 (read-only).
+
+    STALE: PASS 중 만료된 것 (계산값)
+    EXPIRED: PENDING 만료 처리된 것 (DB 상태)
+    """
     try:
+        now = datetime.now(KST)
+
         with _db_lock:
             conn = _conn()
             rows = conn.execute(
                 "SELECT status, COUNT(*) as cnt FROM live_pilot_verification GROUP BY status"
             ).fetchall()
             conn.close()
+
         counts: dict[str, int] = {r["status"]: r["cnt"] for r in rows}
+
         # STALE 계산 (PASS 중 만료된 것)
-        now = datetime.now(KST)
         stale_count = 0
         try:
             with _db_lock:
@@ -427,7 +538,34 @@ def verification_summary() -> dict:
         except Exception:
             pass
         counts["STALE"] = stale_count
-        return {"summary": counts, "live_order_allowed": False}
+
+        # 가장 오래된 PENDING age 계산
+        oldest_pending_minutes = None
+        try:
+            with _db_lock:
+                conn3 = _conn()
+                oldest_row = conn3.execute(
+                    "SELECT MIN(requested_at) as oldest FROM live_pilot_verification WHERE status='PENDING'"
+                ).fetchone()
+                conn3.close()
+            if oldest_row and oldest_row["oldest"]:
+                oldest_str = oldest_row["oldest"].replace("+09:00", "")
+                oldest_dt = datetime.strptime(oldest_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=KST)
+                oldest_pending_minutes = int((now - oldest_dt).total_seconds() / 60)
+        except Exception:
+            pass
+
+        return {
+            "summary": counts,
+            "live_order_allowed": False,
+            "pending_expire_minutes": PENDING_EXPIRE_MINUTES,
+            "oldest_pending_age_minutes": oldest_pending_minutes,
+        }
     except Exception as e:
         log.warning("verification_summary failed: %s", e)
-        return {"summary": {}, "live_order_allowed": False}
+        return {
+            "summary": {},
+            "live_order_allowed": False,
+            "pending_expire_minutes": PENDING_EXPIRE_MINUTES,
+            "oldest_pending_age_minutes": None,
+        }
