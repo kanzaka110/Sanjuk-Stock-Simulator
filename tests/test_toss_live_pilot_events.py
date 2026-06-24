@@ -221,11 +221,29 @@ class TestEventSummary(unittest.TestCase):
         summ = event_summary()
         self.assertFalse(summ["live_order_allowed"])
 
-    def test_live_sent_increments_total(self):
+    def test_bare_live_sent_is_artifact_not_real(self):
+        # adapter enabled + live_order_allowed 없이 들어온 live_sent는
+        # artifact로 강등되어 real total을 올리지 않는다 (오염 방지).
         from core.toss_live_pilot_events import record_event, event_summary
-        record_event("tlive_ls", "live_sent", "live_sent", live_order_sent=True)
+        r = record_event("tlive_ls", "live_sent", "live_sent", live_order_sent=True)
+        self.assertEqual(r["event_type"], "live_sent_artifact")
         summ = event_summary()
-        self.assertGreater(summ["live_order_sent_total"], 0)
+        self.assertEqual(summ["live_order_sent_total"], 0)
+        self.assertEqual(summ["live_sent_real"], 0)
+        self.assertGreater(summ["live_sent_mock_or_artifact"], 0)
+
+    def test_real_live_sent_counts_when_fully_gated(self):
+        # adapter enabled + live_order_allowed=true + sent 일 때만 real로 카운트.
+        from core.toss_live_pilot_events import record_event, event_summary
+        r = record_event(
+            "tlive_real", "live_sent", "live_sent",
+            live_order_sent=True, adapter_status="enabled", live_order_allowed=True,
+        )
+        self.assertEqual(r["event_type"], "live_sent")
+        self.assertTrue(r["is_real_live_sent"])
+        summ = event_summary()
+        self.assertEqual(summ["live_sent_real"], 1)
+        self.assertEqual(summ["live_order_sent_total"], 1)
 
 
 # ── 6. 각 이벤트 타입 커버 ────────────────────────────────

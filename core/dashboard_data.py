@@ -1908,6 +1908,11 @@ def toss_live_pilot_events_data(limit: int = 50) -> dict:
         summ = event_summary()
         return {
             "summary": summ.get("summary", {}),
+            "live_sent_real": summ.get("live_sent_real", 0),
+            "live_sent_mock_or_artifact": summ.get("live_sent_mock_or_artifact", 0),
+            "blocked_policy": summ.get("blocked_policy", 0),
+            "blocked_transport": summ.get("blocked_transport", 0),
+            "blocked_guard": summ.get("blocked_guard", 0),
             "live_order_sent_total": summ.get("live_order_sent_total", 0),
             "live_order_allowed": False,
             "records": list_events(limit=limit),
@@ -1916,6 +1921,11 @@ def toss_live_pilot_events_data(limit: int = 50) -> dict:
         return {
             "error": str(e),
             "summary": {},
+            "live_sent_real": 0,
+            "live_sent_mock_or_artifact": 0,
+            "blocked_policy": 0,
+            "blocked_transport": 0,
+            "blocked_guard": 0,
             "live_order_sent_total": 0,
             "live_order_allowed": False,
             "records": [],

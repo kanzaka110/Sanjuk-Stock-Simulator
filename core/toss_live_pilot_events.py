@@ -15,8 +15,14 @@ event_type:
   confirm_blocked_transport| Hermes PASS + transport 미설정으로 차단
   confirmed_but_not_sent   | Hermes PASS + guard 통과 + 최종 차단 (adapter 등)
   live_send_blocked        | guard 차단
-  live_sent                | 실제/fake 전송 성공
+  live_sent                | 진짜 live 전송 성공 (adapter enabled + live_order_allowed + sent)
+  live_sent_artifact       | test/mock/리허설 전송 — production live_sent로 카운트 금지
   live_send_failed         | 전송 시도 후 실패
+
+[오염 방지 invariant]
+  - adapter_status != enabled 또는 live_order_allowed=false인 live_sent는
+    record 시점에 live_sent_artifact로 강등 (production summary 오염 방지).
+  - live_order_sent_total / live_sent_real은 진짜 게이트 통과 row만 카운트.
 
 금지:
   - row 삭제 없음
@@ -52,6 +58,7 @@ _VALID_EVENT_TYPES = frozenset([
     "confirmed_but_not_sent",
     "live_send_blocked",
     "live_sent",
+    "live_sent_artifact",
     "live_send_failed",
 ])
 
@@ -130,13 +137,21 @@ def record_event(
     estimated_amount_krw: float = 0.0,
     live_order_sent: bool = False,
     adapter_status: str = "disabled",
+    live_order_allowed: bool = False,
     reason: str = "",
     message: str = "",
 ) -> dict:
     """Live pilot 이벤트 기록.
 
     민감정보(accountNo/token/key/secret/broker raw) 포함 금지.
-    live_order_allowed 항상 0.
+
+    안전 invariant:
+        live_sent는 (adapter_status='enabled' + live_order_allowed=true +
+        live_order_sent=true)일 때만 진짜 live_sent로 기록한다. 그 외의
+        live_sent는 test/mock/리허설 artifact이므로 live_sent_artifact로
+        강등하여 production summary/ledger 오염을 막는다.
+        production callback 경로(transport=None)는 애초에 live_sent를 만들지
+        못하므로, 이 강등은 fake transport 테스트 등에 대한 2차 방어막이다.
 
     Returns:
         {"ok": bool, "event_id": str, "event_type": str}
@@ -151,6 +166,22 @@ def record_event(
             if kw in str(field):
                 log.warning("민감정보 감지 in event fields: %s", kw)
                 return {"ok": False, "reason": f"sensitive_field: {kw}"}
+
+    # 안전 invariant: 진짜 live_sent 판별 + artifact 강등
+    is_real_live_sent = (
+        event_type == "live_sent"
+        and bool(live_order_sent)
+        and adapter_status == "enabled"
+        and bool(live_order_allowed)
+    )
+    if event_type == "live_sent" and not is_real_live_sent:
+        event_type = "live_sent_artifact"
+        log.info(
+            "live_sent 강등 → live_sent_artifact: adapter=%s allowed=%s "
+            "(production live_sent 아님)",
+            adapter_status, bool(live_order_allowed),
+        )
+    stored_allowed = 1 if is_real_live_sent else 0
 
     event_id = _gen_event_id()
     symbol_name = SYMBOL_NAMES.get(symbol, "")
@@ -172,7 +203,7 @@ def record_event(
                     event_id, pilot_id, preview_id, verification_id,
                     event_type, status, symbol, symbol_name, symbol_label,
                     side, quantity, limit_price, estimated_amount_krw,
-                    1 if live_order_sent else 0, adapter_status, 0,
+                    1 if live_order_sent else 0, adapter_status, stored_allowed,
                     reason, message, now, 0,
                 ),
             )
@@ -190,7 +221,8 @@ def record_event(
         "pilot_id": pilot_id,
         "symbol_label": symbol_label,
         "live_order_sent": live_order_sent,
-        "live_order_allowed": False,
+        "live_order_allowed": bool(is_real_live_sent),
+        "is_real_live_sent": bool(is_real_live_sent),
         "created_at": now,
     }
 
@@ -210,8 +242,21 @@ def list_events(limit: int = 50) -> list[dict]:
         result = []
         for r in rows:
             d = dict(r)
-            d["live_order_sent"] = bool(d.get("live_order_sent"))
-            d["live_order_allowed"] = False  # 항상 false
+            sent = bool(d.get("live_order_sent"))
+            d["live_order_sent"] = sent
+            et = d.get("event_type")
+            real = (
+                et == "live_sent"
+                and sent
+                and d.get("adapter_status") == "enabled"
+                and bool(d.get("live_order_allowed"))
+            )
+            # Hermes 필터 기준과 일치: real일 때만 true
+            d["live_order_allowed"] = real
+            if et in ("live_sent", "live_sent_artifact") and sent:
+                d["live_sent_classification"] = "real" if real else "mock_or_artifact"
+            else:
+                d["live_sent_classification"] = "n/a"
             result.append(d)
         return result
     except Exception as e:
@@ -220,23 +265,57 @@ def list_events(limit: int = 50) -> list[dict]:
 
 
 def event_summary() -> dict:
-    """이벤트 타입별 건수 요약 (read-only)."""
+    """이벤트 타입별 건수 요약 (read-only).
+
+    production live_sent 오염 방지를 위해 real / mock_or_artifact를 분리한다.
+    - live_sent_real: adapter_status='enabled' + live_order_allowed=1 + sent
+    - live_sent_mock_or_artifact: 그 외의 live_order_sent=1 row 전부
+    - live_order_sent_total: real만 카운트 (기존 의미 변경)
+    """
     try:
         with _db_lock:
             conn = _conn()
             rows = conn.execute(
                 "SELECT event_type, COUNT(*) as cnt FROM live_pilot_events GROUP BY event_type"
             ).fetchall()
-            live_sent_count = conn.execute(
-                "SELECT COUNT(*) FROM live_pilot_events WHERE live_order_sent=1"
+            real_count = conn.execute(
+                "SELECT COUNT(*) FROM live_pilot_events "
+                "WHERE event_type='live_sent' AND live_order_sent=1 "
+                "AND adapter_status='enabled' AND live_order_allowed=1"
+            ).fetchone()[0]
+            artifact_count = conn.execute(
+                "SELECT COUNT(*) FROM live_pilot_events "
+                "WHERE live_order_sent=1 AND NOT ("
+                "event_type='live_sent' AND adapter_status='enabled' "
+                "AND live_order_allowed=1)"
             ).fetchone()[0]
             conn.close()
         counts = {r["event_type"]: r["cnt"] for r in rows}
+        blocked_policy = (
+            counts.get("confirm_blocked_policy", 0)
+            + counts.get("confirm_blocked_hermes", 0)
+        )
+        blocked_transport = counts.get("confirm_blocked_transport", 0)
+        blocked_guard = counts.get("live_send_blocked", 0)
         return {
             "summary": counts,
-            "live_order_sent_total": live_sent_count,
+            "live_sent_real": int(real_count),
+            "live_sent_mock_or_artifact": int(artifact_count),
+            "blocked_policy": blocked_policy,
+            "blocked_transport": blocked_transport,
+            "blocked_guard": blocked_guard,
+            "live_order_sent_total": int(real_count),   # real만 카운트
             "live_order_allowed": False,
         }
     except Exception as e:
         log.warning("event_summary failed: %s", e)
-        return {"summary": {}, "live_order_sent_total": 0, "live_order_allowed": False}
+        return {
+            "summary": {},
+            "live_sent_real": 0,
+            "live_sent_mock_or_artifact": 0,
+            "blocked_policy": 0,
+            "blocked_transport": 0,
+            "blocked_guard": 0,
+            "live_order_sent_total": 0,
+            "live_order_allowed": False,
+        }
