@@ -72,8 +72,15 @@ class TestConfirmPolicyDisabled(unittest.TestCase):
         m._schema_created = False
         self._env_patch = patch.dict(os.environ, _CLEARED_ENV)
         self._env_patch.start()
+        # Hermes 게이트 PASS로 우회 — 이 클래스는 adapter 비활성 레이어 테스트
+        self._hermes_patch = patch(
+            "core.toss_live_pilot_verification.is_verification_passed",
+            return_value=(True, [], {}),
+        )
+        self._hermes_patch.start()
 
     def tearDown(self):
+        self._hermes_patch.stop()
         self._db_patch.stop()
         self._env_patch.stop()
         import core.toss_live_pilot_ledger as m
@@ -124,8 +131,15 @@ class TestConfirmEnabledNoTransport(unittest.TestCase):
         m._schema_created = False
         self._env_patch = patch.dict(os.environ, _ALL_GATES_ENV)
         self._env_patch.start()
+        # Hermes 게이트 PASS로 우회
+        self._hermes_patch = patch(
+            "core.toss_live_pilot_verification.is_verification_passed",
+            return_value=(True, [], {}),
+        )
+        self._hermes_patch.start()
 
     def tearDown(self):
+        self._hermes_patch.stop()
         self._db_patch.stop()
         self._env_patch.stop()
         import core.toss_live_pilot_ledger as m
@@ -156,8 +170,15 @@ class TestConfirmEnabledFakeSuccess(unittest.TestCase):
         m._schema_created = False
         self._env_patch = patch.dict(os.environ, _ALL_GATES_ENV)
         self._env_patch.start()
+        # Hermes 게이트 PASS로 우회 — 이 클래스는 adapter/transport 레이어 테스트
+        self._hermes_patch = patch(
+            "core.toss_live_pilot_verification.is_verification_passed",
+            return_value=(True, [], {}),
+        )
+        self._hermes_patch.start()
 
     def tearDown(self):
+        self._hermes_patch.stop()
         self._db_patch.stop()
         self._env_patch.stop()
         import core.toss_live_pilot_ledger as m
@@ -242,8 +263,15 @@ class TestConfirmGuardBlocked(unittest.TestCase):
         m._schema_created = False
         self._env_patch = patch.dict(os.environ, _ALL_GATES_ENV)
         self._env_patch.start()
+        # Hermes 게이트 PASS로 우회
+        self._hermes_patch = patch(
+            "core.toss_live_pilot_verification.is_verification_passed",
+            return_value=(True, [], {}),
+        )
+        self._hermes_patch.start()
 
     def tearDown(self):
+        self._hermes_patch.stop()
         self._db_patch.stop()
         self._env_patch.stop()
         import core.toss_live_pilot_ledger as m

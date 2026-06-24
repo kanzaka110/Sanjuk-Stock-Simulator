@@ -192,14 +192,16 @@ def _handle_review(preview_id: str) -> dict:
 def _handle_confirm(preview_id: str) -> dict:
     """최종 승인 시도.
 
-    policy disabled → 기존처럼 차단 (confirmed_but_not_sent).
-    policy enabled  → can_send_live_pilot_order guard 검사 후 dispatch_toss_order_live 호출.
-                      transport=None(기본)이면 여전히 blocked.
+    순서:
+      1. pilot record 조회
+      2. Hermes verification PASS 확인 (gate)
+      3. policy/adapter 확인
+      4. can_send guards
+      5. transport dispatch (transport=None 기본 → blocked)
     """
     from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
     from core.toss_live_pilot_adapter import (
         can_send_live_pilot_order,
-        dispatch_toss_order_disabled,
         dispatch_toss_order_live,
     )
     from core.toss_live_pilot_ledger import (
@@ -209,47 +211,63 @@ def _handle_confirm(preview_id: str) -> dict:
         record_live_send_failed,
         list_live_pilot_records,
     )
+    from core.toss_live_pilot_verification import is_verification_passed
 
-    policy = compute_toss_live_pilot_policy()
-
-    # 1. policy disabled → 기존 차단 흐름
-    if not policy.get("live_order_allowed") or policy.get("adapter_status") != "enabled":
-        try:
-            ledger_result = record_confirm_attempt(preview_id)
-            status = ledger_result.get("status", "confirmed_but_not_sent")
-        except Exception as e:
-            logger.warning("confirm ledger failed: %s", e)
-            status = "confirmed_but_not_sent"
-
-        return {
-            "ok": False,
-            "action": "confirm",
-            "live_order_sent": False,
-            "blocked": True,
-            "reason": "toss_order_adapter_disabled",
-            "adapter_status": policy.get("adapter_status", "disabled"),
-            "message": (
-                "[최종 승인 시도 차단됨]\n"
-                "차단: live pilot 조건 미충족\n"
-                "아직 주문 전송 안 함\n"
-                "live_order_sent=false\n"
-                "실주문: 비활성\n"
-                f"상태: {status}"
-            ),
-        }
-
-    # 2. policy enabled → preview/payload 조회 후 guard 검사
-    records = list_live_pilot_records(limit=100)
+    # 1. pilot record 조회
+    records = list_live_pilot_records(limit=200)
     matched = [r for r in records if r.get("pilot_id") == preview_id]
     if not matched:
         return {
             "ok": False, "action": "confirm", "live_order_sent": False, "blocked": True,
             "reason": "pilot_id_not_found",
-            "message": "pilot_id를 찾을 수 없습니다.\n주문 전송 조건 미충족",
+            "message": "pilot_id를 찾을 수 없습니다.\n아직 주문 전송 안 함",
+        }
+    rec = matched[0]
+
+    # 2. Hermes verification gate
+    verif_ok, verif_reasons, verif_rec = is_verification_passed(preview_id)
+    verif_status = verif_rec.get("status", "PENDING") if verif_rec else "NOT_FOUND"
+
+    if not verif_ok:
+        try:
+            record_live_send_blocked(preview_id, verif_reasons)
+        except Exception as e:
+            logger.warning("hermes gate ledger failed: %s", e)
+        return {
+            "ok": False, "action": "confirm", "live_order_sent": False, "blocked": True,
+            "reason": "hermes_verification_required",
+            "verif_status": verif_status,
+            "verif_reasons": verif_reasons,
+            "message": (
+                "[차단: Hermes 교차검증 미완료/미통과]\n"
+                "아직 주문 전송 안 함\n"
+                "live_order_sent=false\n"
+                f"Hermes 검증 상태: {verif_status}\n"
+                f"차단 사유: {'; '.join(verif_reasons[:2])}"
+            ),
         }
 
-    rec = matched[0]
-    # preview/payload 재구성 (ledger 기록에서)
+    # 3. policy/adapter 확인
+    policy = compute_toss_live_pilot_policy()
+    if not policy.get("live_order_allowed") or policy.get("adapter_status") != "enabled":
+        try:
+            record_confirm_attempt(preview_id)
+        except Exception as e:
+            logger.warning("confirm ledger failed: %s", e)
+        return {
+            "ok": False, "action": "confirm", "live_order_sent": False, "blocked": True,
+            "reason": "toss_order_adapter_disabled",
+            "adapter_status": policy.get("adapter_status", "disabled"),
+            "message": (
+                "[Hermes 검증 PASS 확인]\n"
+                "차단: live pilot 조건 미충족\n"
+                "아직 주문 전송 안 함\n"
+                "live_order_sent=false\n"
+                "실주문: 비활성"
+            ),
+        }
+
+    # 4. can_send guards
     preview_stub = {
         "ok": rec.get("status") not in ("blocked", "cancelled"),
         "symbol": rec.get("symbol", ""),
@@ -263,7 +281,6 @@ def _handle_confirm(preview_id: str) -> dict:
     payload_result_stub = {"ok": preview_stub["ok"], "live_order_sent": preview_stub["live_order_sent"]}
 
     can_send, guard_reasons = can_send_live_pilot_order(policy, preview_stub, payload_result_stub)
-
     if not can_send:
         try:
             record_live_send_blocked(preview_id, guard_reasons)
@@ -281,7 +298,7 @@ def _handle_confirm(preview_id: str) -> dict:
             ),
         }
 
-    # 3. guard 통과 → dispatch (transport=None이면 여전히 blocked)
+    # 5. transport dispatch (transport=None → blocked)
     payload = {
         "symbol": preview_stub["symbol"],
         "side": preview_stub["side"],

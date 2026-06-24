@@ -67,6 +67,11 @@ ALLOWED_TOSS_FILES = {
     "tests/test_toss_live_pilot_live_adapter.py",
     "tests/test_toss_live_pilot_live_policy.py",
     "tests/test_toss_live_pilot_live_callback.py",
+    "core/toss_live_pilot_verification.py",
+    "scripts/record_hermes_live_pilot_verification.py",
+    "tests/test_toss_live_pilot_verification.py",
+    "tests/test_toss_live_pilot_hermes_gate.py",
+    "tests/test_toss_live_pilot_verification_script.py",
 }
 
 

@@ -147,14 +147,41 @@ def main() -> None:
         pilot_id = ledger_rec.get("pilot_id", preview_id)
         print(f"  pilot_id: {pilot_id} · status: {ledger_rec.get('status')}")
 
+        # Hermes 검증 요청 생성 (PENDING)
+        print("\n→ Hermes 검증 요청 생성 중...")
+        from core.toss_live_pilot_verification import (
+            create_verification_request,
+            build_hermes_verification_context,
+            format_hermes_verification_request,
+        )
+        verif_preview = {**preview, "pilot_id": pilot_id, "preview_id": pilot_id}
+        verif_result = create_verification_request(verif_preview, pilot_id=pilot_id)
+        verification_id = verif_result.get("verification_id", "")
+        print(f"  verification_id: {verification_id} · status: {verif_result.get('status')}")
+
+        # Hermes 검증 컨텍스트 출력 (Hermes가 읽을 블록)
+        verif_ctx = build_hermes_verification_context(verif_preview, policy)
+        verif_ctx["verification_id"] = verification_id
+        verif_block = format_hermes_verification_request(verif_ctx)
+        print(f"\n[Hermes 검증 요청 블록]")
+        print(verif_block)
+
+        # 메시지에 verification_id + Hermes 대기 상태 추가
+        text_with_verif = (
+            text
+            + f"\n\nverification_id: {verification_id}"
+            + "\nHermes 검증 상태: PENDING (검증 대기)"
+            + "\n최종 승인 전 Hermes PASS 필요"
+        )
+
         # keyboard는 실제 pilot_id로 재생성
         keyboard = build_live_pilot_keyboard(pilot_id, preview)
 
         print("\n→ Telegram 발송 중...")
         from core.toss_live_pilot_telegram import send_live_pilot_preview_message
-        ok = send_live_pilot_preview_message(text, keyboard)
+        ok = send_live_pilot_preview_message(text_with_verif, keyboard)
         print(f"→ 발송 결과: {'OK' if ok else 'FAIL'}")
-        print("   (버튼 눌러도 최종 승인 차단됨 — adapter disabled)")
+        print("   (버튼 눌러도 최종 승인 차단됨 — Hermes PENDING + adapter disabled)")
     else:
         print("\n→ dry-run 모드. ledger 미기록. Telegram 미발송.")
         print("   --send 옵션으로 실제 발송 가능.")

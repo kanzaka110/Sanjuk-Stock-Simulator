@@ -1890,3 +1890,19 @@ def toss_live_pilot_previews_data(limit: int = 20) -> dict:
         }
     except Exception as e:
         return {"error": str(e), "summary": {}, "records": []}
+
+
+def toss_live_pilot_verifications_data(limit: int = 20) -> dict:
+    """최근 Hermes 교차검증 기록 (read-only). live_order_allowed 항상 false."""
+    try:
+        from core.toss_live_pilot_verification import (
+            list_verifications,
+            verification_summary,
+        )
+        return {
+            "summary": verification_summary(),
+            "records": list_verifications(limit=limit),
+            "live_order_allowed": False,
+        }
+    except Exception as e:
+        return {"error": str(e), "summary": {}, "records": [], "live_order_allowed": False}

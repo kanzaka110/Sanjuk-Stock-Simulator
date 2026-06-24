@@ -88,8 +88,15 @@ class TestConfirmCallback(unittest.TestCase):
         self._patch.start()
         import core.toss_live_pilot_ledger as m
         m._schema_created = False
+        # Hermes 게이트를 PASS로 우회 (이 클래스는 adapter 비활성 레이어 테스트)
+        self._hermes_patch = patch(
+            "core.toss_live_pilot_verification.is_verification_passed",
+            return_value=(True, [], {}),
+        )
+        self._hermes_patch.start()
 
     def tearDown(self):
+        self._hermes_patch.stop()
         self._patch.stop()
         import core.toss_live_pilot_ledger as m
         m._schema_created = False

@@ -153,7 +153,7 @@ def compute_toss_live_pilot_policy(
         "sample_insufficient": insufficient,
         "warnings": warnings,
         "block_reason": block_reason,
-        "reason": "승인형 live pilot — 수동 최종 승인 전용",
+        "reason": "승인형 live pilot — 수동 최종 승인 전용 (기본: 비활성)",
     }
 
     return policy
