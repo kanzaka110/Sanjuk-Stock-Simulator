@@ -10,6 +10,7 @@ Toss Live Pilot 미리보기 테스트 발송 — dry-run / 실제 주문 아님
 사용법:
   python scripts/send_toss_live_pilot_preview_test.py          # dry-run (콘솔 출력만)
   python scripts/send_toss_live_pilot_preview_test.py --send    # Telegram 실제 발송
+  python scripts/send_toss_live_pilot_preview_test.py --send --mirror-hermes  # Hermes 방도 미러링
 """
 
 from __future__ import annotations
@@ -57,6 +58,7 @@ def _parse_symbol() -> str:
 
 def main() -> None:
     send_mode = "--send" in sys.argv
+    mirror_hermes = "--mirror-hermes" in sys.argv
 
     from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
     from core.toss_live_pilot_preview import build_live_pilot_preview
@@ -182,6 +184,24 @@ def main() -> None:
         ok = send_live_pilot_preview_message(text_with_verif, keyboard)
         print(f"→ 발송 결과: {'OK' if ok else 'FAIL'}")
         print("   (버튼 눌러도 최종 승인 차단됨 — Hermes PENDING + adapter disabled)")
+
+        # Hermes 미러링 (--mirror-hermes 옵션 + env target 설정 시)
+        if mirror_hermes:
+            print("\n→ Hermes 미러링 시도 중...")
+            from core.toss_live_pilot_hermes_bridge import maybe_send_hermes_verification_request
+            mirror_result = maybe_send_hermes_verification_request(
+                preview_record=verif_preview,
+                verification=verif_result,
+                policy=policy,
+            )
+            if mirror_result.get("skipped"):
+                print(f"   skipped: {mirror_result.get('reason', 'unknown')}")
+                print("   (env target 미설정이면 정상 — HERMES_VERIFY_MIRROR_ENABLED / HERMES_VERIFY_CHAT_ID 설정 필요)")
+            elif mirror_result.get("ok"):
+                print(f"   ✅ Hermes 미러 발송 완료: verification_id={mirror_result.get('verification_id', '')}")
+            else:
+                print(f"   ⚠️  Hermes 미러 발송 실패: {mirror_result.get('reason', 'unknown')}")
+                print("   (preview/verification은 유지됨)")
     else:
         print("\n→ dry-run 모드. ledger 미기록. Telegram 미발송.")
         print("   --send 옵션으로 실제 발송 가능.")

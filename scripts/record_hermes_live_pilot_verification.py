@@ -8,13 +8,34 @@ Hermes 교차검증 결과 기록 CLI
       --symbol 091180.KS --side buy --quantity 1 --price 30000 \\
       --create-request
 
-  # 검증 결과 기록
+  # 검증 결과 기록 (verification_id 직접 지정)
   python scripts/record_hermes_live_pilot_verification.py \\
       --verification-id hv_20250624_123456_1234 \\
       --status PASS \\
       --reason "price_ok" --reason "amount_ok" \\
       --check amount_guard=ok --check price_nonzero=ok \\
       --ttl-minutes 10
+
+  # [HERMES_LIVE_PILOT_VERIFY] 블록 파일에서 verification_id 자동 추출
+  python scripts/record_hermes_live_pilot_verification.py \\
+      --from-verify-block /tmp/hermes_verify.txt \\
+      --status PASS \\
+      --reason "Hermes 교차검증 통과: 가격/금액/중복/정책 OK" \\
+      --ttl-minutes 10
+
+  # stdin에서 블록 읽기
+  python scripts/record_hermes_live_pilot_verification.py \\
+      --from-stdin \\
+      --status HOLD \\
+      --reason "현재가/지정가 괴리 재확인 필요" <<'EOF'
+[HERMES_LIVE_PILOT_VERIFY]
+verification_id: hv_test
+pilot_id: tlive_test
+symbol: 091180.KS
+side: buy
+estimated_amount_krw: 30000
+[/HERMES_LIVE_PILOT_VERIFY]
+EOF
 
   # 드라이런 (기록 없음, 출력만)
   python scripts/record_hermes_live_pilot_verification.py \\
@@ -75,7 +96,53 @@ def _parse_args() -> dict:
         "hermes_message": _val("--message", ""),
         "ttl_minutes": int(_val("--ttl-minutes", "10")),
         "dry_run": _flag("--dry-run"),
+        "from_verify_block": _val("--from-verify-block", ""),
+        "from_stdin": _flag("--from-stdin"),
     }
+
+
+def _extract_verification_id_from_block(text: str) -> str | None:
+    """[HERMES_LIVE_PILOT_VERIFY] 블록에서 verification_id 추출.
+
+    반환: verification_id 문자열 또는 None.
+    민감정보 확인: accountNo/token/key/secret 있으면 None.
+    """
+    # 민감정보 보호
+    for kw in ("accountNo", "Bearer", "APP_KEY", "APP_SECRET"):
+        if kw in text:
+            return None
+
+    in_block = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped == "[HERMES_LIVE_PILOT_VERIFY]":
+            in_block = True
+            continue
+        if stripped == "[/HERMES_LIVE_PILOT_VERIFY]":
+            break
+        if in_block and stripped.startswith("verification_id:"):
+            val = stripped.split(":", 1)[1].strip()
+            return val if val else None
+    return None
+
+
+def _read_block_source(opts: dict) -> str:
+    """--from-verify-block 파일 또는 --from-stdin에서 블록 텍스트 읽기."""
+    if opts.get("from_stdin"):
+        import sys as _sys
+        return _sys.stdin.read()
+
+    path = opts.get("from_verify_block", "")
+    if path:
+        from pathlib import Path as _Path
+        p = _Path(path)
+        if not p.exists():
+            print(f"⚠️  파일 없음: {path}")
+            import sys as _sys
+            _sys.exit(1)
+        return p.read_text(encoding="utf-8")
+
+    return ""
 
 
 def _parse_checks(check_list: list[str]) -> dict:
@@ -140,6 +207,67 @@ def main() -> None:
         print(f"  pilot_id: {result['pilot_id']}")
         print(f"  status: {result['status']}")
         print(f"  requested_at: {result['requested_at']}")
+
+    elif opts.get("from_verify_block") or opts.get("from_stdin"):
+        # ── verify block에서 verification_id 자동 추출 ──
+        block_text = _read_block_source(opts)
+        extracted_id = _extract_verification_id_from_block(block_text)
+        if not extracted_id:
+            print("⚠️  [HERMES_LIVE_PILOT_VERIFY] 블록에서 verification_id를 찾을 수 없음")
+            sys.exit(1)
+
+        status = opts["status"].upper() if opts["status"] else ""
+        if not status:
+            print("⚠️  --status 필수 (PASS | HOLD | BLOCK | ERROR)")
+            sys.exit(1)
+        if status not in ("PENDING", "PASS", "HOLD", "BLOCK", "ERROR"):
+            print(f"⚠️  유효하지 않은 status: {status}")
+            sys.exit(1)
+
+        reasons = opts["reasons"]
+        checks = _parse_checks(opts["checks"])
+        hermes_message = opts["hermes_message"]
+        ttl = opts["ttl_minutes"]
+
+        print(f"\n[블록 기반 검증 결과]")
+        print(f"  verification_id: {extracted_id}  (블록에서 추출)")
+        print(f"  status: {status}")
+        print(f"  reasons: {reasons}")
+        print(f"  checks: {checks}")
+        if status == "PASS":
+            print(f"  ttl_minutes: {ttl}")
+
+        # 민감정보 체크
+        for kw in ("accountNo", "Bearer", "APP_KEY", "APP_SECRET"):
+            if any(kw in str(v) for v in [*reasons, *checks.values(), hermes_message]):
+                print(f"⚠️  민감정보 감지: {kw} — 기록 중단")
+                sys.exit(1)
+
+        if opts["dry_run"]:
+            print("\n→ dry-run 모드. DB 기록 없음.")
+            print("✅ 민감정보 없음. 형식 검증 통과.")
+            return
+
+        result = record_hermes_verification(
+            verification_id=extracted_id,
+            status=status,
+            reasons=reasons,
+            checks=checks,
+            hermes_message=hermes_message,
+            ttl_minutes=ttl,
+        )
+
+        if result.get("ok"):
+            print(f"\n✅ 검증 결과 기록 완료")
+            print(f"  verification_id: {extracted_id}")
+            print(f"  status: {result['status']}")
+            print(f"  verified_at: {result['verified_at']}")
+            if result.get("expires_at"):
+                print(f"  expires_at: {result['expires_at']} (TTL {ttl}분)")
+            print(f"  live_order_allowed: false (항상)")
+        else:
+            print(f"\n⚠️  기록 실패: {result.get('reason', 'unknown')}")
+            sys.exit(1)
 
     else:
         # ── 검증 결과 기록 ──

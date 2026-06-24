@@ -1899,10 +1899,37 @@ def toss_live_pilot_verifications_data(limit: int = 20) -> dict:
             list_verifications,
             verification_summary,
         )
+        summ = verification_summary()
+        counts = summ.get("summary", {})
+
+        # mirror 설정 상태 포함 (비밀 미포함)
+        mirror_enabled = False
+        mirror_target_configured = False
+        try:
+            from core.toss_live_pilot_hermes_bridge import get_mirror_status
+            mirror_cfg = get_mirror_status()
+            mirror_enabled = mirror_cfg.get("mirror_enabled", False)
+            mirror_target_configured = mirror_cfg.get("mirror_target_configured", False)
+        except Exception:
+            pass
+
         return {
-            "summary": verification_summary(),
+            "summary": summ,
             "records": list_verifications(limit=limit),
             "live_order_allowed": False,
+            "mirror_enabled": mirror_enabled,
+            "mirror_target_configured": mirror_target_configured,
+            "pending_count": counts.get("PENDING", 0),
+            "expired_count": counts.get("EXPIRED", 0),
         }
     except Exception as e:
-        return {"error": str(e), "summary": {}, "records": [], "live_order_allowed": False}
+        return {
+            "error": str(e),
+            "summary": {},
+            "records": [],
+            "live_order_allowed": False,
+            "mirror_enabled": False,
+            "mirror_target_configured": False,
+            "pending_count": 0,
+            "expired_count": 0,
+        }
