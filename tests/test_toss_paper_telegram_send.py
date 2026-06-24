@@ -365,3 +365,93 @@ class TestNormalSampleGeneration:
 
         for c in candidates:
             assert c.get("_is_test_sample") is True
+
+
+# ═══ entry_price = accepted market price ═══
+
+class TestEntryPriceMatchesAccepted:
+    """운영 샘플 limit_price가 accepted market price와 일치하는지 검증."""
+
+    def _policy(self) -> dict:
+        return {
+            "mode": "paper_only", "live_order_allowed": False,
+            "sample_status": "insufficient",
+            "base_budget_krw": 100_000, "max_budget_krw": 300_000,
+            "min_budget_krw": 0, "sizing_multiplier": 0.3,
+            "evaluated_count": 0, "win_rate": 0.0, "avg_pnl_pct": 0.0,
+            "consensus_anomaly_count": 0, "consensus_anomaly_symbols": [],
+            "data_error_count": 0, "reason": "표본부족",
+            "blocks": [], "warnings": [], "_note": "test",
+        }
+
+    def test_limit_price_equals_accepted_price_for_kr(self):
+        """KR 종목 limit_price == accepted price."""
+        import sys; sys.path.insert(0, str(ROOT / "scripts"))
+        from send_toss_paper_preview_test import _build_candidates
+        accepted_price = 29800.0
+        with patch("core.toss_paper_performance._get_quote_for_paper",
+                   return_value={"price": accepted_price, "source": "KIS",
+                                 "accepted_price_source": "KIS", "source_chain": []}):
+            candidates, _ = _build_candidates(self._policy(), max_n=5)
+        for c in candidates:
+            if c["symbol"].endswith(".KS"):
+                assert c["limit_price"] == accepted_price, (
+                    f"{c['symbol']}: limit_price={c['limit_price']} != accepted={accepted_price}"
+                )
+
+    def test_limit_price_equals_accepted_price_for_us(self):
+        """US 종목 limit_price == accepted price (not pool _ref_price)."""
+        import sys; sys.path.insert(0, str(ROOT / "scripts"))
+        from send_toss_paper_preview_test import _build_candidates
+        accepted_price = 200.56
+        with patch("core.toss_paper_performance._get_quote_for_paper",
+                   return_value={"price": accepted_price, "source": "KIS",
+                                 "accepted_price_source": "KIS", "source_chain": []}):
+            candidates, _ = _build_candidates(self._policy(), {"usdkrw": 1350.0}, max_n=5)
+        for c in candidates:
+            from send_toss_paper_preview_test import _is_us_ticker
+            if _is_us_ticker(c["symbol"]):
+                assert c["limit_price"] == accepted_price, (
+                    f"{c['symbol']}: limit_price={c['limit_price']} != accepted={accepted_price}"
+                )
+
+    def test_no_hardcoded_135_as_limit_price(self):
+        """limit_price=135 하드코딩 없음 — 항상 accepted price 사용."""
+        import sys; sys.path.insert(0, str(ROOT / "scripts"))
+        from send_toss_paper_preview_test import _build_candidates
+        # mock returns 200.56, never 135
+        with patch("core.toss_paper_performance._get_quote_for_paper",
+                   return_value={"price": 200.56, "source": "KIS",
+                                 "accepted_price_source": "KIS", "source_chain": []}):
+            candidates, _ = _build_candidates(self._policy(), {"usdkrw": 1350.0}, max_n=5)
+        for c in candidates:
+            assert c["limit_price"] != 135, (
+                f"{c['symbol']}: limit_price still uses hardcoded 135"
+            )
+
+    def test_entry_price_near_current_prevents_immediate_win(self):
+        """entry ≈ current이면 +3% target 미도달 → open."""
+        import sys; sys.path.insert(0, str(ROOT / "scripts"))
+        from send_toss_paper_preview_test import _build_candidates
+        accepted = 29800.0
+        with patch("core.toss_paper_performance._get_quote_for_paper",
+                   return_value={"price": accepted, "source": "KIS",
+                                 "accepted_price_source": "KIS", "source_chain": []}):
+            candidates, _ = _build_candidates(self._policy(), max_n=5)
+        for c in candidates:
+            entry = c["limit_price"]
+            current = accepted  # same at creation
+            # target = +3% from entry
+            target = entry * 1.03
+            # current < target → still open
+            assert current < target, f"{c['symbol']}: immediate win risk"
+
+    def test_candidate_pool_has_no_limit_price_field(self):
+        """_CANDIDATE_POOL에 limit_price 필드 없음 (오염 방지)."""
+        import sys; sys.path.insert(0, str(ROOT / "scripts"))
+        import importlib
+        mod = importlib.import_module("send_toss_paper_preview_test")
+        for entry in mod._CANDIDATE_POOL:
+            assert "limit_price" not in entry, (
+                f"{entry['symbol']}: _CANDIDATE_POOL에 limit_price 필드 남아 있음"
+            )

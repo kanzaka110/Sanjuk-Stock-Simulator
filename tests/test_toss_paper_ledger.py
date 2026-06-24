@@ -222,6 +222,102 @@ class TestTelegramText:
         assert "취소 완료" in text
         assert "실제 주문 없음" in text
 
+    def test_kr_ticker_shows_won_sign(self):
+        """KR 종목 승인 응답 지정가에 ₩ 표시."""
+        text = ledger.format_approval_response({
+            "approved": [{"paper_id": "p1", "symbol": "069500.KS", "side": "buy",
+                          "quantity": 10, "limit_price": 30000,
+                          "estimated_amount_krw": 300000, "status": "approved",
+                          "dry_run": True, "live_order_allowed": False,
+                          "price_currency": "KRW", "usdkrw_at_creation": None}],
+            "rejected": [],
+        })
+        assert "₩30,000" in text
+        assert "$" not in text.split("지정가:")[1].split("\n")[0]
+
+    def test_us_ticker_shows_dollar_sign(self):
+        """US 종목 승인 응답 지정가에 $ 표시."""
+        text = ledger.format_approval_response({
+            "approved": [{"paper_id": "p2", "symbol": "NVDA", "side": "buy",
+                          "quantity": 1, "limit_price": 200.56,
+                          "estimated_amount_krw": 306857, "status": "approved",
+                          "dry_run": True, "live_order_allowed": False,
+                          "price_currency": "USD", "usdkrw_at_creation": 1530.0}],
+            "rejected": [],
+        })
+        assert "$200.56" in text
+        assert "₩200" not in text  # no ₩ prefix for USD price
+
+    def test_us_ticker_shows_usdkrw(self):
+        """US 종목 승인 응답에 환율 표시."""
+        text = ledger.format_approval_response({
+            "approved": [{"paper_id": "p3", "symbol": "NVDA", "side": "buy",
+                          "quantity": 1, "limit_price": 200.56,
+                          "estimated_amount_krw": 306857, "status": "approved",
+                          "dry_run": True, "live_order_allowed": False,
+                          "price_currency": "USD", "usdkrw_at_creation": 1530.0}],
+            "rejected": [],
+        })
+        assert "1,530" in text
+
+    def test_us_ticker_no_won_prefix_for_limit(self):
+        """US 종목 지정가에 ₩135 같은 오표시 없음."""
+        text = ledger.format_approval_response({
+            "approved": [{"paper_id": "p4", "symbol": "NVDA", "side": "buy",
+                          "quantity": 1, "limit_price": 135.0,
+                          "estimated_amount_krw": 206550, "status": "approved",
+                          "dry_run": True, "live_order_allowed": False,
+                          "price_currency": "USD", "usdkrw_at_creation": 1530.0}],
+            "rejected": [],
+        })
+        assert "지정가: ₩135" not in text
+        assert "$135.00" in text
+
+    def test_price_currency_stored_in_metadata_via_create(self):
+        """create_paper_preview_records가 price_currency를 metadata에 저장."""
+        import json as _json
+        cand = {
+            "symbol": "NVDA", "side": "buy", "quantity": 1,
+            "limit_price": 200.56, "estimated_amount_krw": 306857,
+            "confidence": 0.0, "reason": "[TEST]",
+            "_price_currency": "USD",
+        }
+        cc = {"blocks": [], "warnings": [], "toss_readiness": "paper_only",
+              "live_order_allowed": False}
+        ctx = {"cash_krw": 5_000_000, "usdkrw": 1530.0}
+        records = ledger.create_paper_preview_records("pid_meta_test", [cand], [cc], ctx)
+        assert len(records) == 1
+        # Verify metadata was persisted by reading it back
+        conn = ledger._conn()
+        row = conn.execute(
+            "SELECT metadata FROM paper_ledger WHERE paper_id=?",
+            (records[0]["paper_id"],)
+        ).fetchone()
+        conn.close()
+        meta = _json.loads(row["metadata"])
+        assert meta.get("price_currency") == "USD"
+
+    def test_approve_returns_price_currency(self):
+        """approve_paper_order 결과에 price_currency 포함."""
+        # Create a USD record then approve it
+        import json as _json
+        cand = {
+            "symbol": "NVDA", "side": "buy", "quantity": 1,
+            "limit_price": 200.56, "estimated_amount_krw": 306857,
+            "confidence": 0.0, "reason": "[TEST]",
+            "_price_currency": "USD",
+        }
+        cc = {"blocks": [], "warnings": [], "toss_readiness": "paper_only",
+              "live_order_allowed": False}
+        ctx = {"cash_krw": 5_000_000, "usdkrw": 1530.0}
+        ledger.create_paper_preview_records("pid_approve_cur", [cand], [cc], ctx)
+        result = ledger.approve_paper_order("pid_approve_cur", symbol="NVDA")
+        assert result["ok"] is True
+        approved = result["approved"]
+        assert len(approved) == 1
+        assert approved[0]["price_currency"] == "USD"
+        assert approved[0]["usdkrw_at_creation"] == 1530.0
+
 
 # ═══ 금지 문구/함수명 ═══
 

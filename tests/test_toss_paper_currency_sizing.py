@@ -157,38 +157,46 @@ class TestUsTickerQuantitySizing:
 
 
 class TestBudgetTooSmall:
-    def _build_with_budget(self, usdkrw: float, budget: int):
+    def _build_with_price(self, usdkrw: float, budget: int, accepted_price: float):
+        """mock accepted_price 지정 — accepted price가 sizing 기준이 됨."""
         from send_toss_paper_preview_test import _build_candidates
         p = _policy(max_budget=budget)
         c = _ctx(usdkrw=usdkrw)
-        with patch("core.toss_paper_performance._get_quote_for_paper",
-                   return_value=_NORMAL_QUOTE):
+        q = {**_NORMAL_QUOTE, "price": accepted_price}
+        with patch("core.toss_paper_performance._get_quote_for_paper", return_value=q):
             candidates, rejected = _build_candidates(p, c, max_n=5)
         return candidates, rejected
 
     def test_budget_too_small_is_rejected(self):
-        """1주 금액이 예산 초과하면 rejected에 들어간다."""
-        # NVDA $135 × 2000 = ₩270,000 < 300,000 → passes
-        # GOOGL $190 × 2000 = ₩380,000 > 300,000 → rejected
-        candidates, rejected = self._build_with_budget(usdkrw=2_000.0, budget=300_000)
+        """accepted price × usdkrw > budget이면 rejected에 들어간다.
+        mock price=200, usdkrw=2000 → $200×2000=₩400,000 > ₩300,000 → US tickers rejected."""
+        candidates, rejected = self._build_with_price(
+            usdkrw=2_000.0, budget=300_000, accepted_price=200.0
+        )
         rejected_syms = [r["symbol"] for r in rejected]
-        assert "GOOGL" in rejected_syms
+        assert "NVDA" in rejected_syms
 
     def test_budget_too_small_reason_contains_block_name(self):
         """rejected reason에 budget_too_small_for_one_share 포함."""
-        _, rejected = self._build_with_budget(usdkrw=2_000.0, budget=300_000)
-        googl_r = next((r for r in rejected if r["symbol"] == "GOOGL"), None)
-        if googl_r:
-            assert "budget_too_small_for_one_share" in googl_r["reject_reason"]
+        _, rejected = self._build_with_price(
+            usdkrw=2_000.0, budget=300_000, accepted_price=200.0
+        )
+        nvda_r = next((r for r in rejected if r["symbol"] == "NVDA"), None)
+        if nvda_r:
+            assert "budget_too_small_for_one_share" in nvda_r["reject_reason"]
 
     def test_budget_too_small_not_in_candidates(self):
-        """예산 부족 후보는 candidates에 없다."""
-        candidates, _ = self._build_with_budget(usdkrw=2_000.0, budget=300_000)
-        assert all(c["symbol"] != "GOOGL" for c in candidates)
+        """예산 부족 US 후보는 candidates에 없다."""
+        candidates, _ = self._build_with_price(
+            usdkrw=2_000.0, budget=300_000, accepted_price=200.0
+        )
+        assert all(c["symbol"] != "NVDA" for c in candidates)
 
     def test_all_estimated_within_budget(self):
         """모든 후보의 estimated_amount_krw <= max_budget."""
-        candidates, _ = self._build_with_budget(usdkrw=1_350.0, budget=300_000)
+        candidates, _ = self._build_with_price(
+            usdkrw=1_350.0, budget=300_000, accepted_price=30_000.0
+        )
         for c in candidates:
             assert c["estimated_amount_krw"] <= 300_000, (
                 f"{c['symbol']}: ₩{c['estimated_amount_krw']:,} > ₩300,000"

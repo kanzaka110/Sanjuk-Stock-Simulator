@@ -30,14 +30,14 @@ except ImportError:
     pass
 
 # ─── 정상 후보 pool (005930.KS 제외) ──────────────────────
-# 가격 source 검증 후 통과한 것만 사용
-# limit_price: KR 종목은 KRW, 미국 종목은 USD
+# _ref_price: 이상치 탐지용 기준가 (KR=KRW, US=USD).
+# 실제 paper entry는 accepted market price 사용 — 즉시 win 방지.
 _CANDIDATE_POOL = [
-    {"symbol": "069500.KS",  "side": "buy", "limit_price": 30000,  "reason": "KOSPI200 ETF · [TEST] Paper 운영 샘플"},
-    {"symbol": "360750.KS",  "side": "buy", "limit_price": 15000,  "reason": "S&P500 ETF · [TEST] Paper 운영 샘플"},
-    {"symbol": "NVDA",        "side": "buy", "limit_price": 135,    "reason": "반도체 · [TEST] Paper 운영 샘플"},
-    {"symbol": "GOOGL",       "side": "buy", "limit_price": 190,    "reason": "빅테크 · [TEST] Paper 운영 샘플"},
-    {"symbol": "000660.KS",  "side": "buy", "limit_price": 195000, "reason": "SK하이닉스 · [TEST] Paper 운영 샘플"},
+    {"symbol": "069500.KS",  "side": "buy", "_ref_price": 30000,  "reason": "KOSPI200 ETF · [TEST] Paper 운영 샘플"},
+    {"symbol": "360750.KS",  "side": "buy", "_ref_price": 15000,  "reason": "S&P500 ETF · [TEST] Paper 운영 샘플"},
+    {"symbol": "NVDA",        "side": "buy", "_ref_price": 135,    "reason": "반도체 · [TEST] Paper 운영 샘플"},
+    {"symbol": "GOOGL",       "side": "buy", "_ref_price": 190,    "reason": "빅테크 · [TEST] Paper 운영 샘플"},
+    {"symbol": "000660.KS",  "side": "buy", "_ref_price": 195000, "reason": "SK하이닉스 · [TEST] Paper 운영 샘플"},
 ]
 
 _MAX_CANDIDATES = 2
@@ -119,22 +119,26 @@ def _build_candidates(
             break
 
         symbol = pool_entry["symbol"]
-        limit_price = float(pool_entry["limit_price"])
+        ref_price = float(pool_entry["_ref_price"])  # 이상치 탐지 기준가
         reason = pool_entry["reason"]
         side = pool_entry["side"]
 
-        val = _validate_candidate(symbol, limit_price, consensus_symbols)
+        # ref_price는 이상치 탐지용. accepted market price를 실제 entry로 사용.
+        val = _validate_candidate(symbol, ref_price, consensus_symbols)
         if not val["ok"]:
             rejected.append({"symbol": symbol, "reject_reason": val["reason"]})
             print(f"  ❌ {symbol}: {val['reason']}")
             continue
 
+        # accepted market price → paper entry (즉시 win 방지)
+        entry_price = val["price"]
+
         # 통화 변환: 미국 주식은 USD × usdkrw
         is_us = _is_us_ticker(symbol)
         if is_us:
-            price_krw_per_share = limit_price * usdkrw
+            price_krw_per_share = entry_price * usdkrw
         else:
-            price_krw_per_share = limit_price
+            price_krw_per_share = entry_price
 
         # 1주 금액이 최대 예산 초과 → 제외
         if price_krw_per_share > max_budget:
@@ -161,20 +165,19 @@ def _build_candidates(
         if quantity <= 0:
             rejected.append({
                 "symbol": symbol,
-                "reject_reason": f"지정가 환산금액(₩{price_krw_per_share:,.0f})이 max_budget({max_budget:,}) 초과",
+                "reject_reason": f"시장가 환산금액(₩{price_krw_per_share:,.0f})이 max_budget({max_budget:,}) 초과",
             })
             print(f"  ❌ {symbol}: 가격이 예산 초과")
             continue
 
         if is_us:
-            val_price_str = f"${val['price']:,.2f}"
             print(
-                f"  ✅ {symbol}: price={val_price_str} via {val['source']} "
+                f"  ✅ {symbol}: price=${entry_price:,.2f} via {val['source']} "
                 f"· qty={quantity} · ₩{estimated:,.0f} (환율 {usdkrw:,.0f})"
             )
         else:
             print(
-                f"  ✅ {symbol}: price={val['price']:,.0f} via {val['source']} "
+                f"  ✅ {symbol}: price={entry_price:,.0f} via {val['source']} "
                 f"· qty={quantity} · ₩{estimated:,.0f}"
             )
 
@@ -182,17 +185,17 @@ def _build_candidates(
             "symbol": symbol,
             "side": side,
             "quantity": quantity,
-            "limit_price": limit_price,
+            "limit_price": entry_price,  # accepted market price — not hardcoded ref
             "estimated_amount_krw": estimated,
             "confidence": 0.0,   # [TEST] — 실제 신뢰도 아님
             "reason": reason,
             "quote_age_sec": 0,
-            "_validated_price": val["price"],
+            "_validated_price": entry_price,
             "_accepted_source": val["source"],
             "_is_test_sample": True,
             "_price_currency": "USD" if is_us else "KRW",
             "_usdkrw": usdkrw if is_us else None,
-            "_limit_price_usd": limit_price if is_us else None,
+            "_limit_price_usd": entry_price if is_us else None,
         })
 
     return candidates, rejected

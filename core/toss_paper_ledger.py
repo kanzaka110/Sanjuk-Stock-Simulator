@@ -96,6 +96,7 @@ def create_paper_preview_records(
                     "readiness": cc.get("toss_readiness", "unknown"),
                     "cash_krw_at_creation": cash_krw,
                     "usdkrw_at_creation": usdkrw,
+                    "price_currency": cand.get("_price_currency", "KRW"),
                 }
 
                 conn.execute(
@@ -166,6 +167,7 @@ def approve_paper_order(preview_id: str, symbol: str | None = None) -> dict:
                     "source='telegram_paper_approval' WHERE paper_id=?",
                     (now, r["paper_id"]),
                 )
+                meta_raw = json.loads(r["metadata"] if r["metadata"] else "{}")
                 approved.append({
                     "paper_id": r["paper_id"],
                     "symbol": r["symbol"],
@@ -176,6 +178,8 @@ def approve_paper_order(preview_id: str, symbol: str | None = None) -> dict:
                     "status": "approved",
                     "dry_run": True,
                     "live_order_allowed": False,
+                    "price_currency": meta_raw.get("price_currency", "KRW"),
+                    "usdkrw_at_creation": meta_raw.get("usdkrw_at_creation"),
                 })
 
             conn.commit()
@@ -277,12 +281,21 @@ def format_approval_response(result: dict) -> str:
     """승인 결과를 Telegram 메시지 텍스트로 변환."""
     lines = []
     for a in result.get("approved", []):
+        currency = a.get("price_currency", "KRW")
+        limit_price = a["limit_price"]
+        usdkrw = a.get("usdkrw_at_creation")
+        if currency == "USD":
+            price_str = f"${limit_price:,.2f}"
+            if usdkrw:
+                price_str += f" (환율 {usdkrw:,.0f}원)"
+        else:
+            price_str = f"₩{limit_price:,.0f}"
         lines.append(
             f"✅ Paper 승인 완료 · 실제 주문 아님\n"
             f"  {a['symbol']}\n"
             f"  paper_id: {a['paper_id']}\n"
             f"  수량: {a['quantity']}주\n"
-            f"  지정가: ₩{a['limit_price']:,.0f}\n"
+            f"  지정가: {price_str}\n"
             f"  예상금액: ₩{a['estimated_amount_krw']:,.0f}\n"
             f"  상태: approved\n"
             f"  실주문: 비활성\n"
