@@ -204,6 +204,43 @@ def _handle_review(preview_id: str) -> dict:
     return {"ok": ok, "action": "review", "live_order_sent": False, "message": msg}
 
 
+def resolve_live_transport_for_confirm(policy: dict):
+    """confirm 경로에서 주입할 live transport를 안전하게 결정.
+
+    env gate 3종 + policy enabled + BUY_ONLY 모두 통과하고, 명시적으로
+    설정된(NotConfigured가 아닌) transport가 DEFAULT_LIVE_TRANSPORT로
+    주입돼 있을 때만 호출 가능한 callable을 반환한다.
+
+    위 조건 중 하나라도 실패하면 None — 호출부는 기존처럼 transport
+    미주입으로 차단된다. 운영 기본값(env OFF, DEFAULT_LIVE_TRANSPORT가
+    NotConfigured)에서는 항상 None을 반환하므로 실주문 경로가 열리지 않는다.
+    """
+    if not policy.get("live_pilot_enabled"):
+        return None
+    if not policy.get("live_order_allowed"):
+        return None
+    if policy.get("adapter_status") != "enabled":
+        return None
+    if not policy.get("all_live_gates_open"):
+        return None
+    if policy.get("side_mode") != "BUY_ONLY":
+        return None
+
+    from core.toss_live_transport import (
+        DEFAULT_LIVE_TRANSPORT,
+        NotConfiguredTossLiveTransport,
+    )
+
+    transport = DEFAULT_LIVE_TRANSPORT
+    if transport is None or isinstance(transport, NotConfiguredTossLiveTransport):
+        return None
+
+    def _send(payload: dict, _policy: dict) -> dict:
+        return transport.send_buy_order(payload)
+
+    return _send
+
+
 def _handle_confirm(preview_id: str) -> dict:
     """최종 승인 시도.
 
@@ -381,7 +418,8 @@ def _handle_confirm(preview_id: str) -> dict:
         "limit_price": preview_stub["limit_price"],
         "estimated_amount_krw": preview_stub["estimated_amount_krw"],
     }
-    dispatch_result = dispatch_toss_order_live(payload, policy, transport=None)
+    transport = resolve_live_transport_for_confirm(policy)
+    dispatch_result = dispatch_toss_order_live(payload, policy, transport=transport)
 
     if dispatch_result.get("live_order_sent"):
         try:

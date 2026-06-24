@@ -90,6 +90,7 @@ ALLOWED_TOSS_FILES = {
     "tests/test_toss_live_transport_live_http.py",
     "tests/test_toss_live_pilot_event_hygiene.py",
     "scripts/reclassify_toss_live_pilot_artifacts.py",
+    "tests/test_toss_live_pilot_transport_injection.py",
 }
 
 
