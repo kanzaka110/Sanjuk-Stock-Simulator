@@ -1874,7 +1874,16 @@ def toss_live_pilot_policy_data() -> dict:
     def _fetch():
         from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
         return compute_toss_live_pilot_policy()
-    return _cached("toss_live_pilot_policy", 60, _fetch)
+    data = dict(_cached("toss_live_pilot_policy", 60, _fetch))
+    # transport dry-run schema 상태 표시 (token/account 등 민감정보 미노출)
+    data["transport"] = {
+        "live_transport_status": data.get("live_transport_status", "not_configured"),
+        "dry_run_schema_ready": True,
+        "order_endpoint_confirmed": True,
+        "order_endpoint": "POST /api/v1/orders",
+        "live_order_sent_possible": False,
+    }
+    return data
 
 
 def toss_live_pilot_previews_data(limit: int = 20) -> dict:
