@@ -203,6 +203,16 @@ def api_toss_paper_policy():
     return JSONResponse(dd.toss_paper_policy_data())
 
 
+@app.get("/api/toss/live-pilot-policy")
+def api_toss_live_pilot_policy():
+    return JSONResponse(dd.toss_live_pilot_policy_data())
+
+
+@app.get("/api/toss/live-pilot-previews")
+def api_toss_live_pilot_previews():
+    return JSONResponse(dd.toss_live_pilot_previews_data())
+
+
 @app.get("/api/recommendations/timeline")
 def api_timeline(
     range: str = "today",

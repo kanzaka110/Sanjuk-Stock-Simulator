@@ -1867,3 +1867,26 @@ def toss_paper_policy_data() -> dict:
         from core.toss_paper_policy import compute_toss_paper_policy
         return compute_toss_paper_policy()
     return _cached("toss_paper_policy", 120, _fetch)
+
+
+def toss_live_pilot_policy_data() -> dict:
+    """승인형 live pilot 정책 (60초 캐시). 실제 주문 0건. adapter disabled."""
+    def _fetch():
+        from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
+        return compute_toss_live_pilot_policy()
+    return _cached("toss_live_pilot_policy", 60, _fetch)
+
+
+def toss_live_pilot_previews_data(limit: int = 20) -> dict:
+    """최근 live pilot 미리보기 기록 (read-only). 실제 주문 0건."""
+    try:
+        from core.toss_live_pilot_ledger import (
+            list_live_pilot_records,
+            live_pilot_ledger_summary,
+        )
+        return {
+            "summary": live_pilot_ledger_summary(),
+            "records": list_live_pilot_records(limit=limit),
+        }
+    except Exception as e:
+        return {"error": str(e), "summary": {}, "records": []}
