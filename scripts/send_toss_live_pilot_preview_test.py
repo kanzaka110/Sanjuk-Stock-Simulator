@@ -27,7 +27,7 @@ except ImportError:
     pass
 
 # ─── 기본 후보 ────────────────────────────────────────────
-_DEFAULT_SYMBOL = "069500.KS"
+_DEFAULT_SYMBOL = "091180.KS"   # TIGER 단기채권 ETF · 1주 약 ₩30,000대 (한도 내)
 _DEFAULT_SIDE = "buy"
 _DEFAULT_REF_PRICE = 30_000  # 이상치 탐지용 기준가 (실제 조회가 우선)
 
@@ -44,6 +44,15 @@ def _get_live_price(symbol: str, ref_price: float) -> float | None:
     except Exception as e:
         print(f"  ⚠️  yfinance 조회 실패: {e}")
     return None
+
+
+def _parse_symbol() -> str:
+    """--symbol XXXX.KS 옵션 파싱. 없으면 기본값."""
+    args = sys.argv[1:]
+    for i, a in enumerate(args):
+        if a == "--symbol" and i + 1 < len(args):
+            return args[i + 1]
+    return _DEFAULT_SYMBOL
 
 
 def main() -> None:
@@ -67,7 +76,7 @@ def main() -> None:
     print(f"\n정책: live_order_allowed={policy['live_order_allowed']} · max ₩{max_krw:,} · adapter={policy['adapter_status']}")
 
     # ── 가격 조회 ──
-    symbol = _DEFAULT_SYMBOL
+    symbol = _parse_symbol()
     print(f"\n[가격 조회] {symbol}")
     price = _get_live_price(symbol, _DEFAULT_REF_PRICE)
 
