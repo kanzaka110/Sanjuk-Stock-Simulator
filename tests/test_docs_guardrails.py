@@ -59,6 +59,11 @@ ALLOWED_TOSS_FILES = {
     "tests/test_toss_live_pilot_guardrails.py",
     "tests/test_toss_live_pilot_adapter.py",
     "tests/test_toss_live_pilot_payload.py",
+    "core/toss_live_pilot_telegram.py",
+    "tests/test_toss_live_pilot_telegram.py",
+    "tests/test_toss_live_pilot_callback.py",
+    "tests/test_toss_live_pilot_script.py",
+    "scripts/send_toss_live_pilot_preview_test.py",
 }
 
 

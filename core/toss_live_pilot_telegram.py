@@ -1,0 +1,288 @@
+"""core/toss_live_pilot_telegram.py
+
+승인형 Live Pilot Telegram UX — 메시지 포맷 + InlineKeyboard + callback handler.
+
+이번 단계에서도 실제 주문 API 호출 절대 없음.
+confirm 버튼을 눌러도 adapter disabled로 차단됨.
+
+callback prefix: tlp: (Paper tp: 와 완전 분리)
+형식: tlp:<action>:<preview_id>
+
+금지:
+- 실제 Toss 주문 API HTTP 쓰기 호출 (POST/PUT/DELETE/PATCH)
+- live_order_sent=True 반환
+- accountNo/token/key/secret 출력
+- live_order_allowed=True 반환
+- 금지 CTA: 매수하기/매도하기/주문 실행/자동매매 시작/실주문: 활성
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+
+logger = logging.getLogger(__name__)
+
+# ─── callback prefix (Paper tp: 와 분리) ─────────────────
+CB_PREFIX = "tlp:"
+
+
+def build_callback_data(action: str, preview_id: str) -> str:
+    """Telegram callback data 문자열 생성. 민감정보 미포함.
+
+    action: review | confirm | cancel
+    """
+    return f"{CB_PREFIX}{action}:{preview_id}"
+
+
+def parse_callback_data(data: str) -> dict | None:
+    """callback data 파싱. 잘못된 형식이면 None."""
+    if not data or not data.startswith(CB_PREFIX):
+        return None
+    parts = data[len(CB_PREFIX):].split(":", 1)
+    if len(parts) < 2:
+        return None
+    return {
+        "action": parts[0],
+        "preview_id": parts[1],
+    }
+
+
+# ─── 메시지 포맷 ─────────────────────────────────────────
+
+def format_live_pilot_preview_message(
+    preview: dict,
+    payload_result: dict,
+    policy: dict,
+) -> str:
+    """Live Pilot 미리보기 Telegram 메시지 생성.
+
+    금지 CTA 없음 — 매수하기/매도하기/주문 실행/실주문: 활성 절대 미포함.
+    """
+    symbol = preview.get("symbol", "")
+    side = preview.get("side", "buy")
+    side_label = "매수 후보" if side == "buy" else "매도 후보"
+    qty = preview.get("quantity", 0)
+    price = preview.get("limit_price", 0)
+    amount = preview.get("estimated_amount_krw", 0)
+    max_krw = policy.get("max_order_krw", 100_000)
+    max_daily = policy.get("max_daily_krw", 300_000)
+    max_per_day = policy.get("max_orders_per_day", 1)
+    blocks = preview.get("blocks", [])
+    ok = preview.get("ok", False) and not blocks
+
+    lines = [
+        "[승인형 Live Pilot 미리보기]",
+        "아직 주문 전송 안 함",
+        "실주문: 비활성",
+        "최종 2단계 승인 필요",
+        "주문 API 호출 비활성",
+        "",
+    ]
+
+    if not ok:
+        lines.append(f"차단: {symbol}")
+        for b in blocks:
+            lines.append(f"  · {b}")
+        lines.append("dry-run payload 생성 불가")
+    else:
+        lines.append(f"{symbol}")
+        lines.append(f"- 방향: {side_label}")
+        lines.append("- 주문유형: 지정가")
+        lines.append(f"- 지정가: ₩{price:,.0f}")
+        lines.append(f"- 수량: {qty}주")
+        lines.append(f"- 예상금액: ₩{amount:,.0f}")
+        lines.append(f"- 1회 한도: ₩{max_krw:,.0f}")
+        lines.append(f"- 일일 한도: ₩{max_daily:,.0f}")
+        lines.append(f"- 일일 최대 주문: {max_per_day}건")
+        lines.append(f"- adapter: {policy.get('adapter_status', 'disabled')}")
+        lines.append("")
+        lines.append("다음 단계: 최종 승인 버튼을 눌러도 이번 단계에서는 전송 차단됩니다.")
+
+    return "\n".join(lines)
+
+
+# ─── InlineKeyboard 생성 ─────────────────────────────────
+
+def build_live_pilot_keyboard(
+    preview_id: str,
+    preview: dict,
+) -> list[list[dict]]:
+    """Live Pilot Telegram InlineKeyboard 생성.
+
+    callback prefix: tlp: (Paper tp: 와 완전 분리)
+    """
+    ok = preview.get("ok", False) and not preview.get("blocks")
+
+    if not ok:
+        return [[
+            {"text": "취소", "callback_data": build_callback_data("cancel", preview_id)},
+        ]]
+
+    return [
+        [
+            {"text": "Live Pilot 검토 완료", "callback_data": build_callback_data("review", preview_id)},
+        ],
+        [
+            {"text": "최종 승인 시도(차단됨)", "callback_data": build_callback_data("confirm", preview_id)},
+            {"text": "취소", "callback_data": build_callback_data("cancel", preview_id)},
+        ],
+    ]
+
+
+# ─── callback handler ────────────────────────────────────
+
+def handle_live_pilot_callback(callback_data: str) -> dict:
+    """Telegram callback 처리.
+
+    confirm을 눌러도 adapter disabled로 차단됨.
+    실제 주문 API 호출 없음.
+
+    반환: {ok, action, message, live_order_sent}
+    """
+    parsed = parse_callback_data(callback_data)
+    if not parsed:
+        return {
+            "ok": False,
+            "action": "unknown",
+            "live_order_sent": False,
+            "message": "잘못된 요청입니다.\n실주문: 비활성\n아직 주문 전송 안 함",
+        }
+
+    action = parsed["action"]
+    preview_id = parsed["preview_id"]
+
+    if action == "review":
+        return _handle_review(preview_id)
+    elif action == "confirm":
+        return _handle_confirm(preview_id)
+    elif action == "cancel":
+        return _handle_cancel(preview_id)
+    else:
+        return {
+            "ok": False,
+            "action": action,
+            "live_order_sent": False,
+            "message": f"알 수 없는 액션: {action}\n실주문: 비활성",
+        }
+
+
+def _handle_review(preview_id: str) -> dict:
+    """검토 완료 — preview 상태 갱신, 주문 없음."""
+    try:
+        from core.toss_live_pilot_ledger import record_reviewed
+        result = record_reviewed(preview_id)
+        ok = result.get("ok", False)
+        msg = (
+            "[Live Pilot 검토 완료]\n"
+            "아직 주문 전송 안 함\n"
+            "실주문: 비활성\n"
+            "주문 API 호출 비활성\n"
+            f"pilot_id: {result.get('pilot_id', preview_id)}\n"
+            f"상태: {result.get('status', 'reviewed')}"
+        )
+    except Exception as e:
+        logger.warning("live pilot review failed: %s", e)
+        ok = False
+        msg = f"검토 기록 오류: {e}\n실주문: 비활성"
+
+    return {"ok": ok, "action": "review", "live_order_sent": False, "message": msg}
+
+
+def _handle_confirm(preview_id: str) -> dict:
+    """최종 승인 시도 — adapter disabled로 항상 차단됨."""
+    dispatch_result = None
+    ledger_result = None
+
+    try:
+        from core.toss_live_pilot_adapter import dispatch_toss_order_disabled
+        dispatch_result = dispatch_toss_order_disabled({}, policy=None)
+    except Exception as e:
+        logger.warning("dispatch call failed: %s", e)
+
+    try:
+        from core.toss_live_pilot_ledger import record_confirm_attempt
+        ledger_result = record_confirm_attempt(preview_id)
+    except Exception as e:
+        logger.warning("confirm ledger failed: %s", e)
+
+    reason = "toss_order_adapter_disabled"
+    status = ledger_result.get("status", "confirmed_but_not_sent") if ledger_result else "confirmed_but_not_sent"
+
+    msg = (
+        "[최종 승인 시도 차단됨]\n"
+        f"차단: {reason}\n"
+        "아직 주문 전송 안 함\n"
+        "live_order_sent=false\n"
+        "실주문: 비활성\n"
+        "주문 API 호출 비활성\n"
+        f"상태: {status}"
+    )
+
+    return {
+        "ok": False,
+        "action": "confirm",
+        "live_order_sent": False,
+        "blocked": True,
+        "reason": reason,
+        "adapter_status": "disabled",
+        "message": msg,
+    }
+
+
+def _handle_cancel(preview_id: str) -> dict:
+    """취소 처리 — live pilot ledger status=cancelled."""
+    try:
+        from core.toss_live_pilot_ledger import cancel_live_pilot
+        result = cancel_live_pilot(preview_id, reason="user_cancelled_via_telegram")
+        ok = result.get("ok", False)
+        msg = (
+            "[Live Pilot 취소]\n"
+            "아직 주문 전송 안 함\n"
+            "실주문: 비활성\n"
+            f"상태: {result.get('status', 'cancelled')}"
+        )
+    except Exception as e:
+        logger.warning("live pilot cancel failed: %s", e)
+        ok = False
+        msg = f"취소 기록 오류: {e}\n실주문: 비활성"
+
+    return {"ok": ok, "action": "cancel", "live_order_sent": False, "message": msg}
+
+
+# ─── Telegram 발송 ────────────────────────────────────────
+
+def send_live_pilot_preview_message(
+    text: str,
+    inline_keyboard: list[list[dict]],
+) -> bool:
+    """InlineKeyboard가 달린 live pilot 미리보기 Telegram 발송.
+
+    실제 주문 없음. 민감정보 미포함.
+    """
+    import json
+    import requests as req
+
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+    if not token or not chat_id:
+        logger.warning("Telegram 미설정 — live pilot 발송 불가")
+        return False
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text[:4000],
+        "disable_web_page_preview": True,
+        "reply_markup": json.dumps({"inline_keyboard": inline_keyboard}),
+    }
+    try:
+        res = req.post(url, json=payload, timeout=30)
+        if res.status_code == 200:
+            logger.info("Live Pilot 미리보기 발송 완료")
+            return True
+        logger.warning("Live Pilot 발송 실패: %d %s", res.status_code, res.text[:160])
+        return False
+    except Exception as e:
+        logger.error("Live Pilot 발송 오류: %s", e)
+        return False

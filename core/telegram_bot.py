@@ -224,7 +224,7 @@ class TelegramBot:
         send_simple_message(text)
 
     def _process_callback_query(self, callback_query: dict) -> None:
-        """callback_query 처리. tp: prefix만 paper handler로 라우팅."""
+        """callback_query 처리. tp: → paper, tlp: → live pilot 라우팅."""
         data = callback_query.get("data", "")
         callback_id = callback_query.get("id", "")
         chat_id = str(
@@ -236,7 +236,23 @@ class TelegramBot:
             log.warning(f"미인증 callback: chat_id={chat_id}")
             return
 
-        # tp: prefix만 처리
+        # tlp: prefix → live pilot handler
+        if data.startswith("tlp:"):
+            log.info(f"Live Pilot callback 수신: {data}")
+            try:
+                from core.toss_live_pilot_telegram import handle_live_pilot_callback
+                result = handle_live_pilot_callback(data)
+                message = result.get("message", "처리 결과 없음\n실주문: 비활성")
+            except Exception as e:
+                log.error(f"Live Pilot callback 처리 오류: {e}")
+                result = {"ok": False}
+                message = f"Live Pilot 처리 오류\n실주문: 비활성"
+            if callback_id:
+                self._answer_callback(callback_id, result.get("ok", False))
+            self._reply(message)
+            return
+
+        # tp: prefix → paper handler
         if not data.startswith("tp:"):
             return
 

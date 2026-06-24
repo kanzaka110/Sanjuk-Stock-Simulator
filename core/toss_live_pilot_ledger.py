@@ -28,7 +28,7 @@ KST = timezone(timedelta(hours=9))
 
 # 허용 status 값
 _VALID_STATUSES = frozenset([
-    "previewed", "payload_validated", "cancelled",
+    "previewed", "reviewed", "payload_validated", "cancelled",
     "blocked", "confirmed_but_not_sent",
 ])
 
@@ -139,6 +139,28 @@ def record_live_pilot_preview(
     return {"ok": True, "pilot_id": pilot_id, "status": status}
 
 
+def record_reviewed(pilot_id: str) -> dict:
+    """Telegram 검토 완료 상태로 업데이트. live_order_sent=0 유지."""
+    with _db_lock:
+        conn = _conn()
+        try:
+            existing = conn.execute(
+                "SELECT status FROM live_pilot_ledger WHERE pilot_id=?", (pilot_id,)
+            ).fetchone()
+            if not existing:
+                return {"ok": False, "reason": "pilot_id not found"}
+            if existing["status"] not in ("previewed", "payload_validated"):
+                return {"ok": False, "reason": f"cannot review: status={existing['status']}"}
+            conn.execute(
+                "UPDATE live_pilot_ledger SET status='reviewed' WHERE pilot_id=?",
+                (pilot_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    return {"ok": True, "pilot_id": pilot_id, "status": "reviewed", "live_order_sent": False}
+
+
 def record_payload_validated(pilot_id: str) -> dict:
     """payload 검증 통과 상태로 업데이트. live_order_sent=0 유지."""
     with _db_lock:
@@ -171,7 +193,7 @@ def record_confirm_attempt(pilot_id: str) -> dict:
             ).fetchone()
             if not existing:
                 return {"ok": False, "reason": "pilot_id not found"}
-            if existing["status"] not in ("previewed", "payload_validated"):
+            if existing["status"] not in ("previewed", "reviewed", "payload_validated"):
                 return {"ok": False, "reason": f"cannot confirm: status={existing['status']}"}
             conn.execute(
                 "UPDATE live_pilot_ledger SET status='confirmed_but_not_sent', "
@@ -201,7 +223,7 @@ def cancel_live_pilot(pilot_id: str, reason: str = "user_cancelled") -> dict:
             ).fetchone()
             if not existing:
                 return {"ok": False, "reason": "pilot_id not found"}
-            if existing["status"] not in ("previewed",):
+            if existing["status"] not in ("previewed", "reviewed", "payload_validated"):
                 return {"ok": False, "reason": f"cannot cancel: status={existing['status']}"}
             conn.execute(
                 "UPDATE live_pilot_ledger SET status='cancelled', "
