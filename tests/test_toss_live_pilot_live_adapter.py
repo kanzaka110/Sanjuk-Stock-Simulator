@@ -261,7 +261,7 @@ class TestDispatchLiveFakeSuccess(unittest.TestCase):
 
     def test_fake_success_message(self):
         result = self._dispatch_with_fake()
-        self.assertIn("승인형 live pilot", result["message"])
+        self.assertIn("승인형 매수 pilot", result["message"])
         self.assertNotIn("자동매매 시작", result["message"])
 
     def test_fake_success_no_sensitive_in_result(self):

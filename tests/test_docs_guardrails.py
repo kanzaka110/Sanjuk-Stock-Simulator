@@ -72,6 +72,9 @@ ALLOWED_TOSS_FILES = {
     "tests/test_toss_live_pilot_verification.py",
     "tests/test_toss_live_pilot_hermes_gate.py",
     "tests/test_toss_live_pilot_verification_script.py",
+    "core/toss_live_transport.py",
+    "tests/test_toss_live_pilot_buy_only.py",
+    "tests/test_toss_live_transport_config.py",
 }
 
 

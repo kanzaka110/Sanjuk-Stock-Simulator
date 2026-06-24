@@ -165,6 +165,12 @@ def can_send_live_pilot_order(
     if not policy.get("requires_second_confirmation"):
         reasons.append("requires_second_confirmation missing")
 
+    # 1.5 BUY_ONLY side guard (policy gate 다음, 나머지 guard 전에 체크)
+    side = preview.get("side", "")
+    allowed_sides = policy.get("allowed_sides", ["buy"])
+    if side not in allowed_sides:
+        reasons.append(f"sell_not_allowed_in_buy_only_pilot: side={side!r}")
+
     # 2. preview valid
     if not preview.get("ok"):
         reasons.append("preview_not_ok")
@@ -340,20 +346,29 @@ def dispatch_toss_order_live(
         "broker_order_id": broker_order_id,
         "payload_hash": payload_hash,
         "transport_status": transport_result.get("status", ""),
-        "failure_reason": transport_result.get("failure_reason", "") if not sent else "",
+        "failure_reason": (
+            transport_result.get("failure_reason")
+            or transport_result.get("reason")
+            or ""
+        ) if not sent else "",
     }
 
     if sent:
         result["message"] = (
-            "승인형 live pilot 주문 전송 완료\n"
+            "승인형 매수 pilot 전송 완료\n"
             "자동매매 아님\n"
-            "사용자 최종 승인 1건\n"
+            "Hermes PASS + 사용자 최종 승인 1건\n"
             "live_order_sent=true"
         )
         log.info("live pilot order sent: symbol=%s hash=%s", symbol, payload_hash)
     else:
+        _fail_reason = (
+            transport_result.get("failure_reason")
+            or transport_result.get("reason")
+            or "unknown"
+        )
         result["message"] = (
-            f"주문 전송 실패: {transport_result.get('failure_reason', 'unknown')}\n"
+            f"주문 전송 실패: {_fail_reason}\n"
             "주문 전송 비활성"
         )
         log.warning("live pilot order failed: symbol=%s reason=%s", symbol, result["failure_reason"])

@@ -39,6 +39,11 @@ _PREFERRED_SYMBOLS: list[str] = ["069500.KS"]
 
 _ALLOWED_ASSET_TYPES: list[str] = ["KR_ETF", "KR_STOCK", "US_STOCK"]
 
+# BUY_ONLY 정책 (이번 단계 고정, env로 제어 안 함)
+_LIVE_PILOT_SIDE_MODE: str = "BUY_ONLY"
+_LIVE_PILOT_ALLOWED_SIDES: list[str] = ["buy"]
+_LIVE_PILOT_BLOCK_SELL: bool = True
+
 
 # ── 내부 helpers ───────────────────────────────────────────────────
 
@@ -154,9 +159,24 @@ def compute_toss_live_pilot_policy(
         "warnings": warnings,
         "block_reason": block_reason,
         "reason": "승인형 live pilot — 수동 최종 승인 전용 (기본: 비활성)",
+        # BUY_ONLY 정책 (고정)
+        "side_mode": _LIVE_PILOT_SIDE_MODE,
+        "allowed_sides": list(_LIVE_PILOT_ALLOWED_SIDES),
+        "sell_allowed": False,
+        # transport 상태
+        "live_transport_status": _get_live_transport_status(),
     }
 
     return policy
+
+
+def _get_live_transport_status() -> str:
+    """Toss live transport 설정 상태 반환 (read-only)."""
+    try:
+        from core.toss_live_transport import LIVE_TRANSPORT_STATUS
+        return LIVE_TRANSPORT_STATUS
+    except Exception:
+        return "not_configured"
 
 
 def check_symbol_allowed(symbol: str, policy: dict | None = None) -> dict:

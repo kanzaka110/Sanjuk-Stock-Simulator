@@ -286,16 +286,26 @@ def _handle_confirm(preview_id: str) -> dict:
             record_live_send_blocked(preview_id, guard_reasons)
         except Exception as e:
             logger.warning("live_send_blocked ledger failed: %s", e)
-        return {
-            "ok": False, "action": "confirm", "live_order_sent": False, "blocked": True,
-            "reason": "live_send_guard_failed",
-            "guard_reasons": guard_reasons,
-            "message": (
+
+        # sell 차단 여부 확인 → 전용 문구
+        if any("sell_not_allowed" in r for r in guard_reasons):
+            guard_msg = (
+                "차단: BUY_ONLY pilot — 매도는 아직 비활성\n"
+                "아직 주문 전송 안 함\n"
+                "live_order_sent=false"
+            )
+        else:
+            guard_msg = (
                 "[차단: 한도/중복/가격 조건 미충족]\n"
                 "주문 전송 안 함\n"
                 "live_order_sent=false\n"
                 f"차단 사유: {'; '.join(guard_reasons[:3])}"
-            ),
+            )
+        return {
+            "ok": False, "action": "confirm", "live_order_sent": False, "blocked": True,
+            "reason": "live_send_guard_failed",
+            "guard_reasons": guard_reasons,
+            "message": guard_msg,
         }
 
     # 5. transport dispatch (transport=None → blocked)
@@ -332,13 +342,28 @@ def _handle_confirm(preview_id: str) -> dict:
             )
         except Exception as e:
             logger.warning("live_send_failed ledger failed: %s", e)
-        return {
-            "ok": False, "action": "confirm", "live_order_sent": False, "blocked": True,
-            "reason": dispatch_result.get("reason", "transport_blocked"),
-            "message": dispatch_result.get(
+
+        dispatch_reason = dispatch_result.get("reason", "transport_blocked")
+        _transport_not_configured_reasons = frozenset([
+            "live_transport_not_injected",
+            "toss_live_transport_not_configured",
+        ])
+        if dispatch_reason in _transport_not_configured_reasons:
+            dispatch_msg = (
+                "[Hermes 검증 PASS 확인]\n"
+                "차단: Toss live transport 미설정\n"
+                "아직 주문 전송 안 함\n"
+                "live_order_sent=false"
+            )
+        else:
+            dispatch_msg = dispatch_result.get(
                 "message",
                 "주문 전송 조건 미충족\n아직 주문 전송 안 함\nlive_order_sent=false",
-            ),
+            )
+        return {
+            "ok": False, "action": "confirm", "live_order_sent": False, "blocked": True,
+            "reason": dispatch_reason,
+            "message": dispatch_msg,
         }
 
 
