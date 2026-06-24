@@ -1892,6 +1892,27 @@ def toss_live_pilot_previews_data(limit: int = 20) -> dict:
         return {"error": str(e), "summary": {}, "records": []}
 
 
+def toss_live_pilot_events_data(limit: int = 50) -> dict:
+    """최근 live pilot callback 이벤트 (read-only). Hermes polling용."""
+    try:
+        from core.toss_live_pilot_events import list_events, event_summary
+        summ = event_summary()
+        return {
+            "summary": summ.get("summary", {}),
+            "live_order_sent_total": summ.get("live_order_sent_total", 0),
+            "live_order_allowed": False,
+            "records": list_events(limit=limit),
+        }
+    except Exception as e:
+        return {
+            "error": str(e),
+            "summary": {},
+            "live_order_sent_total": 0,
+            "live_order_allowed": False,
+            "records": [],
+        }
+
+
 def toss_live_pilot_verifications_data(limit: int = 20) -> dict:
     """최근 Hermes 교차검증 기록 (read-only). live_order_allowed 항상 false."""
     try:

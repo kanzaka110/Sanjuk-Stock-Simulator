@@ -188,6 +188,19 @@ def _handle_review(preview_id: str) -> dict:
         ok = False
         msg = f"검토 기록 오류: {e}\n실주문: 비활성"
 
+    # 이벤트 기록
+    try:
+        from core.toss_live_pilot_events import record_event
+        record_event(
+            pilot_id=preview_id,
+            event_type="reviewed",
+            status="reviewed",
+            preview_id=preview_id,
+            message="Live Pilot 검토 완료",
+        )
+    except Exception as e:
+        logger.warning("review event record failed: %s", e)
+
     return {"ok": ok, "action": "review", "live_order_sent": False, "message": msg}
 
 
@@ -226,27 +239,52 @@ def _handle_confirm(preview_id: str) -> dict:
         }
     rec = matched[0]
 
+    # 공통 이벤트 필드 추출 헬퍼
+    def _event_fields(r: dict) -> dict:
+        sym = r.get("symbol", "")
+        return dict(
+            symbol=sym,
+            side=r.get("side", "buy"),
+            quantity=int(r.get("quantity") or 0),
+            limit_price=float(r.get("limit_price") or 0),
+            estimated_amount_krw=float(r.get("estimated_amount_krw") or 0),
+            adapter_status=r.get("adapter_status", "disabled"),
+        )
+
     # 2. Hermes verification gate
     verif_ok, verif_reasons, verif_rec = is_verification_passed(preview_id)
     verif_status = verif_rec.get("status", "PENDING") if verif_rec else "NOT_FOUND"
+    verification_id = verif_rec.get("verification_id", "") if verif_rec else ""
 
     if not verif_ok:
         try:
             record_live_send_blocked(preview_id, verif_reasons)
         except Exception as e:
             logger.warning("hermes gate ledger failed: %s", e)
+        msg = (
+            "[차단: Hermes 교차검증 미완료/미통과]\n"
+            "아직 주문 전송 안 함\n"
+            "live_order_sent=false\n"
+            f"Hermes 검증 상태: {verif_status}\n"
+            f"차단 사유: {'; '.join(verif_reasons[:2])}"
+        )
+        try:
+            from core.toss_live_pilot_events import record_event
+            record_event(
+                pilot_id=preview_id, event_type="confirm_blocked_hermes",
+                status="live_send_blocked", preview_id=preview_id,
+                verification_id=verification_id,
+                reason="hermes_verification_required", message=msg,
+                **_event_fields(rec),
+            )
+        except Exception as e:
+            logger.warning("confirm_blocked_hermes event failed: %s", e)
         return {
             "ok": False, "action": "confirm", "live_order_sent": False, "blocked": True,
             "reason": "hermes_verification_required",
             "verif_status": verif_status,
             "verif_reasons": verif_reasons,
-            "message": (
-                "[차단: Hermes 교차검증 미완료/미통과]\n"
-                "아직 주문 전송 안 함\n"
-                "live_order_sent=false\n"
-                f"Hermes 검증 상태: {verif_status}\n"
-                f"차단 사유: {'; '.join(verif_reasons[:2])}"
-            ),
+            "message": msg,
         }
 
     # 3. policy/adapter 확인
@@ -256,17 +294,30 @@ def _handle_confirm(preview_id: str) -> dict:
             record_confirm_attempt(preview_id)
         except Exception as e:
             logger.warning("confirm ledger failed: %s", e)
+        msg = (
+            "[Hermes 검증 PASS 확인]\n"
+            "차단: live pilot 조건 미충족\n"
+            "아직 주문 전송 안 함\n"
+            "live_order_sent=false\n"
+            "실주문: 비활성"
+        )
+        try:
+            from core.toss_live_pilot_events import record_event
+            record_event(
+                pilot_id=preview_id, event_type="confirm_blocked_policy",
+                status="confirmed_but_not_sent", preview_id=preview_id,
+                verification_id=verification_id,
+                adapter_status=policy.get("adapter_status", "disabled"),
+                reason="live_pilot_conditions_not_met", message=msg,
+                **{k: v for k, v in _event_fields(rec).items() if k != "adapter_status"},
+            )
+        except Exception as e:
+            logger.warning("confirm_blocked_policy event failed: %s", e)
         return {
             "ok": False, "action": "confirm", "live_order_sent": False, "blocked": True,
             "reason": "toss_order_adapter_disabled",
             "adapter_status": policy.get("adapter_status", "disabled"),
-            "message": (
-                "[Hermes 검증 PASS 확인]\n"
-                "차단: live pilot 조건 미충족\n"
-                "아직 주문 전송 안 함\n"
-                "live_order_sent=false\n"
-                "실주문: 비활성"
-            ),
+            "message": msg,
         }
 
     # 4. can_send guards
@@ -303,6 +354,17 @@ def _handle_confirm(preview_id: str) -> dict:
                 "live_order_sent=false\n"
                 f"차단 사유: {'; '.join(guard_reasons[:3])}"
             )
+        try:
+            from core.toss_live_pilot_events import record_event
+            record_event(
+                pilot_id=preview_id, event_type="live_send_blocked",
+                status="live_send_blocked", preview_id=preview_id,
+                verification_id=verification_id,
+                reason="live_send_guard_failed", message=guard_msg,
+                **_event_fields(rec),
+            )
+        except Exception as e:
+            logger.warning("live_send_blocked event failed: %s", e)
         return {
             "ok": False, "action": "confirm", "live_order_sent": False, "blocked": True,
             "reason": "live_send_guard_failed",
@@ -330,10 +392,22 @@ def _handle_confirm(preview_id: str) -> dict:
             )
         except Exception as e:
             logger.warning("live_sent ledger failed: %s", e)
+        sent_msg = dispatch_result.get("message", "승인형 live pilot 주문 전송 완료")
+        try:
+            from core.toss_live_pilot_events import record_event
+            record_event(
+                pilot_id=preview_id, event_type="live_sent",
+                status="live_sent", preview_id=preview_id,
+                verification_id=verification_id,
+                live_order_sent=True, message=sent_msg,
+                **_event_fields(rec),
+            )
+        except Exception as e:
+            logger.warning("live_sent event failed: %s", e)
         return {
             "ok": True, "action": "confirm",
             "live_order_sent": True,
-            "message": dispatch_result.get("message", "승인형 live pilot 주문 전송 완료"),
+            "message": sent_msg,
         }
     else:
         try:
@@ -357,11 +431,24 @@ def _handle_confirm(preview_id: str) -> dict:
                 "아직 주문 전송 안 함\n"
                 "live_order_sent=false"
             )
+            dispatch_event_type = "confirm_blocked_transport"
         else:
             dispatch_msg = dispatch_result.get(
                 "message",
                 "주문 전송 조건 미충족\n아직 주문 전송 안 함\nlive_order_sent=false",
             )
+            dispatch_event_type = "live_send_failed"
+        try:
+            from core.toss_live_pilot_events import record_event
+            record_event(
+                pilot_id=preview_id, event_type=dispatch_event_type,
+                status="live_send_blocked", preview_id=preview_id,
+                verification_id=verification_id,
+                reason=dispatch_reason, message=dispatch_msg,
+                **_event_fields(rec),
+            )
+        except Exception as e:
+            logger.warning("%s event failed: %s", dispatch_event_type, e)
         return {
             "ok": False, "action": "confirm", "live_order_sent": False, "blocked": True,
             "reason": dispatch_reason,
@@ -385,6 +472,19 @@ def _handle_cancel(preview_id: str) -> dict:
         logger.warning("live pilot cancel failed: %s", e)
         ok = False
         msg = f"취소 기록 오류: {e}\n실주문: 비활성"
+
+    # 이벤트 기록
+    try:
+        from core.toss_live_pilot_events import record_event
+        record_event(
+            pilot_id=preview_id,
+            event_type="cancelled",
+            status="cancelled",
+            preview_id=preview_id,
+            message="Live Pilot 취소",
+        )
+    except Exception as e:
+        logger.warning("cancel event record failed: %s", e)
 
     return {"ok": ok, "action": "cancel", "live_order_sent": False, "message": msg}
 

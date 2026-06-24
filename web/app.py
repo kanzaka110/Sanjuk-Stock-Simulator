@@ -218,6 +218,11 @@ def api_toss_live_pilot_verifications(limit: int = 20):
     return JSONResponse(dd.toss_live_pilot_verifications_data(min(limit, 100)))
 
 
+@app.get("/api/toss/live-pilot-events")
+def api_toss_live_pilot_events(limit: int = 50):
+    return JSONResponse(dd.toss_live_pilot_events_data(min(limit, 200)))
+
+
 @app.get("/api/recommendations/timeline")
 def api_timeline(
     range: str = "today",
