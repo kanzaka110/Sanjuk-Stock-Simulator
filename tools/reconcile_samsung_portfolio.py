@@ -465,6 +465,7 @@ def reconcile(
         "api_stale": api_stale,
         "snapshot_sources": snapshot_sources,
         "issues": issues,
+        "_total_cash_krw": total_cash_krw,
         "summary": {
             "settings_total_eval_krw": settings_total_eval,
             "settings_principal_krw": settings_total_principal,
@@ -545,15 +546,18 @@ def format_report(result: dict) -> str:
 
     # 요약
     sep("요약")
-    lines.append(f"  settings 종목 평가액:  ₩{s['settings_total_eval_krw']:>16,.0f}")
-    lines.append(f"  settings 투자 원금:    ₩{s['settings_principal_krw']:>16,.0f}")
+    lines.append(f"  settings 총 평가액 (종목+현금): ₩{s['settings_total_eval_krw']:>14,.0f}")
+    total_stocks = s['settings_total_eval_krw'] - result.get('_total_cash_krw', 0)
+    lines.append(f"    └ 종목 평가:             ₩{total_stocks:>14,.0f}")
+    lines.append(f"    └ 현금성 자산:           ₩{result.get('_total_cash_krw', 0):>14,.0f}")
+    lines.append(f"  settings 투자 원금:         ₩{s['settings_principal_krw']:>14,.0f}")
     if s.get("api_total_eval_krw"):
-        lines.append(f"  dashboard 종목 평가액: ₩{s['api_total_eval_krw']:>16,.0f}")
+        lines.append(f"  dashboard 총 평가액:        ₩{s['api_total_eval_krw']:>14,.0f}")
         diff = s.get("api_vs_settings_diff_krw", 0) or 0
         diff_pct = s.get("api_vs_settings_diff_pct", 0) or 0
-        lines.append(f"  차이 (api - settings): ₩{diff:>+16,.0f} ({diff_pct:+.2f}%)")
+        lines.append(f"  차이 (api - settings):    ₩{diff:>+14,.0f} ({diff_pct:+.2f}%)")
     else:
-        lines.append("  dashboard 평가액: 조회 불가")
+        lines.append("  dashboard 총 평가액: 조회 불가 (서버 미실행)")
     lines.append(f"  이슈 건수: {s['issue_count']}건 / 미반영 거래: {s['pending_trade_count']}건")
 
     # 원인 후보 리스트
