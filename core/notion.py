@@ -439,6 +439,43 @@ def _section_portfolio_raw(snapshot: MarketSnapshot) -> list[dict]:
     return blocks
 
 
+def _section_portfolio_summary(
+    result: BriefingResult, snapshot: MarketSnapshot
+) -> list[dict]:
+    """보유종목 요약 섹션 — 전체 표 없이 큰 변동 종목만 표시.
+
+    KR_NIGHT / US_NIGHT / US_CLOSE / MANUAL 등에서 사용.
+    큰 변동(±3% 이상) 종목 최대 3개만 표시.
+    """
+    blocks = [H2("📊 포트폴리오 요약", "gray_background")]
+    lines = [
+        "전체 보유종목 표는 아침 브리핑(KR_OPEN/KR_BEFORE)에만 표시됩니다.",
+        "이번 브리핑은 변동/액션 중심 요약입니다.",
+        "상세는 /portfolio 또는 대시보드를 참고하세요.",
+    ]
+
+    # ±3% 이상 변동 종목 추출 (최대 3개)
+    movers = [
+        (tk, q) for tk, q in snapshot.stocks.items()
+        if abs(q.pct) >= 3.0
+    ]
+    movers.sort(key=lambda x: abs(x[1].pct), reverse=True)
+    movers = movers[:3]
+
+    if movers:
+        lines.append("")
+        lines.append("큰 변동 종목 (±3% 이상):")
+        for tk, q in movers:
+            arrow = "▲" if q.pct >= 0 else "▼"
+            lines.append(f"  {arrow} {q.name} ({tk})  {q.pct:+.2f}%")
+    else:
+        lines.append("큰 변동 종목 없음")
+
+    blocks.append(CALLOUT("\n".join(lines), "📋", "gray_background"))
+    blocks.append(DIV())
+    return blocks
+
+
 def _section_next_action(result: BriefingResult) -> list[dict]:
     """다음 액션 섹션."""
     raw = result.raw_json
@@ -501,10 +538,15 @@ def save_to_notion(
     blocks += _section_strategy(result)          # 2. 매수/매도 전략
     blocks += _section_account_strategy(result)  # 3. 계좌별 전략 (신규)
     blocks += _section_market_summary(result)    # 4. 시장 요약 + 합의/불일치
-    blocks += _section_portfolio(result, snapshot)  # 5. 보유 종목 현황
+    from core.briefing_display_policy import should_render_full_portfolio
+    if should_render_full_portfolio(briefing_type):
+        blocks += _section_portfolio(result, snapshot)  # 5. 보유 종목 현황 (전체)
+    else:
+        blocks += _section_portfolio_summary(result, snapshot)  # 5. 포트폴리오 요약
     blocks += _section_market_overview(snapshot)  # 6. 시장 지수/매크로
     blocks += _section_persona_summary(result)   # 7. 페르소나 요약 (토글, 신규)
-    blocks += _section_portfolio_raw(snapshot)    # 8. 실시간 현황 (참고)
+    if should_render_full_portfolio(briefing_type):
+        blocks += _section_portfolio_raw(snapshot)   # 8. 실시간 현황 (참고, 아침만)
     blocks += _section_next_action(result)       # 9. 다음 액션
     blocks += _section_footer()
     children = blocks[:100]
