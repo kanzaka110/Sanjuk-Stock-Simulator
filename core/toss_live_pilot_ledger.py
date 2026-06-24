@@ -1,16 +1,15 @@
 """core/toss_live_pilot_ledger.py
 
-승인형 Live Pilot ledger — preview/confirm attempt 기록만.
+승인형 Live Pilot ledger.
 
 스키마:
-- previewed / cancelled / blocked / confirmed_but_not_sent
-- 실제 체결/주문번호 필드 없음
-- 민감정보 저장 금지
+- previewed / reviewed / payload_validated / cancelled / blocked
+- confirmed_but_not_sent / live_send_blocked / live_sent / live_send_failed
+- 민감정보 저장 금지 (accountNo/token/key/secret)
 
 금지:
-- 주문 체결 결과 저장
 - accountNo/token/key 저장
-- DELETE/UPDATE to change status to 'sent' or 'filled'
+- live_order_sent를 transport 없이 True로 저장
 """
 
 from __future__ import annotations
@@ -28,8 +27,8 @@ KST = timezone(timedelta(hours=9))
 
 # 허용 status 값
 _VALID_STATUSES = frozenset([
-    "previewed", "reviewed", "payload_validated", "cancelled",
-    "blocked", "confirmed_but_not_sent",
+    "previewed", "reviewed", "payload_validated", "cancelled", "blocked",
+    "confirmed_but_not_sent", "live_send_blocked", "live_sent", "live_send_failed",
 ])
 
 # DB 경로
@@ -67,12 +66,27 @@ def _conn() -> sqlite3.Connection:
                 live_order_allowed  INTEGER NOT NULL DEFAULT 0,
                 live_order_sent     INTEGER NOT NULL DEFAULT 0,
                 adapter_status      TEXT DEFAULT 'disabled',
+                broker_order_id     TEXT DEFAULT '',
+                failure_reason      TEXT DEFAULT '',
+                payload_hash        TEXT DEFAULT '',
+                sent_at             TEXT,
                 created_at  TEXT NOT NULL,
                 confirmed_at TEXT,
                 cancelled_at TEXT,
                 reason      TEXT DEFAULT ''
             )
         """)
+        # 기존 DB에 새 컬럼 추가 (이미 있으면 무시)
+        for col, defn in [
+            ("broker_order_id", "TEXT DEFAULT ''"),
+            ("failure_reason",  "TEXT DEFAULT ''"),
+            ("payload_hash",    "TEXT DEFAULT ''"),
+            ("sent_at",         "TEXT"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE live_pilot_ledger ADD COLUMN {col} {defn}")
+            except Exception:
+                pass
         conn.commit()
         _schema_created = True
     return conn
@@ -83,7 +97,6 @@ def _now_kst() -> str:
 
 
 def _gen_pilot_id() -> str:
-    from datetime import datetime
     ts = datetime.now(KST).strftime("%Y%m%d_%H%M%S")
     import random
     seq = random.randint(1000, 9999)
@@ -98,7 +111,7 @@ def record_live_pilot_preview(
 ) -> dict:
     """Live Pilot 미리보기 ledger에 기록.
 
-    status는 'previewed' 또는 'blocked' 중 하나.
+    status: 'previewed' 또는 'blocked'.
     live_order_allowed=0, live_order_sent=0 고정.
     """
     symbol = preview.get("symbol", "")
@@ -117,7 +130,7 @@ def record_live_pilot_preview(
         limit_price, estimated, status,
         json.dumps(blocks, ensure_ascii=False),
         json.dumps(warnings, ensure_ascii=False),
-        0, 0, "disabled", _now_kst(), None, None, reason,
+        0, 0, "disabled", "", "", "", _now_kst(), None, None, reason,
     )
 
     with _db_lock:
@@ -128,8 +141,9 @@ def record_live_pilot_preview(
                    (pilot_id, preview_id, symbol, side, quantity,
                     limit_price, estimated_amount_krw, status,
                     blocks, warnings, live_order_allowed, live_order_sent,
-                    adapter_status, created_at, confirmed_at, cancelled_at, reason)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    adapter_status, broker_order_id, failure_reason, payload_hash,
+                    created_at, confirmed_at, cancelled_at, reason)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 row,
             )
             conn.commit()
@@ -213,6 +227,91 @@ def record_confirm_attempt(pilot_id: str) -> dict:
     }
 
 
+def record_live_send_blocked(pilot_id: str, reasons: list[str]) -> dict:
+    """can_send_live_pilot_order 실패 — 주문 조건 미충족으로 차단."""
+    with _db_lock:
+        conn = _conn()
+        try:
+            existing = conn.execute(
+                "SELECT status FROM live_pilot_ledger WHERE pilot_id=?", (pilot_id,)
+            ).fetchone()
+            if not existing:
+                return {"ok": False, "reason": "pilot_id not found"}
+            conn.execute(
+                "UPDATE live_pilot_ledger SET status='live_send_blocked', "
+                "failure_reason=? WHERE pilot_id=?",
+                (json.dumps(reasons, ensure_ascii=False), pilot_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    return {
+        "ok": True, "pilot_id": pilot_id,
+        "status": "live_send_blocked", "live_order_sent": False,
+    }
+
+
+def record_live_sent(
+    pilot_id: str,
+    broker_order_id: str = "",
+    payload_hash: str = "",
+) -> dict:
+    """실제 주문 전송 성공 기록.
+
+    live_order_sent=1 — transport가 성공 응답 시에만 호출.
+    민감정보(accountNo/token) 저장 금지.
+    """
+    with _db_lock:
+        conn = _conn()
+        try:
+            existing = conn.execute(
+                "SELECT status FROM live_pilot_ledger WHERE pilot_id=?", (pilot_id,)
+            ).fetchone()
+            if not existing:
+                return {"ok": False, "reason": "pilot_id not found"}
+            conn.execute(
+                "UPDATE live_pilot_ledger SET status='live_sent', "
+                "live_order_sent=1, broker_order_id=?, payload_hash=?, sent_at=? "
+                "WHERE pilot_id=?",
+                (broker_order_id, payload_hash, _now_kst(), pilot_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    return {
+        "ok": True, "pilot_id": pilot_id,
+        "status": "live_sent", "live_order_sent": True,
+    }
+
+
+def record_live_send_failed(
+    pilot_id: str,
+    failure_reason: str = "",
+    payload_hash: str = "",
+) -> dict:
+    """실제 주문 전송 실패 기록."""
+    with _db_lock:
+        conn = _conn()
+        try:
+            existing = conn.execute(
+                "SELECT status FROM live_pilot_ledger WHERE pilot_id=?", (pilot_id,)
+            ).fetchone()
+            if not existing:
+                return {"ok": False, "reason": "pilot_id not found"}
+            conn.execute(
+                "UPDATE live_pilot_ledger SET status='live_send_failed', "
+                "live_order_sent=0, failure_reason=?, payload_hash=? WHERE pilot_id=?",
+                (failure_reason, payload_hash, pilot_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    return {
+        "ok": True, "pilot_id": pilot_id,
+        "status": "live_send_failed", "live_order_sent": False,
+    }
+
+
 def cancel_live_pilot(pilot_id: str, reason: str = "user_cancelled") -> dict:
     """Live pilot 취소."""
     with _db_lock:
@@ -267,12 +366,15 @@ def live_pilot_ledger_summary() -> dict:
             rows = conn.execute(
                 "SELECT status, COUNT(*) as cnt FROM live_pilot_ledger GROUP BY status"
             ).fetchall()
+            live_sent_total = conn.execute(
+                "SELECT COALESCE(SUM(live_order_sent), 0) FROM live_pilot_ledger"
+            ).fetchone()[0]
             conn.close()
         counts = {r["status"]: r["cnt"] for r in rows}
         return {
             "counts": counts,
-            "live_order_sent_total": 0,   # 항상 0, adapter disabled
-            "adapter_status": "disabled",
+            "live_order_sent_total": int(live_sent_total),
+            "adapter_status": "disabled",   # 코드 기본값
             "live_order_allowed": False,
         }
     except Exception as e:

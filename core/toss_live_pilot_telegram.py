@@ -190,44 +190,139 @@ def _handle_review(preview_id: str) -> dict:
 
 
 def _handle_confirm(preview_id: str) -> dict:
-    """최종 승인 시도 — adapter disabled로 항상 차단됨."""
-    dispatch_result = None
-    ledger_result = None
+    """최종 승인 시도.
 
-    try:
-        from core.toss_live_pilot_adapter import dispatch_toss_order_disabled
-        dispatch_result = dispatch_toss_order_disabled({}, policy=None)
-    except Exception as e:
-        logger.warning("dispatch call failed: %s", e)
-
-    try:
-        from core.toss_live_pilot_ledger import record_confirm_attempt
-        ledger_result = record_confirm_attempt(preview_id)
-    except Exception as e:
-        logger.warning("confirm ledger failed: %s", e)
-
-    reason = "toss_order_adapter_disabled"
-    status = ledger_result.get("status", "confirmed_but_not_sent") if ledger_result else "confirmed_but_not_sent"
-
-    msg = (
-        "[최종 승인 시도 차단됨]\n"
-        f"차단: {reason}\n"
-        "아직 주문 전송 안 함\n"
-        "live_order_sent=false\n"
-        "실주문: 비활성\n"
-        "주문 API 호출 비활성\n"
-        f"상태: {status}"
+    policy disabled → 기존처럼 차단 (confirmed_but_not_sent).
+    policy enabled  → can_send_live_pilot_order guard 검사 후 dispatch_toss_order_live 호출.
+                      transport=None(기본)이면 여전히 blocked.
+    """
+    from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
+    from core.toss_live_pilot_adapter import (
+        can_send_live_pilot_order,
+        dispatch_toss_order_disabled,
+        dispatch_toss_order_live,
+    )
+    from core.toss_live_pilot_ledger import (
+        record_confirm_attempt,
+        record_live_send_blocked,
+        record_live_sent,
+        record_live_send_failed,
+        list_live_pilot_records,
     )
 
-    return {
-        "ok": False,
-        "action": "confirm",
-        "live_order_sent": False,
-        "blocked": True,
-        "reason": reason,
-        "adapter_status": "disabled",
-        "message": msg,
+    policy = compute_toss_live_pilot_policy()
+
+    # 1. policy disabled → 기존 차단 흐름
+    if not policy.get("live_order_allowed") or policy.get("adapter_status") != "enabled":
+        try:
+            ledger_result = record_confirm_attempt(preview_id)
+            status = ledger_result.get("status", "confirmed_but_not_sent")
+        except Exception as e:
+            logger.warning("confirm ledger failed: %s", e)
+            status = "confirmed_but_not_sent"
+
+        return {
+            "ok": False,
+            "action": "confirm",
+            "live_order_sent": False,
+            "blocked": True,
+            "reason": "toss_order_adapter_disabled",
+            "adapter_status": policy.get("adapter_status", "disabled"),
+            "message": (
+                "[최종 승인 시도 차단됨]\n"
+                "차단: live pilot 조건 미충족\n"
+                "아직 주문 전송 안 함\n"
+                "live_order_sent=false\n"
+                "실주문: 비활성\n"
+                f"상태: {status}"
+            ),
+        }
+
+    # 2. policy enabled → preview/payload 조회 후 guard 검사
+    records = list_live_pilot_records(limit=100)
+    matched = [r for r in records if r.get("pilot_id") == preview_id]
+    if not matched:
+        return {
+            "ok": False, "action": "confirm", "live_order_sent": False, "blocked": True,
+            "reason": "pilot_id_not_found",
+            "message": "pilot_id를 찾을 수 없습니다.\n주문 전송 조건 미충족",
+        }
+
+    rec = matched[0]
+    # preview/payload 재구성 (ledger 기록에서)
+    preview_stub = {
+        "ok": rec.get("status") not in ("blocked", "cancelled"),
+        "symbol": rec.get("symbol", ""),
+        "side": rec.get("side", "buy"),
+        "quantity": rec.get("quantity", 0),
+        "limit_price": rec.get("limit_price", 0),
+        "estimated_amount_krw": rec.get("estimated_amount_krw", 0),
+        "blocks": rec.get("blocks", []),
+        "live_order_sent": bool(rec.get("live_order_sent")),
     }
+    payload_result_stub = {"ok": preview_stub["ok"], "live_order_sent": preview_stub["live_order_sent"]}
+
+    can_send, guard_reasons = can_send_live_pilot_order(policy, preview_stub, payload_result_stub)
+
+    if not can_send:
+        try:
+            record_live_send_blocked(preview_id, guard_reasons)
+        except Exception as e:
+            logger.warning("live_send_blocked ledger failed: %s", e)
+        return {
+            "ok": False, "action": "confirm", "live_order_sent": False, "blocked": True,
+            "reason": "live_send_guard_failed",
+            "guard_reasons": guard_reasons,
+            "message": (
+                "[차단: 한도/중복/가격 조건 미충족]\n"
+                "주문 전송 안 함\n"
+                "live_order_sent=false\n"
+                f"차단 사유: {'; '.join(guard_reasons[:3])}"
+            ),
+        }
+
+    # 3. guard 통과 → dispatch (transport=None이면 여전히 blocked)
+    payload = {
+        "symbol": preview_stub["symbol"],
+        "side": preview_stub["side"],
+        "order_type": "limit",
+        "quantity": preview_stub["quantity"],
+        "limit_price": preview_stub["limit_price"],
+        "estimated_amount_krw": preview_stub["estimated_amount_krw"],
+    }
+    dispatch_result = dispatch_toss_order_live(payload, policy, transport=None)
+
+    if dispatch_result.get("live_order_sent"):
+        try:
+            record_live_sent(
+                preview_id,
+                broker_order_id=dispatch_result.get("broker_order_id", ""),
+                payload_hash=dispatch_result.get("payload_hash", ""),
+            )
+        except Exception as e:
+            logger.warning("live_sent ledger failed: %s", e)
+        return {
+            "ok": True, "action": "confirm",
+            "live_order_sent": True,
+            "message": dispatch_result.get("message", "승인형 live pilot 주문 전송 완료"),
+        }
+    else:
+        try:
+            record_live_send_failed(
+                preview_id,
+                failure_reason=dispatch_result.get("reason", ""),
+                payload_hash=dispatch_result.get("payload_hash", ""),
+            )
+        except Exception as e:
+            logger.warning("live_send_failed ledger failed: %s", e)
+        return {
+            "ok": False, "action": "confirm", "live_order_sent": False, "blocked": True,
+            "reason": dispatch_result.get("reason", "transport_blocked"),
+            "message": dispatch_result.get(
+                "message",
+                "주문 전송 조건 미충족\n아직 주문 전송 안 함\nlive_order_sent=false",
+            ),
+        }
 
 
 def _handle_cancel(preview_id: str) -> dict:

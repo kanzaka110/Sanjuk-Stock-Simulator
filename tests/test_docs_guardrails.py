@@ -64,6 +64,9 @@ ALLOWED_TOSS_FILES = {
     "tests/test_toss_live_pilot_callback.py",
     "tests/test_toss_live_pilot_script.py",
     "scripts/send_toss_live_pilot_preview_test.py",
+    "tests/test_toss_live_pilot_live_adapter.py",
+    "tests/test_toss_live_pilot_live_policy.py",
+    "tests/test_toss_live_pilot_live_callback.py",
 }
 
 
