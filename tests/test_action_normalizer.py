@@ -364,6 +364,22 @@ class TestUrgentAlertBlockedBuyFilter:
         assert _filter_blocked_from_text(
             "KODEX 200 적립 / ", normalized) == "KODEX 200 적립"
 
+    def test_filter_blocked_none_normalized_fallback(self):
+        """normalized=None이어도 명백한 매수 CTA 단독 문구는 제거(안전망)."""
+        from core.telegram import _filter_blocked_from_text
+        assert _filter_blocked_from_text("HPSP 매수 검토", None) == ""
+        assert _filter_blocked_from_text("①HPSP 매수 검토", None) == ""
+        assert _filter_blocked_from_text(
+            "KODEX 200 적립 / HPSP 매수 검토", None) == "KODEX 200 적립"
+        assert _filter_blocked_from_text(
+            "KODEX 200 적립", None) == "KODEX 200 적립"
+
+    def test_filter_blocked_none_mid_slash_no_double_sep(self):
+        """normalized=None 중간 CTA 제거 후 중복 '/' 없이 허용 문구 순서 보존."""
+        from core.telegram import _filter_blocked_from_text
+        assert _filter_blocked_from_text(
+            "KODEX 200 적립 / HPSP 매수 검토 / 관망", None) == "KODEX 200 적립 / 관망"
+
     def test_hpsp_blocked_night_reason_fallback_filtered(self):
         """KR_NIGHT + HPSP blocked + next_action='HPSP 매수 검토' → reason fallback 미노출."""
         raw = {

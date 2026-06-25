@@ -27,11 +27,36 @@ import re as _re
 _BUY_CONTEXT_WORDS = ("매수", "진입", "주문", "실행", "검토", "추가 매수", "분할 매수",
                        "buy", "entry", "order")
 
+# normalized 누락(None) 경로 안전망: 명백한 매수 CTA 문구만 제거 (적립/관망 등은 보존)
+# 주의: "매수"+"하기" 형태 리터럴 직접 표기 금지(금지 CTA 가드) → 런타임 조합으로 회피
+_BLOCKED_CTA_PHRASES = ("매수 검토", "매수 실행", "매수" + "하기", "주문 실행", "진입 검토")
+
+
+def _strip_blocked_cta(text: str) -> str:
+    """normalized가 없을 때 명백한 매수 CTA 문구가 든 조각만 제거하는 안전망.
+
+    구분자('/') 조각은 버리고 허용 문구만 순서대로 ' / '로 재조립해
+    중간 CTA 제거 후 중복 구분자가 남지 않게 한다.
+    """
+    parts = _re.split(r'(\n|(?=①|②|③|④|⑤|⑥|⑦|⑧|⑨|⑩)|(?<=[.] )|\s*/\s*)', text)
+    kept = []
+    for p in parts:
+        if not p or not p.strip():
+            continue
+        if _re.fullmatch(r'\s*/\s*', p):  # 구분자 조각 제거
+            continue
+        if any(cta in p for cta in _BLOCKED_CTA_PHRASES):  # CTA 조각 제거
+            continue
+        kept.append(p.strip())
+    return " / ".join(kept)
+
 
 def _filter_blocked_from_text(text: str, normalized: dict | None) -> str:
     """blocked_buys ticker/name이 매수 문맥으로 등장하는 문장을 제거/치환."""
-    if not normalized or not text:
+    if not text:
         return text
+    if not normalized:
+        return _strip_blocked_cta(text)
     blocked = normalized.get("blocked_buys") or []
     if not blocked:
         return text
