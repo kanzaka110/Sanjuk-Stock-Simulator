@@ -30,6 +30,12 @@ db/data/kis_token.json
 *.swp
 *.swo
 
+# Local Claude runtime/config
+.claude/
+
+# Runtime logs
+dashboard_restart.log
+
 # OS
 .DS_Store
 Thumbs.db

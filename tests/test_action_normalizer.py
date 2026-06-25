@@ -380,6 +380,51 @@ class TestUrgentAlertBlockedBuyFilter:
         assert _filter_blocked_from_text(
             "KODEX 200 적립 / HPSP 매수 검토 / 관망", None) == "KODEX 200 적립 / 관망"
 
+    def _mk_blocked_raw(self, next_action, with_norm=True):
+        raw = {
+            "strategy_buy": [
+                {"ticker": "403870.KS", "name": "HPSP", "account": "[일반]",
+                 "entry_price": "₩70,000", "strategy_type": "신규진입",
+                 "reason": "FOMC 대기 눌림목", "shares": "70주"},
+            ],
+            "strategy_sell": [],
+            "market_summary": "FOMC 대기",
+            "next_action": next_action,
+        }
+        if with_norm:
+            raw["normalized"] = normalize_actions(
+                raw, "KR_NIGHT", {"403870.KS": 62800}, {})
+        return raw
+
+    def test_impact_message_blocked_cta_not_rendered(self):
+        """_build_impact_message 실제 렌더에서 차단 CTA 미노출 + 중복 '/' 없음."""
+        from core.models import BriefingResult
+        from core.telegram import _build_impact_message
+        # 단독 차단 → 다음 액션 섹션 생략
+        raw = self._mk_blocked_raw("HPSP 매수 검토")
+        res = BriefingResult(title="t", raw_json=raw)
+        msg = _build_impact_message(res, raw, "🇰🇷", "테스트", "KR_NIGHT")
+        assert "HPSP 매수 검토" not in msg
+        assert "다음 액션" not in msg
+        # 혼합 → 허용 문구만 잔존, 중복 '/' 없음
+        raw2 = self._mk_blocked_raw("KODEX 200 적립 / HPSP 매수 검토 / 관망")
+        res2 = BriefingResult(title="t", raw_json=raw2)
+        msg2 = _build_impact_message(res2, raw2, "🇰🇷", "테스트", "KR_NIGHT")
+        assert "HPSP 매수 검토" not in msg2
+        assert "KODEX 200 적립" in msg2 and "관망" in msg2
+        assert "/ /" not in msg2
+
+    def test_summary_message_blocked_cta_filtered_none_norm(self):
+        """_build_summary_message normalized=None 안전망에서도 차단 CTA 미노출."""
+        from core.models import BriefingResult
+        from core.telegram import _build_summary_message
+        raw = self._mk_blocked_raw(
+            "KODEX 200 적립 / HPSP 매수 검토 / 관망", with_norm=False)
+        res = BriefingResult(title="t", raw_json=raw)
+        msg = _build_summary_message(res, raw, "🇰🇷", "테스트", "http://x")
+        assert "HPSP 매수 검토" not in msg
+        assert "KODEX 200 적립" in msg and "관망" in msg
+
     def test_hpsp_blocked_night_reason_fallback_filtered(self):
         """KR_NIGHT + HPSP blocked + next_action='HPSP 매수 검토' → reason fallback 미노출."""
         raw = {
