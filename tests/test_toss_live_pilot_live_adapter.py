@@ -204,6 +204,78 @@ class TestCanSendDailyGuard(unittest.TestCase):
         self.assertTrue(any("daily_amount_exceeded" in r for r in reasons))
 
 
+# ─── 4b. 최종 정책 — 건수 무제한 + 1일 총액 cap 200만 ────
+
+# max_orders_per_day=None(무제한), max_daily_krw=2,000,000 → 최종 정책 형태
+_POLICY_FINAL = {
+    "live_pilot_enabled": True,
+    "live_order_allowed": True,
+    "adapter_status": "enabled",
+    "requires_user_confirmation": True,
+    "requires_second_confirmation": True,
+    "max_order_krw": 500_000,
+    "max_daily_krw": 2_000_000,
+    "max_orders_per_day": None,
+    "blocked_symbols": [],
+}
+
+
+class TestCanSendFinalPolicy(unittest.TestCase):
+    """건수 제한 없음(총액 cap만) — 여러 건이어도 총액 이내면 차단 없음."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._patch = patch(
+            "core.toss_live_pilot_ledger._db_path",
+            return_value=Path(self.tmp) / "test_pilot.db",
+        )
+        self._patch.start()
+        import core.toss_live_pilot_ledger as m
+        m._schema_created = False
+
+    def tearDown(self):
+        self._patch.stop()
+        import core.toss_live_pilot_ledger as m
+        m._schema_created = False
+
+    def _inject_today_sent(self, symbol, amount):
+        from core.toss_live_pilot_ledger import _conn, _now_kst
+        with _conn() as conn:
+            conn.execute(
+                """INSERT INTO live_pilot_ledger
+                   (pilot_id, preview_id, symbol, side, quantity,
+                    limit_price, estimated_amount_krw, status,
+                    blocks, warnings, live_order_allowed, live_order_sent,
+                    adapter_status, broker_order_id, failure_reason, payload_hash,
+                    created_at, confirmed_at, cancelled_at, reason)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (f"tlive_final_{symbol}", "prev_final", symbol, "buy", 1,
+                 float(amount), float(amount), "live_sent",
+                 "[]", "[]", 0, 1, "enabled", "", "", "",
+                 _now_kst(), None, None, ""),
+            )
+            conn.commit()
+
+    def test_many_orders_within_cap_no_count_block(self):
+        # 3건(각 30만, 총 90만) 전송됨 + 추가 1건 30만 → 총 120만 < 200만 → 차단 없음
+        self._inject_today_sent("111.KS", 300_000)
+        self._inject_today_sent("222.KS", 300_000)
+        self._inject_today_sent("333.KS", 300_000)
+        preview = _ok_preview(symbol="444.KS", price=300_000)
+        ok, reasons = can_send_live_pilot_order(_POLICY_FINAL, preview, _ok_payload_result())
+        self.assertFalse(any("daily_order_count_exceeded" in r for r in reasons))
+        self.assertFalse(any("daily_amount_exceeded" in r for r in reasons))
+        self.assertTrue(ok, f"unexpected block: {reasons}")
+
+    def test_daily_amount_over_2m_blocked(self):
+        # 이미 1,800,000 전송됨 + 300,000 추가 → 2,100,000 > 2,000,000 cap → 차단
+        self._inject_today_sent("111.KS", 1_800_000)
+        preview = _ok_preview(symbol="444.KS", price=300_000)
+        ok, reasons = can_send_live_pilot_order(_POLICY_FINAL, preview, _ok_payload_result())
+        self.assertFalse(ok)
+        self.assertTrue(any("daily_amount_exceeded" in r for r in reasons))
+
+
 # ─── 5. dispatch_toss_order_live — transport=None ────────
 
 class TestDispatchLiveNoTransport(unittest.TestCase):

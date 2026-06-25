@@ -88,8 +88,8 @@ class TestFullFlow069500(unittest.TestCase):
 
 class TestAmountBlockedFlow005930(unittest.TestCase):
     def setUp(self):
-        # 종목 제한 해제됐지만 319,000 > 100,000 한도 → 금액 가드로 차단
-        self.prev, self.pld, self.disp = _full_flow("005930.KS", price=319000, qty=1)
+        # 종목 제한 해제됐지만 600,000 > 500,000 한도 → 금액 가드로 차단
+        self.prev, self.pld, self.disp = _full_flow("005930.KS", price=600000, qty=1)
 
     def test_preview_blocked(self):
         self.assertFalse(self.prev["ok"])
@@ -120,8 +120,8 @@ class TestUnlockedFlow161510(unittest.TestCase):
 
 class TestAmountGuard(unittest.TestCase):
     def test_over_100k_blocked(self):
-        # 표본부족 모드: max=100,000원. 150,000 초과.
-        prev, pld, _ = _full_flow("069500.KS", price=150_000, qty=1)
+        # 최종 정책: max=500,000원. 600,000 초과.
+        prev, pld, _ = _full_flow("069500.KS", price=600_000, qty=1)
         self.assertFalse(prev["ok"] and pld["ok"])
 
     def test_under_100k_ok(self):

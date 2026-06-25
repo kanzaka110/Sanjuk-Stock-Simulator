@@ -233,11 +233,12 @@ def _check_daily_limits(symbol: str, estimated_krw: float, policy: dict) -> list
             and r.get("created_at", "").startswith(today)
         ]
 
-        max_orders = policy.get("max_orders_per_day", 1)
-        if len(today_sent) >= max_orders:
+        # 주문 건수 제한: None/0/"unlimited" → 건수만으로는 차단하지 않음 (총액 cap으로만 관리)
+        max_orders = policy.get("max_orders_per_day")
+        if isinstance(max_orders, int) and max_orders > 0 and len(today_sent) >= max_orders:
             reasons.append(f"daily_order_count_exceeded: {len(today_sent)}/{max_orders}")
 
-        max_daily = policy.get("max_daily_krw", 300_000)
+        max_daily = policy.get("max_daily_krw", 2_000_000)
         today_total = sum(float(r.get("estimated_amount_krw") or 0) for r in today_sent)
         if today_total + estimated_krw > max_daily:
             reasons.append(

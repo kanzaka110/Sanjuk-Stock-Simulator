@@ -46,10 +46,13 @@ class TestDefaultPolicy(unittest.TestCase):
         self.assertIn("비활성", self.policy["reason"])
 
     def test_max_daily_krw(self):
-        self.assertLessEqual(self.policy["max_daily_krw"], 300_000)
+        self.assertEqual(self.policy["max_daily_krw"], 2_000_000)
 
-    def test_max_orders_per_day(self):
-        self.assertEqual(self.policy["max_orders_per_day"], 1)
+    def test_max_orders_per_day_unlimited(self):
+        # 주문 건수 제한 없음
+        self.assertIsNone(self.policy["max_orders_per_day"])
+        self.assertEqual(self.policy["max_orders_per_day_label"], "unlimited")
+        self.assertFalse(self.policy["order_count_limited"])
 
 
 class TestEnvNotSet(unittest.TestCase):
@@ -74,11 +77,12 @@ class TestEnvNotSet(unittest.TestCase):
 
 
 class TestSampleInsufficient(unittest.TestCase):
-    """evaluated_count < 5 → 초보수 모드."""
+    """evaluated_count < 5 → 표본부족 경고만 (한도는 고정)."""
 
-    def test_max_order_krw_insufficient(self):
+    def test_max_order_krw_fixed_even_insufficient(self):
+        # 표본부족이어도 1회 한도는 고정 50만원
         policy = compute_toss_live_pilot_policy(evaluated_count=0)
-        self.assertLessEqual(policy["max_order_krw"], 100_000)
+        self.assertEqual(policy["max_order_krw"], 500_000)
 
     def test_warning_present(self):
         policy = compute_toss_live_pilot_policy(evaluated_count=2)
@@ -88,10 +92,53 @@ class TestSampleInsufficient(unittest.TestCase):
         policy = compute_toss_live_pilot_policy(evaluated_count=3)
         self.assertTrue(policy["sample_insufficient"])
 
-    def test_stable_sample_higher_budget(self):
+    def test_stable_sample_same_fixed_cap(self):
+        # 표본 충분해도 한도는 동일 고정 (목표금액/증액 개념 아님)
         policy = compute_toss_live_pilot_policy(evaluated_count=10)
-        self.assertGreater(policy["max_order_krw"], 100_000)
+        self.assertEqual(policy["max_order_krw"], 500_000)
         self.assertFalse(policy["sample_insufficient"])
+
+
+class TestFinalLimitPolicy(unittest.TestCase):
+    """최종 한도 정책: 1회 50만, 1일 상한(cap) 200만, 건수 제한 없음."""
+
+    def setUp(self):
+        self.policy = compute_toss_live_pilot_policy(evaluated_count=10)
+
+    def test_max_order_krw_500k(self):
+        self.assertEqual(self.policy["max_order_krw"], 500_000)
+
+    def test_max_daily_krw_2m(self):
+        self.assertEqual(self.policy["max_daily_krw"], 2_000_000)
+
+    def test_daily_is_cap_not_target(self):
+        self.assertTrue(self.policy["daily_krw_is_cap"])
+        self.assertFalse(self.policy["daily_krw_is_target"])
+
+    def test_order_count_unlimited(self):
+        self.assertIsNone(self.policy["max_orders_per_day"])
+        self.assertFalse(self.policy["order_count_limited"])
+
+    def test_buy_only_and_sell_blocked(self):
+        self.assertEqual(self.policy["side_mode"], "BUY_ONLY")
+        self.assertEqual(self.policy["allowed_sides"], ["buy"])
+        self.assertFalse(self.policy["sell_allowed"])
+
+    def test_requires_user_confirmation_kept(self):
+        self.assertTrue(self.policy["requires_user_confirmation"])
+        self.assertTrue(self.policy["requires_second_confirmation"])
+
+    def test_no_forbidden_target_phrases(self):
+        # "목표 집행/한도 소진/남은 한도 사용/200만원 채우기/일일 목표금액" 의미 없음
+        text = str(self.policy)
+        for bad in ("목표 집행", "한도 소진", "남은 한도", "채우기", "목표금액"):
+            self.assertNotIn(bad, text, f"금지 문구 발견: {bad}")
+
+    def test_hold_is_normal_phrasing(self):
+        # 후보 없으면 매수 없음/HOLD가 정상이라는 의미가 정책에 표현됨
+        note = self.policy["daily_policy_note"]
+        self.assertIn("목표 아님", note)
+        self.assertIn("HOLD", note)
 
 
 class TestBlockedSymbols(unittest.TestCase):

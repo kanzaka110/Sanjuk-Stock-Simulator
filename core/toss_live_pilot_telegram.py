@@ -67,9 +67,10 @@ def format_live_pilot_preview_message(
     qty = preview.get("quantity", 0)
     price = preview.get("limit_price", 0)
     amount = preview.get("estimated_amount_krw", 0)
-    max_krw = policy.get("max_order_krw", 100_000)
-    max_daily = policy.get("max_daily_krw", 300_000)
-    max_per_day = policy.get("max_orders_per_day", 1)
+    max_krw = policy.get("max_order_krw", 500_000)
+    max_daily = policy.get("max_daily_krw", 2_000_000)
+    max_per_day = policy.get("max_orders_per_day")
+    max_per_day_label = "무제한" if max_per_day in (None, 0) else f"{max_per_day}건"
     blocks = preview.get("blocks", [])
     ok = preview.get("ok", False) and not blocks
 
@@ -95,10 +96,11 @@ def format_live_pilot_preview_message(
         lines.append(f"- 수량: {qty}주")
         lines.append(f"- 예상금액: ₩{amount:,.0f}")
         lines.append(f"- 1회 한도: ₩{max_krw:,.0f}")
-        lines.append(f"- 일일 한도: ₩{max_daily:,.0f}")
-        lines.append(f"- 일일 최대 주문: {max_per_day}건")
+        lines.append(f"- 1일 상한: ₩{max_daily:,.0f} (목표 아님)")
+        lines.append(f"- 일일 최대 주문: {max_per_day_label}")
         lines.append(f"- adapter: {policy.get('adapter_status', 'disabled')}")
         lines.append("")
+        lines.append("좋은 후보가 있을 때만 매수 — 후보 없으면 매수 없음/HOLD.")
         lines.append("다음 단계: 최종 승인 버튼을 눌러도 이번 단계에서는 전송 차단됩니다.")
 
     return "\n".join(lines)

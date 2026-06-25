@@ -22,11 +22,12 @@ import logging
 log = logging.getLogger(__name__)
 
 # ── 정책 상수 ──────────────────────────────────────────────────────
-_SAMPLE_LIVE_THRESHOLD = 5          # evaluated_count < 5 → 초소액 모드
-_MAX_ORDER_KRW_INSUFFICIENT = 100_000
-_MAX_ORDER_KRW_STABLE = 300_000
-_MAX_DAILY_KRW = 300_000
-_MAX_ORDERS_PER_DAY = 1
+# 최종 정책: 1회 한도 50만원, 1일 상한(cap) 200만원, 주문 건수 제한 없음.
+# 200만원은 목표금액이 아니라 최대 상한이다. 좋은 후보가 없으면 매수 0원/HOLD가 정상.
+_SAMPLE_LIVE_THRESHOLD = 5          # evaluated_count < 5 → 표본부족 경고(한도는 동일)
+_MAX_ORDER_KRW = 500_000            # 1회 주문 한도
+_MAX_DAILY_KRW = 2_000_000          # 1일 주문 총액 상한(cap, 목표 아님)
+_MAX_ORDERS_PER_DAY = None          # 주문 건수 제한 없음 (총액 cap으로만 관리)
 
 # 종목 제한 해제: 블록목록/허용목록 모두 비활성 (BUY_ONLY/Hermes PASS/최종승인/금액한도 가드는 유지)
 _BLOCKED_SYMBOLS: frozenset[str] = frozenset()
@@ -105,12 +106,13 @@ def compute_toss_live_pilot_policy(
     all_gates = _all_live_gates_open()
     insufficient = evaluated_count < _SAMPLE_LIVE_THRESHOLD
 
-    # 예산/한도 결정
+    # 한도는 표본 충분 여부와 무관하게 고정 (1회 50만원). 표본부족이면 경고만 추가.
+    max_order_krw = _MAX_ORDER_KRW
     if insufficient:
-        max_order_krw = _MAX_ORDER_KRW_INSUFFICIENT
-        warnings: list[str] = ["Paper 표본부족 — live pilot은 초소액/수동 승인만"]
+        warnings: list[str] = [
+            "Paper 표본부족 — 수동 최종 승인 필수 (좋은 후보 있을 때만 매수)"
+        ]
     else:
-        max_order_krw = _MAX_ORDER_KRW_STABLE
         warnings = []
 
     # adapter 활성화: 3개 env gate 모두 통과해야
@@ -144,10 +146,18 @@ def compute_toss_live_pilot_policy(
         "env_live_order_allowed": env_order,
         "env_live_adapter_enabled": env_adapter,
         "all_live_gates_open": all_gates,
-        # 한도
+        # 한도 (1일 상한은 cap — 목표금액 아님)
         "max_order_krw": max_order_krw,
         "max_daily_krw": _MAX_DAILY_KRW,
-        "max_orders_per_day": _MAX_ORDERS_PER_DAY,
+        "daily_krw_is_cap": True,
+        "daily_krw_is_target": False,
+        "max_orders_per_day": _MAX_ORDERS_PER_DAY,  # None = 건수 제한 없음
+        "max_orders_per_day_label": "unlimited",
+        "order_count_limited": False,
+        "daily_policy_note": (
+            "1일 상한 ₩2,000,000 (목표 아님). 좋은 후보가 있을 때만 매수하며, "
+            "후보가 없으면 매수 없음/HOLD가 정상이다. 상한 금액을 억지로 맞추지 않는다."
+        ),
         # 종목
         "allowed_asset_types": _ALLOWED_ASSET_TYPES,
         "blocked_symbols": sorted(_BLOCKED_SYMBOLS),

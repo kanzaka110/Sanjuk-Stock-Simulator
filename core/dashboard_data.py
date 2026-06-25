@@ -1887,9 +1887,9 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20) -> dict:
         from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
 
         try:
-            max_order_krw = int(compute_toss_live_pilot_policy().get("max_order_krw", 100_000))
+            max_order_krw = int(compute_toss_live_pilot_policy().get("max_order_krw", 500_000))
         except Exception:
-            max_order_krw = 100_000
+            max_order_krw = 500_000
 
         sections = build_discovery_sections(briefing_type="KR_BEFORE")
         result = toss_eligible_new_candidates(sections, max_order_krw=max_order_krw)

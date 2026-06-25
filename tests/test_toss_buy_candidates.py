@@ -84,7 +84,8 @@ def test_toss_buy_candidates_excludes_reuse_and_scan_rejects_when_zero(monkeypat
 
 def test_toss_buy_candidates_over_limit_shown_not_executable(monkeypatch):
     # 한도 초과 KR 후보도 items에 포함하되 즉시 실행 불가로 표시한다.
-    sections = _sections(new=[_new_cand("222.KS", "고가주", price=500_000)])
+    # 1회 한도 50만원 초과(60만원) 후보.
+    sections = _sections(new=[_new_cand("222.KS", "고가주", price=600_000)])
     _patch_sections(monkeypatch, sections)
 
     result = dd.toss_buy_candidates_data(range_="today")
@@ -110,6 +111,19 @@ def test_toss_buy_candidates_within_limit_executable(monkeypatch):
     result = dd.toss_buy_candidates_data(range_="today")
 
     item = next(i for i in result["items"] if i["symbol"] == "000111.KS")
+    assert item["executable_now"] is True
+    assert item["limit_exceeded"] is False
+    assert item["execution_status"] == "executable"
+
+
+def test_toss_buy_candidates_154700_executable(monkeypatch):
+    # 원익IPS급 154,700원 후보 — 1회 한도 50만원 이내라 즉시 실행 가능.
+    sections = _sections(new=[_new_cand("240810.KS", "원익IPS", price=154_700)])
+    _patch_sections(monkeypatch, sections)
+
+    result = dd.toss_buy_candidates_data(range_="today")
+
+    item = next(i for i in result["items"] if i["symbol"] == "240810.KS")
     assert item["executable_now"] is True
     assert item["limit_exceeded"] is False
     assert item["execution_status"] == "executable"
