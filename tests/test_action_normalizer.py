@@ -353,6 +353,17 @@ class TestUrgentAlertBlockedBuyFilter:
         assert not result.endswith("/")
         assert not result.endswith(" /")
 
+    def test_filter_blocked_exact_values(self):
+        """_filter_blocked_from_text 정확값 검증 (빈 결과 / trailing 구분자 정리)."""
+        from core.telegram import _filter_blocked_from_text
+        normalized = {"blocked_buys": [{"ticker": "403870.KS", "name": "HPSP"}]}
+        assert _filter_blocked_from_text("HPSP 매수 검토", normalized) == ""
+        assert _filter_blocked_from_text("①HPSP 매수 검토", normalized) == ""
+        assert _filter_blocked_from_text(
+            "KODEX 200 적립 / HPSP 매수 검토", normalized) == "KODEX 200 적립"
+        assert _filter_blocked_from_text(
+            "KODEX 200 적립 / ", normalized) == "KODEX 200 적립"
+
     def test_hpsp_blocked_night_reason_fallback_filtered(self):
         """KR_NIGHT + HPSP blocked + next_action='HPSP 매수 검토' → reason fallback 미노출."""
         raw = {
