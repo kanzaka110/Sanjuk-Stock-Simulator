@@ -1285,48 +1285,64 @@ async function ldToss(){
 /* ════ HOME TOSS LIVE PILOT WIDGET ════ */
 async function ldHomeToss(){
   const box=document.getElementById("home-toss-live");if(!box)return;
-  const [policy,previews,events,cands]=await Promise.all([J("/api/toss/live-pilot-policy"),J("/api/toss/live-pilot-previews"),J("/api/toss/live-pilot-events"),J("/api/toss/buy-candidates")]);
-  if(!policy&&!previews&&!events&&!cands){box.innerHTML='<div class="emp">토스증권 상태 데이터 없음</div>';return;}
-  const ps=policy||{},pv=previews||{},ev=events||{},bc=cands||{};
+  const [acct,policy,previews,events,cands]=await Promise.all([
+    J("/api/toss/account-summary"),
+    J("/api/toss/live-pilot-policy"),
+    J("/api/toss/live-pilot-previews"),
+    J("/api/toss/live-pilot-events"),
+    J("/api/toss/buy-candidates")
+  ]);
+  if(!acct&&!policy&&!previews&&!events&&!cands){box.innerHTML='<div class="emp">토스증권 상태 데이터 없음</div>';return;}
+  const ac=acct||{},ps=policy||{},pv=previews||{},ev=events||{},bc=cands||{};
+  const totalKrw=Number(ac.total_account_value?.krw||0);
+  const cashKrw=Number(ac.cash?.krw||0);
+  const marketKrw=Number(ac.market_value?.krw||0);
+  const principal=Number(ac.principal_krw||ac.initial_principal_krw||10000000);
+  const pnl=totalKrw&&principal?totalKrw-principal:0;
+  const pnlPct=principal?((pnl/principal)*100):0;
+  const cashRatio=totalKrw?((cashKrw/totalKrw)*100):0;
+  const hc=ac.holdings_count||0;
   const allowed=!!ps.live_order_allowed,allOpen=!!ps.all_live_gates_open;
   const sentReal=ev.live_sent_real||0,sentTotal=ev.live_order_sent_total||0;
   const adapter=ps.adapter_status||pv.summary?.adapter_status||"—";
   const gateText=allOpen?"게이트 열림":(allowed?"승인 대기":"차단/대기");
   const gateClass=allOpen?"up":allowed?"o":"dn";
-  const recent=(ev.records||pv.records||[]).slice(0,3);
   const scan=bc.scan_summary||{};
-  const itemCount=bc.count||0,rejectCount=bc.excluded_count||0;
+  const itemCount=bc.count||0;
   const topReject=(scan.top_reject_reasons||[]).slice(0,3).map(r=>`${E(r.reason||"기타")} ${r.count||0}`).join(" · ");
+  const realRows=(ev.records||[]).filter(r=>r.live_order_sent===true||r.live_order_sent===1||r.event_type==="live_sent").slice(0,3).map(r=>{
+    const label=r.symbol_label||r.symbol||"—",side=(r.side||"").toUpperCase(),amt=r.estimated_amount_krw||((r.limit_price||0)*(r.quantity||0));
+    return `<div class="home-toss-row"><div class="sym">${E(label)} <span class="${side==="BUY"?"up":"dn"}">${E(side)}</span></div><div class="meta">실제 전송 · ₩${F(Math.round(amt||0))}</div></div>`;
+  }).join("");
   const candidateRows=(bc.items||[]).slice(0,2).map(r=>`<div class="home-toss-row"><div class="sym">${E(r.name||r.ticker||"—")} <span class="up">후보</span></div><div class="meta">${E(r.ticker||"")} · ₩${F(Math.round(r.entry_price||r.limit_price||0))}</div></div>`).join("");
   const rejectedRows=(bc.excluded||[]).filter(r=>r.scope&&r.scope!=="reuse_blocked").slice(0,2).map(r=>`<div class="home-toss-row"><div class="sym">${E(r.name||r.ticker||"—")}</div><div class="meta">${E(r.reason||"탈락")}</div></div>`).join("");
-  const rows=recent.map(r=>{
-    const label=r.symbol_label||r.symbol||"—",side=(r.side||"").toUpperCase(),amt=r.estimated_amount_krw||((r.limit_price||0)*(r.quantity||0));
-    const sent=r.live_order_sent===true||r.live_order_sent===1;
-    return `<div class="home-toss-row"><div class="sym">${E(label)} <span class="${side==="BUY"?"up":"dn"}">${E(side)}</span></div><div class="meta">${E(r.status||r.event_type||"—")} · ${sent?"전송됨":"미전송"} · ₩${F(Math.round(amt||0))}</div></div>`;
-  }).join("");
-  const brief=itemCount>0
-    ? `토스 신규 후보 ${itemCount}건 감지 · Hermes 검증 전까지 실행 없음`
-    : `토스 후보 0건 · ${scan.scanned_count||0}/${scan.universe_count||0}개 스캔, ${topReject||"탈락 사유 없음"}`;
-  const note=sentReal>0?'<div class="trade-ledger-warning">⚠ 실제 전송 기록 있음 — 원장/체결 증거 확인 필요</div>':'<div class="trade-ledger-note">실제 전송 0건 · Hermes PASS + 사용자 최종승인 전까지 실행 안 함</div>';
+  const brief=`토스 AI 계좌 ₩${F(Math.round(totalKrw))} · 평가손익 ${pnl>=0?"+":""}₩${F(Math.round(pnl))} (${pnlPct>=0?"+":""}${pnlPct.toFixed(2)}%) · 실제 거래 ${sentReal}건`;
+  const noTrade='<div class="emp">토스 실제 거래 내역 없음 · Hermes PASS + 사용자 최종승인 전까지 실행 안 함</div>';
   box.innerHTML=`
     <div class="hero-label">TOSS AI COMMAND CENTER</div>
     <div class="home-toss-brief"><div class="ai">✦</div><div class="txt">${brief}</div></div>
     <div class="home-toss-grid">
-      <div class="mini-kpi"><div class="k">Live Gate</div><div class="v ${gateClass}" style="${gateClass==="o"?"color:var(--o)":""}">${gateText}</div><div class="x mt">Hermes 최종승인 전용</div></div>
-      <div class="mini-kpi"><div class="k">신규 후보</div><div class="v ${itemCount?"up":""}">${itemCount}건</div><div class="x mt">탈락 ${rejectCount}건</div></div>
-      <div class="mini-kpi"><div class="k">전송 상태</div><div class="v ${sentReal?"dn":"up"}">실전 ${sentReal}건</div><div class="x mt">전체 ${sentTotal}건</div></div>
-      <div class="mini-kpi"><div class="k">1회/일 한도</div><div class="v">₩${F(ps.max_order_krw||0)}</div><div class="x mt">일 ₩${F(ps.max_daily_krw||0)} · ${ps.max_orders_per_day||0}회</div></div>
+      <div class="mini-kpi"><div class="k">총 평가액</div><div class="v">₩${F(Math.round(totalKrw))}</div><div class="x mt">보유평가 ₩${F(Math.round(marketKrw))}</div></div>
+      <div class="mini-kpi"><div class="k">평가 손익</div><div class="v ${pnl>=0?"up":"dn"}">${pnl>=0?"+":""}₩${F(Math.round(pnl))}</div><div class="x mt">원금 ₩${F(Math.round(principal))}</div></div>
+      <div class="mini-kpi"><div class="k">수익률</div><div class="v ${pnlPct>=0?"up":"dn"}">${pnlPct>=0?"+":""}${pnlPct.toFixed(2)}%</div><div class="x mt">현금비중 ${cashRatio.toFixed(1)}%</div></div>
+      <div class="mini-kpi"><div class="k">실제 거래</div><div class="v ${sentReal?"dn":"up"}">${sentReal}건</div><div class="x mt">보유 ${hc}종목 · 전체전송 ${sentTotal}건</div></div>
     </div>
     <div class="home-toss-scan">
-      <div class="mini-kpi"><div class="k">Universe</div><div class="v">${scan.universe_count??"—"}</div></div>
-      <div class="mini-kpi"><div class="k">Scanned</div><div class="v">${scan.scanned_count??"—"}</div></div>
+      <div class="mini-kpi"><div class="k">신규 후보</div><div class="v">${itemCount}건</div></div>
+      <div class="mini-kpi"><div class="k">Universe / Scanned</div><div class="v">${scan.universe_count??"—"} / ${scan.scanned_count??"—"}</div></div>
       <div class="mini-kpi"><div class="k">Pass / Reject</div><div class="v">${scan.pass_count??"—"} / ${scan.reject_count??"—"}</div></div>
-      <div class="mini-kpi"><div class="k">Source</div><div class="v">${E(scan.source||"—")}</div></div>
+      <div class="mini-kpi"><div class="k">Live Gate</div><div class="v ${gateClass}" style="${gateClass==="o"?"color:var(--o)":""}">${gateText}</div></div>
     </div>
-    ${note}
-    <div style="font-size:10.5px;color:var(--mt);margin:7px 0">mode ${E(ps.side_mode||"BUY_ONLY")} · adapter ${E(adapter)} · 허용종목 ${(ps.live_allowed_symbols||[]).map(E).join(", ")||"—"}</div>
-    <div>${candidateRows||rejectedRows||'<div class="emp">신규 후보 없음 · 탈락 사유 대기</div>'}</div>
-    <div class="home-toss-reject">주요 탈락: ${topReject||"—"}</div>
+    <div style="font-size:10.5px;color:var(--mt);margin:7px 0">mode ${E(ps.side_mode||"BUY_ONLY")} · adapter ${E(adapter)} · 1회한도 ₩${F(ps.max_order_krw||0)} · 일한도 ₩${F(ps.max_daily_krw||0)}</div>
+    <div class="panel" style="padding:9px 10px;background:rgba(8,13,24,.42);border-color:rgba(255,255,255,.06);margin-top:8px">
+      <div style="font-size:11px;font-weight:850;margin-bottom:5px">실제 거래 내역</div>
+      ${realRows||noTrade}
+    </div>
+    <div class="panel" style="padding:9px 10px;background:rgba(8,13,24,.42);border-color:rgba(255,255,255,.06);margin-top:8px">
+      <div style="font-size:11px;font-weight:850;margin-bottom:5px">신규 후보 / 탈락 사유</div>
+      ${candidateRows||rejectedRows||'<div class="emp">신규 후보 없음 · 탈락 사유 대기</div>'}
+      <div class="home-toss-reject">주요 탈락: ${topReject||"—"}</div>
+    </div>
     <div style="margin-top:7px;font-size:10.5px;color:var(--mt);cursor:pointer" onclick="goto('toss')">토스 AI 탭에서 상세 보기 →</div>`;
 }
 /* ════ INIT ════ */
