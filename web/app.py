@@ -203,6 +203,11 @@ def api_toss_paper_policy():
     return JSONResponse(dd.toss_paper_policy_data())
 
 
+@app.get("/api/toss/buy-candidates")
+def api_toss_buy_candidates(range: str = "today", limit: int = 20):
+    return JSONResponse(dd.toss_buy_candidates_data(range_=range, limit=min(limit, 100)))
+
+
 @app.get("/api/toss/live-pilot-policy")
 def api_toss_live_pilot_policy():
     return JSONResponse(dd.toss_live_pilot_policy_data())

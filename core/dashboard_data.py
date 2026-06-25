@@ -1869,6 +1869,42 @@ def toss_paper_policy_data() -> dict:
     return _cached("toss_paper_policy", 120, _fetch)
 
 
+# ─── /api/toss/buy-candidates — 토스 전용 매수 후보 (신규 발굴 기반) ─────────────
+def toss_buy_candidates_data(range_: str = "today", limit: int = 20) -> dict:
+    """토스 전용 매수 후보 조회 (read-only) — 신규 발굴 기반.
+
+    삼성/RIA/ISA/IRP 등 기존 계좌 추천(predictions DB)을 재사용하지 않는다.
+    `core.discovery_candidates`의 신규 발굴 후보 중 토스 소액(KR/1주 ≤ 한도/BUY)
+    조건을 통과한 후보만 `items`에 노출한다. items가 0이면 `excluded`에
+    '기존 후보 제외' + '신규 스캔 탈락 이유'를 함께 담는다. 주문 생성/승인/전송은 하지 않는다.
+    """
+    def _fetch():
+        from core.discovery_candidates import (
+            build_discovery_sections,
+            toss_eligible_new_candidates,
+        )
+        from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
+
+        try:
+            max_order_krw = int(compute_toss_live_pilot_policy().get("max_order_krw", 100_000))
+        except Exception:
+            max_order_krw = 100_000
+
+        sections = build_discovery_sections(briefing_type="KR_BEFORE")
+        result = toss_eligible_new_candidates(sections, max_order_krw=max_order_krw)
+        return {
+            "items": result["items"][:limit],
+            "excluded": result["excluded"][:limit],
+            "count": result["count"],
+            "excluded_count": result["excluded_count"],
+            "range": range_,
+            "max_order_krw": max_order_krw,
+            "note": result["note"],
+        }
+
+    return _cached(f"toss_buy_candidates:{range_}:{limit}", 120, _fetch)
+
+
 def toss_live_pilot_policy_data() -> dict:
     """승인형 live pilot 정책 (60초 캐시). 실제 주문 0건. adapter disabled."""
     def _fetch():

@@ -800,6 +800,27 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
             "\n  6. 모르는 종목이라는 이유로 기각하지 마라 — 데이터 기반으로 평가하되, 정보 부족 시 리스크로만 표기."
         )
 
+    # 신규 발굴 ↔ 보유/관심 관리 코드 레벨 분리 (3섹션)
+    try:
+        from core.discovery_candidates import (
+            build_discovery_sections,
+            render_discovery_text,
+        )
+        _disc_sections = build_discovery_sections(briefing_type=briefing_type)
+        discovery_text = render_discovery_text(_disc_sections)
+    except Exception as e:
+        log.warning("신규 발굴 3섹션 분리 실패: %s", e)
+        discovery_text = ""
+    if discovery_text:
+        extra_context += (
+            f"\n\n━━━ 🆕 발굴/관리 3섹션 분리 (코드 강제) ━━━\n{discovery_text}"
+            "\n→ 절대 규칙:"
+            "\n  1. '신규 발굴' 섹션 종목은 보유·WATCHLIST·RIA 밖의 새 종목만 — 매 브리핑 반드시 '오늘 신규 발굴 TOP 3' 노출 (0개여도 탈락 사유 표시)."
+            "\n  2. 보유 종목은 '보유종목 관리'(리스크/익절/손절/홀딩)에서만 다루고 신규 발굴로 재등장 금지."
+            "\n  3. WATCHLIST/RIA/과거추천은 '재평가' 섹션에서만 — 신규 발굴로 포장 금지."
+            "\n  4. 각 신규 후보는 계좌보다 아이디어(무슨 회사·왜 오르는지)를 먼저 제시한 뒤 적합 계좌/토스 소액 여부를 붙여라 — 계좌 때문에 후보를 숨기지 마라."
+        )
+
     if sector_momentum_text:
         extra_context += f"\n\n━━━ 섹터 모멘텀 ━━━\n{sector_momentum_text}"
     if regime_text:
