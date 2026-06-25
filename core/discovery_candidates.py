@@ -710,6 +710,7 @@ def toss_eligible_new_candidates(
             "scope": "scan_unavailable",
         })
 
+    limit_exceeded_count = 0
     for c in sections.new_discovery:
         if c.market != "KR":
             excluded.append({
@@ -719,21 +720,28 @@ def toss_eligible_new_candidates(
             })
             continue
         est = c.price  # 1주 기준
-        if est > max_order_krw:
-            excluded.append({
-                "ticker": c.ticker, "name": c.name,
-                "reason": f"토스 소액 조건 미충족: 1주 {est:,.0f}원 > 한도 {max_order_krw:,.0f}원",
-                "scope": "toss_soak",
-            })
-            continue
-        items.append({
+        over_limit = est > max_order_krw
+        item = {
             "symbol": c.ticker, "name": c.name, "side": "buy", "quantity": 1,
             "limit_price": c.price, "estimated_amount_krw": round(c.price, 2),
             "market": c.market, "idea": c.idea, "score": c.score,
             "target_price": c.target_price, "stop_loss": c.stop_loss,
             "risk_reward": c.risk_reward,
             "candidate_scope": "new_discovery", "read_only": True,
-        })
+            # 한도는 실주문 gate 전용 — 발굴/표시 단계에서는 후보를 배제하지 않음
+            "executable_now": not over_limit,
+            "limit_exceeded": over_limit,
+        }
+        if over_limit:
+            limit_exceeded_count += 1
+            item["execution_status"] = "limit_exceeded"
+            item["block_reason"] = (
+                f"1주 {est:,.0f}원 > 현재 1회 한도 {max_order_krw:,.0f}원"
+            )
+            item["suggested_action"] = "한도 상향 또는 수동 승인 필요"
+        else:
+            item["execution_status"] = "executable"
+        items.append(item)
 
     # 신규 스캔 탈락 사유도 excluded에 포함
     for r in sections.new_rejected:
@@ -743,11 +751,20 @@ def toss_eligible_new_candidates(
             "scope": "scan_rejected",
         })
 
+    executable_count = sum(1 for i in items if i.get("executable_now"))
+    scan_summary["pass_count"] = len(items)
+    scan_summary["executable_count"] = executable_count
+    scan_summary["limit_exceeded_count"] = limit_exceeded_count
+
     return {
         "items": items,
         "excluded": excluded,
         "count": len(items),
         "excluded_count": len(excluded),
         "scan_summary": scan_summary,
-        "note": "신규 발굴 기반 토스 소액 후보만 표시 (기존 삼성/RIA 재사용 안 함).",
+        "note": (
+            "신규 발굴 기반 토스 후보 표시 (기존 삼성/RIA 재사용 안 함). "
+            "1주 가격이 1회 한도 초과인 종목도 후보로 표시하되 "
+            "execution_status=limit_exceeded로 즉시 실행 불가 처리."
+        ),
     }

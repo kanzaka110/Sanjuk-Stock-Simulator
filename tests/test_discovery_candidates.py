@@ -199,14 +199,21 @@ class TestTossEligible(unittest.TestCase):
         reasons_text = " ".join(e.get("reason", "") for e in result["excluded"])
         self.assertIn("급등", reasons_text)
 
-    def test_toss_over_price_limit_excluded(self):
-        # 1주가 10만원 초과 → 토스 소액 조건 탈락
+    def test_toss_over_price_limit_shown_not_executable(self):
+        # 1주가 10만원 초과여도 후보에서 배제하지 않고 즉시 실행 불가로 표시
         cands = [_cand("bbb.KS", "고가주", price=500_000)]
         sections = build_discovery_sections(
             scan_candidates=cands, briefing_type="KR_BEFORE", **_ctx(),
         )
         result = toss_eligible_new_candidates(sections, max_order_krw=100_000)
-        self.assertNotIn("bbb.KS", {i["symbol"] for i in result["items"]})
+        item = next(i for i in result["items"] if i["symbol"] == "bbb.KS")
+        self.assertFalse(item["executable_now"])
+        self.assertTrue(item["limit_exceeded"])
+        self.assertEqual(item["execution_status"], "limit_exceeded")
+        self.assertIn("한도", item["block_reason"])
+        # 한도 초과는 excluded로 빠지지 않는다
+        self.assertNotIn("bbb.KS", {e.get("ticker") for e in result["excluded"]})
+        self.assertGreaterEqual(result["scan_summary"]["limit_exceeded_count"], 1)
 
     def test_toss_buy_only_us_excluded_for_krw_limit(self):
         # US 종목은 토스 소액(KRW) 대상 아님 — 제외

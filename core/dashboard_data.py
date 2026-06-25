@@ -1874,8 +1874,9 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20) -> dict:
     """토스 전용 매수 후보 조회 (read-only) — 신규 발굴 기반.
 
     삼성/RIA/ISA/IRP 등 기존 계좌 추천(predictions DB)을 재사용하지 않는다.
-    `core.discovery_candidates`의 신규 발굴 후보 중 토스 소액(KR/1주 ≤ 한도/BUY)
-    조건을 통과한 후보만 `items`에 노출한다. items가 0이면 `excluded`에
+    `core.discovery_candidates`의 신규 발굴 KR 후보를 `items`에 노출한다. 1주 가격이
+    1회 한도를 넘어도 후보에서 배제하지 않고 execution_status=limit_exceeded /
+    executable_now=False로 표시한다(한도는 실주문 gate 전용). items가 0이면 `excluded`에
     '기존 후보 제외' + '신규 스캔 탈락 이유'를 함께 담는다. 주문 생성/승인/전송은 하지 않는다.
     """
     def _fetch():

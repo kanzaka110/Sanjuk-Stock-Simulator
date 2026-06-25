@@ -82,15 +82,37 @@ def test_toss_buy_candidates_excludes_reuse_and_scan_rejects_when_zero(monkeypat
     assert "급등" in reasons
 
 
-def test_toss_buy_candidates_over_limit_excluded(monkeypatch):
+def test_toss_buy_candidates_over_limit_shown_not_executable(monkeypatch):
+    # 한도 초과 KR 후보도 items에 포함하되 즉시 실행 불가로 표시한다.
     sections = _sections(new=[_new_cand("222.KS", "고가주", price=500_000)])
     _patch_sections(monkeypatch, sections)
 
     result = dd.toss_buy_candidates_data(range_="today")
 
-    assert "222.KS" not in {i["symbol"] for i in result["items"]}
-    reasons = " ".join(e.get("reason", "") for e in result["excluded"])
-    assert "한도" in reasons
+    assert result["count"] >= 1
+    item = next(i for i in result["items"] if i["symbol"] == "222.KS")
+    assert item["executable_now"] is False
+    assert item["limit_exceeded"] is True
+    assert item["execution_status"] == "limit_exceeded"
+    assert "한도" in item["block_reason"]
+    assert item.get("suggested_action")
+    # 한도 초과는 excluded(toss_soak)로 빠지지 않는다
+    assert "222.KS" not in {e.get("ticker") for e in result["excluded"]}
+    # scan_summary에 한도 초과 카운트 분리 표기
+    assert result["scan_summary"]["limit_exceeded_count"] >= 1
+
+
+def test_toss_buy_candidates_within_limit_executable(monkeypatch):
+    # 한도 이내 후보는 executable_now=True / limit_exceeded=False.
+    sections = _sections(new=[_new_cand("000111.KS", "소액주", price=30_000)])
+    _patch_sections(monkeypatch, sections)
+
+    result = dd.toss_buy_candidates_data(range_="today")
+
+    item = next(i for i in result["items"] if i["symbol"] == "000111.KS")
+    assert item["executable_now"] is True
+    assert item["limit_exceeded"] is False
+    assert item["execution_status"] == "executable"
 
 
 def test_toss_buy_candidates_us_excluded(monkeypatch):
