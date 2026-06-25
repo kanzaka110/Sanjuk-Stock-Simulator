@@ -270,13 +270,15 @@ details summary::before{content:"▸";transition:transform .18s;color:var(--mt)}
 .hero-today-trades .tl-name{font-size:12px}.hero-today-trades .tl-meta{font-size:9.5px}.hero-today-trades .tl-value{font-size:11px}
 .hero-today-trades .act-mini{background:var(--sf2);border:1px solid var(--ln);border-radius:8px;padding:7px 9px;font-size:12px;line-height:1.45;cursor:pointer}
 .hero-today-trades .act-mini .side{font-weight:800}.hero-today-trades .act-mini .meta{font-size:10px;color:var(--mt);margin-top:2px}
-.home-toss-panel{margin-top:8px;padding:10px 12px;background:rgba(8,13,24,.72);border-color:rgba(255,255,255,.07);border-radius:12px}
-.home-toss-panel .ph{margin-bottom:8px}.home-toss-panel .ph h2{font-size:12px}.home-toss-panel .sub{font-size:10.5px}
-.home-toss-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px;margin-bottom:8px}
-.home-toss-grid .mini-kpi{background:var(--sf2);border:1px solid var(--ln);border-radius:9px;padding:8px;min-width:0}
-.home-toss-grid .mini-kpi .k{font-size:10px;color:var(--mt);margin-bottom:3px}.home-toss-grid .mini-kpi .v{font-size:13px;font-weight:850;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.home-toss-panel{margin-top:10px;padding:13px 14px;background:radial-gradient(circle at 14% 0%,rgba(34,197,94,.18),transparent 34%),linear-gradient(150deg,rgba(10,31,48,.92),rgba(8,13,24,.86));border-color:rgba(34,197,94,.24);border-radius:16px;box-shadow:0 12px 38px rgba(0,0,0,.18)}
+.home-toss-panel .hero-label{color:var(--up);margin-bottom:6px}.home-toss-panel .ph{margin-bottom:8px}.home-toss-panel .ph h2{font-size:12px}.home-toss-panel .sub{font-size:10.5px}
+.home-toss-brief{display:flex;gap:9px;align-items:flex-start;margin-bottom:10px}.home-toss-brief .ai{width:28px;height:28px;border-radius:10px;background:rgba(34,197,94,.16);display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0}.home-toss-brief .txt{font-size:14px;line-height:1.35;font-weight:850;letter-spacing:-.2px}
+.home-toss-grid{display:grid;grid-template-columns:1.1fr .9fr .9fr 1.05fr;gap:7px;margin-bottom:8px}
+.home-toss-grid .mini-kpi{background:rgba(8,13,24,.72);border:1px solid rgba(255,255,255,.07);border-radius:10px;padding:9px 10px;min-width:0}
+.home-toss-grid .mini-kpi .k{font-size:10px;color:var(--mt);margin-bottom:3px}.home-toss-grid .mini-kpi .v{font-size:15px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.home-toss-grid .mini-kpi .x{font-size:10px}
+.home-toss-scan{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px;margin:8px 0}.home-toss-scan .mini-kpi{background:rgba(15,23,42,.72);border:1px solid var(--border2);border-radius:9px;padding:8px}.home-toss-scan .k{font-size:9.5px;color:var(--mt)}.home-toss-scan .v{font-size:13px;font-weight:850;margin-top:2px}
 .home-toss-row{display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-top:1px solid var(--border2);font-size:11.5px;align-items:center}.home-toss-row:first-child{border-top:0}
-.home-toss-row .sym{font-weight:800;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.home-toss-row .meta{color:var(--mt);font-size:10px;text-align:right;flex-shrink:0}
+.home-toss-row .sym{font-weight:800;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.home-toss-row .meta{color:var(--mt);font-size:10px;text-align:right;flex-shrink:0}.home-toss-reject{font-size:10.5px;color:var(--mt);line-height:1.45;margin-top:7px}
 .hero-decision{grid-column:2;grid-row:1 / span 2;border-radius:22px;padding:18px;overflow:hidden}
 .hero-decision #home-dbrief{max-height:520px;overflow:auto;padding-right:4px}
 .market-strip{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:12px;padding:0;overflow:visible}
@@ -1283,34 +1285,50 @@ async function ldToss(){
 /* ════ HOME TOSS LIVE PILOT WIDGET ════ */
 async function ldHomeToss(){
   const box=document.getElementById("home-toss-live");if(!box)return;
-  const [policy,previews,events]=await Promise.all([J("/api/toss/live-pilot-policy"),J("/api/toss/live-pilot-previews"),J("/api/toss/live-pilot-events")]);
-  if(!policy&&!previews&&!events){box.innerHTML='<div class="emp">토스증권 상태 데이터 없음</div>';return;}
-  const ps=policy||{},pv=previews||{},ev=events||{};
+  const [policy,previews,events,cands]=await Promise.all([J("/api/toss/live-pilot-policy"),J("/api/toss/live-pilot-previews"),J("/api/toss/live-pilot-events"),J("/api/toss/buy-candidates")]);
+  if(!policy&&!previews&&!events&&!cands){box.innerHTML='<div class="emp">토스증권 상태 데이터 없음</div>';return;}
+  const ps=policy||{},pv=previews||{},ev=events||{},bc=cands||{};
   const allowed=!!ps.live_order_allowed,allOpen=!!ps.all_live_gates_open;
   const sentReal=ev.live_sent_real||0,sentTotal=ev.live_order_sent_total||0;
   const adapter=ps.adapter_status||pv.summary?.adapter_status||"—";
   const gateText=allOpen?"게이트 열림":(allowed?"승인 대기":"차단/대기");
   const gateClass=allOpen?"up":allowed?"o":"dn";
   const recent=(ev.records||pv.records||[]).slice(0,3);
+  const scan=bc.scan_summary||{};
+  const itemCount=bc.count||0,rejectCount=bc.excluded_count||0;
+  const topReject=(scan.top_reject_reasons||[]).slice(0,3).map(r=>`${E(r.reason||"기타")} ${r.count||0}`).join(" · ");
+  const candidateRows=(bc.items||[]).slice(0,2).map(r=>`<div class="home-toss-row"><div class="sym">${E(r.name||r.ticker||"—")} <span class="up">후보</span></div><div class="meta">${E(r.ticker||"")} · ₩${F(Math.round(r.entry_price||r.limit_price||0))}</div></div>`).join("");
+  const rejectedRows=(bc.excluded||[]).filter(r=>r.scope&&r.scope!=="reuse_blocked").slice(0,2).map(r=>`<div class="home-toss-row"><div class="sym">${E(r.name||r.ticker||"—")}</div><div class="meta">${E(r.reason||"탈락")}</div></div>`).join("");
   const rows=recent.map(r=>{
     const label=r.symbol_label||r.symbol||"—",side=(r.side||"").toUpperCase(),amt=r.estimated_amount_krw||((r.limit_price||0)*(r.quantity||0));
     const sent=r.live_order_sent===true||r.live_order_sent===1;
     return `<div class="home-toss-row"><div class="sym">${E(label)} <span class="${side==="BUY"?"up":"dn"}">${E(side)}</span></div><div class="meta">${E(r.status||r.event_type||"—")} · ${sent?"전송됨":"미전송"} · ₩${F(Math.round(amt||0))}</div></div>`;
   }).join("");
+  const brief=itemCount>0
+    ? `토스 신규 후보 ${itemCount}건 감지 · Hermes 검증 전까지 실행 없음`
+    : `토스 후보 0건 · ${scan.scanned_count||0}/${scan.universe_count||0}개 스캔, ${topReject||"탈락 사유 없음"}`;
   const note=sentReal>0?'<div class="trade-ledger-warning">⚠ 실제 전송 기록 있음 — 원장/체결 증거 확인 필요</div>':'<div class="trade-ledger-note">실제 전송 0건 · Hermes PASS + 사용자 최종승인 전까지 실행 안 함</div>';
   box.innerHTML=`
+    <div class="hero-label">TOSS AI COMMAND CENTER</div>
+    <div class="home-toss-brief"><div class="ai">✦</div><div class="txt">${brief}</div></div>
     <div class="home-toss-grid">
-      <div class="mini-kpi"><div class="k">Live Gate</div><div class="v ${gateClass}" style="${gateClass==="o"?"color:var(--o)":""}">${gateText}</div></div>
+      <div class="mini-kpi"><div class="k">Live Gate</div><div class="v ${gateClass}" style="${gateClass==="o"?"color:var(--o)":""}">${gateText}</div><div class="x mt">Hermes 최종승인 전용</div></div>
+      <div class="mini-kpi"><div class="k">신규 후보</div><div class="v ${itemCount?"up":""}">${itemCount}건</div><div class="x mt">탈락 ${rejectCount}건</div></div>
       <div class="mini-kpi"><div class="k">전송 상태</div><div class="v ${sentReal?"dn":"up"}">실전 ${sentReal}건</div><div class="x mt">전체 ${sentTotal}건</div></div>
-      <div class="mini-kpi"><div class="k">모드</div><div class="v">${E(ps.side_mode||"BUY_ONLY")}</div><div class="x mt">매도 불가</div></div>
       <div class="mini-kpi"><div class="k">1회/일 한도</div><div class="v">₩${F(ps.max_order_krw||0)}</div><div class="x mt">일 ₩${F(ps.max_daily_krw||0)} · ${ps.max_orders_per_day||0}회</div></div>
     </div>
+    <div class="home-toss-scan">
+      <div class="mini-kpi"><div class="k">Universe</div><div class="v">${scan.universe_count??"—"}</div></div>
+      <div class="mini-kpi"><div class="k">Scanned</div><div class="v">${scan.scanned_count??"—"}</div></div>
+      <div class="mini-kpi"><div class="k">Pass / Reject</div><div class="v">${scan.pass_count??"—"} / ${scan.reject_count??"—"}</div></div>
+      <div class="mini-kpi"><div class="k">Source</div><div class="v">${E(scan.source||"—")}</div></div>
+    </div>
     ${note}
-    <div style="font-size:10.5px;color:var(--mt);margin:7px 0">adapter ${E(adapter)} · 허용종목 ${(ps.live_allowed_symbols||[]).map(E).join(", ")||"—"}</div>
-    <div>${rows||'<div class="emp">최근 토스 pilot 이벤트 없음</div>'}</div>
+    <div style="font-size:10.5px;color:var(--mt);margin:7px 0">mode ${E(ps.side_mode||"BUY_ONLY")} · adapter ${E(adapter)} · 허용종목 ${(ps.live_allowed_symbols||[]).map(E).join(", ")||"—"}</div>
+    <div>${candidateRows||rejectedRows||'<div class="emp">신규 후보 없음 · 탈락 사유 대기</div>'}</div>
+    <div class="home-toss-reject">주요 탈락: ${topReject||"—"}</div>
     <div style="margin-top:7px;font-size:10.5px;color:var(--mt);cursor:pointer" onclick="goto('toss')">토스 AI 탭에서 상세 보기 →</div>`;
 }
-
 /* ════ INIT ════ */
 async function init(){ldStatus();ldMkt();await Promise.allSettled([loadTrades(),ldPF()]);ldAct();ldPerf();ldNews();ldDecisionBrief();ldCalendar();ldAnalytics();ldWorkspace();ldBriefing();ldToss();ldHomeToss();}
 init();
