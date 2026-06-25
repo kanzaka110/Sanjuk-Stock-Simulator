@@ -36,22 +36,17 @@ def _get_live_pilot_policy() -> dict:
         return {
             "live_order_allowed": False,
             "max_order_krw": 100_000,
-            "blocked_symbols": ["161510.KS", "005930.KS"],
+            "blocked_symbols": [],
             "sample_insufficient": True,
         }
 
 
 def _check_symbol_blocks(symbol: str, policy: dict) -> list[str]:
-    """symbol 차단 사유 목록 반환."""
+    """symbol 차단 사유 목록 반환 (종목 제한 해제 시 빈 목록)."""
     blocks: list[str] = []
     blocked = policy.get("blocked_symbols", [])
     if symbol in blocked:
-        if symbol == "161510.KS":
-            blocks.append("위험_저신뢰_종목")
-        elif symbol == "005930.KS":
-            blocks.append("price_anomaly_history")
-        else:
-            blocks.append("blocked_symbol")
+        blocks.append(f"blocked_symbol: {symbol}")
     return blocks
 
 

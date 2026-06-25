@@ -74,30 +74,33 @@ class TestPreview069500(unittest.TestCase):
         self.assertEqual(p["estimated_amount_krw"], 40000)
 
 
-class TestBlocked161510(unittest.TestCase):
-    """161510.KS — 위험 종목, 차단."""
+class TestUnlocked161510(unittest.TestCase):
+    """161510.KS — 종목 제한 해제, 한도 내면 통과."""
 
-    def test_ok_false(self):
+    def test_ok_true_within_limit(self):
         p = build_live_pilot_preview(_candidate("161510.KS", price=1000, qty=1))
-        self.assertFalse(p["ok"])
+        self.assertTrue(p["ok"])
 
-    def test_block_reason_contains_danger(self):
+    def test_no_symbol_block_reason(self):
         p = build_live_pilot_preview(_candidate("161510.KS", price=1000, qty=1))
         combined = " ".join(p["blocks"])
-        self.assertTrue("위험" in combined or "저신뢰" in combined)
+        self.assertNotIn("blocked_symbol", combined)
 
 
-class TestBlocked005930(unittest.TestCase):
-    """005930.KS — price anomaly history, 차단."""
+class TestUnlocked005930(unittest.TestCase):
+    """005930.KS — 종목 제한 해제. 단, 금액 한도 가드는 유지."""
 
-    def test_ok_false(self):
+    def test_ok_true_within_limit(self):
+        p = build_live_pilot_preview(_candidate("005930.KS", price=50000, qty=1))
+        self.assertTrue(p["ok"])
+
+    def test_amount_guard_still_blocks_over_limit(self):
+        # 종목은 허용되지만 319,000 > 100,000 한도 → 금액 가드로 차단 유지
         p = build_live_pilot_preview(_candidate("005930.KS", price=319000, qty=1))
         self.assertFalse(p["ok"])
-
-    def test_block_reason_price_anomaly(self):
-        p = build_live_pilot_preview(_candidate("005930.KS", price=319000, qty=1))
         combined = " ".join(p["blocks"])
-        self.assertIn("anomaly", combined)
+        self.assertIn("한도_초과", combined)
+        self.assertNotIn("blocked_symbol", combined)
 
 
 class TestSourceDisagreement(unittest.TestCase):
@@ -145,7 +148,8 @@ class TestTelegramText(unittest.TestCase):
         return build_live_pilot_telegram_text(p)
 
     def _text_blocked(self):
-        p = build_live_pilot_preview(_candidate("161510.KS", price=1000, qty=1))
+        # 종목 제한 해제 후 — 가격 없음으로 차단되는 케이스 사용
+        p = build_live_pilot_preview(_candidate("069500.KS", price=0, qty=1))
         return build_live_pilot_telegram_text(p)
 
     def test_live_order_inactive_in_text(self):

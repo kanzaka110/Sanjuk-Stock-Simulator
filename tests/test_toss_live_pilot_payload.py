@@ -84,10 +84,11 @@ class TestFullFlow069500(unittest.TestCase):
         self.assertEqual(self.disp["reason"], "toss_order_adapter_disabled")
 
 
-# ─── 2. 차단 흐름 — 005930.KS ────────────────────────────────────
+# ─── 2. 금액 한도 차단 흐름 — 005930.KS (종목은 해제, 한도 가드 유지) ───
 
-class TestBlockedFlow005930(unittest.TestCase):
+class TestAmountBlockedFlow005930(unittest.TestCase):
     def setUp(self):
+        # 종목 제한 해제됐지만 319,000 > 100,000 한도 → 금액 가드로 차단
         self.prev, self.pld, self.disp = _full_flow("005930.KS", price=319000, qty=1)
 
     def test_preview_blocked(self):
@@ -100,17 +101,19 @@ class TestBlockedFlow005930(unittest.TestCase):
     def test_dispatch_always_blocked(self):
         self.assertFalse(self.disp["live_order_sent"])
 
-    def test_preview_has_anomaly_block(self):
-        self.assertTrue(any("anomaly" in b for b in self.prev["blocks"]))
+    def test_preview_has_amount_block_not_symbol(self):
+        combined = " ".join(self.prev["blocks"])
+        self.assertIn("한도_초과", combined)
+        self.assertNotIn("blocked_symbol", combined)
 
 
-# ─── 3. 차단 흐름 — 161510.KS ────────────────────────────────────
+# ─── 3. 종목 제한 해제 흐름 — 161510.KS ──────────────────────────
 
-class TestBlockedFlow161510(unittest.TestCase):
-    def test_blocked_161510(self):
+class TestUnlockedFlow161510(unittest.TestCase):
+    def test_161510_allowed_within_limit(self):
         prev, pld, _ = _full_flow("161510.KS", price=1000, qty=1)
-        self.assertFalse(prev["ok"])
-        self.assertFalse(pld["ok"])
+        self.assertTrue(prev["ok"])
+        self.assertTrue(pld["ok"])
 
 
 # ─── 4. 금액 한도 초과 ───────────────────────────────────────────

@@ -95,17 +95,17 @@ class TestSampleInsufficient(unittest.TestCase):
 
 
 class TestBlockedSymbols(unittest.TestCase):
-    """위험 종목 차단."""
+    """종목 제한 해제 — 블록목록 비활성, 모든 종목 symbol-guard 통과."""
 
-    def test_161510_blocked(self):
+    def test_161510_no_longer_blocked(self):
         r = check_symbol_allowed("161510.KS")
-        self.assertFalse(r["allowed"])
-        self.assertTrue(any("위험" in b or "저신뢰" in b for b in r["blocks"]))
+        self.assertTrue(r["allowed"])
+        self.assertEqual(r["blocks"], [])
 
-    def test_005930_blocked(self):
+    def test_005930_no_longer_blocked(self):
         r = check_symbol_allowed("005930.KS")
-        self.assertFalse(r["allowed"])
-        self.assertTrue(any("anomaly" in b or "price" in b for b in r["blocks"]))
+        self.assertTrue(r["allowed"])
+        self.assertEqual(r["blocks"], [])
 
     def test_069500_preferred(self):
         r = check_symbol_allowed("069500.KS")
@@ -124,10 +124,9 @@ class TestPreferredSymbols(unittest.TestCase):
         policy = compute_toss_live_pilot_policy(evaluated_count=0)
         self.assertIn("069500.KS", policy["preferred_symbols"])
 
-    def test_blocked_list_contains_danger_symbols(self):
+    def test_blocked_list_empty_after_unlock(self):
         policy = compute_toss_live_pilot_policy(evaluated_count=0)
-        self.assertIn("161510.KS", policy["blocked_symbols"])
-        self.assertIn("005930.KS", policy["blocked_symbols"])
+        self.assertEqual(policy["blocked_symbols"], [])
 
 
 class TestNoSensitiveInfo(unittest.TestCase):

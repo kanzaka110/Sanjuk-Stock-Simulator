@@ -28,11 +28,11 @@ _MAX_ORDER_KRW_STABLE = 300_000
 _MAX_DAILY_KRW = 300_000
 _MAX_ORDERS_PER_DAY = 1
 
-# 위험/anomaly 이력 종목 → 항상 block
-_BLOCKED_SYMBOLS: frozenset[str] = frozenset(["161510.KS", "005930.KS", "MU"])
+# 종목 제한 해제: 블록목록/허용목록 모두 비활성 (BUY_ONLY/Hermes PASS/최종승인/금액한도 가드는 유지)
+_BLOCKED_SYMBOLS: frozenset[str] = frozenset()
 
-# 허용 종목 (live pilot 단계에서만 사용)
-_LIVE_ALLOWED_SYMBOLS: list[str] = ["091180.KS", "360750.KS"]
+# 허용 종목 화이트리스트 해제 (빈 목록 = 종목 화이트리스트 강제 없음)
+_LIVE_ALLOWED_SYMBOLS: list[str] = []
 
 # 고신뢰 종목 우선 (paper 참조용)
 _PREFERRED_SYMBOLS: list[str] = ["069500.KS"]
@@ -190,15 +190,9 @@ def check_symbol_allowed(symbol: str, policy: dict | None = None) -> dict:
 
     blocks: list[str] = []
 
+    # 종목 제한 해제 — _BLOCKED_SYMBOLS 비어 있으면 차단 없음
     if symbol in _BLOCKED_SYMBOLS:
-        if symbol == "161510.KS":
-            blocks.append("위험_저신뢰_종목")
-        elif symbol == "005930.KS":
-            blocks.append("price_anomaly_history")
-        elif symbol == "MU":
-            blocks.append("blocked_symbol_MU")
-        else:
-            blocks.append("blocked_symbol")
+        blocks.append(f"blocked_symbol: {symbol}")
 
     preferred = symbol in _PREFERRED_SYMBOLS
 

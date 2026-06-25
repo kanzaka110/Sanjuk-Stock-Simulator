@@ -4,7 +4,7 @@ compute_toss_live_pilot_policy env gate 테스트.
 - 기본 env 없음 → disabled
 - 1/2개 env만 true → disabled
 - 3개 env 모두 true → enabled 가능
-- blocked_symbols에 MU 포함
+- 종목 제한 해제 → blocked_symbols/live_allowed_symbols 빈 목록
 """
 
 import unittest
@@ -169,49 +169,37 @@ class TestAllGatesEnabled(unittest.TestCase):
         self.assertGreaterEqual(policy["max_orders_per_day"], 1)
 
 
-# ─── 5. blocked_symbols ──────────────────────────────────
+# ─── 5. blocked_symbols (종목 제한 해제) ──────────────────
 
 class TestBlockedSymbols(unittest.TestCase):
-    def test_blocked_symbols_contains_005930(self):
+    def test_blocked_symbols_empty_after_unlock(self):
         policy = compute_toss_live_pilot_policy(evaluated_count=0)
-        self.assertIn("005930.KS", policy["blocked_symbols"])
+        self.assertEqual(policy["blocked_symbols"], [])
 
-    def test_blocked_symbols_contains_161510(self):
-        policy = compute_toss_live_pilot_policy(evaluated_count=0)
-        self.assertIn("161510.KS", policy["blocked_symbols"])
-
-    def test_blocked_symbols_contains_mu(self):
-        policy = compute_toss_live_pilot_policy(evaluated_count=0)
-        self.assertIn("MU", policy["blocked_symbols"])
-
-    def test_check_symbol_mu_blocked(self):
+    def test_check_symbol_mu_allowed(self):
         result = check_symbol_allowed("MU")
-        self.assertFalse(result["allowed"])
-        self.assertTrue(any("MU" in b for b in result["blocks"]))
+        self.assertTrue(result["allowed"])
+        self.assertEqual(result["blocks"], [])
 
-    def test_check_symbol_005930_blocked(self):
+    def test_check_symbol_005930_allowed(self):
         result = check_symbol_allowed("005930.KS")
-        self.assertFalse(result["allowed"])
+        self.assertTrue(result["allowed"])
 
     def test_check_symbol_091180_allowed(self):
         result = check_symbol_allowed("091180.KS")
         self.assertTrue(result["allowed"])
 
 
-# ─── 6. live_allowed_symbols ─────────────────────────────
+# ─── 6. live_allowed_symbols (화이트리스트 해제) ──────────
 
 class TestLiveAllowedSymbols(unittest.TestCase):
     def test_live_allowed_symbols_present(self):
         policy = compute_toss_live_pilot_policy(evaluated_count=0)
         self.assertIn("live_allowed_symbols", policy)
 
-    def test_091180_in_live_allowed(self):
+    def test_live_allowed_symbols_empty_after_unlock(self):
         policy = compute_toss_live_pilot_policy(evaluated_count=0)
-        self.assertIn("091180.KS", policy["live_allowed_symbols"])
-
-    def test_360750_in_live_allowed(self):
-        policy = compute_toss_live_pilot_policy(evaluated_count=0)
-        self.assertIn("360750.KS", policy["live_allowed_symbols"])
+        self.assertEqual(policy["live_allowed_symbols"], [])
 
 
 # ─── 7. 민감정보 없음 ────────────────────────────────────

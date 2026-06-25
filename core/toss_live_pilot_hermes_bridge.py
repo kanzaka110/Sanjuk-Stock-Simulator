@@ -251,7 +251,8 @@ def _build_mirror_context(
 ) -> dict:
     """Hermes 메시지용 컨텍스트 dict 빌드."""
     blocked = policy.get("blocked_symbols") or []
-    allowed = [s for s in ["091180.KS", "360750.KS"] if s not in blocked]
+    # 종목 화이트리스트 해제 — policy의 live_allowed_symbols 반영 (빈 목록 = 제한 없음)
+    allowed = [s for s in (policy.get("live_allowed_symbols") or []) if s not in blocked]
     sym = preview_record.get("symbol", "")
     return {
         "verification_id": verification.get("verification_id", ""),

@@ -56,7 +56,7 @@ def build_toss_order_payload(
             from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
             policy = compute_toss_live_pilot_policy()
         except Exception:
-            policy = {"max_order_krw": 100_000, "blocked_symbols": ["161510.KS", "005930.KS", "MU"]}
+            policy = {"max_order_krw": 100_000, "blocked_symbols": []}
 
     symbol = preview.get("symbol", "")
     side = preview.get("side", "buy")
