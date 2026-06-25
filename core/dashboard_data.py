@@ -1897,6 +1897,7 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20) -> dict:
             "excluded": result["excluded"][:limit],
             "count": result["count"],
             "excluded_count": result["excluded_count"],
+            "scan_summary": result.get("scan_summary", {}),
             "range": range_,
             "max_order_krw": max_order_krw,
             "note": result["note"],

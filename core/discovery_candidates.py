@@ -68,6 +68,7 @@ class DiscoverySections:
     new_discovery: tuple[NewCandidate, ...] = ()
     new_rejected: tuple[RejectedCandidate, ...] = ()
     market: str = ""
+    scan_summary: dict = field(default_factory=dict)
 
 
 # ── 컨텍스트 helpers ───────────────────────────────────────────────
@@ -292,6 +293,230 @@ def build_new_discovery(
     return tuple(passed), tuple(rejected)
 
 
+# ── 런타임 의존성 없는(requests-only) 모멘텀 계산 ─────────────────
+# pandas/pykrx/yfinance 미설치 환경에서도 동작하는 순수 파이썬 지표.
+
+def _ret_pct(closes: list[float], n: int) -> float:
+    """n일 전 대비 수익률(%). 데이터 부족 시 0."""
+    if len(closes) <= n or closes[-1 - n] <= 0:
+        return 0.0
+    return round((closes[-1] / closes[-1 - n] - 1) * 100, 2)
+
+
+def _pct_from_high(closes: list[float]) -> float:
+    """기간 내 최고가 대비 현재가 위치(%, 음수=하단)."""
+    if not closes:
+        return 0.0
+    hi = max(closes)
+    if hi <= 0:
+        return 0.0
+    return round((closes[-1] / hi - 1) * 100, 2)
+
+
+def _rsi_from_closes(closes: list[float], period: int = 14) -> float:
+    """순수 파이썬 RSI(14). 데이터 부족 시 중립값 50."""
+    if len(closes) <= period:
+        return 50.0
+    gains = 0.0
+    losses = 0.0
+    for i in range(-period, 0):
+        diff = closes[i] - closes[i - 1]
+        if diff >= 0:
+            gains += diff
+        else:
+            losses -= diff
+    if losses == 0:
+        return 100.0
+    rs = (gains / period) / (losses / period)
+    return round(100 - 100 / (1 + rs), 1)
+
+
+def _avg_turnover(closes: list[float], vols: list[int], lookback: int = 20) -> float:
+    """최근 lookback일 평균 거래대금(종가×거래량)."""
+    n = min(len(closes), len(vols), lookback)
+    if n == 0:
+        return 0.0
+    total = sum(closes[-i] * vols[-i] for i in range(1, n + 1))
+    return total / n
+
+
+def _vol_surge(vols: list[int], lookback: int = 20) -> float:
+    """최근 거래량 / 직전 평균 거래량 비율. 데이터 부족 시 1.0."""
+    if len(vols) < 5:
+        return 1.0
+    recent = vols[-1]
+    base = [v for v in vols[-(lookback + 1):-1] if v > 0]
+    if not base:
+        return 1.0
+    avg = sum(base) / len(base)
+    if avg <= 0:
+        return 1.0
+    return round(recent / avg, 2)
+
+
+def _light_quote_kr(ticker: str) -> dict | None:
+    """KIS 일봉(requests-only)으로 KR 종목 시세+모멘텀. pandas 불필요."""
+    from core.market_kis import get_domestic_chart, get_domestic_price
+
+    chart = get_domestic_chart(ticker, period="3mo", interval="1d")
+    closes: list[float] = []
+    vols: list[int] = []
+    if chart and chart.get("points"):
+        for p in chart["points"]:
+            c = float(p.get("close") or 0)
+            if c > 0:
+                closes.append(c)
+                vols.append(int(p.get("volume") or 0))
+
+    if closes:
+        price = closes[-1]
+        change_pct = float(chart.get("day_pct") or 0.0)
+    else:
+        q = get_domestic_price(ticker)
+        if q is None:
+            return None
+        price = float(q.price)
+        change_pct = float(q.pct)
+    if price <= 0:
+        return None
+
+    turnover = _avg_turnover(closes, vols)
+    return {
+        "ticker": ticker, "name": _name_for(ticker), "market": "KR",
+        "price": price, "change_pct": change_pct,
+        "ret_20d": _ret_pct(closes, 20), "ret_60d": _ret_pct(closes, 60),
+        "rsi": _rsi_from_closes(closes), "vol_surge": _vol_surge(vols),
+        "pct_from_52w_high": _pct_from_high(closes),
+        # 거래대금 미산출 시 curated 유니버스이므로 최소 기준값으로 보정
+        "volume_value": turnover if turnover > 0 else _MIN_KR_VALUE_KRW,
+        "source": "유니버스(fallback)", "tags": ("유니버스",),
+        "has_catalyst": False,
+    }
+
+
+def _light_quote_us(ticker: str) -> dict | None:
+    """KIS 해외 현재가(requests-only)로 US 종목. 모멘텀은 중립(차트 미수집)."""
+    from core.market_kis import get_overseas_price
+
+    q = get_overseas_price(ticker)
+    if q is None:
+        return None
+    price = float(q.price)
+    if price <= 0:
+        return None
+    return {
+        "ticker": ticker, "name": _name_for(ticker), "market": "US",
+        "price": price, "change_pct": float(q.pct),
+        "ret_20d": 0.0, "ret_60d": 0.0, "rsi": 50.0, "vol_surge": 1.0,
+        "pct_from_52w_high": 0.0, "volume_value": _MIN_US_MCAP,
+        "source": "유니버스(fallback)", "tags": ("유니버스",),
+        "has_catalyst": False,
+    }
+
+
+def _light_quote(ticker: str, market: str) -> dict | None:
+    """단일 종목 경량 시세 (requests-only). 실패 시 None — 테스트 seam."""
+    try:
+        if market == "KR":
+            return _light_quote_kr(ticker)
+        return _light_quote_us(ticker)
+    except Exception as e:
+        log.debug("light_quote 실패 [%s]: %s", ticker, e)
+        return None
+
+
+def _pandas_available() -> bool:
+    """pandas 설치 여부 — 미설치 시 scanner 경로를 건너뛰고 fallback."""
+    import importlib.util
+    return importlib.util.find_spec("pandas") is not None
+
+
+def _markets_for(briefing_type: str) -> list[str]:
+    if briefing_type in ("KR_BEFORE", "KR_NIGHT", "KR_OPEN"):
+        return ["KR"]
+    if briefing_type in ("US_BEFORE", "US_NIGHT"):
+        return ["US"]
+    return ["KR", "US"]
+
+
+def _universe_for(markets: list[str]) -> dict[str, tuple[str, str]]:
+    """{ticker: (market, name)} — SCAN_UNIVERSE 기반 fallback 모집단."""
+    uni: dict[str, tuple[str, str]] = {}
+    try:
+        from config.settings import SCAN_UNIVERSE_KR, SCAN_UNIVERSE_US
+        if "KR" in markets:
+            uni.update({t: ("KR", n) for t, n in SCAN_UNIVERSE_KR.items()})
+        if "US" in markets:
+            uni.update({t: ("US", n) for t, n in SCAN_UNIVERSE_US.items()})
+    except Exception as e:
+        log.warning("SCAN_UNIVERSE 로드 실패: %s", e)
+    return uni
+
+
+def _fallback_universe_candidates(markets: list[str]) -> list[dict]:
+    """pandas/pykrx 없이 SCAN_UNIVERSE를 직접 스캔 — 핵심 안전망."""
+    uni = _universe_for(markets)
+    out: list[dict] = []
+    for ticker, (mkt, name) in uni.items():
+        q = _light_quote(ticker, mkt)
+        if q is None:
+            continue
+        q.setdefault("name", name)
+        out.append(q)
+    return out
+
+
+def scan_discovery_candidates(briefing_type: str = "MANUAL") -> tuple[list[dict], dict]:
+    """후보 모집단 + 스캔 메타 반환.
+
+    1순위: scanner.py(유니버스+전시장 발굴, pandas 필요).
+    pandas 미설치 또는 결과 0건이면 SCAN_UNIVERSE 기반 fallback을 반드시 수행한다.
+    단순 예외 로그 후 빈 결과를 반환하지 않는다.
+    """
+    markets = _markets_for(briefing_type)
+    universe_count = len(_universe_for(markets))
+    pandas_ok = _pandas_available()
+    fallback_used = False
+    candidates: list[dict] = []
+
+    if pandas_ok:
+        try:
+            candidates = _default_scan_candidates(briefing_type)
+        except Exception as e:
+            log.warning("scanner 경로 실패 → universe fallback: %s", e)
+            candidates = []
+
+    if not candidates:
+        fallback_used = True
+        candidates = _fallback_universe_candidates(markets)
+
+    meta = {
+        "universe_count": universe_count,
+        "scanned_count": len(candidates),
+        "dependency_fallback_used": fallback_used,
+        "pandas_available": pandas_ok,
+        "source": "universe_fallback" if fallback_used else "scanner",
+    }
+    return candidates, meta
+
+
+_REJECT_CATEGORIES = (
+    ("데이터 부족", "데이터 부족"),
+    ("거래대금", "거래대금/유동성 부족"),
+    ("급등 추격", "당일 급등 추격"),
+    ("수급 미확인", "수급 미확인"),
+    ("손익비", "손익비 부족"),
+    ("스캔 결과 없음", "스캔 결과 없음"),
+)
+
+
+def _reject_category(reason: str) -> str:
+    for key, label in _REJECT_CATEGORIES:
+        if key in reason:
+            return label
+    return reason
+
+
 # ── 스캐너 → 후보 정규화 (프로덕션 기본 소스) ───────────────────────
 
 def _default_scan_candidates(briefing_type: str) -> list[dict]:
@@ -350,11 +575,42 @@ def build_discovery_sections(
         recent_reco = d_recent if recent_reco is None else recent_reco
 
     if scan_candidates is None:
-        scan_candidates = _default_scan_candidates(briefing_type)
+        scan_candidates, scan_meta = scan_discovery_candidates(briefing_type)
+    else:
+        scan_meta = {
+            "universe_count": len(scan_candidates),
+            "scanned_count": len(scan_candidates),
+            "dependency_fallback_used": False,
+            "pandas_available": _pandas_available(),
+            "source": "injected",
+        }
 
     passed, rejected = build_new_discovery(
         scan_candidates, held=held, watchlist=watchlist, ria=ria, recent_reco=recent_reco,
     )
+    rejected_list = list(rejected)
+
+    # 스캔 자체가 비어있으면(런타임 시세/의존성 수집 실패) 사유를 명시 — 빈 결과 금지
+    if scan_meta.get("scanned_count", 0) == 0:
+        rejected_list.insert(0, RejectedCandidate(
+            ticker="*", name="신규 스캔",
+            reason="신규 스캔 결과 없음 — 런타임 시세/의존성 수집 실패 (universe fallback도 비어있음)",
+        ))
+
+    cat_counts: dict[str, int] = {}
+    for r in rejected_list:
+        cat = _reject_category(r.reason)
+        cat_counts[cat] = cat_counts.get(cat, 0) + 1
+    top_reasons = [
+        {"reason": k, "count": v}
+        for k, v in sorted(cat_counts.items(), key=lambda x: -x[1])[:_TOP_REJECTED]
+    ]
+    scan_summary = {
+        **scan_meta,
+        "pass_count": len(passed),
+        "reject_count": len(rejected_list),
+        "top_reject_reasons": top_reasons,
+    }
 
     holdings = tuple(
         {"ticker": t, "name": _name_for(t), "section": "보유종목 관리"}
@@ -371,8 +627,9 @@ def build_discovery_sections(
         holdings_management=holdings,
         watchlist_reeval=reeval,
         new_discovery=passed,
-        new_rejected=rejected[:_TOP_REJECTED],
+        new_rejected=tuple(rejected_list[:_TOP_REJECTED]),
         market=market,
+        scan_summary=scan_summary,
     )
 
 
@@ -436,6 +693,7 @@ def toss_eligible_new_candidates(
     """
     items: list[dict] = []
     excluded: list[dict] = []
+    scan_summary = dict(getattr(sections, "scan_summary", {}) or {})
 
     # 기존 후보 재사용 금지 명시
     excluded.append({
@@ -443,6 +701,14 @@ def toss_eligible_new_candidates(
         "reason": "기존 삼성/RIA/관심 후보는 토스 후보로 재사용 안 함 (신규 발굴 기반만 사용)",
         "scope": "reuse_blocked",
     })
+
+    # 스캔 자체가 0건이면 런타임 사유를 명시 (reuse_blocked 단독 노출 방지)
+    if scan_summary.get("scanned_count", 1) == 0:
+        excluded.append({
+            "ticker": "*",
+            "reason": "신규 스캔 불가 — 런타임 시세/의존성 수집 실패 (universe fallback도 비어있음)",
+            "scope": "scan_unavailable",
+        })
 
     for c in sections.new_discovery:
         if c.market != "KR":
@@ -482,5 +748,6 @@ def toss_eligible_new_candidates(
         "excluded": excluded,
         "count": len(items),
         "excluded_count": len(excluded),
+        "scan_summary": scan_summary,
         "note": "신규 발굴 기반 토스 소액 후보만 표시 (기존 삼성/RIA 재사용 안 함).",
     }

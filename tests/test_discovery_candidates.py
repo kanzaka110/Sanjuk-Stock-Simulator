@@ -17,11 +17,13 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+import core.discovery_candidates as disc
 from core.discovery_candidates import (
     build_new_discovery,
     build_discovery_sections,
     render_discovery_text,
     toss_eligible_new_candidates,
+    scan_discovery_candidates,
     NewCandidate,
     RejectedCandidate,
     DiscoverySections,
@@ -232,6 +234,102 @@ class TestIdeaFirstRender(unittest.TestCase):
         passed, _ = build_new_discovery([c], **_ctx())
         self.assertTrue(passed)
         self.assertTrue(passed[0].idea)
+
+
+# ─── 8. 런타임 의존성 없는 fallback 스캔 ──────────────────────────
+
+def _light_quote_stub(ticker, market):
+    """pandas/pykrx 없이도 동작하는 경량 시세 stub (네트워크 없음)."""
+    if market != "KR":
+        return None
+    return {
+        "ticker": ticker, "name": disc._name_for(ticker), "market": "KR",
+        "price": 40_000.0, "change_pct": 2.0, "ret_20d": 9.0, "ret_60d": 20.0,
+        "rsi": 58.0, "vol_surge": 2.1, "pct_from_52w_high": -4.0,
+        "volume_value": 6e10, "source": "유니버스(fallback)",
+        "tags": ("유니버스",), "has_catalyst": True,
+    }
+
+
+class TestDependencyFallbackScan(unittest.TestCase):
+    def test_fallback_used_when_pandas_missing(self):
+        # pandas 미설치를 가정 + 네트워크 없는 경량 시세
+        orig_pd, orig_lq = disc._pandas_available, disc._light_quote
+        disc._pandas_available = lambda: False
+        disc._light_quote = _light_quote_stub
+        try:
+            cands, meta = scan_discovery_candidates("KR_BEFORE")
+        finally:
+            disc._pandas_available, disc._light_quote = orig_pd, orig_lq
+        self.assertTrue(meta["dependency_fallback_used"])
+        self.assertGreater(meta["universe_count"], 0)
+        self.assertGreater(meta["scanned_count"], 0)
+        # 유니버스 기반으로 실제 후보가 만들어졌다 (보유 제외 후에도 남음)
+        self.assertGreater(len(cands), 0)
+
+    def test_fallback_produces_passing_new_candidates(self):
+        orig_pd, orig_lq = disc._pandas_available, disc._light_quote
+        disc._pandas_available = lambda: False
+        disc._light_quote = _light_quote_stub
+        try:
+            sections = build_discovery_sections(briefing_type="KR_BEFORE")
+        finally:
+            disc._pandas_available, disc._light_quote = orig_pd, orig_lq
+        # 유니버스 비보유 종목이 신규 발굴로 통과해야 한다
+        self.assertGreater(len(sections.new_discovery), 0)
+        new_tickers = {c.ticker for c in sections.new_discovery}
+        d_held, d_wl, d_ria, _ = disc._known_sets()
+        self.assertEqual(new_tickers & (d_held | d_wl | d_ria), set())
+
+
+# ─── 9. scan_summary 노출 ─────────────────────────────────────────
+
+class TestScanSummary(unittest.TestCase):
+    def test_sections_carry_scan_summary(self):
+        orig_pd, orig_lq = disc._pandas_available, disc._light_quote
+        disc._pandas_available = lambda: False
+        disc._light_quote = _light_quote_stub
+        try:
+            sections = build_discovery_sections(briefing_type="KR_BEFORE")
+        finally:
+            disc._pandas_available, disc._light_quote = orig_pd, orig_lq
+        s = sections.scan_summary
+        for k in ("universe_count", "scanned_count", "pass_count",
+                  "reject_count", "top_reject_reasons", "dependency_fallback_used"):
+            self.assertIn(k, s)
+
+    def test_toss_output_includes_scan_summary(self):
+        orig_pd, orig_lq = disc._pandas_available, disc._light_quote
+        disc._pandas_available = lambda: False
+        disc._light_quote = _light_quote_stub
+        try:
+            sections = build_discovery_sections(briefing_type="KR_BEFORE")
+        finally:
+            disc._pandas_available, disc._light_quote = orig_pd, orig_lq
+        result = toss_eligible_new_candidates(sections, max_order_krw=100_000)
+        self.assertIn("scan_summary", result)
+        self.assertTrue(result["scan_summary"])
+
+
+# ─── 10. 스캔 전면 실패 시에도 탈락 사유 노출 ─────────────────────
+
+class TestScanTotalFailure(unittest.TestCase):
+    def test_excluded_has_reasons_not_only_reuse_blocked(self):
+        # 모든 시세 수집 실패 (None) → 스캔 0건
+        orig_pd, orig_lq = disc._pandas_available, disc._light_quote
+        disc._pandas_available = lambda: False
+        disc._light_quote = lambda t, m: None
+        try:
+            sections = build_discovery_sections(briefing_type="KR_BEFORE")
+        finally:
+            disc._pandas_available, disc._light_quote = orig_pd, orig_lq
+        result = toss_eligible_new_candidates(sections, max_order_krw=100_000)
+        scopes = {e.get("scope") for e in result["excluded"]}
+        # reuse_blocked 하나만 있으면 실패 — 스캔 사유가 함께 있어야 한다
+        self.assertNotEqual(scopes, {"reuse_blocked"})
+        self.assertTrue(
+            "scan_rejected" in scopes or "scan_unavailable" in scopes)
+        self.assertEqual(sections.scan_summary["scanned_count"], 0)
 
 
 if __name__ == "__main__":

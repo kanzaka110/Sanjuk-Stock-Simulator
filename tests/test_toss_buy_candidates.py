@@ -101,3 +101,42 @@ def test_toss_buy_candidates_us_excluded(monkeypatch):
     result = dd.toss_buy_candidates_data(range_="today")
 
     assert "XYZ" not in {i["symbol"] for i in result["items"]}
+
+
+def test_toss_buy_candidates_returns_scan_summary(monkeypatch):
+    # pandas 미설치 + 네트워크 없는 경량 시세 → 실제 universe fallback 스캔
+    monkeypatch.setattr(dd, "_cache", {}, raising=False)
+    monkeypatch.setattr(disc, "_pandas_available", lambda: False)
+    monkeypatch.setattr(
+        disc, "_light_quote",
+        lambda t, m: ({
+            "ticker": t, "name": disc._name_for(t), "market": "KR",
+            "price": 40_000.0, "change_pct": 2.0, "ret_20d": 9.0,
+            "ret_60d": 20.0, "rsi": 58.0, "vol_surge": 2.1,
+            "pct_from_52w_high": -4.0, "volume_value": 6e10,
+            "source": "유니버스(fallback)", "tags": ("유니버스",),
+            "has_catalyst": True,
+        } if m == "KR" else None),
+    )
+
+    result = dd.toss_buy_candidates_data(range_="today")
+
+    assert result.get("scan_summary"), "scan_summary 누락"
+    s = result["scan_summary"]
+    assert s["dependency_fallback_used"] is True
+    assert s["universe_count"] > 0
+    for k in ("scanned_count", "pass_count", "reject_count", "top_reject_reasons"):
+        assert k in s
+
+
+def test_toss_buy_candidates_scan_failure_has_reasons(monkeypatch):
+    monkeypatch.setattr(dd, "_cache", {}, raising=False)
+    monkeypatch.setattr(disc, "_pandas_available", lambda: False)
+    monkeypatch.setattr(disc, "_light_quote", lambda t, m: None)
+
+    result = dd.toss_buy_candidates_data(range_="today")
+
+    # items=0이어도 excluded가 reuse_blocked 하나만은 아니어야 한다
+    scopes = {e.get("scope") for e in result["excluded"]}
+    assert scopes != {"reuse_blocked"}
+    assert result["scan_summary"]["scanned_count"] == 0
