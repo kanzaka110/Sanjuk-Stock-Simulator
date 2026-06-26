@@ -306,6 +306,7 @@ HOLDINGS_GENERAL: dict[str, dict] = {
 HOLDINGS_RIA: dict[str, dict] = {
     "069500.KS": {"shares": 12, "avg_cost_krw": 142_000},  # KODEX 200 (6/23 6주 @146,000 추가매수)
     "091160.KS": {"shares": 9, "avg_cost_krw": 178_000},   # KODEX 반도체 (6/19 매수)
+    "229200.KS": {"shares": 30, "avg_cost_krw": 15_500},   # KODEX 코스닥150 (6/26 매수)
 }
 
 # 매도대금 누적 (수수료 차감 후 추정):
@@ -314,7 +315,8 @@ HOLDINGS_RIA: dict[str, dict] = {
 #   3차 ≈ ₩3,738,952 ($2,504.97 × ₩1,492.68, 수수료 추정 차감 후)
 #   합계 ≈ ₩20,485,776
 # RIA_CASH: 삼성증권 스샷 기준 2026-06-24 현금잔고 ₩17,341,329
-RIA_CASH: float = 17_341_329.0
+#   2026-06-26: KODEX 코스닥150 30주 @₩15,500 매수 -₩465,000 → ₩16,876,329
+RIA_CASH: float = 16_876_329.0
 
 # RIA 5/31 면제 누적 양도차익 (USD) — 최종 확정
 #   1차 5/12: GOOGL $620.73 + NVDA $1,980.06 = $2,600.79
@@ -346,10 +348,11 @@ HOLDINGS_PENSION: dict[str, dict] = {
     "133690.KS": {"shares": 69, "avg_cost_krw": 102_974},   # TIGER 미국나스닥100
     "360750.KS": {"shares": 310, "avg_cost_krw": 18_214},   # TIGER 미국S&P500
     "251350.KS": {"shares": 20, "avg_cost_krw": 37_145},    # KODEX MSCI선진국
-    "161510.KS": {"shares": 20, "avg_cost_krw": 26_180},    # PLUS 고배당주
+    # 161510.KS: PLUS 고배당주 20주 → 2026-06-25 전량 매도 @ ₩24,200 (실현손익 -₩39,600 / -7.56%)
 }
 # PENSION_MMF: 삼성증권 스샷 기준 2026-06-24 삼성신종류형 MMF ₩6,957,019
-PENSION_MMF: float = 6_957_019.0
+#   2026-06-25: PLUS 고배당주 20주 @₩24,200 매도 +₩484,000 → ₩7,441,019
+PENSION_MMF: float = 7_441_019.0
 
 # [ISA] 중개형 ISA (7180216799-14, 2026-04-07 개설)
 # 매수 이력:
