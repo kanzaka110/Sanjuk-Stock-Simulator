@@ -723,6 +723,7 @@ def toss_eligible_new_candidates(
         over_limit = est > max_order_krw
         item = {
             "symbol": c.ticker, "name": c.name, "side": "buy", "quantity": 1,
+            "price": c.price,
             "limit_price": c.price, "estimated_amount_krw": round(c.price, 2),
             "market": c.market, "idea": c.idea, "score": c.score,
             "target_price": c.target_price, "stop_loss": c.stop_loss,

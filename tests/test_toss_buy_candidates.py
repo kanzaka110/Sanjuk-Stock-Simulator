@@ -103,6 +103,18 @@ def test_toss_buy_candidates_over_limit_shown_not_executable(monkeypatch):
     assert result["scan_summary"]["limit_exceeded_count"] >= 1
 
 
+def test_toss_buy_candidates_price_field_populated(monkeypatch):
+    # price 필드는 라이브 시세(limit_price)와 동일하게 채워져야 한다 (None 금지).
+    sections = _sections(new=[_new_cand("000111.KS", "소액주", price=30_000)])
+    _patch_sections(monkeypatch, sections)
+
+    result = dd.toss_buy_candidates_data(range_="today")
+
+    item = next(i for i in result["items"] if i["symbol"] == "000111.KS")
+    assert item["price"] is not None
+    assert item["price"] == item["limit_price"] == 30_000.0
+
+
 def test_toss_buy_candidates_within_limit_executable(monkeypatch):
     # 한도 이내 후보는 executable_now=True / limit_exceeded=False.
     sections = _sections(new=[_new_cand("000111.KS", "소액주", price=30_000)])
