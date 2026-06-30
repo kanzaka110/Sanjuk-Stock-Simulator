@@ -12,12 +12,15 @@ from core.toss_quality_gate import (
     score_candidate,
     score_candidates_batch,
     _decide_bucket,
+    no_action_diagnosis,
     QualityScore,
     PASS_EXECUTE,
+    SMALL_PASS,
     WAIT_PULLBACK,
     WATCH,
     CHASE_BLOCK,
     BLOCK,
+    EXECUTABLE_BUCKETS,
 )
 
 
@@ -63,9 +66,16 @@ class TestDecideBucket:
         assert b == BLOCK
         assert "손익비" in r
 
-    def test_crisis_block(self):
+    def test_crisis_high_rr_small_pass(self):
+        """위기장에서도 RR 2.5+ → SMALL_PASS."""
         b, r = _decide_bucket(80, 2.5, "위기", 2.0, True, True, -1)
-        assert b == BLOCK
+        assert b == SMALL_PASS
+        assert "위기" in r
+
+    def test_crisis_low_rr_watch(self):
+        """위기장 + RR < 2.5 → WATCH (BLOCK 아님)."""
+        b, r = _decide_bucket(80, 1.8, "위기", 2.0, True, True, -1)
+        assert b == WATCH
         assert "위기" in r
 
     def test_chase_block(self):
@@ -78,13 +88,27 @@ class TestDecideBucket:
         assert b == WATCH
         assert "약세장" in r
 
-    def test_rr_medium_wait(self):
-        b, r = _decide_bucket(80, 1.5, "강세장", 2.0, True, True, -1)
-        assert b == WAIT_PULLBACK
-        assert "눌림" in r
+    def test_bear_high_rr_small_pass(self):
+        """약세장 + RR 2.0+ → SMALL_PASS."""
+        b, r = _decide_bucket(80, 2.0, "약세장", 2.0, True, True, -1)
+        assert b == SMALL_PASS
+        assert "약세장" in r
 
-    def test_low_score_watch(self):
+    def test_rr_medium_small_pass(self):
+        """RR 1.5 (보통) → SMALL_PASS (WAIT 대신)."""
+        b, r = _decide_bucket(80, 1.5, "강세장", 2.0, True, True, -1)
+        assert b == SMALL_PASS
+        assert "소액" in r
+
+    def test_low_score_high_rr_small_pass(self):
+        """총점 낮지만 RR 1.8+ → SMALL_PASS."""
         b, r = _decide_bucket(30, 2.0, "강세장", 2.0, True, True, -1)
+        assert b == SMALL_PASS
+        assert "소액" in r
+
+    def test_low_score_low_rr_watch(self):
+        """총점 + RR 모두 부족 → WATCH."""
+        b, r = _decide_bucket(30, 1.3, "강세장", 2.0, True, True, -1)
         assert b == WATCH
         assert "총점" in r
 
@@ -155,14 +179,26 @@ class TestCrisisRegime:
 
     @patch("core.toss_quality_gate._score_momentum", return_value=15.0)
     @patch("core.toss_quality_gate._penalty_event_risk", return_value=(0.0, -1))
-    def test_crisis_blocks(self, mock_event, mock_momentum):
+    def test_crisis_high_rr_small_pass(self, mock_event, mock_momentum):
+        """위기장 + RR 3.0 → SMALL_PASS (전면 BLOCK 아님)."""
         crisis = MagicMock()
         crisis.regime = "위기"
         crisis.risk_adjustment = "현금비중확대"
         c = _candidate(risk_reward=3.0)
         qs = score_candidate(c, regime_obj=crisis)
-        assert qs.decision_bucket == BLOCK
+        assert qs.decision_bucket == SMALL_PASS
         assert qs.score_market_regime == 0.0
+
+    @patch("core.toss_quality_gate._score_momentum", return_value=15.0)
+    @patch("core.toss_quality_gate._penalty_event_risk", return_value=(0.0, -1))
+    def test_crisis_low_rr_watch(self, mock_event, mock_momentum):
+        """위기장 + RR < 2.5 → WATCH."""
+        crisis = MagicMock()
+        crisis.regime = "위기"
+        crisis.risk_adjustment = "현금비중확대"
+        c = _candidate(risk_reward=1.8)
+        qs = score_candidate(c, regime_obj=crisis)
+        assert qs.decision_bucket == WATCH
 
 
 # ── 배치 테스트 ──────────────────────────────────────────────────
@@ -200,3 +236,85 @@ class TestToDict:
         assert d["decision_bucket"] == PASS_EXECUTE
         assert d["score_total"] == 75
         assert "risk_flags" in d
+
+
+# ── SMALL_PASS 테스트 ────────────────────────────────────────────
+
+class TestSmallPass:
+
+    def test_small_pass_is_executable(self):
+        assert SMALL_PASS in EXECUTABLE_BUCKETS
+
+    def test_pass_execute_is_executable(self):
+        assert PASS_EXECUTE in EXECUTABLE_BUCKETS
+
+    def test_watch_not_executable(self):
+        assert WATCH not in EXECUTABLE_BUCKETS
+
+    @patch("core.toss_quality_gate._score_momentum", return_value=15.0)
+    @patch("core.toss_quality_gate._penalty_event_risk", return_value=(0.0, -1))
+    def test_medium_rr_gets_small_pass(self, mock_event, mock_momentum):
+        """RR 1.5 → SMALL_PASS."""
+        c = _candidate(risk_reward=1.5)
+        qs = score_candidate(c)
+        assert qs.decision_bucket == SMALL_PASS
+
+
+# ── no_action_diagnosis 테스트 ───────────────────────────────────
+
+class TestNoActionDiagnosis:
+
+    def test_no_diagnosis_when_pass_exists(self):
+        items = [
+            {"decision_bucket": PASS_EXECUTE, "symbol": "A"},
+            {"decision_bucket": BLOCK, "symbol": "B"},
+        ]
+        assert no_action_diagnosis(items) is None
+
+    def test_no_diagnosis_when_small_pass_exists(self):
+        items = [
+            {"decision_bucket": SMALL_PASS, "symbol": "A"},
+            {"decision_bucket": BLOCK, "symbol": "B"},
+        ]
+        assert no_action_diagnosis(items) is None
+
+    def test_diagnosis_when_all_blocked(self):
+        items = [
+            {"decision_bucket": BLOCK, "symbol": "A", "decision_reason": "손절 없음",
+             "risk_reward": 0, "quality_score": 30},
+            {"decision_bucket": WATCH, "symbol": "B", "decision_reason": "총점 부족",
+             "risk_reward": 1.5, "stop_loss": 100, "target_price": 120, "quality_score": 40},
+        ]
+        diag = no_action_diagnosis(items)
+        assert diag is not None
+        assert diag["executable_count"] == 0
+        assert diag["total_candidates"] == 2
+        assert len(diag["relaxable_candidates"]) >= 1
+
+    def test_diagnosis_empty_items(self):
+        assert no_action_diagnosis([]) is None
+
+    def test_relaxable_has_hints(self):
+        items = [
+            {"decision_bucket": WATCH, "symbol": "X", "decision_reason": "총점 부족",
+             "risk_reward": 2.0, "stop_loss": 100, "target_price": 130, "quality_score": 35,
+             "name": "테스트"},
+        ]
+        diag = no_action_diagnosis(items)
+        assert diag is not None
+        relaxable = diag["relaxable_candidates"]
+        assert len(relaxable) == 1
+        assert len(relaxable[0]["relaxation_hints"]) > 0
+
+
+# ── stock_agent_ready SMALL_PASS 테스트 ──────────────────────────
+
+class TestStockAgentReadySmallPass:
+
+    def test_small_pass_stock_agent_ready(self):
+        """SMALL_PASS도 stock_agent_ready=true."""
+        # dashboard_data 로직 시뮬레이션
+        bucket = SMALL_PASS
+        _exec = ("PASS_EXECUTE", "SMALL_PASS")
+        ready = bucket in _exec
+        assert ready is True

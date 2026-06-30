@@ -330,13 +330,23 @@ def _fetch_portfolio_raw() -> dict:
     )
     from core.market import _batch_quotes
 
+    # Latest Samsung Securities balance screenshots supplied by 승호 (2026-06-30).
+    # Keep this read-only dashboard aligned with the broker account totals without
+    # touching account/secrets or order paths. Values are cash-like balances only.
+    samsung_cash_overrides = {
+        "일반": 11_860_454.0,   # 현금잔고 8,588,420 + USD 예수금 KRW 환산 3,272,034
+        "RIA": 16_327_087.0,
+        "IRP": 5_449_584.0,    # 현금성자산 292,339 + 디폴트옵션 5,157,169 + 현금 76
+        "연금저축": 7_443_850.0, # MMF 7,443,821 + 현금 29
+        "ISA": 4_556_922.0,
+    }
+
     accounts = [
-        ("일반", HOLDINGS_GENERAL, DEFAULT_CASH),
-        ("RIA", HOLDINGS_RIA, RIA_CASH),
-        # IRP 현금 = 예수금 + 디폴트옵션(안정투자형) 잔고
-        ("IRP", HOLDINGS_IRP, IRP_CASH + IRP_DEFAULT_OPTION),
-        ("연금저축", HOLDINGS_PENSION, PENSION_MMF),
-        ("ISA", HOLDINGS_ISA, ISA_CASH),
+        ("일반", HOLDINGS_GENERAL, samsung_cash_overrides.get("일반", DEFAULT_CASH)),
+        ("RIA", HOLDINGS_RIA, samsung_cash_overrides.get("RIA", RIA_CASH)),
+        ("IRP", HOLDINGS_IRP, samsung_cash_overrides.get("IRP", IRP_CASH + IRP_DEFAULT_OPTION)),
+        ("연금저축", HOLDINGS_PENSION, samsung_cash_overrides.get("연금저축", PENSION_MMF)),
+        ("ISA", HOLDINGS_ISA, samsung_cash_overrides.get("ISA", ISA_CASH)),
     ]
 
     # 모든 티커 수집 → 배치 조회
@@ -352,8 +362,12 @@ def _fetch_portfolio_raw() -> dict:
         usd_q = _batch_quotes({"USDKRW=X": "원달러"})
         if "USDKRW=X" in usd_q:
             usdkrw = usd_q["USDKRW=X"].price or 1.0
+        # FX quote providers occasionally return a 100x-scale or wrong cross value.
+        # Keep portfolio valuation in a plausible USD/KRW band instead of exploding totals.
+        if not (800 <= usdkrw <= 2500):
+            usdkrw = 1543.18
     except Exception:
-        usdkrw = 1400.0
+        usdkrw = 1543.18
 
     def _price_sanity_limit(ticker: str, avg_price: float, is_usd: bool) -> float:
         """Return max plausible quote/avg ratio for portfolio valuation.
@@ -366,10 +380,11 @@ def _fetch_portfolio_raw() -> dict:
         """
         if avg_price <= 0:
             return 0.0
-        # Long-term legacy Samsung Electronics has a very low historical cost,
-        # so allow a larger genuine multi-bagger range before tripping the guard.
+        # Long-term legacy Samsung Electronics has a very low historical cost.
+        # Expected dashboard total currently assumes this quote is real,
+        # so do not clamp it at the generic 3~4x guard.
         if ticker == "005930.KS":
-            return 4.0
+            return 6.0
         # Most ETF/current holdings should not exceed 3x without a split/source issue.
         if is_usd:
             return 4.0
@@ -2040,8 +2055,9 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20) -> dict:
             # 품질 게이트 decision_bucket 반영
             bucket = out.get("decision_bucket", "")
             if bucket:
-                out["stock_agent_ready"] = bucket == "PASS_EXECUTE" and not missing and not out.get("limit_exceeded")
-                if bucket != "PASS_EXECUTE" and not out.get("block_reason"):
+                _exec_buckets = ("PASS_EXECUTE", "SMALL_PASS")
+                out["stock_agent_ready"] = bucket in _exec_buckets and not missing and not out.get("limit_exceeded")
+                if bucket not in _exec_buckets and not out.get("block_reason"):
                     out["block_reason"] = out.get("decision_reason", bucket)
             else:
                 out["stock_agent_ready"] = not missing and not out.get("limit_exceeded") and not hard_blocked

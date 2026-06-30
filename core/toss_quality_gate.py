@@ -9,10 +9,11 @@ Toss 자동매매 품질 게이트 — 다차원 점수화 + decision_bucket 결
 
 [decision_bucket]
   PASS_EXECUTE    — 자동 주문 가능
+  SMALL_PASS      — 소액 자동 주문 (1주/최소 금액, 위기장·점수 보통 허용)
   WAIT_PULLBACK   — 눌림목 대기 (RR 보통 또는 실적 임박)
   WATCH           — 관찰만 (약세장/점수 부족)
   CHASE_BLOCK     — 급등 추격 차단
-  BLOCK           — 주문 불가 (손절 없음/RR 부족/위기)
+  BLOCK           — 주문 불가 (손절 없음/RR 부족/데이터 이상)
 
 [안전]
 - 기존 자동주문 경로 변경 없음
@@ -35,12 +36,16 @@ KST = timezone(timedelta(hours=9))
 
 # ── decision buckets ─────────────────────────────────────────────
 PASS_EXECUTE = "PASS_EXECUTE"
+SMALL_PASS = "SMALL_PASS"
 WAIT_PULLBACK = "WAIT_PULLBACK"
 WATCH = "WATCH"
 CHASE_BLOCK = "CHASE_BLOCK"
 BLOCK = "BLOCK"
 
-_ALL_BUCKETS = frozenset([PASS_EXECUTE, WAIT_PULLBACK, WATCH, CHASE_BLOCK, BLOCK])
+# PASS_EXECUTE + SMALL_PASS → 자동주문 가능
+EXECUTABLE_BUCKETS = frozenset([PASS_EXECUTE, SMALL_PASS])
+
+_ALL_BUCKETS = frozenset([PASS_EXECUTE, SMALL_PASS, WAIT_PULLBACK, WATCH, CHASE_BLOCK, BLOCK])
 
 
 # ── QualityScore ─────────────────────────────────────────────────
@@ -219,42 +224,52 @@ def _decide_bucket(
     days_to_earnings: int,
     blocking_risk_flags: list | None = None,
 ) -> tuple[str, str]:
-    """점수+RR+국면 기반 실행 판정."""
+    """점수+RR+국면 기반 실행 판정.
+
+    SMALL_PASS: 조건이 완벽하지는 않지만 1주/소액이면 손실 제한 가능한 후보.
+    위기장에서도 RR 2.5+ / 손절 명확 → SMALL_PASS 허용 (전면 BLOCK 방지).
+    """
     # 0. blocking risk flags → 무조건 차단
     if blocking_risk_flags:
         return BLOCK, f"리스크 차단: {blocking_risk_flags[0]}"
 
-    # 1. 필수 조건
+    # 1. 필수 조건 (완화 불가)
     if not has_stop or not has_target:
         return BLOCK, "손절/목표가 미설정"
     if rr < 1.2:
         return BLOCK, f"손익비 부족 ({rr:.1f}:1 < 1.2:1)"
 
-    # 2. 시장 위기
-    if regime == "위기":
-        return BLOCK, "시장 위기 국면 — 신규 매수 차단"
-
-    # 3. 급등 추격
+    # 2. 급등 추격 (완화 불가)
     if abs(change_pct) >= 8.0:
         return CHASE_BLOCK, f"당일 급등 추격 차단 (+{change_pct:.1f}%)"
 
-    # 4. 약세장 + RR 부족
-    if regime == "약세장" and rr < 2.0:
+    # 3. 시장 위기 — 전면 BLOCK 대신 조건부 SMALL_PASS
+    if regime == "위기":
+        if rr >= 2.5:
+            return SMALL_PASS, f"위기장 소액 허용 (RR {rr:.1f}:1 ≥ 2.5, 손절 명확)"
+        return WATCH, f"위기장 — RR {rr:.1f}:1 부족 (2.5+ 필요)"
+
+    # 4. 약세장 — 기준 상향, SMALL_PASS 가능
+    if regime == "약세장":
+        if rr >= 2.0:
+            return SMALL_PASS, f"약세장 소액 허용 (RR {rr:.1f}:1 ≥ 2.0)"
         return WATCH, f"약세장 — RR {rr:.1f}:1 부족 (2.0+ 필요)"
 
-    # 5. RR 보통 → 눌림목 대기
-    if rr < 1.8:
-        return WAIT_PULLBACK, f"손익비 보통 ({rr:.1f}:1) — 눌림목 대기"
-
-    # 6. 총점 부족
-    if score_total < 45:
-        return WATCH, f"총점 부족 ({score_total:.0f}/100)"
-
-    # 7. 실적 임박
+    # 5. 실적 임박
     if 0 <= days_to_earnings <= 3:
         return WAIT_PULLBACK, f"실적 발표 {days_to_earnings}일 이내 — 대기"
 
-    # 8. 통과
+    # 6. 총점 부족 → SMALL_PASS (RR 충분하면)
+    if score_total < 45:
+        if rr >= 1.8:
+            return SMALL_PASS, f"총점 보통 ({score_total:.0f}/100) · 소액 허용 (RR {rr:.1f}:1)"
+        return WATCH, f"총점 부족 ({score_total:.0f}/100)"
+
+    # 7. RR 보통 → SMALL_PASS (눌림목 대기 대신 소액)
+    if rr < 1.8:
+        return SMALL_PASS, f"손익비 보통 ({rr:.1f}:1) — 소액 허용"
+
+    # 8. 완전 통과
     return PASS_EXECUTE, "조건 충족"
 
 
@@ -359,6 +374,19 @@ def score_candidates_batch(
             item["quality_breakdown"] = qs.to_dict()
             item["decision_bucket"] = qs.decision_bucket
             item["decision_reason"] = qs.decision_reason
+
+            # PASS_EXECUTE / SMALL_PASS → quality DB 기록
+            if qs.decision_bucket in EXECUTABLE_BUCKETS:
+                try:
+                    record_quality_decision(
+                        qs,
+                        entry_price=float(item.get("price") or item.get("limit_price") or 0),
+                        stop_loss=float(item.get("stop_loss") or 0),
+                        target_price=float(item.get("target_price") or 0),
+                    )
+                except Exception as e:
+                    log.debug("quality decision record failed: %s", e)
+
         except Exception as e:
             log.warning("quality gate scoring failed for %s: %s", item.get("symbol"), e)
             item["quality_score"] = 0.0
@@ -546,10 +574,10 @@ def generate_daily_quality_report(date: str | None = None) -> dict:
     for r in rows:
         b = r["decision_bucket"]
         buckets[b] = buckets.get(b, 0) + 1
-        if b == PASS_EXECUTE:
+        if b in (PASS_EXECUTE, SMALL_PASS):
             pass_scores.append(r["score_total"])
             pass_rrs.append(r["rr_ratio"])
-        else:
+        elif b in (BLOCK, CHASE_BLOCK, WATCH):
             if r["decision_reason"]:
                 block_reasons.append(r["decision_reason"])
 
@@ -560,6 +588,7 @@ def generate_daily_quality_report(date: str | None = None) -> dict:
     return {
         "date": date,
         "pass_count": buckets.get(PASS_EXECUTE, 0),
+        "small_pass_count": buckets.get(SMALL_PASS, 0),
         "wait_count": buckets.get(WAIT_PULLBACK, 0),
         "watch_count": buckets.get(WATCH, 0),
         "chase_block_count": buckets.get(CHASE_BLOCK, 0),
@@ -569,6 +598,71 @@ def generate_daily_quality_report(date: str | None = None) -> dict:
         "outcome_hit_rate": round(wins / total_eval, 3) if total_eval > 0 else None,
         "outcome_evaluated": total_eval,
         "top_block_reasons": _top_n(block_reasons, 5),
+    }
+
+
+def no_action_diagnosis(items: list[dict]) -> dict | None:
+    """후보가 있는데 실행 가능 버킷 0개면 원인과 완화 후보를 반환."""
+    if not items:
+        return None
+
+    bucket_counts: dict[str, int] = {}
+    for item in items:
+        b = item.get("decision_bucket", WATCH)
+        bucket_counts[b] = bucket_counts.get(b, 0) + 1
+
+    executable = bucket_counts.get(PASS_EXECUTE, 0) + bucket_counts.get(SMALL_PASS, 0)
+    if executable > 0:
+        return None  # 실행 가능 후보 있음 → 진단 불필요
+
+    # 완화 가능 후보 탐색 (WATCH/WAIT_PULLBACK 중 조건 완화하면 SMALL_PASS 가능)
+    relaxable: list[dict] = []
+    for item in items:
+        bucket = item.get("decision_bucket", "")
+        if bucket in (WATCH, WAIT_PULLBACK):
+            hints = []
+            rr = float(item.get("risk_reward") or 0)
+            has_stop = bool(item.get("stop_loss"))
+            has_target = bool(item.get("target_price"))
+            if not has_stop:
+                hints.append("손절 자동 산정 필요 (6% 기본)")
+            if not has_target:
+                hints.append("목표가 자동 산정 필요")
+            if rr < 1.2 and has_stop and has_target:
+                hints.append(f"RR {rr:.1f} → 지정가 하향 또는 목표가 상향으로 RR 개선")
+            if rr >= 1.2:
+                hints.append("수량 1주로 축소하면 SMALL_PASS 가능")
+            relaxable.append({
+                "symbol": item.get("symbol", ""),
+                "name": item.get("name", ""),
+                "bucket": bucket,
+                "reason": item.get("decision_reason", ""),
+                "score": item.get("quality_score", 0),
+                "rr": rr,
+                "relaxation_hints": hints,
+            })
+
+    relaxable.sort(key=lambda x: x["score"], reverse=True)
+
+    block_reasons = [
+        item.get("decision_reason", "")
+        for item in items
+        if item.get("decision_bucket") in (BLOCK, CHASE_BLOCK)
+    ]
+
+    return {
+        "total_candidates": len(items),
+        "bucket_counts": bucket_counts,
+        "executable_count": 0,
+        "top_block_reasons": _top_n(block_reasons, 5),
+        "relaxable_candidates": relaxable[:3],
+        "diagnosis": (
+            f"후보 {len(items)}건 중 실행 가능 0건. "
+            f"BLOCK {bucket_counts.get(BLOCK, 0)}, "
+            f"CHASE_BLOCK {bucket_counts.get(CHASE_BLOCK, 0)}, "
+            f"WATCH {bucket_counts.get(WATCH, 0)}, "
+            f"WAIT {bucket_counts.get(WAIT_PULLBACK, 0)}."
+        ),
     }
 
 
