@@ -355,6 +355,50 @@ def _fetch_portfolio_raw() -> dict:
     except Exception:
         usdkrw = 1400.0
 
+    def _price_sanity_limit(ticker: str, avg_price: float, is_usd: bool) -> float:
+        """Return max plausible quote/avg ratio for portfolio valuation.
+
+        Dashboard quotes can occasionally arrive with split/currency scale errors
+        (e.g. KR equity 5x, US equity 10x). Portfolio valuation should not let
+        one bad quote inflate total assets. The limit is intentionally loose so
+        real winners still show gains; extreme moves fall back to cost and are
+        flagged on the item for reconciliation.
+        """
+        if avg_price <= 0:
+            return 0.0
+        # Long-term legacy Samsung Electronics has a very low historical cost,
+        # so allow a larger genuine multi-bagger range before tripping the guard.
+        if ticker == "005930.KS":
+            return 4.0
+        # Most ETF/current holdings should not exceed 3x without a split/source issue.
+        if is_usd:
+            return 4.0
+        return 3.5
+
+    def _guard_portfolio_quote(ticker: str, cur_price: float, avg_price: float, is_usd: bool) -> tuple[float, dict]:
+        """Clamp obviously bad quotes for portfolio totals, preserving diagnostics."""
+        note = {"price_guard": "ok"}
+        if not cur_price or cur_price <= 0:
+            note.update({
+                "price_guard": "missing",
+                "raw_price": round(_safe(cur_price), 2),
+                "valuation_price": round(_safe(avg_price), 2),
+                "price_warning": "현재가 조회 실패 — 평가액은 평단 기준 보수 계산",
+            })
+            return avg_price or 0.0, note
+        limit = _price_sanity_limit(ticker, avg_price, is_usd)
+        ratio = (cur_price / avg_price) if avg_price else 0.0
+        if limit and ratio > limit:
+            note.update({
+                "price_guard": "clamped_high",
+                "raw_price": round(_safe(cur_price), 2),
+                "valuation_price": round(_safe(avg_price), 2),
+                "price_ratio": round(_safe(ratio), 2),
+                "price_warning": f"가격 이상치 의심: 현재가/평단 {ratio:.1f}배 — 총평가액은 평단 기준 보수 계산",
+            })
+            return avg_price, note
+        return cur_price, note
+
     result_accounts = []
     total_eval = 0.0
     total_cost = 0.0
@@ -370,8 +414,10 @@ def _fetch_portfolio_raw() -> dict:
             is_usd = avg_usd > 0
 
             q = quotes.get(ticker)
-            cur_price = q.price if q else 0.0
+            raw_price = q.price if q else 0.0
             pct = q.pct if q else 0.0
+            avg_price = avg_usd if is_usd else avg_krw
+            cur_price, price_note = _guard_portfolio_quote(ticker, raw_price, avg_price, is_usd)
 
             if is_usd:
                 cost_total = avg_usd * shares
@@ -396,11 +442,13 @@ def _fetch_portfolio_raw() -> dict:
                 "avg_cost": _safe(avg_usd if is_usd else avg_krw),
                 "currency": "USD" if is_usd else "KRW",
                 "current_price": round(_safe(cur_price), 2),
+                "raw_price": round(_safe(raw_price), 2),
                 "day_pct": round(_safe(pct), 2),
                 "pnl_pct": round(_safe(pnl_pct), 2),
                 "eval_krw": round(_safe(eval_krw)),
                 "horizon": strategy.get("horizon", ""),
                 "thesis": strategy.get("thesis", ""),
+                **price_note,
             })
             acct_eval += eval_krw
             acct_cost += cost_krw
@@ -1988,7 +2036,15 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20) -> dict:
                     missing.append(key)
             out["missing_fields"] = missing
             hard_blocked = out.get("execution_status") == "hold_risk_flags" or bool(out.get("blocking_risk_flags"))
-            out["stock_agent_ready"] = not missing and not out.get("limit_exceeded") and not hard_blocked
+
+            # 품질 게이트 decision_bucket 반영
+            bucket = out.get("decision_bucket", "")
+            if bucket:
+                out["stock_agent_ready"] = bucket == "PASS_EXECUTE" and not missing and not out.get("limit_exceeded")
+                if bucket != "PASS_EXECUTE" and not out.get("block_reason"):
+                    out["block_reason"] = out.get("decision_reason", bucket)
+            else:
+                out["stock_agent_ready"] = not missing and not out.get("limit_exceeded") and not hard_blocked
             return out
 
         items = [_enrich_for_stock_agent(i) for i in result["items"][:limit]]

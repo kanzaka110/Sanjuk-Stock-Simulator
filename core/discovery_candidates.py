@@ -900,6 +900,14 @@ def toss_eligible_new_candidates(
             "scope": "scan_rejected",
         })
 
+    # 품질 게이트 점수화 (자동매매 PASS 품질 강화)
+    try:
+        from core.toss_quality_gate import score_candidates_batch
+        items = score_candidates_batch(items, market="KR")
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("quality gate scoring failed: %s", e)
+
     items = _rotate_candidate_groups(items)
 
     executable_count = sum(1 for i in items if i.get("executable_now"))

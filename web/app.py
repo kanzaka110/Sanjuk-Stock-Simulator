@@ -240,6 +240,12 @@ def api_stock_agent_activity(limit: int = 20):
     return JSONResponse(dd.stock_agent_activity_data(min(limit, 100)))
 
 
+@app.get("/api/quality-report")
+def api_quality_report(date: str | None = None):
+    from core.toss_quality_gate import generate_daily_quality_report
+    return JSONResponse(generate_daily_quality_report(date))
+
+
 @app.get("/api/recommendations/timeline")
 def api_timeline(
     range: str = "today",
