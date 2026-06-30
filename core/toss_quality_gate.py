@@ -91,7 +91,21 @@ class QualityScore:
 # ── 점수 계산 ────────────────────────────────────────────────────
 
 def _score_momentum(candidate: dict) -> float:
-    """기술 지표 모멘텀 점수 (0-25). 빠른 fallback: candidate RSI."""
+    """기술 지표 모멘텀 점수 (0-25).
+
+    대시보드 GET 경로에서는 신규 발굴 스캐너가 이미 계산한 candidate.score를
+    우선 사용한다. 종목별 calculate_indicators()는 yfinance/pykrx 조회가 섞여
+    /api/toss/buy-candidates를 45초 이상 막을 수 있으므로 score가 없을 때만
+    보조 경로로 호출한다.
+    """
+    score = candidate.get("score", 0)
+    try:
+        score_f = float(score or 0)
+    except Exception:
+        score_f = 0.0
+    if score_f > 0:
+        return min(25.0, max(0.0, score_f / 4))
+
     ticker = candidate.get("symbol", "")
     try:
         from core.indicators import calculate_indicators
@@ -101,9 +115,7 @@ def _score_momentum(candidate: dict) -> float:
             return max(0.0, min(25.0, (result.confluence_score + 4) / 8 * 25))
     except Exception as e:
         log.debug("momentum score fallback for %s: %s", ticker, e)
-    # fallback: candidate의 기존 점수 활용
-    score = candidate.get("score", 0)
-    return min(25.0, max(0.0, score / 4))
+    return 0.0
 
 
 def _score_liquidity(candidate: dict) -> float:
@@ -279,6 +291,7 @@ def score_candidate(
     candidate: dict,
     regime_obj=None,
     accuracy_stats: dict | None = None,
+    expensive_checks: bool = True,
 ) -> QualityScore:
     """단일 후보 품질 점수 계산."""
     ticker = candidate.get("symbol", "")
@@ -297,9 +310,13 @@ def score_candidate(
     p_overheat = _penalty_overheat(candidate)
     p_duplicate = _penalty_duplicate(candidate)
 
-    # 이벤트 리스크: pre_score 계산 후 비용 관리
+    # 이벤트 리스크: pre_score 계산 후 비용 관리.
+    # GET 대시보드 배치 경로는 expensive_checks=False로 외부/느린 조회를 건너뛴다.
     pre_score = s_momentum + s_liquidity + s_rr + s_reliability + s_regime + p_overheat + p_duplicate
-    p_event, days_to_earnings = _penalty_event_risk(ticker, pre_score)
+    if expensive_checks:
+        p_event, days_to_earnings = _penalty_event_risk(ticker, pre_score)
+    else:
+        p_event, days_to_earnings = 0.0, -1
 
     score_total = max(0.0, min(100.0,
         s_momentum + s_liquidity + s_rr + s_reliability + s_regime
@@ -346,8 +363,17 @@ def score_candidate(
 def score_candidates_batch(
     items: list[dict],
     market: str = "KR",
+    *,
+    persist_decisions: bool = False,
+    expensive_checks: bool = False,
 ) -> list[dict]:
-    """배치 점수 계산. regime 1회 호출, accuracy_stats 1회 로드."""
+    """배치 점수 계산. regime 1회 호출, accuracy_stats 1회 로드.
+
+    기본값은 GET/read-only 대시보드용이다.
+    - persist_decisions=False: 후보 조회만으로 quality DB가 중복 증가하지 않게 함
+    - expensive_checks=False: 종목별 재무/지표 네트워크 조회를 생략해 API 타임아웃 방지
+    실제 preview/order 생성 경로에서 기록이 필요하면 persist_decisions=True로 호출한다.
+    """
     if not items:
         return items
 
@@ -369,14 +395,19 @@ def score_candidates_batch(
 
     for item in items:
         try:
-            qs = score_candidate(item, regime_obj=regime_obj, accuracy_stats=accuracy_stats)
+            qs = score_candidate(
+                item,
+                regime_obj=regime_obj,
+                accuracy_stats=accuracy_stats,
+                expensive_checks=expensive_checks,
+            )
             item["quality_score"] = qs.score_total
             item["quality_breakdown"] = qs.to_dict()
             item["decision_bucket"] = qs.decision_bucket
             item["decision_reason"] = qs.decision_reason
 
             # PASS_EXECUTE / SMALL_PASS → quality DB 기록
-            if qs.decision_bucket in EXECUTABLE_BUCKETS:
+            if persist_decisions and qs.decision_bucket in EXECUTABLE_BUCKETS:
                 try:
                     record_quality_decision(
                         qs,

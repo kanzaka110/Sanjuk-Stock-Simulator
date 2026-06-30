@@ -574,16 +574,40 @@ def _universe_for(markets: list[str]) -> dict[str, tuple[str, str]]:
 
 
 def _fallback_universe_candidates(markets: list[str]) -> list[dict]:
-    """pandas/pykrx 없이 SCAN_UNIVERSE를 직접 스캔 — 핵심 안전망."""
+    """pandas/pykrx 없이 SCAN_UNIVERSE를 직접 스캔 — 핵심 안전망.
+
+    기존 구현은 50개 내외 종목을 순차 시세 조회해서 /api/toss/buy-candidates
+    cold start가 40초 이상 걸렸다. GET 대시보드 경로가 막히지 않도록 경량
+    quote는 병렬로 조회하되, 결과 순서는 기존 유니버스 순서를 유지한다.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     uni = _universe_for(markets)
-    out: list[dict] = []
-    for ticker, (mkt, name) in uni.items():
+    entries = list(uni.items())
+    if not entries:
+        return []
+
+    def _load(idx_ticker_meta):
+        idx, (ticker, (mkt, name)) = idx_ticker_meta
         q = _light_quote(ticker, mkt)
         if q is None:
-            continue
+            return idx, None
         q.setdefault("name", name)
-        out.append(q)
-    return out
+        return idx, q
+
+    out_by_idx: dict[int, dict] = {}
+    max_workers = min(12, max(1, len(entries)))
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = [ex.submit(_load, (idx, item)) for idx, item in enumerate(entries)]
+        for fut in as_completed(futures):
+            try:
+                idx, q = fut.result()
+            except Exception as e:
+                log.debug("fallback universe quote failed: %s", e)
+                continue
+            if q is not None:
+                out_by_idx[idx] = q
+    return [out_by_idx[i] for i in sorted(out_by_idx)]
 
 
 def scan_discovery_candidates(briefing_type: str = "MANUAL") -> tuple[list[dict], dict]:
@@ -603,12 +627,14 @@ def scan_discovery_candidates(briefing_type: str = "MANUAL") -> tuple[list[dict]
         try:
             candidates = _default_scan_candidates(briefing_type)
             # scanner.py는 카테고리별 상위만 반환해서 같은 후보가 반복되기 쉽다.
-            # 장중 후보 다양성을 위해 curated SCAN_UNIVERSE 전체를 보강 스캔한다.
-            seen = {str(c.get("ticker") or "") for c in candidates}
-            for q in _fallback_universe_candidates(markets):
-                if q.get("ticker") not in seen:
-                    candidates.append(q)
-                    seen.add(str(q.get("ticker") or ""))
+            # 단, 이미 충분한 후보가 있으면 GET API 응답성을 위해 전체 유니버스 보강은 생략한다.
+            # 부족할 때만 병렬 fallback으로 보강한다.
+            if len(candidates) < 30:
+                seen = {str(c.get("ticker") or "") for c in candidates}
+                for q in _fallback_universe_candidates(markets):
+                    if q.get("ticker") not in seen:
+                        candidates.append(q)
+                        seen.add(str(q.get("ticker") or ""))
         except Exception as e:
             log.warning("scanner 경로 실패 → universe fallback: %s", e)
             candidates = []

@@ -1727,13 +1727,26 @@ def _fetch_toss_account_summary_raw() -> dict:
     from core import toss_client as tc
 
     now_str = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
+    try:
+        from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
+        live_policy = compute_toss_live_pilot_policy()
+    except Exception:
+        live_policy = {}
+    effective_live = bool(
+        live_policy.get("autonomous_mode")
+        and not live_policy.get("autonomous_kill_switch")
+        and live_policy.get("all_live_gates_open")
+        and live_policy.get("live_transport_status") == "configured"
+    )
+
     base = {
         "enabled": tc.is_configured(),
         "label": "Toss 실전 AI 자동거래 계좌",
         "separate_from_portfolio": True,
         "included_in_total_portfolio": False,
-        "trading_enabled": False,
-        "automation_status": "disabled",
+        "trading_enabled": effective_live,
+        "automation_status": "autonomous_live_pilot" if effective_live else "disabled",
+        "live_policy": live_policy,
         "account_count": 0,
         "accounts": [],
         "holdings_count": 0,
@@ -1744,9 +1757,9 @@ def _fetch_toss_account_summary_raw() -> dict:
         "exchange_rate": None,
         "warnings": [
             "기존 삼성증권/수동 포트폴리오에 합산하지 않음",
-            "실주문 기능 없음",
             "실전 계좌 · 별도 성과 추적",
-            "자동거래 비활성",
+            "자율 live pilot 활성" if effective_live else "실주문 기능 없음",
+            "Hermes PASS 후 자동주문" if effective_live else "자동거래 비활성",
         ],
         "updated_at": now_str,
         "error": "",
@@ -1856,16 +1869,39 @@ def _fetch_toss_automation_status_raw() -> dict:
     guards.append({"name": "최대 포지션", "status": str(cfg.TOSS_MAX_POSITIONS), "ok": True})
     guards.append({"name": "블랙리스트", "status": ", ".join(cfg.TOSS_SYMBOL_BLACKLIST) or "없음", "ok": True})
 
+    # Legacy paper-trading config can disagree with the live-pilot/autonomous
+    # env gates used by the real Toss order path. Surface the effective live
+    # status here so the dashboard does not show a false kill-switch while
+    # /api/toss/live-pilot-policy is armed.
+    try:
+        from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
+        live_policy = compute_toss_live_pilot_policy()
+    except Exception:
+        live_policy = {}
+
+    effective_live = bool(
+        live_policy.get("autonomous_mode")
+        and not live_policy.get("autonomous_kill_switch")
+        and live_policy.get("all_live_gates_open")
+        and live_policy.get("live_transport_status") == "configured"
+    )
+    if effective_live:
+        guards = [g for g in guards if g.get("name") not in ("킬스위치", "실주문 허용", "Telegram 승인")]
+        guards.insert(0, {"name": "자율 live pilot", "status": "ON", "ok": True})
+        guards.insert(1, {"name": "실주문 게이트", "status": "OPEN", "ok": True})
+        guards.insert(2, {"name": "Telegram 승인", "status": "불필요", "ok": True})
+
     return {
-        "automation_enabled": cfg.TOSS_AUTOMATION_ENABLED,
-        "mode": cfg.TOSS_AUTOMATION_MODE,
-        "dry_run": cfg.TOSS_DRY_RUN,
-        "live_orders_allowed": cfg.TOSS_ALLOW_LIVE_ORDERS,
-        "kill_switch": cfg.TOSS_KILL_SWITCH,
-        "telegram_approval_required": cfg.TOSS_REQUIRE_TELEGRAM_APPROVAL,
+        "automation_enabled": effective_live or cfg.TOSS_AUTOMATION_ENABLED,
+        "mode": "autonomous_live_pilot" if effective_live else cfg.TOSS_AUTOMATION_MODE,
+        "dry_run": False if effective_live else cfg.TOSS_DRY_RUN,
+        "live_orders_allowed": effective_live or cfg.TOSS_ALLOW_LIVE_ORDERS,
+        "kill_switch": False if effective_live else cfg.TOSS_KILL_SWITCH,
+        "telegram_approval_required": False if effective_live else cfg.TOSS_REQUIRE_TELEGRAM_APPROVAL,
         "paper_trades_count_today": stats.get("count", 0),
         "daily_budget_used_krw": stats.get("daily_amount_krw", 0),
         "daily_budget_max_krw": cfg.TOSS_MAX_DAILY_ORDER_KRW,
+        "live_policy": live_policy,
         "guards": guards,
     }
 
@@ -1958,6 +1994,7 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20) -> dict:
         from core.discovery_candidates import (
             build_discovery_sections,
             toss_eligible_new_candidates,
+            _fallback_universe_candidates,
         )
         from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
 
@@ -1966,8 +2003,16 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20) -> dict:
         except Exception:
             max_order_krw = 500_000
 
-        sections = build_discovery_sections(briefing_type="KR_BEFORE")
+        # 대시보드 GET은 응답성이 우선이다. 전체 scanner/discover 경로는
+        # cold start에서 30~60초 걸릴 수 있으므로, 토스 후보 API는 병렬 경량
+        # 유니버스 quote를 주 소스로 사용한다. 주문 전송 경로의 최종 gate는
+        # 별도로 유지된다.
+        scan_candidates = _fallback_universe_candidates(["KR"])
+        sections = build_discovery_sections(scan_candidates=scan_candidates, briefing_type="KR_BEFORE")
         result = toss_eligible_new_candidates(sections, max_order_krw=max_order_krw)
+        scan_summary = result.setdefault("scan_summary", {})
+        scan_summary["dependency_fallback_used"] = True
+        scan_summary["source"] = "fast_universe_fallback"
 
         def _enrich_for_stock_agent(item: dict) -> dict:
             """Add complete read-only order-review fields for Hermes stock-agent.
