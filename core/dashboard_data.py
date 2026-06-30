@@ -2569,6 +2569,8 @@ def toss_live_pilot_events_data(limit: int = 50) -> dict:
         ]
         live_sent_real = int(summ.get("live_sent_real", 0)) + len(autonomous_real_records)
         warnings = []
+        if not broker_truth.get("ok", False):
+            warnings.append("브로커 주문 조회 실패/제한: " + str(broker_truth.get("error") or "unknown"))
         if broker_orders and not records:
             warnings.append("브로커 주문은 있으나 live-pilot 이벤트 ledger가 비어 있음 — 표시/기록 경로 점검 필요")
         allowed_assets = set(policy.get("allowed_asset_types") or [])
