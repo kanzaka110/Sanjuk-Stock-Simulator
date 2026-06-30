@@ -82,6 +82,9 @@ def _conn() -> sqlite3.Connection:
             ("failure_reason",  "TEXT DEFAULT ''"),
             ("payload_hash",    "TEXT DEFAULT ''"),
             ("sent_at",         "TEXT"),
+            ("stop_loss",       "TEXT"),
+            ("invalidation",    "TEXT"),
+            ("target_price",    "TEXT"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE live_pilot_ledger ADD COLUMN {col} {defn}")
@@ -125,12 +128,22 @@ def record_live_pilot_preview(
     preview_id = preview.get("preview_id", _gen_pilot_id())
     pilot_id = _gen_pilot_id()
 
+    stop_loss = preview.get("stop_loss") or ""
+    invalidation = preview.get("invalidation") or ""
+    target_price = preview.get("target_price") or ""
+    # stop_loss가 숫자면 문자열로 변환
+    if isinstance(stop_loss, (int, float)):
+        stop_loss = str(stop_loss)
+    if isinstance(target_price, (int, float)):
+        target_price = str(target_price)
+
     row = (
         pilot_id, preview_id, symbol, side, quantity,
         limit_price, estimated, status,
         json.dumps(blocks, ensure_ascii=False),
         json.dumps(warnings, ensure_ascii=False),
         0, 0, "disabled", "", "", "", _now_kst(), None, None, reason,
+        stop_loss, invalidation, target_price,
     )
 
     with _db_lock:
@@ -142,8 +155,9 @@ def record_live_pilot_preview(
                     limit_price, estimated_amount_krw, status,
                     blocks, warnings, live_order_allowed, live_order_sent,
                     adapter_status, broker_order_id, failure_reason, payload_hash,
-                    created_at, confirmed_at, cancelled_at, reason)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    created_at, confirmed_at, cancelled_at, reason,
+                    stop_loss, invalidation, target_price)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 row,
             )
             conn.commit()

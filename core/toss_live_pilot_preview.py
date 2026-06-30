@@ -137,6 +137,10 @@ def build_live_pilot_preview(candidate: dict, policy: dict | None = None) -> dic
         "warnings": warnings,
         "max_order_krw": policy.get("max_order_krw"),
         "sample_insufficient": policy.get("sample_insufficient", True),
+        # 후보의 stop_loss/invalidation/target_price 전달
+        "stop_loss": candidate.get("stop_loss"),
+        "invalidation": candidate.get("invalidation"),
+        "target_price": candidate.get("target_price"),
     }
 
     if not ok:

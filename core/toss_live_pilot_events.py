@@ -60,6 +60,12 @@ _VALID_EVENT_TYPES = frozenset([
     "live_sent",
     "live_sent_artifact",
     "live_send_failed",
+    # autonomous finalizer 이벤트
+    "autonomous_blocked_hermes",
+    "autonomous_blocked_policy",
+    "autonomous_blocked_guard",
+    "autonomous_live_sent",
+    "autonomous_send_failed",
 ])
 
 
