@@ -491,7 +491,7 @@ details summary::before{content:"▸";transition:transform .18s;color:var(--mt)}
 <!-- ═══ 토스 AI ═══ -->
 <div class="page" id="p-toss">
   <div class="panel" style="margin-bottom:16px">
-    <div class="ph"><h2>Toss 실전 AI 자동거래 계좌</h2><span class="sub">기존 포트폴리오 미합산 · US BUY+SELL 승인형 · 실전 계좌</span></div>
+    <div class="ph"><h2>Toss 실전 AI 자동거래 계좌</h2><span class="sub">기존 포트폴리오 미합산 · 자율실행 모드 · 실전 계좌</span></div>
     <div id="toss-page"></div>
   </div>
 </div>
@@ -1204,8 +1204,8 @@ async function ldToss(){
       <div class="kpi"><div class="k">총 Toss 자산</div><div class="v">₩${F(Math.round(totalKrw))}</div><div class="x mt">${fxTxt}</div></div>
       <div class="kpi"><div class="k">예수금/현금</div><div class="v">₩${F(Math.round(cashKrw))}</div><div class="x mt">${cashUsd?'$'+F(cashUsd):""}</div></div>
       <div class="kpi"><div class="k">보유종목 평가</div><div class="v">₩${F(Math.round(mvKrw))}</div><div class="x mt">${hc}종목</div></div>
-      <div class="kpi"><div class="k">자동거래</div><div class="v" style="font-size:18px;color:var(--mt)">비활성</div><div class="x mt">실주문 기능 없음</div></div>
-      <div class="kpi"><div class="k">거래 활성화</div><div class="v" style="font-size:18px;color:var(--mt)">OFF</div><div class="x mt">별도 성과 추적</div></div>
+      <div class="kpi" id="toss-auto-kpi"><div class="k">자동거래</div><div class="v" style="font-size:18px;color:var(--mt)">확인 중…</div></div>
+      <div class="kpi" id="toss-transport-kpi"><div class="k">Transport</div><div class="v" style="font-size:18px;color:var(--mt)">확인 중…</div></div>
     </div>
     <div class="grid" style="grid-template-columns:1fr 1fr;gap:14px">
       <div class="panel"><div class="ph"><h2>계좌 정보</h2></div>${accts||'<div class="emp">계좌 없음</div>'}<div style="margin-top:8px;font-size:11px;color:var(--mt)">갱신: ${E(d.updated_at||"—")}</div></div>
@@ -1220,8 +1220,67 @@ async function ldToss(){
     const gateOpen=!!lp.all_live_gates_open && !!(lp.transport&&lp.transport.live_order_sent_possible);
     const sides=(lp.allowed_sides||[]).join("+").toUpperCase()||lp.side_mode||"—";
     const assets=(lp.allowed_asset_types||[]).join(", ")||"—";
-    const rows=((le||{}).records||[]).slice(0,4).map(r=>`<tr><td>${E((r.created_at||"").slice(5,16))}</td><td class="nm">${E(r.display_name||r.symbol_label||r.symbol||"—")}</td><td>${E((r.side||"").toUpperCase())}</td><td>${E(r.event_type||"—")}</td><td>${E(r.live_sent_classification||r.reason||"")}</td></tr>`).join("");
-    liveHtml=`<div class="panel" style="margin-top:14px"><div class="ph"><h2>Live Pilot 운영 상태</h2><span class="sub">US BUY+SELL · 버튼 승인 전용 · 실제/아티팩트 분리</span></div><div class="kpis" style="grid-template-columns:repeat(6,1fr);margin-bottom:12px"><div class="kpi"><div class="k">상태</div><div class="v ${gateOpen?'up':'o'}" style="font-size:18px;${gateOpen?'':'color:var(--o)'}">${gateOpen?'READY':'확인 필요'}</div><div class="x mt">transport ${E(lp.live_transport_status||"—")}</div></div><div class="kpi"><div class="k">방향</div><div class="v" style="font-size:18px">${E(sides)}</div><div class="x mt">sell ${lp.sell_allowed?'허용':'차단'}</div></div><div class="kpi"><div class="k">자산</div><div class="v" style="font-size:18px">${E(assets)}</div><div class="x mt">국내 ticker 차단</div></div><div class="kpi"><div class="k">한도</div><div class="v" style="font-size:18px">USD잔고</div><div class="x mt">KRW cap 없음</div></div><div class="kpi"><div class="k">실제 전송</div><div class="v ${realSent?'dn':'up'}" style="font-size:18px">${realSent}건</div><div class="x mt">아티팩트 ${artifact}건 제외</div></div><div class="kpi"><div class="k">PASS TTL</div><div class="v" style="font-size:18px">필수</div><div class="x mt">만료 시 승인금지</div></div></div><div style="font-size:11px;color:var(--mt);margin-bottom:8px">${E(lp.daily_policy_note||lp.reason||"Hermes PASS + 사용자 최종승인 전에는 전송하지 않음")}</div>${rows?`<div class="tbl-scroll" style="max-height:220px"><table class="tbl"><thead><tr><th>시각</th><th>종목</th><th>방향</th><th>이벤트</th><th>분류/사유</th></tr></thead><tbody>${rows}</tbody></table></div>`:'<div class="emp">최근 live pilot 이벤트 없음</div>'}</div>`;
+    const isAutonomous=!!lp.autonomous_mode;
+    const killSw=!!lp.autonomous_kill_switch;
+    const modeLabel=isAutonomous?(killSw?"자율(정지)":"자율실행"):"수동 승인";
+    const modeColor=isAutonomous?(killSw?"var(--dn)":"var(--up)"):"var(--o)";
+    const rows=((le||{}).records||[]).slice(0,6).map(r=>`<tr><td>${E((r.created_at||"").slice(5,16))}</td><td class="nm">${E(r.display_name||r.symbol_label||r.symbol||"—")}</td><td>${E((r.side||"").toUpperCase())}</td><td>${E(r.event_type||"—")}</td><td>${E(r.live_sent_classification||r.reason||"")}</td></tr>`).join("");
+    // 자동거래/transport KPI 업데이트
+    const autoKpi=document.getElementById("toss-auto-kpi");
+    if(autoKpi)autoKpi.innerHTML=`<div class="k">자동거래</div><div class="v" style="font-size:18px;color:${modeColor}">${modeLabel}</div><div class="x mt">${isAutonomous?"Hermes PASS → 자동주문":"버튼 승인 필요"}</div>`;
+    const trKpi=document.getElementById("toss-transport-kpi");
+    if(trKpi)trKpi.innerHTML=`<div class="k">Transport</div><div class="v ${gateOpen?"up":"o"}" style="font-size:18px">${gateOpen?"READY":"OFF"}</div><div class="x mt">${E(lp.live_transport_status||"—")}</div>`;
+
+    liveHtml=`<div class="panel" style="margin-top:14px"><div class="ph"><h2>자율실행 운영 상태</h2><span class="sub">${isAutonomous?"Hermes PASS → 자동 매수/매도 · 승인 버튼 없음":"수동 승인형"} · 실제/아티팩트 분리</span></div>
+      <div class="kpis" style="grid-template-columns:repeat(6,1fr);margin-bottom:12px">
+        <div class="kpi"><div class="k">모드</div><div class="v" style="font-size:18px;color:${modeColor}">${modeLabel}</div><div class="x mt">${E(lp.mode||"—")}</div></div>
+        <div class="kpi"><div class="k">방향</div><div class="v" style="font-size:18px">${E(sides)}</div><div class="x mt">sell ${lp.sell_allowed?'허용':'차단'}</div></div>
+        <div class="kpi"><div class="k">자산</div><div class="v" style="font-size:18px">${E(assets)}</div><div class="x mt">삼성 제외</div></div>
+        <div class="kpi"><div class="k">KR 1회 한도</div><div class="v" style="font-size:18px">₩${F(lp.autonomous_kr_max_order_krw||0)}</div><div class="x mt">US $${F(lp.autonomous_us_max_order_usd||0)}</div></div>
+        <div class="kpi"><div class="k">실제 전송</div><div class="v ${realSent?"dn":"up"}" style="font-size:18px">${realSent}건</div><div class="x mt">아티팩트 ${artifact}건 제외</div></div>
+        <div class="kpi"><div class="k">킬스위치</div><div class="v" style="font-size:18px;color:${killSw?"var(--dn)":"var(--up)"}">${killSw?"ON":"OFF"}</div><div class="x mt">${killSw?"모든 자율주문 차단":"정상"}</div></div>
+      </div>
+      <div style="font-size:11px;color:var(--mt);margin-bottom:8px">${E(lp.reason||lp.daily_policy_note||"")}</div>
+      ${rows?`<div class="tbl-scroll" style="max-height:260px"><table class="tbl"><thead><tr><th>시각</th><th>종목</th><th>방향</th><th>이벤트</th><th>분류/사유</th></tr></thead><tbody>${rows}</tbody></table></div>`:'<div class="emp">최근 이벤트 없음</div>'}
+    </div>`;
+  }
+  // 품질 게이트 리포트 + 후보 상세
+  const [qr,bc]=await Promise.all([J("/api/quality-report"),J("/api/toss/buy-candidates")]);
+  let qrHtml="";
+  if(qr){
+    const passTotal=(qr.pass_count||0)+(qr.small_pass_count||0);
+    const hitRate=qr.outcome_hit_rate!=null?(qr.outcome_hit_rate*100).toFixed(1)+"%":"—";
+    const topReasons=(qr.top_block_reasons||[]).slice(0,3).map(r=>`<div style="font-size:11px;padding:3px 0;border-bottom:1px solid var(--border2)">${E(r.reason)} <span class="mt">(${r.count}건)</span></div>`).join("");
+    qrHtml=`<div class="panel" style="margin-top:14px"><div class="ph"><h2>품질 게이트 리포트</h2><span class="sub">${E(qr.date||"오늘")} · 자동매매 후보 선별 품질</span></div>
+      <div class="kpis" style="grid-template-columns:repeat(6,1fr);margin-bottom:12px">
+        <div class="kpi"><div class="k">PASS</div><div class="v up" style="font-size:18px">${qr.pass_count||0}</div><div class="x mt">자동주문 가능</div></div>
+        <div class="kpi"><div class="k">SMALL</div><div class="v" style="font-size:18px;color:var(--up)">${qr.small_pass_count||0}</div><div class="x mt">소액 허용</div></div>
+        <div class="kpi"><div class="k">WAIT</div><div class="v" style="font-size:18px;color:var(--o)">${qr.wait_count||0}</div><div class="x mt">눌림목 대기</div></div>
+        <div class="kpi"><div class="k">WATCH</div><div class="v" style="font-size:18px;color:var(--mt)">${qr.watch_count||0}</div><div class="x mt">관찰</div></div>
+        <div class="kpi"><div class="k">BLOCK</div><div class="v" style="font-size:18px;color:var(--dn)">${(qr.block_count||0)+(qr.chase_block_count||0)}</div><div class="x mt">차단</div></div>
+        <div class="kpi"><div class="k">적중률(5d)</div><div class="v" style="font-size:18px">${hitRate}</div><div class="x mt">${qr.outcome_evaluated||0}건 평가</div></div>
+      </div>
+      ${passTotal>0?`<div style="font-size:11px;color:var(--mt);margin-bottom:6px">PASS 평균 점수 ${qr.avg_pass_score||0} / 평균 RR ${qr.avg_pass_rr||0}:1</div>`:""}
+      ${topReasons?`<div style="margin-top:6px"><div style="font-size:11px;font-weight:700;color:var(--mt);margin-bottom:4px">주요 차단 사유</div>${topReasons}</div>`:""}
+    </div>`;
+  }
+  let bcHtml="";
+  if(bc&&bc.items&&bc.items.length){
+    const bucketTag=b=>{
+      const m={PASS_EXECUTE:["up","PASS"],SMALL_PASS:["up","SMALL"],WAIT_PULLBACK:["o","WAIT"],WATCH:["gy","WATCH"],CHASE_BLOCK:["dn","CHASE"],BLOCK:["dn","BLOCK"]};
+      const[c,l]=m[b]||m.WATCH;return`<span class="tag ${c}">${l}</span>`;
+    };
+    const cRows=bc.items.slice(0,12).map(i=>{
+      const qs=i.quality_score!=null?i.quality_score.toFixed(0):"—";
+      const rr=i.risk_reward!=null?i.risk_reward.toFixed(1):"—";
+      const sl=i.stop_loss?`₩${F(Math.round(i.stop_loss))}`:"—";
+      const tp=i.target_price?`₩${F(Math.round(i.target_price))}`:"—";
+      const ready=i.stock_agent_ready?'<span class="up" style="font-weight:700">✓</span>':'<span class="mt">—</span>';
+      return`<tr><td class="nm">${E(i.name||i.symbol)}</td><td>₩${F(Math.round(i.price||i.limit_price||0))}</td><td>${bucketTag(i.decision_bucket||"WATCH")}</td><td style="font-weight:700">${qs}</td><td>${rr}:1</td><td>${sl}</td><td>${tp}</td><td>${ready}</td><td style="font-size:10px;color:var(--mt)">${E((i.decision_reason||"").slice(0,30))}</td></tr>`;
+    }).join("");
+    bcHtml=`<div class="panel" style="margin-top:14px"><div class="ph"><h2>신규 후보 (품질 게이트)</h2><span class="sub">${bc.count||0}건 · PASS/SMALL만 자동주문 대상</span></div>
+      <div class="tbl-scroll" style="max-height:360px"><table class="tbl"><thead><tr><th>종목</th><th>가격</th><th>판정</th><th>점수</th><th>RR</th><th>손절</th><th>목표</th><th>Ready</th><th>사유</th></tr></thead><tbody>${cRows}</tbody></table></div>
+    </div>`;
   }
   let autoHtml="";
   if(as2){
@@ -1300,7 +1359,7 @@ async function ldToss(){
       <div style="margin-top:8px;font-size:10px;color:var(--mt)">평가시각: ${E(pp.evaluated_at||"—")} · ${E(pp._note||"")}</div>
     </div>`;
   }
-  box.innerHTML+=liveHtml+autoHtml+ptHtml+dcHtml+ccHtml+plHtml+ppHtml;
+  box.innerHTML+=liveHtml+qrHtml+bcHtml+autoHtml+ptHtml+dcHtml+ccHtml+plHtml+ppHtml;
 }
 
 /* ════ HOME TOSS LIVE PILOT WIDGET ════ */
