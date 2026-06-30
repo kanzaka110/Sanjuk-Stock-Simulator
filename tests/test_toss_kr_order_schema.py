@@ -30,14 +30,15 @@ _KR_PAYLOAD = {
 
 
 class TestKrStockSchemaAllowed:
-    """KR_STOCK asset_type에서 .KS/.KQ 심볼 허용."""
+    """KR_STOCK asset_type에서 .KS/.KQ 심볼 허용, API에는 suffix strip."""
 
     def test_kr_symbol_allowed_with_kr_asset_type(self):
         result = build_toss_order_create_request(
             _KR_PAYLOAD, client_order_id="test_kr", asset_type="KR_STOCK",
         )
         assert result["ok"] is True
-        assert result["request"]["symbol"] == "069500.KS"
+        # Toss API에는 suffix 없이 숫자 코드만 전송
+        assert result["request"]["symbol"] == "069500"
 
     def test_kr_symbol_blocked_with_us_asset_type(self):
         result = build_toss_order_create_request(
@@ -47,12 +48,12 @@ class TestKrStockSchemaAllowed:
         assert any("non_us" in b for b in result["blocks"])
 
     def test_kr_symbol_auto_detect_asset_type(self):
-        """asset_type=None이면 심볼에서 자동 판별."""
+        """asset_type=None이면 심볼에서 자동 판별, suffix strip."""
         result = build_toss_order_create_request(
             _KR_PAYLOAD, client_order_id="test_kr",
         )
         assert result["ok"] is True
-        assert result["request"]["symbol"] == "069500.KS"
+        assert result["request"]["symbol"] == "069500"
 
 
 class TestKrStockPriceFormat:
@@ -122,4 +123,4 @@ class TestKosdaq:
             payload, client_order_id="test_kq", asset_type="KR_STOCK",
         )
         assert result["ok"] is True
-        assert result["request"]["symbol"] == "091160.KQ"
+        assert result["request"]["symbol"] == "091160"

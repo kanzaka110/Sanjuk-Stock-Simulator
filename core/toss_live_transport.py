@@ -200,15 +200,18 @@ def build_toss_order_create_request(
     if blocks:
         return {"ok": False, "request": {}, "blocks": blocks, "warnings": warnings}
 
-    # KR_STOCK: 가격은 정수 KRW
+    # KR_STOCK: 가격은 정수 KRW, symbol에서 .KS/.KQ suffix strip
     if asset_type == "KR_STOCK":
         price_str = str(int(price_num))
+        # Toss API는 국내 종목코드를 숫자만 받음 (예: "316140", not "316140.KS")
+        api_symbol = norm_symbol.replace(".KS", "").replace(".KQ", "")
     else:
         price_str = str(int(price_num)) if price_num.is_integer() else str(price_num)
+        api_symbol = norm_symbol
 
     request = {
         "clientOrderId": cid,
-        "symbol": norm_symbol,
+        "symbol": api_symbol,
         "side": side.upper(),
         "orderType": "LIMIT",
         "quantity": str(qty_int),

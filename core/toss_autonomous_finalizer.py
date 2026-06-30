@@ -252,26 +252,31 @@ def _finalize_impl(pilot_id: str) -> dict:
         except Exception as e:
             log.warning("autonomous live_send_failed ledger failed: %s", e)
 
+        fail_reason = dispatch_result.get("reason", "dispatch_failed")
+        error_body = dispatch_result.get("error_body", "")
+        fail_detail = f"{fail_reason}: {error_body}" if error_body else fail_reason
+
         _record_event(
             pilot_id=pilot_id,
             event_type="autonomous_send_failed",
             status="live_send_failed",
             verification_id=verification_id,
-            reason=dispatch_result.get("reason", "dispatch_failed"),
+            reason=fail_detail[:500],
             rec=rec,
             policy=policy,
         )
 
         _send_result_telegram(
             "failed", rec,
-            failure_reason=dispatch_result.get("reason", "dispatch_failed"),
+            failure_reason=fail_detail[:200],
         )
 
         return {
             "ok": False,
             "action": "autonomous_finalize",
             "live_order_sent": False,
-            "reason": dispatch_result.get("reason", "dispatch_failed"),
+            "reason": fail_reason,
+            "error_body": error_body[:300] if error_body else "",
         }
 
 
