@@ -769,6 +769,16 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
     except Exception as e:
         log.debug("Toss 계좌 컨텍스트 스킵: %s", e)
 
+
+    # Toss live pilot 운영 교훈/상태 — 다음 브리핑이 오늘 자동화 수정사항을 반영하도록 주입
+    try:
+        from core.toss_decision_context import format_toss_live_pilot_briefing_lessons
+        live_pilot_text = format_toss_live_pilot_briefing_lessons()
+        if live_pilot_text:
+            extra_context += f"\n\n━━━ Toss Live Pilot 운영 교훈 ━━━\n{live_pilot_text}"
+    except Exception as e:
+        log.debug("Toss live pilot 교훈 스킵: %s", e)
+
     # Toss Paper 성과 (read-only, 기존 예측 DB·포트폴리오 합산 금지)
     try:
         from core.toss_paper_performance import format_toss_paper_performance_briefing

@@ -190,3 +190,64 @@ def context_to_briefing_text(ctx: dict | None = None) -> str:
     if warns:
         lines.append(f"- 경고: {', '.join(warns)}")
     return "\n".join(lines)
+
+
+
+def format_toss_live_pilot_briefing_lessons(limit: int = 8) -> str:
+    """Toss live pilot 운영 교훈을 다음 브리핑 LLM 입력으로 제공한다.
+
+    목적: 오늘의 자동화 테스트/실패 원인을 다음 브리핑이 잊지 않도록
+    read-only 이벤트/정책 요약과 실행 규칙을 주입한다.
+    """
+    try:
+        from core.toss_live_pilot_events import list_events
+        from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
+        from core.toss_live_transport import get_transport_status
+    except Exception:
+        return ""
+
+    try:
+        policy = compute_toss_live_pilot_policy()
+    except Exception:
+        policy = {}
+    try:
+        transport = get_transport_status()
+    except Exception:
+        transport = {}
+    try:
+        events = list_events(limit)
+    except Exception:
+        events = []
+
+    side_mode = policy.get("side_mode", "UNKNOWN")
+    allowed_sides = ",".join(policy.get("allowed_sides") or []) or "unknown"
+    sell_allowed = bool(policy.get("sell_allowed"))
+    live_possible = bool(
+        (policy.get("transport") or {}).get("live_order_sent_possible")
+        or transport.get("live_order_sent_possible")
+        or (policy.get("live_transport_status") == "configured" and policy.get("live_order_allowed"))
+    )
+
+    lines = [
+        "[Toss Live Pilot — 브리핑 반영 규칙]",
+        f"- 현재 live pilot: side_mode={side_mode}, allowed_sides={allowed_sides}, sell_allowed={sell_allowed}, live_order_sent_possible={live_possible}",
+        "- 토스 AI 계좌는 미국장 BUY+SELL 소액 자동화 우선. 삼성증권 자동화로 해석 금지.",
+        "- BUY 성공 직후 SELL은 Toss 보유/매도가능수량 반영 지연으로 422가 날 수 있음.",
+        "- 다음 브리핑/자동화 판단: 매수 직후 매도는 holdings에서 매도가능수량 확인 후 실행. 실패 시 사용자에게 수동 매도 여부를 묻지 말고 원인확인→재시도/패치→검증으로 닫기.",
+        "- 주문표에는 체결/금액/수량/잔고/손익, 즉시체결 위험, 손절/무효화를 우선 표시.",
+    ]
+
+    recent = []
+    for e in events[:5]:
+        symbol = e.get("symbol") or ""
+        if not symbol:
+            continue
+        side = e.get("side") or ""
+        et = e.get("event_type") or ""
+        sent = bool(e.get("live_order_sent"))
+        reason = e.get("reason") or ""
+        recent.append(f"  · {symbol} {side}: {et}, live_order_sent={sent}, reason={reason}")
+    if recent:
+        lines.append("- 최근 live pilot 이벤트:")
+        lines.extend(recent)
+    return "\n".join(lines)

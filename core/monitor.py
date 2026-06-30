@@ -26,6 +26,13 @@ from core.monitor_models import AlertResult, AlertTrigger, Severity, TriggerType
 
 log = logging.getLogger(__name__)
 
+AI_ANALYSIS_DEFAULT_MODEL = "haiku"
+AI_ANALYSIS_HIGH_STAKES_MODEL = "sonnet"
+AI_ANALYSIS_COOLDOWN_SEC = 60 * 60  # same ticker/type: at most once per hour
+AI_FAILURE_WINDOW_SEC = 30 * 60
+AI_FAILURE_CIRCUIT_THRESHOLD = 3
+AI_ANALYSIS_TIMEOUT_SEC = 45
+
 
 class MarketMonitor:
     """2-tier 시장 감시 엔진."""
@@ -34,6 +41,8 @@ class MarketMonitor:
         self._running: bool = False
         self._active_alerts: set[str] = set()  # 현재 발동 중인 알림 키
         self._last_scan: datetime | None = None
+        self._ai_last_called: dict[str, float] = {}
+        self._ai_failure_times: list[float] = []
 
     def run(self) -> None:
         """메인 감시 루프 — 주문 가능 시간 기준 (미국 프리/애프터 포함)."""
@@ -70,7 +79,6 @@ class MarketMonitor:
                     result = self._process_trigger(trigger)
                     if self._is_actionable(result):
                         self._send_alert(result)
-                        self._active_alerts.add(key)
                     else:
                         log.info(
                             "알림 억제 (비액션): %s %s — %s",
@@ -78,6 +86,10 @@ class MarketMonitor:
                             trigger.trigger_type.value,
                             result.severity.value,
                         )
+                    # 비액션/빈응답도 조건이 유지되는 동안 재분석하지 않는다.
+                    # 이전에는 전송 성공시에만 active 처리되어, 같은 급락/목표가 조건이
+                    # 매 스캔마다 Claude CLI를 다시 호출하며 토큰을 소모했다.
+                    self._active_alerts.add(key)
 
                 # 조건 해소된 알림 제거 (다음에 다시 발동하면 재전송)
                 self._active_alerts -= (self._active_alerts - current_keys)
@@ -540,15 +552,49 @@ class MarketMonitor:
         severity = self._classify_severity(trigger)
         ai_analysis = ""
 
-        # CRITICAL/WARNING 시에만 CLI AI 호출 ($0)
-        if severity in (Severity.CRITICAL, Severity.WARNING):
-            ai_analysis = self._ai_analyze(trigger)
+        # CRITICAL/WARNING 시에만 CLI AI 호출하되, 비용 가드로 반복 호출을 막는다.
+        if severity in (Severity.CRITICAL, Severity.WARNING) and self._should_run_ai_analysis(trigger):
+            ai_analysis = self._ai_analyze(trigger, self._analysis_model_for(trigger, severity))
 
         return AlertResult(
             trigger=trigger,
             severity=severity,
             ai_analysis=ai_analysis,
         )
+
+
+    def _should_run_ai_analysis(self, trigger: AlertTrigger) -> bool:
+        """Claude CLI 분석 비용 가드: 동일 트리거 쿨다운 + 실패 서킷브레이커."""
+        now = time.time()
+        window_start = now - AI_FAILURE_WINDOW_SEC
+        self._ai_failure_times = [t for t in self._ai_failure_times if t >= window_start]
+        if len(self._ai_failure_times) >= AI_FAILURE_CIRCUIT_THRESHOLD:
+            log.warning(
+                "CLI 분석 서킷브레이커: 최근 %d분 실패 %d회 → 스킵",
+                AI_FAILURE_WINDOW_SEC // 60,
+                len(self._ai_failure_times),
+            )
+            return False
+
+        key = self._alert_key(trigger)
+        last = self._ai_last_called.get(key)
+        if last is not None and now - last < AI_ANALYSIS_COOLDOWN_SEC:
+            remain = int(AI_ANALYSIS_COOLDOWN_SEC - (now - last))
+            log.info("CLI 분석 쿨다운: %s — %d초 남음", key, remain)
+            return False
+
+        # 호출 전에 기록해 timeout/빈응답도 즉시 재시도 루프를 만들지 않게 한다.
+        self._ai_last_called[key] = now
+        return True
+
+    def _record_ai_analysis_failure(self) -> None:
+        self._ai_failure_times.append(time.time())
+
+    def _analysis_model_for(self, trigger: AlertTrigger, severity: Severity) -> str:
+        """위험도별 모델 라우팅: 일반 경고는 haiku, 실제 위험/손절은 sonnet."""
+        if severity == Severity.CRITICAL or trigger.trigger_type == TriggerType.STOP_LOSS_HIT:
+            return AI_ANALYSIS_HIGH_STAKES_MODEL
+        return AI_ANALYSIS_DEFAULT_MODEL
 
     def _classify_severity(self, trigger: AlertTrigger) -> Severity:
         """트리거 심각도 분류. 발송 여부는 _is_actionable()에서 별도 판단."""
@@ -631,8 +677,8 @@ class MarketMonitor:
         log.info("알림 전송 결정: %s — actionable_order", result.trigger.ticker)
         return True
 
-    def _ai_analyze(self, trigger: AlertTrigger) -> str:
-        """Claude CLI로 AI 분석 — 즉시 행동할 매수/매도만 판정 (API 비용 $0)."""
+    def _ai_analyze(self, trigger: AlertTrigger, model: str | None = None) -> str:
+        """Claude CLI로 AI 분석 — 즉시 행동할 매수/매도만 판정."""
         import subprocess
 
         # 보유 종목 정보 수집
@@ -710,22 +756,26 @@ class MarketMonitor:
             f"실수가 있으면 안 됩니다. 확실할 때만 [매수]/[매도]를 내리세요."
         )
 
+        model = model or AI_ANALYSIS_DEFAULT_MODEL
         try:
             result = subprocess.run(
-                ["/usr/bin/claude", "-p", prompt, "--model", "opus"],
+                ["/usr/bin/claude", "-p", prompt, "--model", model],
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=AI_ANALYSIS_TIMEOUT_SEC,
                 cwd="/home/kanzaka110/Sanjuk-Stock-Simulator",
             )
             if result.returncode == 0 and result.stdout.strip():
                 return result.stdout.strip()
-            log.warning("CLI 분석 실패: returncode=%d", result.returncode)
+            self._record_ai_analysis_failure()
+            log.warning("CLI 분석 실패: model=%s returncode=%d", model, result.returncode)
             return ""
         except subprocess.TimeoutExpired:
-            log.warning("CLI 분석 타임아웃 (120초)")
+            self._record_ai_analysis_failure()
+            log.warning("CLI 분석 타임아웃 (%d초)", AI_ANALYSIS_TIMEOUT_SEC)
             return ""
         except Exception as e:
+            self._record_ai_analysis_failure()
             log.warning("CLI 분석 오류: %s", e)
             return ""
 

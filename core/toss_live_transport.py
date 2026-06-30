@@ -8,12 +8,12 @@ Toss live order transport 인터페이스 + 기본 구현.
 - 기본 구현체(NotConfiguredTossLiveTransport)는 항상 blocked 반환
 
 인터페이스:
-  transport.send_buy_order(payload: dict) → dict
+  transport.send_buy_order(payload: dict) → dict  # buy/sell 공용 payload
 
 금지:
   - 추측 endpoint HTTP POST 금지
   - 계좌번호/토큰/키/시크릿 payload 포함 금지
-  - sell 주문 구현 금지 (BUY_ONLY)
+  - 한국장 symbol 주문 금지 (US_STOCK only)
   - live_order_sent=True를 endpoint 확인 없이 반환 금지
 """
 
@@ -30,10 +30,10 @@ log = logging.getLogger(__name__)
 # 명시적으로 armed된 runtime(아래 _runtime_live_transport_armed)에서만 configured로 승격.
 LIVE_TRANSPORT_STATUS: str = "not_configured"
 
-# 주문 schema 상수 (BUY_ONLY 지정가 고정)
+# 주문 schema 상수 (US_STOCK BUY+SELL 지정가)
 _CLIENT_ORDER_ID_MAX = 36
 _CLIENT_ORDER_ID_RE = re.compile(r"[^a-zA-Z0-9_-]")
-_DEFAULT_MAX_ORDER_KRW = 100_000
+_DEFAULT_MAX_ORDER_KRW = 0  # 0/None = 임의 KRW cap 없음
 
 
 class TossLiveTransportBase:
@@ -51,7 +51,7 @@ class TossLiveTransportBase:
 
         금지:
             - 계좌번호/토큰/키/시크릿 포함 금지
-            - sell 주문 구현 금지
+            - 한국장 symbol 주문 금지
         """
         raise NotImplementedError
 
@@ -115,20 +115,31 @@ def _normalize_client_order_id(raw: str) -> str:
     return f"{prefix}-{digest}"
 
 
+def _classify_asset_type(symbol: str) -> str:
+    """심볼에서 asset type 판별."""
+    s = str(symbol).strip().upper()
+    if s.endswith((".KS", ".KQ")):
+        return "KR_STOCK"
+    return "US_STOCK"
+
+
 def build_toss_order_create_request(
     payload: dict,
     *,
     client_order_id: str,
     max_order_krw: float = _DEFAULT_MAX_ORDER_KRW,
+    asset_type: str | None = None,
 ) -> dict:
     """내부 payload → Toss 주문 생성 request body 변환 (dry-run only).
 
     실제 HTTP 호출 없음. 민감정보(계좌번호/토큰/키/시크릿) 미포함.
-    BUY_ONLY + LIMIT만 허용. 국내 symbol은 .KS 제거, quantity/price는 문자열.
+    US_STOCK/KR_STOCK BUY+SELL + LIMIT. digit-only ticker는 항상 차단.
+
+    Args:
+        asset_type: "US_STOCK" | "KR_STOCK" | None (None이면 symbol에서 자동 판별)
 
     Returns:
         {"ok": bool, "request": dict, "blocks": list[str], "warnings": list[str]}
-        ok=False면 request는 {} (전송 가능 형태 미생성).
     """
     blocks: list[str] = []
     warnings: list[str] = ["dry-run only", "not sent"]
@@ -140,14 +151,24 @@ def build_toss_order_create_request(
     limit_price = payload.get("limit_price")
     estimated_krw = payload.get("estimated_amount_krw")
 
-    # symbol 정규화: 국내(.KS) suffix 제거
-    norm_symbol = symbol[:-3] if symbol.endswith(".KS") else symbol
+    norm_symbol = symbol.upper()
     if not norm_symbol:
         blocks.append("invalid_symbol: empty")
 
-    # BUY_ONLY guard
-    if side != "buy":
-        blocks.append(f"sell_not_allowed_buy_only: side={side!r}")
+    # asset type 결정
+    if asset_type is None:
+        asset_type = _classify_asset_type(norm_symbol)
+
+    # digit-only 심볼은 항상 차단 (삼성증권 종목코드 형식)
+    if norm_symbol.isdigit():
+        blocks.append(f"digit_only_symbol_blocked: {symbol}")
+    elif asset_type == "US_STOCK" and norm_symbol.endswith((".KS", ".KQ")):
+        blocks.append(f"non_us_symbol_not_allowed: {symbol}")
+    # KR_STOCK + .KS/.KQ → 허용
+
+    # BUY+SELL guard
+    if side not in ("buy", "sell"):
+        blocks.append(f"side_not_allowed: side={side!r}")
 
     # LIMIT only guard
     if order_type != "limit":
@@ -157,18 +178,21 @@ def build_toss_order_create_request(
     if qty_int is None:
         blocks.append(f"invalid_quantity: {quantity!r} (양의 정수 필요)")
 
-    price_int = _as_positive_int(limit_price)
-    if price_int is None:
-        blocks.append(f"invalid_price: {limit_price!r} (양의 정수 필요)")
+    try:
+        price_num = float(limit_price)
+    except (TypeError, ValueError):
+        price_num = 0.0
+    if price_num <= 0:
+        blocks.append(f"invalid_price: {limit_price!r} (양수 필요)")
 
     # 금액 한도 재확인
     try:
         est = float(estimated_krw) if estimated_krw is not None else (
-            float(price_int * qty_int) if price_int and qty_int else 0.0
+            float(price_num * qty_int) if price_num and qty_int else 0.0
         )
     except (TypeError, ValueError):
         est = 0.0
-    if est > float(max_order_krw):
+    if max_order_krw and est > float(max_order_krw):
         blocks.append(f"amount_over_limit: {est:,.0f} > {float(max_order_krw):,.0f}")
 
     cid = _normalize_client_order_id(client_order_id)
@@ -176,16 +200,21 @@ def build_toss_order_create_request(
     if blocks:
         return {"ok": False, "request": {}, "blocks": blocks, "warnings": warnings}
 
+    # KR_STOCK: 가격은 정수 KRW
+    if asset_type == "KR_STOCK":
+        price_str = str(int(price_num))
+    else:
+        price_str = str(int(price_num)) if price_num.is_integer() else str(price_num)
+
     request = {
         "clientOrderId": cid,
         "symbol": norm_symbol,
-        "side": "BUY",
+        "side": side.upper(),
         "orderType": "LIMIT",
         "quantity": str(qty_int),
-        "price": str(price_int),
+        "price": price_str,
         "timeInForce": "DAY",
         "confirmHighValueOrder": False,
-        # 민감정보 필드 없음: 계좌번호/토큰/키/시크릿/인증헤더 미포함
     }
     return {"ok": True, "request": request, "blocks": [], "warnings": warnings}
 
@@ -204,7 +233,8 @@ class DryRunTossLiveTransport(TossLiveTransportBase):
             or payload.get("preview_id")
             or "tlive"
         )
-        max_krw = float(payload.get("max_order_krw", _DEFAULT_MAX_ORDER_KRW) or _DEFAULT_MAX_ORDER_KRW)
+        max_krw = payload.get("max_order_krw", _DEFAULT_MAX_ORDER_KRW)
+        max_krw = float(max_krw) if max_krw else 0
         built = build_toss_order_create_request(
             payload, client_order_id=cid, max_order_krw=max_krw
         )
@@ -245,7 +275,7 @@ class LiveTossTransport(TossLiveTransportBase):
 
     [중요] production 기본 경로에서 자동 주입/자동 실행되지 않음.
     - DEFAULT_LIVE_TRANSPORT는 NotConfigured 유지
-    - env gate 3개 + Hermes PASS + 사용자 최종 승인 + BUY_ONLY + guard 통과
+    - env gate 3개 + Hermes PASS + 사용자 최종 승인 + BUY/SELL + US-only guard 통과
       + 명시적 transport 주입 없이는 실제 주문 불가
     - schema 검증(build_toss_order_create_request) 통과 시에만 HTTP 위임
 
@@ -264,12 +294,16 @@ class LiveTossTransport(TossLiveTransportBase):
             or payload.get("preview_id")
             or "tlive"
         )
-        max_krw = float(payload.get("max_order_krw", _DEFAULT_MAX_ORDER_KRW) or _DEFAULT_MAX_ORDER_KRW)
+        max_krw = payload.get("max_order_krw", _DEFAULT_MAX_ORDER_KRW)
+        max_krw = float(max_krw) if max_krw else 0
+        asset_type = payload.get("asset_type") or _classify_asset_type(
+            str(payload.get("symbol", ""))
+        )
         built = build_toss_order_create_request(
-            payload, client_order_id=cid, max_order_krw=max_krw
+            payload, client_order_id=cid, max_order_krw=max_krw,
+            asset_type=asset_type,
         )
 
-        # schema 검증 실패 → 전송 안 함
         if not built["ok"]:
             return {
                 "ok": False,
@@ -284,10 +318,9 @@ class LiveTossTransport(TossLiveTransportBase):
                 ),
             }
 
-        # 실제 전송은 HTTP 위임 모듈에서 (민감정보 격리)
-        from core.toss_live_order_http import submit_buy_order
+        from core.toss_live_order_http import submit_order
 
-        return submit_buy_order(
+        return submit_order(
             built["request"],
             account_seq=self._account_seq,
             timeout=self._timeout,

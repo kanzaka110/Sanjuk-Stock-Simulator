@@ -34,6 +34,10 @@ class ScanHit:
     rsi: float
     vol_surge: float  # 5일 평균 거래량 / 60일 평균 거래량
     pct_from_52w_high: float  # 52주(데이터 범위) 고점 대비 % (음수)
+    change_pct: float = 0.0  # 전일 대비 등락률(가능한 경우)
+    open_price: float = 0.0
+    high_price: float = 0.0
+    low_price: float = 0.0
     tags: tuple[str, ...] = ()  # 모멘텀리더/급등/거래량급증/신고가/과매도반전
     is_held: bool = False
     in_watchlist: bool = False
@@ -65,7 +69,7 @@ class ScanReport:
             flag_str = f" ({','.join(flags)})" if flags else ""
             lines.append(
                 f"  [{'/'.join(h.tags)}] {h.name}({h.ticker}){flag_str}: "
-                f"{unit}{h.price:,.0f} | 20일 {h.ret_20d:+.1f}% | 60일 {h.ret_60d:+.1f}% | "
+                f"{unit}{h.price:,.0f} | 당일 {h.change_pct:+.1f}% | 20일 {h.ret_20d:+.1f}% | 60일 {h.ret_60d:+.1f}% | "
                 f"RSI {h.rsi:.0f} | 거래량 x{h.vol_surge:.1f} | 고점대비 {h.pct_from_52w_high:+.1f}%"
             )
         return "\n".join(lines)
@@ -132,6 +136,7 @@ def scan_market(market: str = "US", top_n: int = 6) -> ScanReport:
                 continue
 
             cur = float(close.iloc[-1])
+            prev = float(close.iloc[-2]) if len(close) >= 2 else cur
             ret_20 = (cur / float(close.iloc[-21]) - 1) * 100
             ret_60 = (cur / float(close.iloc[-61]) - 1) * 100
             rsi = compute_rsi(close)
@@ -145,6 +150,10 @@ def scan_market(market: str = "US", top_n: int = 6) -> ScanReport:
 
             rows.append({
                 "ticker": tk, "name": universe[tk], "price": cur,
+                "change_pct": ((cur / prev - 1) * 100) if prev > 0 else 0.0,
+                "open_price": float(df["Open"].dropna().iloc[-1]) if "Open" in df else 0.0,
+                "high_price": float(df["High"].dropna().iloc[-1]) if "High" in df else 0.0,
+                "low_price": float(df["Low"].dropna().iloc[-1]) if "Low" in df else 0.0,
                 "ret_20d": ret_20, "ret_60d": ret_60, "rsi": rsi,
                 "vol_surge": vol_surge, "from_high": from_high,
                 "bounced": bounced,
@@ -179,6 +188,10 @@ def scan_market(market: str = "US", top_n: int = 6) -> ScanReport:
             ret_20d=round(r["ret_20d"], 1), ret_60d=round(r["ret_60d"], 1),
             rsi=round(r["rsi"], 0), vol_surge=round(r["vol_surge"], 1),
             pct_from_52w_high=round(r["from_high"], 1),
+            change_pct=round(r.get("change_pct", 0.0), 1),
+            open_price=round(r.get("open_price", 0.0), 2),
+            high_price=round(r.get("high_price", 0.0), 2),
+            low_price=round(r.get("low_price", 0.0), 2),
             tags=tuple(dict.fromkeys(tags[r["ticker"]])),
             is_held=r["ticker"] in held,
             in_watchlist=r["ticker"] in watchlist,
@@ -219,6 +232,30 @@ class DiscoveryHit:
     source: str  # 급등상위/거래량상위
     ret_60d: float = 0.0  # 보강 조회 시
     rsi: float = 0.0
+    open_price: float = 0.0
+    high_price: float = 0.0
+    low_price: float = 0.0
+
+
+def _naver_realtime_kr(code: str) -> dict:
+    """네이버 polling API로 KR 장중 open/high/low/current를 보강한다. 실패 시 {}."""
+    try:
+        import requests
+        url = f"https://polling.finance.naver.com/api/realtime/domestic/stock/{code}"
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
+        d = (r.json().get("datas") or [{}])[0]
+        def num(key):
+            raw = d.get(key + "Raw") or d.get(key) or 0
+            return float(str(raw).replace(",", "") or 0)
+        return {
+            "price": num("closePrice"),
+            "change_pct": float(d.get("fluctuationsRatioRaw") or d.get("fluctuationsRatio") or 0),
+            "open_price": num("openPrice"),
+            "high_price": num("highPrice"),
+            "low_price": num("lowPrice"),
+        }
+    except Exception:
+        return {}
 
 
 def discover_us(top_n: int = 10) -> list[DiscoveryHit]:
@@ -297,13 +334,18 @@ def discover_kr(top_n: int = 10) -> list[DiscoveryHit]:
                     value = price * volume  # 거래대금 근사
                     if price < _MIN_KR_PRICE or value < _MIN_KR_VALUE_KRW:
                         continue
+                    rt = _naver_realtime_kr(code)
+                    live_price = rt.get("price") or price
                     hits.append(DiscoveryHit(
                         ticker=f"{code}{suffix}",
                         name=name[:24],
-                        price=price,
-                        change_pct=round(pct, 1),
+                        price=live_price,
+                        change_pct=round(float(rt.get("change_pct", pct)), 1),
                         volume_value=value,
                         source="급등상위",
+                        open_price=float(rt.get("open_price") or 0),
+                        high_price=float(rt.get("high_price") or 0),
+                        low_price=float(rt.get("low_price") or 0),
                     ))
                 except (ValueError, KeyError, TypeError):
                     continue

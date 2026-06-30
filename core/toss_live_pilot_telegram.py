@@ -67,8 +67,8 @@ def format_live_pilot_preview_message(
     qty = preview.get("quantity", 0)
     price = preview.get("limit_price", 0)
     amount = preview.get("estimated_amount_krw", 0)
-    max_krw = policy.get("max_order_krw", 500_000)
-    max_daily = policy.get("max_daily_krw", 2_000_000)
+    max_krw = policy.get("max_order_krw") or 0
+    max_daily = policy.get("max_daily_krw") or 0
     max_per_day = policy.get("max_orders_per_day")
     max_per_day_label = "무제한" if max_per_day in (None, 0) else f"{max_per_day}건"
     blocks = preview.get("blocks", [])
@@ -209,7 +209,7 @@ def _handle_review(preview_id: str) -> dict:
 def resolve_live_transport_for_confirm(policy: dict):
     """confirm 경로에서 주입할 live transport를 안전하게 결정.
 
-    env gate 3종 + policy enabled + BUY_ONLY 모두 통과하고, 명시적으로
+    env gate 3종 + policy enabled + 허용 side 정책을 모두 통과하고, 명시적으로
     설정된(NotConfigured가 아닌) transport가 DEFAULT_LIVE_TRANSPORT로
     주입돼 있을 때만 호출 가능한 callable을 반환한다.
 
@@ -225,9 +225,6 @@ def resolve_live_transport_for_confirm(policy: dict):
         return None
     if not policy.get("all_live_gates_open"):
         return None
-    if policy.get("side_mode") != "BUY_ONLY":
-        return None
-
     from core.toss_live_transport import (
         DEFAULT_LIVE_TRANSPORT,
         NotConfiguredTossLiveTransport,
@@ -379,31 +376,13 @@ def _handle_confirm(preview_id: str) -> dict:
         except Exception as e:
             logger.warning("live_send_blocked ledger failed: %s", e)
 
-        # sell 차단 여부 확인 → 전용 문구
-        if any("sell_not_allowed" in r for r in guard_reasons):
-            guard_msg = (
-                "차단: BUY_ONLY pilot — 매도는 아직 비활성\n"
-                "아직 주문 전송 안 함\n"
-                "live_order_sent=false"
-            )
-        else:
-            guard_msg = (
-                "[차단: 한도/중복/가격 조건 미충족]\n"
-                "주문 전송 안 함\n"
-                "live_order_sent=false\n"
-                f"차단 사유: {'; '.join(guard_reasons[:3])}"
-            )
-        try:
-            from core.toss_live_pilot_events import record_event
-            record_event(
-                pilot_id=preview_id, event_type="live_send_blocked",
-                status="live_send_blocked", preview_id=preview_id,
-                verification_id=verification_id,
-                reason="live_send_guard_failed", message=guard_msg,
-                **_event_fields(rec),
-            )
-        except Exception as e:
-            logger.warning("live_send_blocked event failed: %s", e)
+        guard_msg = (
+            "[차단: 정책/한도/중복/가격 조건 미충족]\n"
+            "주문 전송 안 함\n"
+            "live_order_sent=false\n"
+            f"차단 사유: {'; '.join(guard_reasons[:3])}"
+        )
+
         return {
             "ok": False, "action": "confirm", "live_order_sent": False, "blocked": True,
             "reason": "live_send_guard_failed",
@@ -435,12 +414,19 @@ def _handle_confirm(preview_id: str) -> dict:
         sent_msg = dispatch_result.get("message", "승인형 live pilot 주문 전송 완료")
         try:
             from core.toss_live_pilot_events import record_event
+            event_fields = _event_fields(rec)
+            event_fields["adapter_status"] = policy.get("adapter_status", "disabled")
             record_event(
                 pilot_id=preview_id, event_type="live_sent",
                 status="live_sent", preview_id=preview_id,
                 verification_id=verification_id,
                 live_order_sent=True, message=sent_msg,
-                **_event_fields(rec),
+                live_order_allowed=bool(policy.get("live_order_allowed")),
+                broker_order_id=dispatch_result.get("broker_order_id", ""),
+                broker_order_status=dispatch_result.get("broker_order_status", ""),
+                filled_quantity=float(dispatch_result.get("filled_quantity") or 0),
+                filled_price=float(dispatch_result.get("filled_price") or 0),
+                **event_fields,
             )
         except Exception as e:
             logger.warning("live_sent event failed: %s", e)
@@ -564,4 +550,35 @@ def send_live_pilot_preview_message(
         return False
     except Exception as e:
         logger.error("Live Pilot 발송 오류: %s", e)
+        return False
+
+
+def send_autonomous_result_message(text: str) -> bool:
+    """자율실행 결과 Telegram 발송 (InlineKeyboard 없음, 결과 보고 전용).
+
+    민감정보 미포함. 승인 버튼 없음.
+    """
+    import requests as req
+
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+    if not token or not chat_id:
+        logger.warning("Telegram 미설정 — 자율실행 결과 발송 불가")
+        return False
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text[:4000],
+        "disable_web_page_preview": True,
+    }
+    try:
+        res = req.post(url, json=payload, timeout=30)
+        if res.status_code == 200:
+            logger.info("자율실행 결과 발송 완료")
+            return True
+        logger.warning("자율실행 결과 발송 실패: %d %s", res.status_code, res.text[:160])
+        return False
+    except Exception as e:
+        logger.error("자율실행 결과 발송 오류: %s", e)
         return False

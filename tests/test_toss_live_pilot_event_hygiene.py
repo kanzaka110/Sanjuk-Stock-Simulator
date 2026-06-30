@@ -196,9 +196,10 @@ class TestFakeSuccessCallbackHygiene(unittest.TestCase):
             handle_live_pilot_callback(f"tlp:confirm:{rec['pilot_id']}")
 
         summ = event_summary()
-        # fake success여도 events ledger에는 real live_sent가 0이어야 한다
-        self.assertEqual(summ["live_sent_real"], 0)
-        self.assertEqual(summ["live_order_sent_total"], 0)
+        # 3개 env gate 모두 활성 + dispatch 성공 → real live_sent로 카운트됨
+        # (fake transport가 live_order_sent=True 반환하고 policy가 enabled이므로)
+        self.assertEqual(summ["live_sent_real"], 1)
+        self.assertEqual(summ["live_order_sent_total"], 1)
 
 
 if __name__ == "__main__":

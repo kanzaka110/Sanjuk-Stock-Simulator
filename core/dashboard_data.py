@@ -1869,6 +1869,18 @@ def toss_paper_policy_data() -> dict:
     return _cached("toss_paper_policy", 120, _fetch)
 
 
+
+
+# ─── /api/market/discovery — 계좌 비의존 광역 시장 레이더 ─────────────
+def market_discovery_data(range_: str = "today", limit: int = 50) -> dict:
+    """삼성/ISA/RIA/IRP/토스 공용 광역 후보 레이더 (read-only)."""
+    def _fetch():
+        from core.discovery_candidates import build_discovery_sections, market_discovery_radar
+        sections = build_discovery_sections(briefing_type="KR_OPEN")
+        return market_discovery_radar(sections, limit=limit)
+    return _cached(f"market_discovery:{range_}:{limit}", 120, _fetch)
+
+
 # ─── /api/toss/buy-candidates — 토스 전용 매수 후보 (신규 발굴 기반) ─────────────
 def toss_buy_candidates_data(range_: str = "today", limit: int = 20) -> dict:
     """토스 전용 매수 후보 조회 (read-only) — 신규 발굴 기반.
@@ -1893,19 +1905,281 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20) -> dict:
 
         sections = build_discovery_sections(briefing_type="KR_BEFORE")
         result = toss_eligible_new_candidates(sections, max_order_krw=max_order_krw)
+
+        def _enrich_for_stock_agent(item: dict) -> dict:
+            """Add complete read-only order-review fields for Hermes stock-agent.
+
+            These fields are display/review metadata only. They do not create, approve,
+            or send an order. missing_fields is explicit so the agent can HOLD/BLOCK
+            instead of guessing when data is absent.
+            """
+            out = dict(item)
+            price = out.get("price") or out.get("limit_price") or out.get("entry_price")
+            limit_price = out.get("limit_price") or price
+            quantity = int(out.get("quantity") or 0)
+            try:
+                current_price = float(out.get("current_price") or price or 0)
+            except Exception:
+                current_price = 0.0
+            try:
+                limit_f = float(limit_price or 0)
+            except Exception:
+                limit_f = 0.0
+            estimated = float(out.get("estimated_amount_krw") or (quantity * limit_f if quantity and limit_f else 0))
+            stop = out.get("stop_loss")
+            target = out.get("target_price")
+
+            out.setdefault("account", "토스 AI")
+            out.setdefault("account_type", "토스 AI")
+            out.setdefault("order_type", "LIMIT")
+            out.setdefault("entry_price", limit_f or None)
+            out.setdefault("current_price", current_price or None)
+            out.setdefault("current_price_source", "discovery_candidates.price")
+            out.setdefault("current_price_age_sec", None)
+            out.setdefault("quantity", quantity)
+            out.setdefault("estimated_amount_krw", round(estimated, 2) if estimated else None)
+            out.setdefault("condition", "지정가 이하에서만 검토 · 승호 최종 승인 전 실주문 없음")
+            out.setdefault("execution_gate", "Hermes PASS + 승호 최종 승인 필요")
+            out.setdefault("broker_execution", "Toss live pilot BUY_ONLY approval gate")
+            out.setdefault("read_only_notice", "GET-only 후보 표시 · 이 응답은 주문 생성/승인/전송을 하지 않음")
+
+            if current_price and limit_f:
+                gap = round((limit_f / current_price - 1.0) * 100.0, 2)
+                out.setdefault("current_vs_limit_gap_pct", gap)
+                if gap > 0.3:
+                    fill_note = "지정가가 현재가보다 높음 — 즉시체결/추격 위험 재검증"
+                elif gap >= -0.3:
+                    fill_note = "현재가 근접 — 즉시체결 가능성 있음"
+                else:
+                    fill_note = "현재가보다 낮은 지정가 — 미체결 가능성 있음"
+                out.setdefault("fill_risk_note", fill_note)
+            else:
+                out.setdefault("current_vs_limit_gap_pct", None)
+                out.setdefault("fill_risk_note", "현재가 또는 지정가 부족 — 체결 가능성 판단 불가")
+
+            risk_notes = list(out.get("risk_notes") or [])
+            if stop:
+                risk_notes.append(f"손절 기준 {stop:,.0f}원" if isinstance(stop, (int, float)) else f"손절 기준 {stop}")
+            if target:
+                risk_notes.append(f"목표 기준 {target:,.0f}원" if isinstance(target, (int, float)) else f"목표 기준 {target}")
+            if out.get("limit_exceeded"):
+                risk_notes.append(str(out.get("block_reason") or "1회 주문 한도 초과"))
+            if out.get("blocking_risk_flags"):
+                risk_notes.extend(str(f) for f in out.get("blocking_risk_flags") or [])
+            if out.get("observation_flags"):
+                risk_notes.extend(str(f) for f in out.get("observation_flags") or [])
+            out["risk_notes"] = risk_notes
+
+            missing = []
+            required = {
+                "account": out.get("account") or out.get("account_type"),
+                "symbol": out.get("symbol"),
+                "name": out.get("name"),
+                "side": out.get("side"),
+                "current_price": out.get("current_price"),
+                "limit_price": out.get("limit_price"),
+                "quantity": out.get("quantity"),
+                "estimated_amount_krw": out.get("estimated_amount_krw"),
+                "stop_loss": out.get("stop_loss"),
+                "condition": out.get("condition"),
+            }
+            for key, value in required.items():
+                if value in (None, "", 0, 0.0, []):
+                    missing.append(key)
+            out["missing_fields"] = missing
+            hard_blocked = out.get("execution_status") == "hold_risk_flags" or bool(out.get("blocking_risk_flags"))
+            out["stock_agent_ready"] = not missing and not out.get("limit_exceeded") and not hard_blocked
+            return out
+
+        items = [_enrich_for_stock_agent(i) for i in result["items"][:limit]]
         return {
-            "items": result["items"][:limit],
+            "items": items,
             "excluded": result["excluded"][:limit],
             "count": result["count"],
             "excluded_count": result["excluded_count"],
             "scan_summary": result.get("scan_summary", {}),
             "range": range_,
             "max_order_krw": max_order_krw,
+            "schema": "toss_buy_candidates.v2.stock_agent_ready",
             "note": result["note"],
         }
 
     return _cached(f"toss_buy_candidates:{range_}:{limit}", 120, _fetch)
 
+
+
+# ─── /api/stock-agent/activity — Hermes Stock-Agent 분석 활동 조회 (GET-only) ──
+def stock_agent_activity_data(limit: int = 20) -> dict:
+    """Stock-Agent 분석/감시 활동 요약.
+
+    읽기 전용 대시보드 표시용이다. 후보 스캔, Hermes 검증 ledger, live-pilot 이벤트,
+    저장된 리뷰 아티팩트가 있으면 한 화면에 모아 보여준다. 주문 생성/승인/전송 없음.
+    """
+    def _fetch():
+        from pathlib import Path
+
+        now_str = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
+        out = {
+            "schema": "stock_agent_activity.v1.read_only",
+            "updated_at": now_str,
+            "read_only_notice": "GET-only 분석 활동 표시 · 주문 생성/승인/전송 없음",
+            "live_order_allowed": False,
+            "summary": {
+                "candidate_count": 0,
+                "ready_count": 0,
+                "missing_count": 0,
+                "pending_verifications": 0,
+                "recent_events": 0,
+                "reviews_saved": False,
+            },
+            "artifacts": {},
+            "activities": [],
+            "error": "",
+        }
+
+        activities: list[dict] = []
+
+        # 1) 현재 후보 스캔 상태
+        try:
+            cands = toss_buy_candidates_data(limit=min(limit, 50)) or {}
+            items = cands.get("items") or []
+            excluded = cands.get("excluded") or []
+            scan = cands.get("scan_summary") or {}
+            ready = [i for i in items if i.get("stock_agent_ready")]
+            missing = [i for i in items if i.get("missing_fields")]
+            out["summary"].update({
+                "candidate_count": len(items),
+                "ready_count": len(ready),
+                "missing_count": len(missing),
+                "universe_count": scan.get("universe_count"),
+                "scanned_count": scan.get("scanned_count"),
+                "pass_count": scan.get("pass_count"),
+                "reject_count": scan.get("reject_count"),
+                "excluded_count": cands.get("excluded_count", len(excluded)),
+            })
+            out["candidates"] = items[:10]
+            out["excluded"] = excluded[:10]
+            out["scan_summary"] = scan
+            activities.append({
+                "kind": "scan",
+                "title": "신규 후보 스캔",
+                "status": f"후보 {len(items)} · PASS-ready {len(ready)} · 정보부족 {len(missing)}",
+                "time": now_str,
+                "detail": cands.get("note") or "토스 AI 계좌 전용 신규 발굴 후보를 읽기 전용으로 스캔",
+            })
+            for item in items[:5]:
+                name = item.get("name") or item.get("symbol") or item.get("ticker") or "—"
+                symbol = item.get("symbol") or item.get("ticker") or ""
+                missing_fields = item.get("missing_fields") or []
+                status = "PASS-ready" if item.get("stock_agent_ready") else ("HOLD · 정보부족" if missing_fields else item.get("execution_status", "검토"))
+                gap = item.get("current_vs_limit_gap_pct")
+                detail_bits = [item.get("fill_risk_note") or "체결위험 미확인"]
+                if gap is not None:
+                    detail_bits.append(f"현재가 대비 {gap:+.2f}%")
+                if missing_fields:
+                    detail_bits.append("부족: " + ", ".join(missing_fields[:4]))
+                activities.append({
+                    "kind": "candidate",
+                    "title": f"{name} ({symbol})" if symbol else name,
+                    "status": status,
+                    "time": now_str,
+                    "detail": " · ".join(detail_bits),
+                })
+        except Exception as e:
+            activities.append({"kind": "scan", "title": "신규 후보 스캔", "status": "오류", "time": now_str, "detail": str(e)})
+
+        # 2) Hermes 검증/이벤트 ledger
+        try:
+            ver = toss_live_pilot_verifications_data(limit=min(limit, 50)) or {}
+            v_records = ver.get("records") or []
+            out["summary"]["pending_verifications"] = ver.get("pending_count", 0)
+            for r in v_records[:5]:
+                symbol = r.get("symbol") or r.get("ticker") or ""
+                name = r.get("symbol_name") or r.get("name") or symbol or "검증 요청"
+                activities.append({
+                    "kind": "verification",
+                    "title": f"Hermes 검증 · {name} ({symbol})" if symbol else f"Hermes 검증 · {name}",
+                    "status": r.get("status") or r.get("decision") or "검토",
+                    "time": r.get("created_at") or r.get("updated_at") or "",
+                    "detail": r.get("reason") or r.get("summary") or "PASS/HOLD/BLOCK 검증 기록",
+                })
+        except Exception as e:
+            activities.append({"kind": "verification", "title": "Hermes 검증 ledger", "status": "오류", "time": now_str, "detail": str(e)})
+
+        try:
+            ev = toss_live_pilot_events_data(limit=min(limit, 50)) or {}
+            e_records = ev.get("records") or []
+            out["summary"]["recent_events"] = len(e_records)
+            for r in e_records[:5]:
+                symbol = r.get("symbol") or r.get("ticker") or ""
+                name = r.get("symbol_name") or r.get("name") or symbol or "이벤트"
+                activities.append({
+                    "kind": "event",
+                    "title": f"Live Pilot 이벤트 · {name} ({symbol})" if symbol else f"Live Pilot 이벤트 · {name}",
+                    "status": r.get("event_type") or r.get("status") or "event",
+                    "time": r.get("created_at") or r.get("event_time") or "",
+                    "detail": r.get("message") or r.get("reason") or r.get("result") or "이벤트 기록",
+                })
+        except Exception as e:
+            activities.append({"kind": "event", "title": "Live Pilot 이벤트", "status": "오류", "time": now_str, "detail": str(e)})
+
+        # 3) Stock-Agent 리뷰 아티팩트 — 있으면 표시, 없으면 configured-but-empty로 표시
+        artifact_paths = [
+            Path("/root/.hermes/stock-agent/reviews/recent_reviews.md"),
+            Path("/home/kanzaka110/.hermes/stock-agent/reviews/recent_reviews.md"),
+            Path(".hermes/stock-agent/reviews/recent_reviews.md"),
+        ]
+        snapshot_paths = [
+            Path("/root/.hermes/stock-agent/reviews/latest_snapshot.json"),
+            Path("/home/kanzaka110/.hermes/stock-agent/reviews/latest_snapshot.json"),
+            Path(".hermes/stock-agent/reviews/latest_snapshot.json"),
+        ]
+        def _safe_existing(paths):
+            for x in paths:
+                try:
+                    if x.exists():
+                        return x
+                except OSError:
+                    continue
+            return None
+
+        review_path = _safe_existing(artifact_paths)
+        snapshot_path = _safe_existing(snapshot_paths)
+        out["artifacts"] = {
+            "recent_reviews_exists": bool(review_path),
+            "latest_snapshot_exists": bool(snapshot_path),
+            "recent_reviews_path": str(review_path) if review_path else "",
+            "latest_snapshot_path": str(snapshot_path) if snapshot_path else "",
+        }
+        if review_path:
+            try:
+                body = review_path.read_text(encoding="utf-8", errors="replace")
+                excerpt = body[-2000:].strip()
+                mtime = datetime.fromtimestamp(review_path.stat().st_mtime, KST).strftime("%Y-%m-%d %H:%M KST")
+                out["artifacts"].update({"recent_reviews_mtime": mtime, "recent_reviews_excerpt": excerpt})
+                out["summary"]["reviews_saved"] = True
+                activities.append({
+                    "kind": "review",
+                    "title": "LLM 리뷰 아티팩트 저장됨",
+                    "status": "recent_reviews.md",
+                    "time": mtime,
+                    "detail": excerpt.splitlines()[-1] if excerpt else "저장된 리뷰 있음",
+                })
+            except Exception as e:
+                out["artifacts"]["recent_reviews_error"] = str(e)
+        else:
+            activities.append({
+                "kind": "review",
+                "title": "LLM 리뷰 아티팩트",
+                "status": "아직 없음",
+                "time": now_str,
+                "detail": "이벤트 발생 후 Stock-Agent 리뷰가 저장되면 recent_reviews.md/latest_snapshot.json 상태가 여기에 표시됨",
+            })
+
+        out["activities"] = activities[:limit]
+        return out
+
+    return _cached(f"stock_agent_activity:{limit}", 60, _fetch)
 
 def toss_live_pilot_policy_data() -> dict:
     """승인형 live pilot 정책 (60초 캐시). 실제 주문 0건. adapter disabled."""
@@ -1914,14 +2188,65 @@ def toss_live_pilot_policy_data() -> dict:
         return compute_toss_live_pilot_policy()
     data = dict(_cached("toss_live_pilot_policy", 60, _fetch))
     # transport dry-run schema 상태 표시 (token/account 등 민감정보 미노출)
+    transport_configured = data.get("live_transport_status") == "configured"
+    live_order_sent_possible = bool(
+        data.get("live_order_allowed")
+        and data.get("adapter_status") == "enabled"
+        and transport_configured
+    )
     data["transport"] = {
         "live_transport_status": data.get("live_transport_status", "not_configured"),
         "dry_run_schema_ready": True,
         "order_endpoint_confirmed": True,
         "order_endpoint": "POST /api/v1/orders",
-        "live_order_sent_possible": False,
+        # read-only 표시값: env gate + adapter + transport가 모두 열린 경우에만 true.
+        # 실제 주문은 별도 Hermes PASS + 사용자 최종 승인 + transport dispatch guard 필요.
+        "live_order_sent_possible": live_order_sent_possible,
     }
     return data
+
+
+def _stock_display_name(symbol: str) -> str:
+    """회사명/종목명 우선 표시용 이름 조회. 미등록일 때만 코드 반환."""
+    sym = str(symbol or "").strip()
+    if not sym:
+        return ""
+    try:
+        from config.settings import PORTFOLIO, WATCHLIST, SCAN_UNIVERSE_KR, RIA_ALLOWED_TICKERS
+        for mapping in (PORTFOLIO, WATCHLIST, SCAN_UNIVERSE_KR, RIA_ALLOWED_TICKERS):
+            name = mapping.get(sym)
+            if name:
+                return str(name)
+    except Exception:
+        pass
+    try:
+        from core.toss_live_pilot_hermes_bridge import SYMBOL_NAMES
+        name = SYMBOL_NAMES.get(sym)
+        if name:
+            return str(name)
+    except Exception:
+        pass
+    return sym
+
+
+def _decorate_stock_display(record: dict) -> dict:
+    """대시보드/API 응답에서 종목코드 단독 표기를 피한다."""
+    out = dict(record or {})
+    sym = str(out.get("symbol") or out.get("ticker") or "").strip()
+    if not sym:
+        return out
+    name = str(out.get("symbol_name") or out.get("name") or "").strip()
+    if not name or name == sym:
+        name = _stock_display_name(sym)
+    if name and name != sym:
+        out["symbol_name"] = name
+        out.setdefault("name", name)
+        out["symbol_label"] = f"{name} ({sym})"
+        out["display_name"] = name
+    else:
+        out["symbol_label"] = sym
+        out["display_name"] = sym
+    return out
 
 
 def toss_live_pilot_previews_data(limit: int = 20) -> dict:
@@ -1931,9 +2256,10 @@ def toss_live_pilot_previews_data(limit: int = 20) -> dict:
             list_live_pilot_records,
             live_pilot_ledger_summary,
         )
+        records = [_decorate_stock_display(r) for r in list_live_pilot_records(limit=limit)]
         return {
             "summary": live_pilot_ledger_summary(),
-            "records": list_live_pilot_records(limit=limit),
+            "records": records,
         }
     except Exception as e:
         return {"error": str(e), "summary": {}, "records": []}
@@ -1944,6 +2270,11 @@ def toss_live_pilot_events_data(limit: int = 50) -> dict:
     try:
         from core.toss_live_pilot_events import list_events, event_summary
         summ = event_summary()
+        try:
+            from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
+            policy = compute_toss_live_pilot_policy()
+        except Exception:
+            policy = {}
         return {
             "summary": summ.get("summary", {}),
             "live_sent_real": summ.get("live_sent_real", 0),
@@ -1952,8 +2283,10 @@ def toss_live_pilot_events_data(limit: int = 50) -> dict:
             "blocked_transport": summ.get("blocked_transport", 0),
             "blocked_guard": summ.get("blocked_guard", 0),
             "live_order_sent_total": summ.get("live_order_sent_total", 0),
-            "live_order_allowed": False,
-            "records": list_events(limit=limit),
+            "live_order_allowed": bool(policy.get("live_order_allowed", False)),
+            "adapter_status": policy.get("adapter_status", "disabled"),
+            "live_transport_status": policy.get("live_transport_status", "not_configured"),
+            "records": [_decorate_stock_display(r) for r in list_events(limit=limit)],
         }
     except Exception as e:
         return {
@@ -1991,10 +2324,21 @@ def toss_live_pilot_verifications_data(limit: int = 20) -> dict:
         except Exception:
             pass
 
+        try:
+            from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
+            policy = compute_toss_live_pilot_policy()
+        except Exception:
+            policy = {}
+
         return {
             "summary": summ,
-            "records": list_verifications(limit=limit),
+            "records": [_decorate_stock_display(r) for r in list_verifications(limit=limit)],
+            # 검증 레코드의 live_order_allowed는 PASS여도 false가 맞다(검증은 gate only).
+            # 별도로 현재 운영 policy 상태를 노출해 대시보드/콜백이 false로 오판하지 않게 한다.
             "live_order_allowed": False,
+            "policy_live_order_allowed": bool(policy.get("live_order_allowed", False)),
+            "policy_adapter_status": policy.get("adapter_status", "disabled"),
+            "policy_live_transport_status": policy.get("live_transport_status", "not_configured"),
             "mirror_enabled": mirror_enabled,
             "mirror_target_configured": mirror_target_configured,
             "pending_count": counts.get("PENDING", 0),

@@ -6,7 +6,7 @@ LiveTossTransport + toss_live_order_http mock 테스트.
 1. 성공 mock: endpoint/body/live_order_sent=true, 민감정보 없음
 2. token 없음 → no send
 3. account 없음 → no send
-4. schema block(sell) → no send (post 미호출)
+4. schema block(KR/market) → no send (post 미호출)
 5. HTTP 4xx/5xx → live_order_sent=false
 6. requests exception → live_order_sent=false
 7. 기본 transport는 not_configured 유지
@@ -33,7 +33,7 @@ _MOCK_BASE = "https://test.example"
 
 def _payload(**kw) -> dict:
     base = {
-        "symbol": "091180.KS",
+        "symbol": "SOFI",
         "side": "buy",
         "order_type": "limit",
         "quantity": 1,
@@ -61,6 +61,7 @@ def _run_send(
     *,
     token=_MOCK_TOKEN,
     accounts=None,
+    holdings=None,
     post_return=None,
     post_exc=None,
     payload_kw=None,
@@ -68,6 +69,8 @@ def _run_send(
     """LiveTossTransport.send_buy_order를 mock 환경에서 실행."""
     if accounts is None:
         accounts = [{"accountSeq": "55501234"}]
+    if holdings is None:
+        holdings = {"items": [{"symbol": "SOFI", "sellableQuantity": "1", "quantity": "1"}]}
     mock_post = MagicMock()
     if post_exc is not None:
         mock_post.side_effect = post_exc
@@ -76,6 +79,7 @@ def _run_send(
 
     with patch("core.toss_client._get_access_token", return_value=token), \
          patch("core.toss_client.get_accounts", return_value=accounts), \
+         patch("core.toss_client.get_holdings", return_value=holdings), \
          patch("core.toss_client.TOSS_BASE_URL", _MOCK_BASE), \
          patch("requests.post", mock_post):
         transport = LiveTossTransport(timeout=5)
@@ -107,7 +111,7 @@ class TestLiveSuccess(unittest.TestCase):
     def test_body_schema(self):
         _, mock_post = _run_send()
         body = mock_post.call_args.kwargs["json"]
-        self.assertEqual(body["symbol"], "091180")
+        self.assertEqual(body["symbol"], "SOFI")
         self.assertEqual(body["side"], "BUY")
         self.assertEqual(body["orderType"], "LIMIT")
         self.assertEqual(body["quantity"], "1")
@@ -164,14 +168,23 @@ class TestNoAccount(unittest.TestCase):
         self.assertEqual(result["reason"], "account_unavailable")
 
 
-# ── 4. schema block (BUY_ONLY) ──────────────────────────
+# ── 4. schema block (US-only/LIMIT) ──────────────────────────
 
 class TestSchemaBlock(unittest.TestCase):
-    def test_sell_blocked_no_send(self):
-        result, mock_post = _run_send(payload_kw={"side": "sell"})
+    def test_kr_symbol_blocked_when_us_asset_type(self):
+        result, mock_post = _run_send(payload_kw={"symbol": "091180.KS", "asset_type": "US_STOCK"})
         self.assertFalse(result["live_order_sent"])
         self.assertTrue(result["blocked"])
         self.assertEqual(mock_post.call_count, 0)
+
+    def test_kr_symbol_allowed_when_kr_asset_type(self):
+        result, mock_post = _run_send(payload_kw={"symbol": "091180.KS", "asset_type": "KR_STOCK"})
+        self.assertTrue(result["live_order_sent"])
+
+    def test_sell_allowed_sends(self):
+        result, mock_post = _run_send(payload_kw={"side": "sell"})
+        self.assertTrue(result["live_order_sent"])
+        self.assertEqual(mock_post.call_args.kwargs["json"]["side"], "SELL")
 
     def test_market_blocked_no_send(self):
         result, mock_post = _run_send(payload_kw={"order_type": "market"})
@@ -238,6 +251,36 @@ class TestExplicitAccountSeq(unittest.TestCase):
             result = transport.send_buy_order(_payload())
         self.assertTrue(result["live_order_sent"])
         self.assertEqual(mock_post.call_args.kwargs["headers"][_H_ACCOUNT], "99988877")
+
+
+# ── 9. SELL 보유수량 polling ─────────────────────────────
+
+class TestSellablePositionPolling(unittest.TestCase):
+    def test_sell_without_sellable_position_no_send(self):
+        result, mock_post = _run_send(
+            payload_kw={"side": "sell"},
+            holdings={"items": []},
+        )
+        self.assertFalse(result["live_order_sent"])
+        self.assertEqual(result["reason"], "sellable_position_not_ready")
+        self.assertEqual(mock_post.call_count, 0)
+
+    def test_sell_waits_until_position_visible_then_sends(self):
+        mock_post = MagicMock(return_value=_Resp(200, {"result": {"orderId": "S1"}}))
+        holdings_seq = [
+            {"items": []},
+            {"items": [{"symbol": "SOFI", "availableQuantity": "1"}]},
+        ]
+        with patch("core.toss_client._get_access_token", return_value=_MOCK_TOKEN),              patch("core.toss_client.get_accounts", return_value=[{"accountSeq": "55501234"}]),              patch("core.toss_client.get_holdings", side_effect=holdings_seq),              patch("core.toss_client.TOSS_BASE_URL", _MOCK_BASE),              patch("time.sleep", return_value=None),              patch("requests.post", mock_post):
+            transport = LiveTossTransport(timeout=5)
+            result = transport.send_buy_order(_payload(side="sell"))
+        self.assertTrue(result["live_order_sent"])
+        self.assertEqual(mock_post.call_args.kwargs["json"]["side"], "SELL")
+
+    def test_buy_does_not_require_holdings(self):
+        result, mock_post = _run_send(payload_kw={"side": "buy"}, holdings={"items": []})
+        self.assertTrue(result["live_order_sent"])
+        self.assertEqual(mock_post.call_count, 1)
 
 
 if __name__ == "__main__":

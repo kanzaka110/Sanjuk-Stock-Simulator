@@ -172,17 +172,19 @@ class TestFormatHermesVerifyMessageMinimalCtx(unittest.TestCase):
 
 class TestBuildDefaultHermesVerdictSell(unittest.TestCase):
     def test_sell_is_block(self):
-        ctx = {**_BASE_CTX, "side": "sell"}
+        # BUY_SELL 정책: allowed_sides에 sell 명시 없으면 BLOCK, 있으면 PASS
+        # allowed_sides=["buy"] → sell BLOCK
+        ctx = {**_BASE_CTX, "side": "sell", "allowed_sides": ["buy"]}
         verdict = build_default_hermes_verdict(ctx)
         self.assertEqual(verdict["status"], "BLOCK")
 
     def test_sell_block_has_sell_reason(self):
-        ctx = {**_BASE_CTX, "side": "sell"}
+        ctx = {**_BASE_CTX, "side": "sell", "allowed_sides": ["buy"]}
         verdict = build_default_hermes_verdict(ctx)
         self.assertTrue(any("sell" in r for r in verdict["reasons"]))
 
     def test_sell_checks_has_fail(self):
-        ctx = {**_BASE_CTX, "side": "sell"}
+        ctx = {**_BASE_CTX, "side": "sell", "allowed_sides": ["buy"]}
         verdict = build_default_hermes_verdict(ctx)
         self.assertIn("FAIL", str(verdict["checks"]))
 
@@ -229,8 +231,10 @@ class TestBuildDefaultHermesVerdictValidBuy(unittest.TestCase):
         self.assertEqual(verdict["status"], "PASS")
 
     def test_pass_has_execution_blocked(self):
+        # BUY_SELL 정책: PASS checks에는 execution_blocked 키가 없음
+        # adapter_status / live_transport_status 정보로 실행 상태 확인
         verdict = build_default_hermes_verdict(_BASE_CTX)
-        self.assertTrue(verdict["checks"].get("execution_blocked"))
+        self.assertNotIn("execution_blocked", verdict["checks"])
 
     def test_pass_checks_adapter_disabled(self):
         verdict = build_default_hermes_verdict(_BASE_CTX)

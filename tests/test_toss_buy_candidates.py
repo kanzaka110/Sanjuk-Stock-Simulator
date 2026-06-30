@@ -188,3 +188,92 @@ def test_toss_buy_candidates_scan_failure_has_reasons(monkeypatch):
     scopes = {e.get("scope") for e in result["excluded"]}
     assert scopes != {"reuse_blocked"}
     assert result["scan_summary"]["scanned_count"] == 0
+
+
+
+def test_toss_buy_candidates_stock_agent_review_fields(monkeypatch):
+    # Stock-Agent가 PASS/HOLD/BLOCK을 판단할 수 있도록 주문표 핵심 필드를 명시한다.
+    sections = _sections(new=[_new_cand("000111.KS", "소액주", price=30_000)])
+    _patch_sections(monkeypatch, sections)
+
+    result = dd.toss_buy_candidates_data(range_="today")
+
+    assert result["schema"] == "toss_buy_candidates.v2.stock_agent_ready"
+    item = next(i for i in result["items"] if i["symbol"] == "000111.KS")
+    assert item["account"] == "토스 AI"
+    assert item["account_type"] == "토스 AI"
+    assert item["order_type"] == "LIMIT"
+    assert item["current_price"] == 30_000.0
+    assert item["entry_price"] == 30_000.0
+    assert item["limit_price"] == 30_000.0
+    assert item["quantity"] == 1
+    assert item["estimated_amount_krw"] == 30_000.0
+    assert item["stop_loss"] == 28_200.0
+    assert item["target_price"] == 31_500.0
+    assert item["current_vs_limit_gap_pct"] == 0.0
+    assert "즉시체결" in item["fill_risk_note"]
+    assert item["condition"]
+    assert item["execution_gate"] == "Hermes PASS + 승호 최종 승인 필요"
+    assert item["read_only_notice"].startswith("GET-only")
+    assert item["missing_fields"] == []
+    assert item["stock_agent_ready"] is True
+
+
+def test_toss_buy_candidates_limit_exceeded_not_stock_agent_ready(monkeypatch):
+    sections = _sections(new=[_new_cand("222.KS", "고가주", price=600_000)])
+    _patch_sections(monkeypatch, sections)
+
+    result = dd.toss_buy_candidates_data(range_="today")
+
+    item = next(i for i in result["items"] if i["symbol"] == "222.KS")
+    assert item["limit_exceeded"] is True
+    assert item["missing_fields"] == []
+    assert item["stock_agent_ready"] is False
+    assert "한도" in " ".join(item["risk_notes"])
+
+
+
+
+
+def test_toss_candidate_with_weak_flow_only_becomes_conditional_small_entry(monkeypatch):
+    weak = _new_cand("000444.KQ", "수급약함", price=48_000)
+    weak = weak.__class__(
+        **{**weak.__dict__,
+           "risk_flags": ("수급 약함 — 즉시 실행보다 관찰",),
+           "suggested_accounts": ("삼성 수동", "ISA", "토스 AI")}
+    )
+    sections = _sections(new=[weak])
+    _patch_sections(monkeypatch, sections)
+
+    result = dd.toss_buy_candidates_data(range_="today")
+    item = result["items"][0]
+
+    assert item["execution_status"] == "conditional_small_entry"
+    assert item["executable_now"] is True
+    assert item["stock_agent_ready"] is True
+    assert item["blocking_risk_flags"] == []
+    assert item["observation_flags"] == ["수급 약함 — 즉시 실행보다 관찰"]
+    assert "수급 약함" in " ".join(item["risk_notes"])
+    assert result["scan_summary"]["conditional_small_entry_count"] == 1
+
+
+def test_toss_candidate_with_intraday_risk_is_hold_not_executable(monkeypatch):
+    risky = _new_cand("000333.KQ", "장중반전", price=158_000)
+    risky = risky.__class__(
+        **{**risky.__dict__,
+           "high_price": 177_600.0,
+           "low_price": 156_000.0,
+           "intraday_drawdown_pct": -11.0,
+           "intraday_range_pct": 13.8,
+           "risk_flags": ("장중 고점 대비 급락 -11.0%",),
+           "suggested_accounts": ("삼성 수동", "ISA", "토스 AI")}
+    )
+    sections = _sections(new=[risky])
+    _patch_sections(monkeypatch, sections)
+    result = dd.toss_buy_candidates_data(range_="today")
+    item = result["items"][0]
+    assert item["execution_status"] == "hold_risk_flags"
+    assert item["executable_now"] is False
+    assert item["stock_agent_ready"] is False
+    assert "장중" in item["block_reason"]
+    assert "장중" in " ".join(item["risk_notes"])

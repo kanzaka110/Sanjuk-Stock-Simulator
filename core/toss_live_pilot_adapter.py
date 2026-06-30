@@ -86,8 +86,8 @@ def build_toss_order_payload(
     if limit_price <= 0:
         blocks.append("invalid_price: limit_price > 0 필요")
 
-    max_krw = policy.get("max_order_krw", 100_000)
-    if estimated_krw > max_krw and not blocks:
+    max_krw = policy.get("max_order_krw")
+    if max_krw and estimated_krw > max_krw and not blocks:
         blocks.append(f"금액_한도_초과: {estimated_krw:,.0f}원 > {max_krw:,.0f}원")
 
     ok = len(blocks) == 0
@@ -160,16 +160,18 @@ def can_send_live_pilot_order(
         reasons.append("live_order_allowed=false")
     if policy.get("adapter_status") != "enabled":
         reasons.append(f"adapter_status={policy.get('adapter_status', 'disabled')}")
-    if not policy.get("requires_user_confirmation"):
-        reasons.append("requires_user_confirmation missing")
-    if not policy.get("requires_second_confirmation"):
-        reasons.append("requires_second_confirmation missing")
+    # autonomous 모드: user confirmation 불필요
+    if not policy.get("autonomous_mode"):
+        if not policy.get("requires_user_confirmation"):
+            reasons.append("requires_user_confirmation missing")
+        if not policy.get("requires_second_confirmation"):
+            reasons.append("requires_second_confirmation missing")
 
-    # 1.5 BUY_ONLY side guard (policy gate 다음, 나머지 guard 전에 체크)
-    side = preview.get("side", "")
-    allowed_sides = policy.get("allowed_sides", ["buy"])
+    # 1.5 side guard (policy gate 다음, 나머지 guard 전에 체크)
+    side = str(preview.get("side", "")).lower()
+    allowed_sides = policy.get("allowed_sides", ["buy", "sell"])
     if side not in allowed_sides:
-        reasons.append(f"sell_not_allowed_in_buy_only_pilot: side={side!r}")
+        reasons.append(f"side_not_allowed: side={side!r}")
 
     # 2. preview valid
     if not preview.get("ok"):
@@ -185,17 +187,27 @@ def can_send_live_pilot_order(
     if payload_result.get("live_order_sent"):
         reasons.append("payload live_order_sent=true")
 
-    # 4. symbol guard
-    symbol = preview.get("symbol", "")
+    # 4. symbol/asset guard
+    symbol = str(preview.get("symbol", "")).strip()
     blocked_symbols = set(policy.get("blocked_symbols", []))
     if symbol in blocked_symbols:
         reasons.append(f"blocked_symbol: {symbol}")
+    # digit-only 심볼은 항상 차단 (삼성증권 종목코드 형식)
+    if not symbol or symbol.isdigit():
+        reasons.append(f"invalid_or_digit_only_symbol: {symbol}")
+    elif symbol.endswith((".KS", ".KQ")):
+        # KR_STOCK이 허용 asset type에 있을 때만 통과
+        if "KR_STOCK" not in policy.get("allowed_asset_types", []):
+            reasons.append(f"non_us_symbol_not_allowed: {symbol}")
+    # US_STOCK guard: .KS/.KQ가 아닌데 US_STOCK만 허용인 경우는 통과
 
-    # 5. amount guard
+    # 5. amount guard — None/0이면 임의 KRW cap 없음
     estimated = float(preview.get("estimated_amount_krw") or 0)
-    max_krw = policy.get("max_order_krw", 100_000)
-    if estimated > max_krw:
-        reasons.append(f"amount_over_limit: {estimated:,.0f} > {max_krw:,.0f}")
+    max_krw = policy.get("max_order_krw")
+    if max_krw:
+        max_krw = float(max_krw)
+        if estimated > max_krw:
+            reasons.append(f"amount_over_limit: {estimated:,.0f} > {max_krw:,.0f}")
 
     # 6. price sanity
     limit_price = float(preview.get("limit_price") or 0)
@@ -209,14 +221,96 @@ def can_send_live_pilot_order(
 
     # 8. daily guard (ledger 조회)
     try:
-        _daily_reasons = _check_daily_limits(symbol, estimated, policy)
+        policy_for_daily = dict(policy)
+        policy_for_daily["_current_side"] = side
+        _daily_reasons = _check_daily_limits(symbol, estimated, policy_for_daily)
         reasons.extend(_daily_reasons)
     except Exception as e:
         log.warning("daily guard 조회 실패: %s", e)
         reasons.append("daily_guard_check_failed")
 
+    # 9. autonomous 추가 가드
+    if policy.get("autonomous_mode"):
+        _auto_reasons = _check_autonomous_guards(symbol, side, estimated, limit_price, preview, policy)
+        reasons.extend(_auto_reasons)
+
     ok = len(reasons) == 0
     return ok, reasons
+
+
+def _check_autonomous_guards(
+    symbol: str,
+    side: str,
+    estimated_krw: float,
+    limit_price: float,
+    preview: dict,
+    policy: dict,
+) -> list[str]:
+    """Autonomous 모드 전용 가드: 한도/stop_loss/side 체크."""
+    reasons: list[str] = []
+
+    from core.toss_live_pilot_policy import classify_asset_type
+    asset_type = classify_asset_type(symbol)
+
+    # autonomous side 가드
+    autonomous_sides = policy.get("autonomous_allowed_sides", ["buy", "sell"])
+    if side not in autonomous_sides:
+        reasons.append(f"autonomous_side_not_allowed: {side}")
+
+    # KR_STOCK 한도
+    if asset_type == "KR_STOCK":
+        kr_max = policy.get("autonomous_kr_max_order_krw", 500_000)
+        if kr_max and estimated_krw > kr_max:
+            reasons.append(f"autonomous_kr_order_over_limit: {estimated_krw:,.0f} > {kr_max:,.0f}")
+
+        # KR daily BUY cap
+        if side == "buy":
+            kr_daily_max = policy.get("autonomous_kr_max_daily_buy_krw", 1_500_000)
+            if kr_daily_max:
+                try:
+                    today_kr_buy_total = _today_kr_buy_total()
+                    if today_kr_buy_total + estimated_krw > kr_daily_max:
+                        reasons.append(
+                            f"autonomous_kr_daily_buy_over: "
+                            f"{today_kr_buy_total + estimated_krw:,.0f} > {kr_daily_max:,.0f}"
+                        )
+                except Exception as e:
+                    log.warning("KR daily buy check failed: %s", e)
+
+    # US_STOCK 한도 (USD 기준)
+    if asset_type == "US_STOCK":
+        us_max = policy.get("autonomous_us_max_order_usd", 1_000)
+        if us_max and limit_price > 0:
+            qty = int(preview.get("quantity") or 0)
+            order_usd = limit_price * qty
+            if order_usd > us_max:
+                reasons.append(f"autonomous_us_order_over_limit: ${order_usd:,.2f} > ${us_max:,.2f}")
+
+    # BUY + stop_loss 필수
+    if side == "buy":
+        stop_loss = preview.get("stop_loss") or preview.get("invalidation")
+        if not stop_loss:
+            reasons.append("autonomous_buy_requires_stop_loss")
+
+    return reasons
+
+
+def _today_kr_buy_total() -> float:
+    """당일 KR_STOCK BUY live_sent 총액."""
+    from core.toss_live_pilot_ledger import list_live_pilot_records
+    from core.toss_live_pilot_policy import classify_asset_type
+    today = datetime.now(KST).strftime("%Y-%m-%d")
+    records = list_live_pilot_records(limit=100)
+    total = 0.0
+    for r in records:
+        if (
+            r.get("status") == "live_sent"
+            and r.get("created_at", "").startswith(today)
+            and str(r.get("side", "")).lower() == "buy"
+            and classify_asset_type(r.get("symbol", "")) == "KR_STOCK"
+        ):
+            total += float(r.get("estimated_amount_krw") or 0)
+    return total
 
 
 def _check_daily_limits(symbol: str, estimated_krw: float, policy: dict) -> list[str]:
@@ -238,17 +332,21 @@ def _check_daily_limits(symbol: str, estimated_krw: float, policy: dict) -> list
         if isinstance(max_orders, int) and max_orders > 0 and len(today_sent) >= max_orders:
             reasons.append(f"daily_order_count_exceeded: {len(today_sent)}/{max_orders}")
 
-        max_daily = policy.get("max_daily_krw", 2_000_000)
+        max_daily = policy.get("max_daily_krw")
         today_total = sum(float(r.get("estimated_amount_krw") or 0) for r in today_sent)
-        if today_total + estimated_krw > max_daily:
-            reasons.append(
-                f"daily_amount_exceeded: {today_total + estimated_krw:,.0f} > {max_daily:,.0f}"
-            )
+        if max_daily:
+            max_daily = float(max_daily)
+            if today_total + estimated_krw > max_daily:
+                reasons.append(
+                    f"daily_amount_exceeded: {today_total + estimated_krw:,.0f} > {max_daily:,.0f}"
+                )
 
-        # 중복 symbol 체크
-        today_sent_symbols = {r.get("symbol") for r in today_sent}
-        if symbol in today_sent_symbols:
-            reasons.append(f"duplicate_symbol_today: {symbol}")
+        # 중복 주문 체크: 같은 symbol+same side만 차단한다.
+        # BUY 후 SELL 왕복 테스트/리스크 청산은 허용해야 하므로 symbol 단독 중복으로 막지 않는다.
+        current_side = str(policy.get("_current_side") or "").lower()
+        today_sent_keys = {(r.get("symbol"), str(r.get("side") or "").lower()) for r in today_sent}
+        if current_side and (symbol, current_side) in today_sent_keys:
+            reasons.append(f"duplicate_symbol_side_today: {symbol}/{current_side}")
 
     except Exception as e:
         reasons.append(f"daily_limit_check_error: {e}")
@@ -345,8 +443,13 @@ def dispatch_toss_order_live(
         "limit_price": payload.get("limit_price"),
         "estimated_amount_krw": payload.get("estimated_amount_krw"),
         "broker_order_id": broker_order_id,
+        "broker_confirmed": bool(transport_result.get("broker_confirmed")),
+        "broker_order_status": transport_result.get("broker_order_status", ""),
+        "filled_quantity": transport_result.get("filled_quantity", 0.0),
+        "filled_price": transport_result.get("filled_price", 0.0),
+        "order_confirmation": transport_result.get("order_confirmation", {}),
         "payload_hash": payload_hash,
-        "transport_status": transport_result.get("status", ""),
+        "transport_status": transport_result.get("status", "") or transport_result.get("transport_status", ""),
         "failure_reason": (
             transport_result.get("failure_reason")
             or transport_result.get("reason")
@@ -356,9 +459,11 @@ def dispatch_toss_order_live(
 
     if sent:
         result["message"] = (
-            "승인형 매수 pilot 전송 완료\n"
-            "자동매매 아님\n"
+            f"승인형 {str(payload.get('side', 'buy')).upper()} pilot 전송 완료\n"
+            "Hermes 승인형 자동실행 범위\n"
             "Hermes PASS + 사용자 최종 승인 1건\n"
+            f"broker_order_id={broker_order_id or '미확인'}\n"
+            f"broker_status={result.get('broker_order_status') or '확인대기'} filled_qty={float(result.get('filled_quantity') or 0):g}\n"
             "live_order_sent=true"
         )
         log.info("live pilot order sent: symbol=%s hash=%s", symbol, payload_hash)

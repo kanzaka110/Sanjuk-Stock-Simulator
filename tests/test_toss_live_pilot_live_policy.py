@@ -157,12 +157,14 @@ class TestAllGatesEnabled(unittest.TestCase):
         self.assertTrue(policy["requires_second_confirmation"])
 
     def test_max_order_krw_set(self):
+        # US 자동화 정책: 임의 KRW 1회 한도 없음 (None)
         policy = compute_toss_live_pilot_policy(evaluated_count=0)
-        self.assertGreater(policy["max_order_krw"], 0)
+        self.assertIsNone(policy["max_order_krw"])
 
     def test_max_daily_krw_set(self):
+        # US 자동화 정책: 임의 KRW 1일 한도 없음 (None)
         policy = compute_toss_live_pilot_policy(evaluated_count=0)
-        self.assertGreater(policy["max_daily_krw"], 0)
+        self.assertIsNone(policy["max_daily_krw"])
 
     def test_max_orders_per_day_unlimited(self):
         # 최종 정책: 주문 건수 제한 없음 (총액 cap으로만 관리)

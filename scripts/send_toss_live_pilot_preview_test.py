@@ -75,7 +75,7 @@ def main() -> None:
     # ── Policy ──
     policy = compute_toss_live_pilot_policy()
     max_krw = policy.get("max_order_krw", 100_000)
-    print(f"\n정책: live_order_allowed={policy['live_order_allowed']} · max ₩{max_krw:,} · adapter={policy['adapter_status']}")
+    print(f"\n정책: live_order_allowed={policy['live_order_allowed']} · max ₩{max_krw or 0:,} · adapter={policy['adapter_status']}")
 
     # ── 가격 조회 ──
     symbol = _parse_symbol()
@@ -89,7 +89,7 @@ def main() -> None:
     print(f"  ✅ {symbol}: ₩{price:,.0f}")
 
     # ── 금액 한도 체크 ──
-    if price > max_krw:
+    if max_krw and price > max_krw:
         print(f"\n⚠️  1주 금액(₩{price:,.0f}) > 1회 한도(₩{max_krw:,}) — 발송 안 함")
         sys.exit(0)
 

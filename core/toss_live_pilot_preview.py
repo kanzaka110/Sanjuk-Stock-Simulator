@@ -42,7 +42,11 @@ def _get_live_pilot_policy() -> dict:
 
 
 def _check_symbol_blocks(symbol: str, policy: dict) -> list[str]:
-    """symbol 차단 사유 목록 반환 (종목 제한 해제 시 빈 목록)."""
+    """symbol 차단 사유 목록 반환 (blocked_symbols 리스트만 체크).
+
+    asset type 기반 심볼 가드는 adapter (can_send_live_pilot_order)에서 수행.
+    preview는 preview 생성 가능 여부만 판단한다.
+    """
     blocks: list[str] = []
     blocked = policy.get("blocked_symbols", [])
     if symbol in blocked:
@@ -52,9 +56,9 @@ def _check_symbol_blocks(symbol: str, policy: dict) -> list[str]:
 
 def _check_amount(estimated_krw: float, policy: dict) -> list[str]:
     """예상금액 한도 초과 여부 체크."""
-    max_krw = policy.get("max_order_krw", 100_000)
-    if estimated_krw > max_krw:
-        return [f"금액_한도_초과: {estimated_krw:,.0f}원 > {max_krw:,.0f}원"]
+    max_krw = policy.get("max_order_krw")
+    if max_krw and estimated_krw > float(max_krw):
+        return [f"금액_한도_초과: {estimated_krw:,.0f}원 > {float(max_krw):,.0f}원"]
     return []
 
 
@@ -131,7 +135,7 @@ def build_live_pilot_preview(candidate: dict, policy: dict | None = None) -> dic
         "requires_second_confirmation": True,
         "blocks": blocks,
         "warnings": warnings,
-        "max_order_krw": policy.get("max_order_krw", 100_000),
+        "max_order_krw": policy.get("max_order_krw"),
         "sample_insufficient": policy.get("sample_insufficient", True),
     }
 
@@ -176,7 +180,7 @@ def build_live_pilot_telegram_text(preview: dict) -> str:
         lines.append(f"- 지정가: ₩{price:,.0f}")
         lines.append(f"- 수량: {qty}주")
         lines.append(f"- 예상금액: ₩{amount:,.0f}")
-        lines.append(f"- 한도: 1회 최대 ₩{max_krw:,.0f}")
+        lines.append(f"- 한도: 1회 최대 ₩{max_krw or 0:,.0f}" if max_krw else "- 한도: 제한 없음 (USD buying power 기준)")
         lines.append("- 상태: 주문 API 호출 비활성")
         if warnings:
             lines.append("")

@@ -171,6 +171,26 @@ def _append_gap_note(lines: list, action: dict) -> None:
     lines.append(f"  {icon} {note}")
 
 
+def _append_hermes_verdict(lines: list, verdict: str, note: str = "") -> None:
+    """주문표 하단에 Hermes PASS/HOLD/BLOCK 판정을 명시한다."""
+    note_part = f" — {note}" if note else ""
+    lines.append(f"  Hermes 판정: {verdict}{note_part}")
+
+
+def _append_fill_risk(lines: list, action: dict) -> None:
+    """현재가/지정가 gap 기반 체결 위험을 모든 주문표에 일관 표시."""
+    gap = action.get("gap_pct")
+    stage = action.get("gap_stage", "")
+    if gap is None:
+        return
+    if stage == "chase" or gap >= -0.3:
+        lines.append("  ⚠ 체결 가능성: 현재가 근접/초과 — 승인 시 즉시체결 위험")
+    elif gap < -3.0:
+        lines.append("  ℹ 체결 가능성: 지정가 괴리 큼 — 미체결 가능성 높음")
+    else:
+        lines.append("  ℹ 체결 가능성: 눌림목 지정가 — 미체결 가능성 있음")
+
+
 def _render_normalized_sections(lines: list, normalized: dict, sep: str, next_action: str) -> None:
     """정규화 분류 결과를 4섹션으로 렌더 (결정론적).
 
@@ -210,6 +230,8 @@ def _render_normalized_sections(lines: list, normalized: dict, sep: str, next_ac
                 lines.append(f"  🎯 {a['target']}")
             if a.get("stop"):
                 lines.append(f"  🛑 {a['stop']}")
+            _append_fill_risk(lines, a)
+            _append_hermes_verdict(lines, "PASS", "정규화 통과 · 실주문은 승호 최종 승인 필요")
         lines.append("")
     else:
         lines.append(sep)
@@ -249,7 +271,13 @@ def _render_normalized_sections(lines: list, normalized: dict, sep: str, next_ac
             # 대량주문 경고
             if a.get("large_order_note"):
                 lines.append(f"  {a['large_order_note']}")
-            lines.append("  메모: 추격매수 아님 — 미체결 가능 (즉시 실행 아님)")
+            _append_fill_risk(lines, a)
+            if a.get("gap_stage") == "chase" or (a.get("gap_pct") is not None and a.get("gap_pct") >= -0.3):
+                lines.append("  메모: 눌림목 예약으로 보기 어려움 — 즉시체결 위험 재검증")
+                _append_hermes_verdict(lines, "HOLD", "가격 괴리 재확인 전 실행 금지")
+            else:
+                lines.append("  메모: 추격매수 아님 — 미체결 가능 (즉시 실행 아님)")
+                _append_hermes_verdict(lines, "HOLD", "조건부 예약 · 도달 전 실행 금지")
             rw = _format_execution_risk_warning(a)
             if rw:
                 lines.append(rw)
@@ -266,6 +294,8 @@ def _render_normalized_sections(lines: list, normalized: dict, sep: str, next_ac
             br = a.get("block_reason", "")
             if br:
                 lines.append(f"  사유: {str(br)[:120]}")
+            _append_fill_risk(lines, a)
+            _append_hermes_verdict(lines, "BLOCK", "차단 섹션 표시 · 주문 금지")
         lines.append("")
 
     # ⚠️ 주문 차단·정보 부족 (주문표 필수 필드 누락)
@@ -279,6 +309,7 @@ def _render_normalized_sections(lines: list, normalized: dict, sep: str, next_ac
                 lines.append(f"  정보 부족으로 주문표 제외 — 누락: {', '.join(miss)}")
             else:
                 lines.append("  정보 부족으로 주문표 제외")
+            _append_hermes_verdict(lines, "BLOCK", "필수 주문표 누락")
         lines.append("")
 
     # 🟡 매도 취소·홀딩 전환
@@ -310,6 +341,7 @@ def _render_normalized_sections(lines: list, normalized: dict, sep: str, next_ac
                 lines.append(rw)
             if a.get("hold_note"):
                 lines.append(f"  🔒 {a['hold_note']}")
+            _append_hermes_verdict(lines, "HOLD", "보유 관리 · 실행 매도 아님" if a.get("protected_hold") else "매도 취소/홀딩 전환")
             why = a.get("cancel_reason") or a.get("reason", "")
             if why:
                 lines.append(f"  💬 {str(why)[:80]}")

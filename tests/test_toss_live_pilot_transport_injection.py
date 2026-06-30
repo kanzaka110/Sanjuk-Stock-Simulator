@@ -174,11 +174,12 @@ class TestEnabledPolicyResolvesInjectedTransport(unittest.TestCase):
         self.assertTrue(result["live_order_sent"])
         self.assertEqual(len(fake.called_payloads), 1)
 
-    def test_resolver_none_when_side_mode_not_buy_only(self):
-        bad = dict(_ENABLED_POLICY, side_mode="BUY_SELL")
+    def test_resolver_works_with_buy_sell_mode(self):
+        """BUY_SELL 모드에서도 transport 해소 가능 (정책 변경 반영)."""
+        pol = dict(_ENABLED_POLICY, side_mode="BUY_SELL")
         fake = _FakeSuccessTransport()
         with patch("core.toss_live_transport.DEFAULT_LIVE_TRANSPORT", fake):
-            self.assertIsNone(resolve_live_transport_for_confirm(bad))
+            self.assertIsNotNone(resolve_live_transport_for_confirm(pol))
 
 
 # ── 4. env ON mock + fake success → 격리 DB에만 live_sent, production 미오염 ──
@@ -277,7 +278,7 @@ class TestSellBlockedEvenEnabled(unittest.TestCase):
             _ENABLED_POLICY, preview, {"ok": True}
         )
         self.assertFalse(ok)
-        self.assertTrue(any("sell_not_allowed" in r for r in reasons))
+        self.assertTrue(any("side_not_allowed" in r or "non_us_symbol" in r for r in reasons))
 
 
 # ── 7. blocked symbol → env ON mock에서도 차단 ──

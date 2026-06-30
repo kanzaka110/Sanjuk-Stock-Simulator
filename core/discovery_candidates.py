@@ -18,18 +18,22 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone, timedelta
 
 log = logging.getLogger(__name__)
 
 # ── 발굴 게이트 상수 ───────────────────────────────────────────────
-_CHASE_CHANGE_PCT = 8.0          # 당일 등락률 초과 시 추격 금지
-_MIN_RISK_REWARD = 1.5           # 목표:손절 최소 1.5:1
+_CHASE_CHANGE_PCT = 8.0          # 이 이상은 즉시실행 금지 플래그(후보 제거 아님)
+_HARD_CHASE_CHANGE_PCT = 30.0      # 이 이상만 발굴 후보에서 제외
+_MIN_RISK_REWARD = 1.5           # 목표:손절 권장 1.5:1
+_HARD_MIN_RISK_REWARD = 1.0      # 이 미만만 하드 탈락, 1.0~1.5는 관찰 후보
 _STOP_PCT = 0.06                 # 손절 폭 (가격 대비)
 _TARGET_BASE = 0.05              # 목표 폭 기본값
 _MIN_KR_VALUE_KRW = 30_000_000_000   # 한국 거래대금 300억+ (유동성)
 _MIN_US_MCAP = 2_000_000_000         # 미국 시총 $2B+
-_TOP_NEW = 3                     # 신규 발굴 TOP N
-_TOP_REJECTED = 5                # 탈락 표시 상위 N
+_TOP_NEW = 8                     # 신규 발굴 TOP N — 반복 후보 과소노출 방지
+_TOP_REJECTED = 12               # 탈락 표시 상위 N
+_ROTATION_MINUTES = 5              # 장중 후보 노출 순환 단위
 
 
 @dataclass(frozen=True)
@@ -47,6 +51,13 @@ class NewCandidate:
     stop_loss: float
     risk_reward: float
     change_pct: float = 0.0
+    open_price: float = 0.0
+    high_price: float = 0.0
+    low_price: float = 0.0
+    intraday_drawdown_pct: float = 0.0  # 현재가가 장중 고점 대비 얼마나 밀렸는지(음수)
+    intraday_range_pct: float = 0.0
+    risk_flags: tuple[str, ...] = ()
+    suggested_accounts: tuple[str, ...] = ()
     tags: tuple[str, ...] = ()
 
 
@@ -153,8 +164,111 @@ def _risk_reward(c: dict) -> tuple[float, float, float]:
     return target, stop, rr
 
 
+
+def _intraday_metrics(c: dict) -> tuple[float, float, list[str]]:
+    """장중 급등/급락/수급 약화를 실행 리스크 플래그로 계산한다.
+
+    이 플래그는 후보를 숨기는 용도가 아니다. 발굴 후보로는 남기고,
+    Toss/실행 채널에서 HOLD/BLOCK 판단에 사용한다.
+    """
+    price = float(c.get("price") or 0)
+    high = float(c.get("high_price") or 0)
+    low = float(c.get("low_price") or 0)
+    change = float(c.get("change_pct") or 0)
+    vol_surge = float(c.get("vol_surge") or 0)
+    flags: list[str] = []
+    drawdown = ((price / high - 1) * 100) if price > 0 and high > 0 else 0.0
+    range_pct = ((high / low - 1) * 100) if high > 0 and low > 0 else 0.0
+    if change >= _CHASE_CHANGE_PCT:
+        flags.append(f"당일 급등 추격 주의 +{change:.1f}%")
+    if drawdown <= -6.0:
+        flags.append(f"장중 고점 대비 급락 {drawdown:.1f}%")
+    if range_pct >= 10.0:
+        flags.append(f"장중 변동성 과대 {range_pct:.1f}%")
+    if 0 < vol_surge < 1.0 and not c.get("has_catalyst"):
+        flags.append("수급 약함 — 즉시 실행보다 관찰")
+    return round(drawdown, 1), round(range_pct, 1), flags
+
+def _soft_observation_flags(flags: tuple[str, ...] | list[str]) -> list[str]:
+    """즉시 HOLD가 아니라 소액 조건부/관찰매수로 남길 완화 리스크."""
+    return [f for f in flags if str(f).startswith(("수급 약함", "손익비 보통"))]
+
+
+def _blocking_risk_flags(flags: tuple[str, ...] | list[str]) -> list[str]:
+    """실행을 차단해야 하는 장중 반전/과열 리스크만 분리한다."""
+    soft = set(_soft_observation_flags(flags))
+    return [f for f in flags if f not in soft]
+
+
+def _intraday_rotation_bucket(now: datetime | None = None) -> int:
+    """KST 기준 5분 단위 후보 순환 버킷. 상태 저장 없이 같은 후보 고정 노출을 완화한다."""
+    kst = timezone(timedelta(hours=9))
+    now = now.astimezone(kst) if now else datetime.now(kst)
+    return (now.hour * 60 + now.minute) // _ROTATION_MINUTES
+
+
+def _rotate_list(items: list, bucket: int | None = None) -> list:
+    """리스트를 5분 버킷 기준으로 순환. 길이 0/1이면 그대로 반환."""
+    if len(items) <= 1:
+        return list(items)
+    b = _intraday_rotation_bucket() if bucket is None else bucket
+    n = b % len(items)
+    return list(items[n:] + items[:n])
+
+
+def _candidate_status_priority(item: dict) -> int:
+    status = item.get("execution_status") or item.get("action_bias") or ""
+    return {
+        "executable": 0,
+        "conditional_small_entry": 1,
+        "CONDITIONAL_SMALL_ENTRY": 1,
+        "ACCOUNT_REVIEW": 1,
+        "limit_exceeded": 2,
+        "WATCH": 3,
+        "hold_risk_flags": 4,
+        "HOLD_RISK_REVIEW": 4,
+    }.get(str(status), 9)
+
+
+def _rotate_candidate_groups(items: list[dict]) -> list[dict]:
+    """상태 우선순위는 지키되 같은 상태 후보는 장중 순환 노출한다."""
+    bucket = _intraday_rotation_bucket()
+    out: list[dict] = []
+    for priority in sorted({_candidate_status_priority(i) for i in items}):
+        group = [i for i in items if _candidate_status_priority(i) == priority]
+        group = _rotate_list(group, bucket)
+        for rank, item in enumerate(group, 1):
+            item["rotation_bucket"] = bucket
+            item["rotation_rank"] = rank
+        out.extend(group)
+    return out
+
+
+def _suggested_accounts(c: dict, price: float) -> tuple[str, ...]:
+    """시장 발굴 후보를 계좌 제약 없이 먼저 찾은 뒤, 후단에서 계좌 후보를 붙인다."""
+    market = _market_of(c.get("ticker", ""), c.get("market", ""))
+    ticker = c.get("ticker", "")
+    name = str(c.get("name", "")).upper()
+    accounts: list[str] = []
+    if market == "US":
+        accounts.append("삼성 일반")
+        if price <= 500_000:
+            accounts.append("토스 AI")
+    else:
+        if ticker.endswith((".KS", ".KQ")):
+            accounts.extend(["삼성 수동", "ISA"])
+        if any(x in name for x in ("KODEX", "TIGER", "PLUS", "ACE")):
+            accounts.append("RIA/연금 검토")
+        if price <= 500_000:
+            accounts.append("토스 AI")
+    return tuple(dict.fromkeys(accounts))
+
 def _gate(c: dict) -> str:
-    """탈락 사유 반환 (통과 시 빈 문자열)."""
+    """하드 탈락 사유 반환 (통과 시 빈 문자열).
+
+    보수성 완화: 당일 급등/수급 약함은 후보 제거가 아니라 risk_flags로 이동한다.
+    실제 실행은 Toss/계좌별 후단 게이트에서 차단한다.
+    """
     price = float(c.get("price") or 0)
     if price <= 0:
         return "데이터 부족 (가격/시세 없음)"
@@ -166,19 +280,14 @@ def _gate(c: dict) -> str:
         return "거래대금/유동성 부족"
 
     change = float(c.get("change_pct") or 0)
-    if change > _CHASE_CHANGE_PCT:
-        return f"당일 급등 추격 위험 (+{change:.1f}%)"
-
-    vol_surge = float(c.get("vol_surge") or 0)
-    if vol_surge < 1.0 and not c.get("has_catalyst"):
-        return "수급 미확인 (거래량/촉매 없음)"
+    if change >= _HARD_CHASE_CHANGE_PCT:
+        return f"비정상 급등 과열 (+{change:.1f}%)"
 
     _, _, rr = _risk_reward(c)
-    if rr < _MIN_RISK_REWARD:
-        return f"손익비 부족 ({rr:.1f}:1 < 1.5:1)"
+    if rr < _HARD_MIN_RISK_REWARD:
+        return f"손익비 부족 ({rr:.1f}:1 < 1.0:1)"
 
     return ""
-
 
 def _score(c: dict, novel: bool, duplicate: bool) -> tuple[float, list[str]]:
     """통과 후보 점수 + 근거."""
@@ -278,13 +387,24 @@ def build_new_discovery(
         duplicate = ticker in recent_reco
         score, reasons = _score(c, novel=novel, duplicate=duplicate)
         target, stop, rr = _risk_reward(c)
+        price = float(c.get("price") or 0)
+        intraday_dd, intraday_range, risk_flags = _intraday_metrics(c)
+        if rr < _MIN_RISK_REWARD:
+            risk_flags.append(f"손익비 보통 {rr:.1f}:1 — 즉시 실행보다 관찰")
         passed.append(NewCandidate(
             ticker=ticker, name=name,
             market=_market_of(ticker, c.get("market", "")),
-            price=float(c.get("price") or 0),
+            price=price,
             score=score, idea=_idea(c, reasons), reasons=tuple(reasons),
             target_price=target, stop_loss=stop, risk_reward=rr,
             change_pct=float(c.get("change_pct") or 0),
+            open_price=float(c.get("open_price") or 0),
+            high_price=float(c.get("high_price") or 0),
+            low_price=float(c.get("low_price") or 0),
+            intraday_drawdown_pct=intraday_dd,
+            intraday_range_pct=intraday_range,
+            risk_flags=tuple(risk_flags),
+            suggested_accounts=_suggested_accounts(c, price),
             tags=tuple(c.get("tags") or ()),
         ))
 
@@ -482,6 +602,13 @@ def scan_discovery_candidates(briefing_type: str = "MANUAL") -> tuple[list[dict]
     if pandas_ok:
         try:
             candidates = _default_scan_candidates(briefing_type)
+            # scanner.py는 카테고리별 상위만 반환해서 같은 후보가 반복되기 쉽다.
+            # 장중 후보 다양성을 위해 curated SCAN_UNIVERSE 전체를 보강 스캔한다.
+            seen = {str(c.get("ticker") or "") for c in candidates}
+            for q in _fallback_universe_candidates(markets):
+                if q.get("ticker") not in seen:
+                    candidates.append(q)
+                    seen.add(str(q.get("ticker") or ""))
         except Exception as e:
             log.warning("scanner 경로 실패 → universe fallback: %s", e)
             candidates = []
@@ -532,24 +659,26 @@ def _default_scan_candidates(briefing_type: str) -> list[dict]:
     out: list[dict] = []
     for m in markets:
         try:
-            for h in scan_market(m).hits:
+            for h in scan_market(m, top_n=18).hits:
                 out.append({
                     "ticker": h.ticker, "name": h.name, "market": m, "price": h.price,
-                    "change_pct": 0.0, "ret_20d": h.ret_20d, "ret_60d": h.ret_60d,
+                    "change_pct": h.change_pct, "ret_20d": h.ret_20d, "ret_60d": h.ret_60d,
                     "rsi": h.rsi, "vol_surge": h.vol_surge,
                     "pct_from_52w_high": h.pct_from_52w_high,
+                    "open_price": h.open_price, "high_price": h.high_price, "low_price": h.low_price,
                     "volume_value": (_MIN_KR_VALUE_KRW if m == "KR" else _MIN_US_MCAP),
                     "source": "유니버스", "tags": h.tags, "has_catalyst": False,
                 })
         except Exception as e:
             log.warning("유니버스 스캔 정규화 실패 (%s): %s", m, e)
         try:
-            disc = discover_kr() if m == "KR" else discover_us()
+            disc = discover_kr(top_n=25) if m == "KR" else discover_us(top_n=25)
             for d in disc:
                 out.append({
                     "ticker": d.ticker, "name": d.name, "market": m, "price": d.price,
                     "change_pct": d.change_pct, "ret_20d": 0.0, "ret_60d": d.ret_60d,
                     "rsi": d.rsi, "vol_surge": 1.0, "pct_from_52w_high": 0.0,
+                    "open_price": d.open_price, "high_price": d.high_price, "low_price": d.low_price,
                     "volume_value": d.volume_value, "source": d.source,
                     "tags": (d.source,), "has_catalyst": True,
                 })
@@ -666,9 +795,10 @@ def render_discovery_text(sections: DiscoverySections) -> str:
             lines.append(
                 f"     진입 {unit}{c.price:,.0f} · 목표 {unit}{c.target_price:,.0f}"
                 f" · 손절 {unit}{c.stop_loss:,.0f} · 손익비 {c.risk_reward:.1f}:1")
-            toss_ok = c.market == "KR" and c.price <= 100_000
-            lines.append(
-                f"     적합 계좌: 일반/ISA 검토 · 토스 소액 {'가능' if toss_ok else '불가(고가/해외)'}")
+            if c.risk_flags:
+                lines.append(f"     위험 플래그: {', '.join(c.risk_flags)}")
+            accounts = ", ".join(c.suggested_accounts) if c.suggested_accounts else "계좌 배정 필요"
+            lines.append(f"     계좌 후보: {accounts}")
     else:
         lines.append("  신규 후보 없음 — 통과 후보 0개 (탈락 상위 사유):")
         if sections.new_rejected:
@@ -721,6 +851,8 @@ def toss_eligible_new_candidates(
             continue
         est = c.price  # 1주 기준
         over_limit = est > max_order_krw
+        blocking_flags = _blocking_risk_flags(c.risk_flags)
+        observation_flags = _soft_observation_flags(c.risk_flags)
         item = {
             "symbol": c.ticker, "name": c.name, "side": "buy", "quantity": 1,
             "price": c.price,
@@ -728,18 +860,34 @@ def toss_eligible_new_candidates(
             "market": c.market, "idea": c.idea, "score": c.score,
             "target_price": c.target_price, "stop_loss": c.stop_loss,
             "risk_reward": c.risk_reward,
+            "open_price": c.open_price, "high_price": c.high_price, "low_price": c.low_price,
+            "intraday_drawdown_pct": c.intraday_drawdown_pct,
+            "intraday_range_pct": c.intraday_range_pct,
+            "risk_flags": list(c.risk_flags),
+            "blocking_risk_flags": blocking_flags,
+            "observation_flags": observation_flags,
+            "suggested_accounts": list(c.suggested_accounts),
             "candidate_scope": "new_discovery", "read_only": True,
-            # 한도는 실주문 gate 전용 — 발굴/표시 단계에서는 후보를 배제하지 않음
-            "executable_now": not over_limit,
+            # 한도는 실주문 gate 전용 — 발굴/표시 단계에서는 후보를 배제하지 않음.
+            # 단, 수급 약함 단독은 HOLD 차단이 아니라 소액 조건부 후보로 완화한다.
+            "executable_now": not over_limit and not blocking_flags,
             "limit_exceeded": over_limit,
         }
-        if over_limit:
+        if blocking_flags:
+            item["execution_status"] = "hold_risk_flags"
+            item["block_reason"] = " / ".join(blocking_flags + observation_flags)
+            item["suggested_action"] = "토스 즉시 실행 금지 · 삼성/ISA 포함 감시 후보로 재검토"
+        elif over_limit:
             limit_exceeded_count += 1
             item["execution_status"] = "limit_exceeded"
             item["block_reason"] = (
                 f"1주 {est:,.0f}원 > 현재 1회 한도 {max_order_krw:,.0f}원"
             )
             item["suggested_action"] = "한도 상향 또는 수동 승인 필요"
+        elif observation_flags:
+            item["execution_status"] = "conditional_small_entry"
+            item["observation_reason"] = " / ".join(observation_flags)
+            item["suggested_action"] = "소액 조건부 관찰매수 후보 · Hermes PASS와 승호 최종 승인 필요"
         else:
             item["execution_status"] = "executable"
         items.append(item)
@@ -752,9 +900,13 @@ def toss_eligible_new_candidates(
             "scope": "scan_rejected",
         })
 
+    items = _rotate_candidate_groups(items)
+
     executable_count = sum(1 for i in items if i.get("executable_now"))
+    conditional_count = sum(1 for i in items if i.get("execution_status") == "conditional_small_entry")
     scan_summary["pass_count"] = len(items)
     scan_summary["executable_count"] = executable_count
+    scan_summary["conditional_small_entry_count"] = conditional_count
     scan_summary["limit_exceeded_count"] = limit_exceeded_count
 
     return {
@@ -766,6 +918,61 @@ def toss_eligible_new_candidates(
         "note": (
             "신규 발굴 기반 토스 후보 표시 (기존 삼성/RIA 재사용 안 함). "
             "1주 가격이 1회 한도 초과인 종목도 후보로 표시하되 "
-            "execution_status=limit_exceeded로 즉시 실행 불가 처리."
+            "execution_status=limit_exceeded/hold_risk_flags로 즉시 실행 불가 처리. "
+            "수급 약함/손익비 보통 단독은 conditional_small_entry로 완화 표시. "
+            "같은 상태 후보는 5분 단위로 노출 순환."
         ),
+    }
+
+
+# ── 계좌 비의존 광역 시장 레이더 ───────────────────────────────────
+def market_discovery_radar(sections: DiscoverySections, limit: int = 50) -> dict:
+    """Toss 전용이 아닌 삼성/ISA/RIA/IRP/토스 공용 광역 후보 레이더.
+
+    발굴은 넓게 유지하고, 계좌/실행 제약은 후단에서 분리한다.
+    이 함수는 read-only 데이터 구조만 반환한다.
+    """
+    items: list[dict] = []
+    for c in list(sections.new_discovery)[:limit]:
+        action_bias = "WATCH"
+        blocking_flags = _blocking_risk_flags(c.risk_flags)
+        observation_flags = _soft_observation_flags(c.risk_flags)
+        if not c.risk_flags and c.risk_reward >= 1.5:
+            action_bias = "ACCOUNT_REVIEW"
+        if observation_flags and not blocking_flags:
+            action_bias = "CONDITIONAL_SMALL_ENTRY"
+        if blocking_flags:
+            action_bias = "HOLD_RISK_REVIEW"
+        items.append({
+            "symbol": c.ticker, "name": c.name, "market": c.market,
+            "price": c.price, "change_pct": c.change_pct,
+            "score": c.score, "idea": c.idea, "reasons": list(c.reasons),
+            "target_price": c.target_price, "stop_loss": c.stop_loss, "risk_reward": c.risk_reward,
+            "open_price": c.open_price, "high_price": c.high_price, "low_price": c.low_price,
+            "intraday_drawdown_pct": c.intraday_drawdown_pct,
+            "intraday_range_pct": c.intraday_range_pct,
+            "risk_flags": list(c.risk_flags),
+            "blocking_risk_flags": blocking_flags,
+            "observation_flags": observation_flags,
+            "suggested_accounts": list(c.suggested_accounts),
+            "action_bias": action_bias,
+            "read_only": True,
+        })
+    items = _rotate_candidate_groups(items)
+
+    account_buckets: dict[str, list[dict]] = {}
+    for item in items:
+        for acc in item.get("suggested_accounts") or ["계좌 배정 필요"]:
+            account_buckets.setdefault(acc, []).append(item)
+    return {
+        "items": items,
+        "count": len(items),
+        "account_buckets": {k: v[:10] for k, v in account_buckets.items()},
+        "rejected": [
+            {"ticker": r.ticker, "name": r.name, "reason": r.reason}
+            for r in sections.new_rejected
+        ],
+        "scan_summary": sections.scan_summary,
+        "schema": "market_discovery_radar.v1.account_agnostic",
+        "note": "광역 후보 발굴은 계좌/한도 제약 없이 수행하고, 삼성/ISA/RIA/IRP/토스 배정은 후단에서 분리한다. 같은 상태 후보는 5분 단위로 순환 노출한다.",
     }

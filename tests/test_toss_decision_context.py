@@ -16,7 +16,7 @@ from unittest.mock import patch, MagicMock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from core.toss_decision_context import get_toss_decision_context, context_to_briefing_text
+from core.toss_decision_context import get_toss_decision_context, context_to_briefing_text, format_toss_live_pilot_briefing_lessons
 
 
 def _mock_context(**overrides):
@@ -118,3 +118,30 @@ class TestBriefingText:
         ctx = _mock_context()
         text = context_to_briefing_text(ctx)
         assert "99900001234" not in text
+
+
+class TestLivePilotBriefingLessons:
+    def test_lessons_include_sellable_polling_rule(self):
+        events = [
+            {"symbol": "BBAI", "side": "sell", "event_type": "live_send_failed", "live_order_sent": False, "reason": "http_422"},
+            {"symbol": "BBAI", "side": "buy", "event_type": "live_sent", "live_order_sent": True, "reason": ""},
+        ]
+        policy = {
+            "side_mode": "BUY_SELL",
+            "allowed_sides": ["buy", "sell"],
+            "sell_allowed": True,
+            "transport": {"live_order_sent_possible": True},
+        }
+        with patch("core.toss_live_pilot_events.list_events", return_value=events), \
+             patch("core.toss_live_pilot_policy.compute_toss_live_pilot_policy", return_value=policy), \
+             patch("core.toss_live_transport.get_transport_status", return_value={"live_order_sent_possible": True}):
+            text = format_toss_live_pilot_briefing_lessons()
+        assert "BUY_SELL" in text
+        assert "매도가능수량" in text
+        assert "수동 매도 여부를 묻지" in text
+        assert "BBAI sell" in text
+
+    def test_lessons_degrade_empty_on_import_error(self):
+        with patch.dict("sys.modules", {"core.toss_live_pilot_events": None}):
+            text = format_toss_live_pilot_briefing_lessons()
+        assert isinstance(text, str)

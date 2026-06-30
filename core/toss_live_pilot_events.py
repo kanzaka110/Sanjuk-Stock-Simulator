@@ -102,10 +102,24 @@ def _conn() -> sqlite3.Connection:
                 live_order_allowed  INTEGER DEFAULT 0,
                 reason              TEXT DEFAULT '',
                 message             TEXT DEFAULT '',
+                broker_order_id     TEXT DEFAULT '',
+                broker_order_status TEXT DEFAULT '',
+                filled_quantity     REAL DEFAULT 0,
+                filled_price        REAL DEFAULT 0,
                 created_at          TEXT NOT NULL,
                 delivered_to_hermes INTEGER DEFAULT 0
             )
         """)
+        for col, defn in [
+            ("broker_order_id", "TEXT DEFAULT ''"),
+            ("broker_order_status", "TEXT DEFAULT ''"),
+            ("filled_quantity", "REAL DEFAULT 0"),
+            ("filled_price", "REAL DEFAULT 0"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE live_pilot_events ADD COLUMN {col} {defn}")
+            except Exception:
+                pass
         conn.commit()
         _schema_created = True
     return conn
@@ -140,6 +154,10 @@ def record_event(
     live_order_allowed: bool = False,
     reason: str = "",
     message: str = "",
+    broker_order_id: str = "",
+    broker_order_status: str = "",
+    filled_quantity: float = 0.0,
+    filled_price: float = 0.0,
 ) -> dict:
     """Live pilot 이벤트 기록.
 
@@ -162,7 +180,7 @@ def record_event(
 
     # 민감정보 가드
     for kw in ("accountNo", "Bearer", "APP_KEY", "APP_SECRET"):
-        for field in (reason, message):
+        for field in (reason, message, broker_order_id, broker_order_status):
             if kw in str(field):
                 log.warning("민감정보 감지 in event fields: %s", kw)
                 return {"ok": False, "reason": f"sensitive_field: {kw}"}
@@ -197,14 +215,16 @@ def record_event(
                     event_type, status, symbol, symbol_name, symbol_label,
                     side, quantity, limit_price, estimated_amount_krw,
                     live_order_sent, adapter_status, live_order_allowed,
-                    reason, message, created_at, delivered_to_hermes)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    reason, message, broker_order_id, broker_order_status,
+                    filled_quantity, filled_price, created_at, delivered_to_hermes)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     event_id, pilot_id, preview_id, verification_id,
                     event_type, status, symbol, symbol_name, symbol_label,
                     side, quantity, limit_price, estimated_amount_krw,
                     1 if live_order_sent else 0, adapter_status, stored_allowed,
-                    reason, message, now, 0,
+                    reason, message, broker_order_id, broker_order_status,
+                    float(filled_quantity or 0), float(filled_price or 0), now, 0,
                 ),
             )
             conn.commit()
@@ -223,6 +243,10 @@ def record_event(
         "live_order_sent": live_order_sent,
         "live_order_allowed": bool(is_real_live_sent),
         "is_real_live_sent": bool(is_real_live_sent),
+        "broker_order_id": broker_order_id,
+        "broker_order_status": broker_order_status,
+        "filled_quantity": float(filled_quantity or 0),
+        "filled_price": float(filled_price or 0),
         "created_at": now,
     }
 

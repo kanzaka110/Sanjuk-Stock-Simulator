@@ -217,6 +217,8 @@ _POLICY_FINAL = {
     "max_daily_krw": 2_000_000,
     "max_orders_per_day": None,
     "blocked_symbols": [],
+    "allowed_asset_types": ["US_STOCK", "KR_STOCK"],
+    "allowed_sides": ["buy", "sell"],
 }
 
 
@@ -333,7 +335,8 @@ class TestDispatchLiveFakeSuccess(unittest.TestCase):
 
     def test_fake_success_message(self):
         result = self._dispatch_with_fake()
-        self.assertIn("승인형 매수 pilot", result["message"])
+        # 메시지 포맷: "승인형 BUY pilot 전송 완료" (side 대문자 영문)
+        self.assertIn("승인형 BUY pilot 전송 완료", result["message"])
         self.assertNotIn("자동매매 시작", result["message"])
 
     def test_fake_success_no_sensitive_in_result(self):

@@ -201,25 +201,17 @@ def test_ticker_detail_structure(empty_db):
     assert isinstance(td["open"], list)
 
 
-# ─── 시뮬레이터 HTML 구조 검증 ───────────────────────
-def test_simulator_tab_in_html():
-    """index.html에 시뮬레이터 탭과 주요 요소가 존재."""
+# ─── 모바일 핵심 탭 구조 검증 ───────────────────────
+def test_mobile_agent_tab_replaces_simulator_tab():
+    """index.html에서 저가치 시뮬레이터 탭 대신 에이전트 탭이 먼저 보인다."""
     from pathlib import Path
     html = (Path(__file__).parent.parent / "web" / "index.html").read_text(encoding="utf-8")
 
-    # 탭 버튼
-    assert 'data-t="sim"' in html
-    assert 'id="t-sim"' in html
-
-    # 3패널 구조
-    assert 'sim-left' in html
-    assert 'sim-center' in html
-    assert 'sim-right' in html
-
-    # 주요 요소 ID
-    assert 'id="sim-list"' in html
-    assert 'id="sim-hero"' in html
-    assert 'id="sim-order"' in html
+    assert 'data-t="agent"' in html
+    assert 'id="t-agent"' in html
+    assert 'stock-agent-activity-m' in html
+    assert 'data-t="sim"' not in html
+    assert 'id="t-sim"' in html  # 섹션은 보존하되 탭에서 숨김
 
     # 안전 장치: POST/실제 주문 없음
     assert "주문표 미리보기" in html
@@ -2307,3 +2299,47 @@ def test_mobile_home_shows_today_exec_trades_under_total_eval():
     assert "function renderHomeExecTrades()" in mobile
     assert "renderHomeExecTrades();renderMCB" in mobile
     assert "renderHomeExecTrades();_tradeLedgerLoaded=true" in mobile
+
+
+
+def test_stock_agent_activity_api_and_html_markers():
+    """Stock-Agent 분석 활동은 GET-only API와 PC/모바일 표시 위치를 갖는다."""
+    from pathlib import Path
+    root = Path(__file__).parent.parent
+    app = (root / "web" / "app.py").read_text(encoding="utf-8")
+    pc = (root / "web" / "index_pc.html").read_text(encoding="utf-8")
+    mobile = (root / "web" / "index.html").read_text(encoding="utf-8")
+    data = (root / "core" / "dashboard_data.py").read_text(encoding="utf-8")
+
+    assert '@app.get("/api/stock-agent/activity")' in app
+    assert "def stock_agent_activity_data" in data
+    assert "stock_agent_activity.v1.read_only" in data
+    assert "live_order_allowed" in data
+    assert "stock-agent-activity-pc" in pc
+    assert "stock-agent-activity-m" in mobile
+    assert 'data-p="agent"' in pc
+    assert 'data-p="sim"' not in pc
+    assert 'id="p-agent"' in pc
+    assert 'data-t="agent"' in mobile
+    assert 'data-t="sim"' not in mobile
+    assert mobile.index('data-t="agent"') < mobile.index('data-t="toss"')
+    assert 'id="t-agent"' in mobile
+    assert "/api/stock-agent/activity" in pc
+    assert "/api/stock-agent/activity" in mobile
+    assert "상세 보기" in pc
+    assert "상세 보기" in mobile
+    assert "agent-summary-first-v2" in pc
+    assert "agent-summary-first-v2" in mobile
+    assert "agent-detail-log" in pc
+    assert "agent-detail-log" in mobile
+    assert "종목 분석" in pc
+    assert "종목 분석" in mobile
+    assert "agent-stock-card" in pc
+    assert "agent-stock-card" in mobile
+    assert '"candidates"' in data
+    assert '"excluded"' in data
+    assert "display:none" in pc
+    assert "display:none" in mobile
+    assert "핵심 활동" in pc
+    assert "핵심 활동" in mobile
+    assert "주문 생성/승인/전송 없음" in data

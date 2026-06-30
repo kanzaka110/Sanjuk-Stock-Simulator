@@ -31,17 +31,17 @@ body{background:var(--bg);color:var(--tx);font-family:-apple-system,BlinkMacSyst
 .dot-g{background:var(--g)}.dot-r{background:var(--r)}
 
 /* Tabs */
-.tabs{display:flex;border-bottom:1px solid var(--ln);position:sticky;top:36px;background:var(--bg);z-index:99;overflow-x:auto;-webkit-overflow-scrolling:touch;flex-wrap:wrap}
+.tabs{display:flex;border-bottom:1px solid var(--ln);position:sticky;top:36px;background:var(--bg);z-index:99;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;flex-wrap:nowrap;white-space:nowrap;scroll-snap-type:x proximity}
 .tabs::-webkit-scrollbar{display:none}
-.tb{flex-shrink:0;padding:13px 14px;font-size:13px;font-weight:600;color:var(--mt);background:none;border:none;cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap;min-height:44px;-webkit-tap-highlight-color:transparent}
+.tb{flex:0 0 auto;padding:13px 14px;font-size:13px;font-weight:600;color:var(--mt);background:none;border:none;cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap;min-height:44px;-webkit-tap-highlight-color:transparent;scroll-snap-align:start}
 /* 브리핑 탭 가시성 강조 */
 .briefing-tab-visible{position:relative}
-.briefing-tab-priority::after{content:"";position:absolute;top:8px;right:6px;width:5px;height:5px;border-radius:50%;background:var(--b)}
+.briefing-tab-priority::after{content:;position:absolute;top:8px;right:6px;width:5px;height:5px;border-radius:50%;background:var(--b)}
 .tab-scroll-hint{display:none}
-/* 접힘 폰: 탭 wrap + compact */
-.mobile-tab-wrap{flex-wrap:wrap}
+/* 모바일 탭은 한 줄 가로 스크롤 고정 — 새 에이전트 탭이 아래 줄로 떨어지지 않게 함 */
+.mobile-tab-wrap{flex-wrap:nowrap}
 @media(max-width:649px){
-  .tabs{flex-wrap:wrap;gap:0}
+  .tabs{flex-wrap:nowrap;gap:0;padding:0 8px 0 0}
   .tb{padding:10px 12px;font-size:12px;min-height:38px}
   .tab-scroll-hint{display:none}
 }
@@ -907,7 +907,7 @@ details[open] summary::before{transform:rotate(90deg)}
 <button class="tb" data-t="act">액션</button>
 <button class="tb" data-t="perf">성과</button>
 <button class="tb briefing-tab-button briefing-tab-visible briefing-tab-priority" data-t="briefing">브리핑</button>
-<button class="tb" data-t="sim">시뮬레이터</button>
+<button class="tb" data-t="agent">에이전트</button>
 <button class="tb" data-t="toss">토스 AI</button>
 <span class="tab-scroll-hint"></span>
 </div>
@@ -1114,8 +1114,17 @@ details[open] summary::before{transform:rotate(90deg)}
 <!-- ═══ 토스 AI ═══ -->
 <div class="tc" id="t-toss">
 <div class="c">
-  <h3>Toss 실전 AI 자동거래 계좌 <span class="mt" style="font-size:10px;font-weight:400">기존 포트폴리오 미합산 · 자동거래 비활성 · 실전 계좌</span></h3>
+  <h3>Toss 실전 AI 자동거래 계좌 <span class="mt" style="font-size:10px;font-weight:400">기존 포트폴리오 미합산 · US BUY+SELL 승인형 · 실전 계좌</span></h3>
   <div id="toss-page-m"><div class="emp">불러오는 중…</div></div>
+</div>
+</div>
+
+<!-- ═══ 에이전트 ═══ -->
+<div class="tc" id="t-agent">
+<div class="c stock-agent-activity-panel-mobile">
+  <h3>Stock-Agent 분석 활동 <span class="mt" style="font-size:10px;font-weight:400">후보 스캔 · Hermes 검증 · 리뷰 아티팩트 · 읽기 전용</span></h3>
+  <div class="brief" style="margin-bottom:10px"><div class="brief-ic">✦</div><div class="brief-tx">요약 먼저 보고, 필요하면 상세 로그만 펼쳐봐. 주문 전송은 없음.</div></div>
+  <div id="stock-agent-activity-m"><div class="emp">분석 활동 불러오는 중…</div></div>
 </div>
 </div>
 
@@ -2793,7 +2802,7 @@ async function refreshAllNow(){
   const btn=document.getElementById("refresh-btn");if(btn)btn.disabled=true;
   setRefreshState("ok",'<span class="refresh-last-updated">갱신 중…</span>');
   try{
-    await Promise.allSettled([loadMkt(),loadTrades(),loadAct(),loadPF(),loadPerf(),loadTimeline(),loadSignals(),loadDBrief(),loadAnalytics(),loadBriefing()]);
+    await Promise.allSettled([loadMkt(),loadTrades(),loadAct(),loadPF(),loadPerf(),loadTimeline(),loadSignals(),loadDBrief(),loadAnalytics(),loadBriefing(),ldStockAgentActivity()]);
     markRefreshSuccess();
   }catch(e){markRefreshError("all")}
   _refreshing=false;if(btn)btn.disabled=false;
@@ -2818,6 +2827,42 @@ document.addEventListener("visibilitychange",handleVisibilityRefresh);
 /* interval 래퍼 — paused면 skip */
 function safeInterval(fn,ms){
   _intervals.push(setInterval(()=>{if(!_paused&&!document.hidden)fn()},ms));
+}
+
+
+
+/* ═══ STOCK-AGENT 분석 활동 — 읽기 전용 ═══ */
+function toggleAgentDetail(id){const el=document.getElementById(id);if(!el)return;const open=el.style.display!=="none";el.style.display=open?"none":"block";const b=document.querySelector(`[data-agent-toggle="${id}"]`);if(b)b.textContent=open?"상세 보기":"상세 닫기";}
+function won(v){return v==null||v===""?"—":"₩"+Math.round(Number(v)||0).toLocaleString()}
+function pct(v){return v==null||v===""?"—":(Number(v)>=0?"+":"")+Number(v).toFixed(2)+"%"}
+function agentCandidateCardM(it){
+  const sym=it.symbol||it.ticker||""; const name=it.name||sym||"종목"; const ready=it.stock_agent_ready;
+  const risks=(it.risk_notes||[]).slice(0,2).map(x=>`<span style="display:inline-block;margin:3px 4px 0 0;padding:3px 7px;border-radius:999px;background:rgba(245,158,11,.12);color:var(--o);font-size:10px">${E(x)}</span>`).join("");
+  return `<div class="agent-stock-card" style="background:var(--sf);border:1px solid ${ready?'rgba(34,197,94,.30)':'rgba(245,158,11,.28)'};border-radius:13px;padding:11px;margin-bottom:9px"><div style="display:flex;justify-content:space-between;gap:8px"><div><div style="font-size:15px;font-weight:950">${E(name)} <span class="mt" style="font-size:10px">${E(sym)}</span></div><div style="font-size:10px;color:var(--mt);margin-top:3px;line-height:1.35">${E(it.idea||"분석 메모 없음")}</div></div><span class="bg ${ready?'bg-g':'bg-o'}" style="height:max-content">${ready?'검토 가능':'보류'}</span></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:9px"><div style="background:var(--sf2);border-radius:9px;padding:7px"><div style="font-size:9px;color:var(--mt)">가격/수량</div><b>${won(it.limit_price||it.price)} · ${E(it.quantity||1)}주</b></div><div style="background:var(--sf2);border-radius:9px;padding:7px"><div style="font-size:9px;color:var(--mt)">금액/괴리</div><b>${won(it.estimated_amount_krw)} · ${pct(it.current_vs_limit_gap_pct)}</b></div><div style="background:var(--sf2);border-radius:9px;padding:7px"><div style="font-size:9px;color:var(--mt)">목표</div><b>${won(it.target_price)}</b></div><div style="background:var(--sf2);border-radius:9px;padding:7px"><div style="font-size:9px;color:var(--mt)">손절</div><b>${won(it.stop_loss)}</b></div></div><div style="font-size:10.5px;color:var(--mt);margin-top:7px;line-height:1.45"><b style="color:var(--wh)">판단:</b> ${E(it.fill_risk_note||it.condition||"체결 조건 확인 필요")}</div>${risks}</div>`;
+}
+function agentActivityHtmlM(d){
+  if(!d)return '<div class="emp">Stock-Agent 활동 데이터 없음</div>';
+  const s=d.summary||{}, arts=d.artifacts||{}, acts=d.activities||[], cands=d.candidates||[], excluded=d.excluded||[];
+  const detailId="agent-detail-log-m", rejectId="agent-reject-log-m";
+  const kpis=[["후보",s.candidate_count??0],["검토",s.ready_count??0],["부족",s.missing_count??0],["탈락",s.excluded_count??s.reject_count??0]].map(([k,v])=>`<div style="flex:1;background:var(--sf2);border-radius:11px;padding:9px 6px;text-align:center"><div style="font-size:9px;color:var(--mt)">${E(k)}</div><div style="font-size:16px;font-weight:950">${E(v)}</div></div>`).join("");
+  const artifact=arts.recent_reviews_exists?`리뷰 저장됨 · ${E(arts.recent_reviews_mtime||"")}`:"리뷰 아티팩트 아직 없음";
+  const verdict=(s.ready_count||0)>0?`검토 가능한 종목 ${s.ready_count}개`:(s.candidate_count||0)>0?"후보 있음 · 추가 확인 필요":"신규 실행 후보 없음";
+  const latest=acts.filter(a=>a.kind!=="event").slice(0,3).map(a=>`<div style="padding:9px 0;border-bottom:1px solid var(--ln);font-size:11.5px"><div style="display:flex;justify-content:space-between;gap:8px"><b>${E(a.title||"활동")}</b><span class="mt">${E(a.kind||"log")}</span></div><div class="mt" style="margin-top:3px"><b>${E(a.status||"—")}</b>${a.time?" · "+E(a.time):""}</div></div>`).join("");
+  const detailRows=acts.map(a=>`<div style="padding:9px 0;border-bottom:1px solid var(--ln);font-size:11.5px"><div style="display:flex;justify-content:space-between;gap:8px"><b>${E(a.title||"활동")}</b><span class="mt">${E(a.kind||"log")}</span></div><div class="mt" style="margin-top:3px"><b>${E(a.status||"—")}</b>${a.time?" · "+E(a.time):""} · ${E(a.detail||"")}</div></div>`).join("");
+  const rejectRows=excluded.map(x=>`<div style="padding:8px 0;border-bottom:1px solid var(--ln);font-size:11px"><b>${E(x.name||x.ticker||"탈락 후보")}</b> <span class="mt">${E(x.ticker||"")}</span><div class="mt">${E(x.reason||"사유 없음")}</div></div>`).join("");
+  const scan=`Universe ${s.universe_count??"—"} · Scanned ${s.scanned_count??"—"} · Pass/Reject ${s.pass_count??"—"}/${s.reject_count??"—"}`;
+  const candCards=cands.map(agentCandidateCardM).join("") || '<div class="emp">표시할 종목 분석 없음</div>';
+  return `<div class="agent-summary-first-v2" style="background:linear-gradient(135deg,rgba(47,107,255,.16),rgba(14,22,40,.65));border:1px solid rgba(47,107,255,.28);border-radius:14px;padding:13px;margin-bottom:10px"><div style="font-size:10px;color:var(--mt);font-weight:800;margin-bottom:4px">현재 판단</div><div style="font-size:18px;font-weight:950;letter-spacing:-.3px">${E(verdict)}</div><div style="font-size:10px;color:var(--mt);margin-top:5px">${E(artifact)} · 주문 전송 없음</div></div>`+
+    `<div style="display:flex;gap:6px;margin-bottom:10px">${kpis}</div><div style="font-size:10px;color:var(--mt);margin-bottom:9px">${E(scan)} · GET-only</div>`+
+    `<div style="font-size:13px;font-weight:950;margin:12px 0 6px">종목 분석</div>${candCards}`+
+    `<div style="background:var(--sf);border:1px solid var(--ln);border-radius:13px;padding:11px;margin-bottom:9px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px"><div style="font-size:12px;font-weight:900">핵심 활동</div><button data-agent-toggle="${detailId}" onclick="toggleAgentDetail('${detailId}')" style="background:rgba(47,107,255,.16);border:1px solid rgba(47,107,255,.34);color:var(--wh);border-radius:999px;padding:7px 11px;font-size:11px;font-weight:850">상세 보기</button></div>${latest||'<div class="emp">표시할 핵심 활동 없음</div>'}</div>`+
+    `<div id="${detailId}" class="agent-detail-log" style="display:none;background:var(--sf);border:1px solid var(--ln);border-radius:13px;padding:11px"><div style="font-size:12px;font-weight:900;margin-bottom:5px">상세 로그 · ${acts.length}건</div>${detailRows||'<div class="emp">상세 로그 없음</div>'}</div>`+
+    `<div style="margin-top:9px"><button data-agent-toggle="${rejectId}" onclick="toggleAgentDetail('${rejectId}')" style="background:rgba(148,163,184,.10);border:1px solid rgba(148,163,184,.22);color:var(--wh);border-radius:999px;padding:8px 11px;font-size:11px;font-weight:850">탈락 사유 보기</button><div id="${rejectId}" style="display:none;margin-top:8px">${rejectRows||'<div class="emp">탈락 사유 없음</div>'}</div></div>`;
+}
+async function ldStockAgentActivity(){
+  const d=await J("/api/stock-agent/activity");
+  const el=document.getElementById("stock-agent-activity-m");
+  if(el)el.innerHTML=agentActivityHtmlM(d);
 }
 
 /* ═══ TOSS 실전 AI 자동거래 계좌 (기존 포트폴리오 미합산) ═══ */
@@ -2846,12 +2891,19 @@ async function ldToss(){
     <div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--ln)">${warns}</div>
     <div style="font-size:10px;color:var(--mt);margin-top:6px">갱신: ${E(d.updated_at||"—")}</div>`;
   // 자동거래 상태 + paper trades
-  const [as2,pt]=await Promise.all([J("/api/toss/automation-status"),J("/api/toss/paper-trades")]);
+  const [lp,le,bc,pv,as2,pt]=await Promise.all([J("/api/toss/live-pilot-policy"),J("/api/toss/live-pilot-events"),J("/api/toss/buy-candidates"),J("/api/toss/live-pilot-previews"),J("/api/toss/automation-status"),J("/api/toss/paper-trades")]);
+  if(lp){
+    const realSent=Number((le||{}).live_sent_real||0), artifact=Number((le||{}).live_sent_mock_or_artifact||0);
+    const gateOpen=!!lp.all_live_gates_open && !!(lp.transport&&lp.transport.live_order_sent_possible);
+    const sides=(lp.allowed_sides||[]).join("+").toUpperCase()||lp.side_mode||"—";
+    const latest=((le||{}).records||[]).slice(0,3).map(r=>`<div style="display:flex;justify-content:space-between;gap:8px;padding:5px 0;border-bottom:1px solid var(--ln);font-size:11px"><span style="font-weight:700">${E(r.display_name||r.symbol_label||r.symbol||"—")} ${E((r.side||"").toUpperCase())}</span><span class="mt">${E(r.event_type||"—")} · ${E(r.live_sent_classification||r.reason||"")}</span></div>`).join("");
+    box.innerHTML+=`<div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--ln)"><div style="font-size:12px;font-weight:800;margin-bottom:6px">Live Pilot 운영 상태 <span style="font-size:10px;color:var(--mt);font-weight:400">US BUY+SELL · 버튼 승인 전용</span></div><div style="display:grid;grid-template-columns:repeat(2,1fr);gap:7px;margin-bottom:8px"><div style="background:var(--sf2);border-radius:8px;padding:7px;text-align:center"><div style="font-size:9px;color:var(--mt)">상태</div><div style="font-size:13px;font-weight:900;color:${gateOpen?'var(--up)':'var(--o)'}">${gateOpen?'READY':'확인 필요'}</div></div><div style="background:var(--sf2);border-radius:8px;padding:7px;text-align:center"><div style="font-size:9px;color:var(--mt)">방향</div><div style="font-size:13px;font-weight:900">${E(sides)}</div></div><div style="background:var(--sf2);border-radius:8px;padding:7px;text-align:center"><div style="font-size:9px;color:var(--mt)">실제 전송</div><div style="font-size:13px;font-weight:900;color:${realSent?'var(--dn)':'var(--up)'}">${realSent}건</div><div style="font-size:9px;color:var(--mt)">아티팩트 ${artifact}건 제외</div></div><div style="background:var(--sf2);border-radius:8px;padding:7px;text-align:center"><div style="font-size:9px;color:var(--mt)">한도</div><div style="font-size:13px;font-weight:900">USD잔고</div><div style="font-size:9px;color:var(--mt)">KRW cap 없음</div></div></div><div style="font-size:10px;color:var(--mt);line-height:1.45;margin-bottom:6px">${E(lp.daily_policy_note||"Hermes PASS + 최종승인 전에는 주문 전송 없음")}</div>${latest||'<div class="emp" style="font-size:11px">최근 live 이벤트 없음</div>'}<div style="font-size:10px;color:var(--mt);margin-top:5px">신규 후보 ${((bc||{}).count||0)}건 · previews ${((pv||{}).records||[]).length}건</div></div>`;
+  }
   if(as2){
     const gs=(as2.guards||[]).map(g=>`<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--ln);font-size:11px"><span>${E(g.name)}</span><span style="font-weight:700;color:${g.ok?"var(--up)":"var(--mt)"}">${E(g.status)}</span></div>`).join("");
     box.innerHTML+=`
       <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--ln)">
-        <div style="font-size:12px;font-weight:700;margin-bottom:6px">자동거래 상태 <span style="font-size:10px;color:var(--mt);font-weight:400">실주문 비활성 · paper trading만 기록</span></div>
+        <div style="font-size:12px;font-weight:700;margin-bottom:6px">Paper/구형 자동거래 상태 <span style="font-size:10px;color:var(--mt);font-weight:400">Live Pilot과 별도</span></div>
         <div style="display:flex;gap:8px;margin-bottom:8px">
           <div style="flex:1;background:var(--sf2);border-radius:8px;padding:6px;text-align:center"><div style="font-size:9px;color:var(--mt)">모드</div><div style="font-size:12px;font-weight:800">${E(as2.mode)}</div></div>
           <div style="flex:1;background:var(--sf2);border-radius:8px;padding:6px;text-align:center"><div style="font-size:9px;color:var(--mt)">킬스위치</div><div style="font-size:12px;font-weight:800;color:${as2.kill_switch?"var(--dn)":"var(--up)"}">${as2.kill_switch?"ON":"OFF"}</div></div>
@@ -2906,7 +2958,7 @@ async function ldToss(){
 
 /* ═══ INIT ═══ */
 async function init(){
-  await Promise.allSettled([loadMkt(),loadTrades(),loadAct(),loadPF(),loadPerf(),loadNews(),loadTimeline(),loadSimList(),loadSignals(),loadDBrief(),loadCalendar(),loadAnalytics(),loadBriefing(),ldToss()]);
+  await Promise.allSettled([loadMkt(),loadTrades(),loadAct(),loadPF(),loadPerf(),loadNews(),loadTimeline(),loadSimList(),loadSignals(),loadDBrief(),loadCalendar(),loadAnalytics(),loadBriefing(),ldToss(),ldStockAgentActivity()]);
   markRefreshSuccess();
 }
 init();

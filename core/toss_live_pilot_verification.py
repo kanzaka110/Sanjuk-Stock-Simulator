@@ -186,11 +186,12 @@ def record_hermes_verification(
         conn = _conn()
         try:
             existing = conn.execute(
-                "SELECT verification_id FROM live_pilot_verification WHERE verification_id=?",
+                "SELECT verification_id, pilot_id FROM live_pilot_verification WHERE verification_id=?",
                 (verification_id,),
             ).fetchone()
             if not existing:
                 return {"ok": False, "reason": "verification_id not found"}
+            pilot_id = existing["pilot_id"]
             conn.execute(
                 """UPDATE live_pilot_verification
                    SET status=?, reasons=?, checks=?, hermes_message=?,
@@ -210,7 +211,7 @@ def record_hermes_verification(
         finally:
             conn.close()
 
-    return {
+    result = {
         "ok": True,
         "verification_id": verification_id,
         "status": status,
@@ -218,6 +219,12 @@ def record_hermes_verification(
         "expires_at": expires_at,
         "live_order_allowed": False,  # 항상 False — gate only
     }
+
+    # PASS → autonomous finalizer 트리거 (fail-safe)
+    if status == _PASS_STATUS and pilot_id:
+        _try_trigger_autonomous_finalize(pilot_id)
+
+    return result
 
 
 def get_verification_for_pilot(pilot_id: str) -> dict | None:
@@ -301,7 +308,7 @@ def build_hermes_verification_context(
     """
     symbol = preview_record.get("symbol", "")
     estimated = float(preview_record.get("estimated_amount_krw") or 0)
-    max_krw = policy.get("max_order_krw", 100_000)
+    max_krw = policy.get("max_order_krw") or 0
     blocked_symbols = policy.get("blocked_symbols", [])
     paper_count = 0
     paper_status = "unknown"
@@ -310,7 +317,7 @@ def build_hermes_verification_context(
         paper_status = "insufficient" if paper_count < 5 else "stable"
 
     checks: dict = {
-        "amount_guard": "ok" if estimated <= max_krw else f"FAIL: {estimated:,.0f} > {max_krw:,.0f}",
+        "amount_guard": "ok" if (not max_krw or estimated <= max_krw) else f"FAIL: {estimated:,.0f} > {max_krw:,.0f}",
         "blocked_symbol": "ok" if symbol not in blocked_symbols else f"FAIL: {symbol}",
         "price_nonzero": "ok" if float(preview_record.get("limit_price") or 0) > 0 else "FAIL",
         "quantity_nonzero": "ok" if int(preview_record.get("quantity") or 0) > 0 else "FAIL",
@@ -569,3 +576,23 @@ def verification_summary() -> dict:
             "pending_expire_minutes": PENDING_EXPIRE_MINUTES,
             "oldest_pending_age_minutes": None,
         }
+
+
+# ── Autonomous finalizer 트리거 ──────────────────────────────────
+
+def _try_trigger_autonomous_finalize(pilot_id: str) -> None:
+    """Hermes PASS 기록 후 autonomous finalizer 호출 (fail-safe).
+
+    autonomous mode가 아니면 no-op. 모든 예외 무시.
+    """
+    try:
+        from core.toss_autonomous_finalizer import try_autonomous_finalize
+        result = try_autonomous_finalize(pilot_id)
+        if result.get("skipped"):
+            log.debug("autonomous finalize skipped: %s", result.get("reason"))
+        elif result.get("ok"):
+            log.info("autonomous finalize success: pilot_id=%s", pilot_id)
+        else:
+            log.info("autonomous finalize blocked: pilot_id=%s reason=%s", pilot_id, result.get("reason"))
+    except Exception as e:
+        log.warning("autonomous finalize trigger error: %s", e)

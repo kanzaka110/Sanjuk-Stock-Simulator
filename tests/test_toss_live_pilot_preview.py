@@ -96,7 +96,9 @@ class TestUnlocked005930(unittest.TestCase):
 
     def test_amount_guard_still_blocks_over_limit(self):
         # 종목은 허용되지만 600,000 > 500,000 한도 → 금액 가드로 차단 유지
-        p = build_live_pilot_preview(_candidate("005930.KS", price=600000, qty=1))
+        # 기본 정책은 max_order_krw=None이므로 명시적 한도 정책 전달
+        policy = {"max_order_krw": 500_000, "blocked_symbols": [], "sample_insufficient": False, "warnings": []}
+        p = build_live_pilot_preview(_candidate("005930.KS", price=600000, qty=1), policy=policy)
         self.assertFalse(p["ok"])
         combined = " ".join(p["blocks"])
         self.assertIn("한도_초과", combined)
@@ -129,11 +131,13 @@ class TestNoPriceBlock(unittest.TestCase):
 
 
 class TestAmountLimit(unittest.TestCase):
-    """금액 한도 초과 → block."""
+    """금액 한도 초과 → block (명시적 한도 정책 전달 시)."""
 
     def test_over_limit_blocked(self):
         # 최종 정책: 1회 한도 500,000원 고정. 600,000 * 1 > 500,000 → 차단
-        p = build_live_pilot_preview(_candidate("069500.KS", price=600000, qty=1))
+        # 기본 정책은 max_order_krw=None이므로 명시적 한도 정책 전달
+        policy = {"max_order_krw": 500_000, "blocked_symbols": [], "sample_insufficient": False, "warnings": []}
+        p = build_live_pilot_preview(_candidate("069500.KS", price=600000, qty=1), policy=policy)
         self.assertFalse(p["ok"])
         combined = " ".join(p["blocks"])
         self.assertIn("한도_초과", combined)

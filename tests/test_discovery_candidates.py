@@ -90,12 +90,20 @@ class TestWatchlistExcluded(unittest.TestCase):
 # ─── 3. 탈락 사유 ─────────────────────────────────────────────────
 
 class TestRejectionReasons(unittest.TestCase):
-    def test_chase_rejected(self):
-        # 당일 +12% 급등 → 추격 금지
+    def test_chase_flagged_not_rejected(self):
+        # 당일 +12% 급등은 후보에서 숨기지 않고 실행 리스크로 표시
         cands = [_cand("111111.KS", "급등주", change_pct=12.0)]
         passed, rejected = build_new_discovery(cands, **_ctx())
+        self.assertTrue(passed)
+        self.assertEqual(rejected, ())
+        self.assertTrue(any("급등" in f for f in passed[0].risk_flags))
+
+    def test_extreme_chase_rejected(self):
+        # 과열권(+30% 이상)은 하드 탈락
+        cands = [_cand("111112.KS", "과열주", change_pct=35.0)]
+        passed, rejected = build_new_discovery(cands, **_ctx())
         self.assertEqual(passed, ())
-        self.assertTrue(any("급등" in r.reason for r in rejected))
+        self.assertTrue(any("과열" in r.reason or "급등" in r.reason for r in rejected))
 
     def test_low_liquidity_rejected(self):
         cands = [_cand("222222.KS", "저유동주", volume_value=1_000_000_000.0)]
@@ -123,7 +131,7 @@ class TestAlwaysPresentSection(unittest.TestCase):
     def test_zero_pass_still_renders_section(self):
         # 전부 탈락하는 후보들
         cands = [
-            _cand("aaa.KS", "급등A", change_pct=20.0),
+            _cand("aaa.KS", "급등A", change_pct=35.0),
             _cand("bbb.KS", "저유동B", volume_value=500_000_000.0),
         ]
         sections = build_discovery_sections(
@@ -140,7 +148,7 @@ class TestAlwaysPresentSection(unittest.TestCase):
             scan_candidates=cands, briefing_type="KR_BEFORE", **_ctx()
         )
         self.assertEqual(sections.new_discovery, ())
-        self.assertLessEqual(len(sections.new_rejected), 5)
+        self.assertLessEqual(len(sections.new_rejected), 12)
         self.assertGreaterEqual(len(sections.new_rejected), 1)
 
 
@@ -191,7 +199,7 @@ class TestTossEligible(unittest.TestCase):
         self.assertNotIn("005930.KS", item_tickers)
 
     def test_toss_excluded_has_scan_reject_reasons(self):
-        cands = [_cand("zzz.KS", "급등탈락", change_pct=25.0)]
+        cands = [_cand("zzz.KS", "급등탈락", change_pct=35.0)]
         sections = build_discovery_sections(
             scan_candidates=cands, briefing_type="KR_BEFORE", **_ctx(),
         )
@@ -341,3 +349,45 @@ class TestScanTotalFailure(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ─── 11. 계좌 비의존 광역 레이더 / 장중 리스크 플래그 ─────────────
+
+def test_intraday_reversal_is_kept_but_flagged():
+    cands = [_cand("123456.KQ", "장중반전", price=158_000, change_pct=-3.0)]
+    cands[0].update({"high_price": 177_600, "low_price": 156_000, "open_price": 170_000})
+    passed, rejected = build_new_discovery(cands, **_ctx())
+    assert passed, rejected
+    assert passed[0].risk_flags
+    assert passed[0].intraday_drawdown_pct <= -6.0
+
+
+
+
+def test_market_discovery_weak_flow_only_is_conditional_not_hold():
+    from core.discovery_candidates import DiscoverySections, NewCandidate, market_discovery_radar
+    cand = NewCandidate(
+        ticker="000445.KQ", name="수급약함", market="KR", price=48_000.0,
+        score=70, idea="수급 약함 단독 완화", reasons=("거래대금 충분",),
+        target_price=52_000.0, stop_loss=45_000.0, risk_reward=1.8,
+        risk_flags=("수급 약함 — 즉시 실행보다 관찰",),
+        suggested_accounts=("토스 AI",),
+    )
+    sections = DiscoverySections(new_discovery=(cand,))
+
+    radar = market_discovery_radar(sections)
+    item = radar["items"][0]
+
+    assert item["action_bias"] == "CONDITIONAL_SMALL_ENTRY"
+    assert item["blocking_risk_flags"] == []
+    assert item["observation_flags"] == ["수급 약함 — 즉시 실행보다 관찰"]
+
+
+def test_market_discovery_radar_is_account_agnostic():
+    from core.discovery_candidates import market_discovery_radar
+    cands = [_cand("123457.KQ", "광역후보", price=158_000)]
+    sections = build_discovery_sections(scan_candidates=cands, briefing_type="KR_BEFORE", **_ctx())
+    radar = market_discovery_radar(sections)
+    assert radar["schema"] == "market_discovery_radar.v1.account_agnostic"
+    assert radar["items"]
+    assert any("삼성" in a for a in radar["items"][0]["suggested_accounts"])

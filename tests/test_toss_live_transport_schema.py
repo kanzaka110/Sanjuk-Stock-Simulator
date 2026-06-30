@@ -2,8 +2,8 @@
 
 build_toss_order_create_request() dry-run schema 변환 테스트.
 
-1. KR symbol 변환 (.KS 제거)
-2. BUY_ONLY (buy → BUY, sell → BLOCK)
+1. US symbol 허용 / KR symbol 차단
+2. BUY+SELL (buy/sell → upper)
 3. LIMIT only (limit → LIMIT, market → BLOCK)
 4. quantity 변환/검증
 5. price 변환/검증
@@ -29,7 +29,7 @@ from core.toss_live_transport import build_toss_order_create_request
 
 def _payload(**kw) -> dict:
     base = {
-        "symbol": "091180.KS",
+        "symbol": "SOFI",
         "side": "buy",
         "order_type": "limit",
         "quantity": 1,
@@ -40,12 +40,21 @@ def _payload(**kw) -> dict:
     return base
 
 
-# ── 1. KR symbol 변환 ────────────────────────────────────
+# ── 1. US symbol / KR 차단 ────────────────────────────────────
 
 class TestSymbolNormalization(unittest.TestCase):
-    def test_ks_suffix_removed(self):
-        r = build_toss_order_create_request(_payload(), client_order_id="tlive_1")
-        self.assertEqual(r["request"]["symbol"], "091180")
+    def test_kr_suffix_blocked_when_us_asset_type(self):
+        r = build_toss_order_create_request(
+            _payload(symbol="091180.KS"), client_order_id="tlive_1", asset_type="US_STOCK",
+        )
+        self.assertFalse(r["ok"])
+        self.assertTrue(any("non_us_symbol_not_allowed" in b for b in r["blocks"]))
+
+    def test_kr_suffix_allowed_when_kr_asset_type(self):
+        r = build_toss_order_create_request(
+            _payload(symbol="091180.KS"), client_order_id="tlive_1", asset_type="KR_STOCK",
+        )
+        self.assertTrue(r["ok"])
 
     def test_us_symbol_unchanged(self):
         # MU 같은 미국 티커는 그대로 (단 BUY/LIMIT 유효해야 request 생성)
@@ -63,18 +72,17 @@ class TestSymbolNormalization(unittest.TestCase):
         self.assertTrue(any("invalid_symbol" in b for b in r["blocks"]))
 
 
-# ── 2. BUY_ONLY ──────────────────────────────────────────
+# ── 2. BUY+SELL ──────────────────────────────────────────
 
-class TestBuyOnly(unittest.TestCase):
+class TestBuySell(unittest.TestCase):
     def test_buy_uppercased(self):
         r = build_toss_order_create_request(_payload(side="buy"), client_order_id="t")
         self.assertEqual(r["request"]["side"], "BUY")
 
-    def test_sell_blocked(self):
+    def test_sell_uppercased(self):
         r = build_toss_order_create_request(_payload(side="sell"), client_order_id="t")
-        self.assertFalse(r["ok"])
-        self.assertTrue(any("sell_not_allowed" in b for b in r["blocks"]))
-        self.assertEqual(r["request"], {})
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["request"]["side"], "SELL")
 
 
 # ── 3. LIMIT only ────────────────────────────────────────
@@ -136,10 +144,10 @@ class TestPrice(unittest.TestCase):
         r = build_toss_order_create_request(_payload(limit_price=-100), client_order_id="t")
         self.assertFalse(r["ok"])
 
-    def test_fractional_blocked(self):
-        r = build_toss_order_create_request(_payload(limit_price=30850.5), client_order_id="t")
-        self.assertFalse(r["ok"])
-        self.assertTrue(any("invalid_price" in b for b in r["blocks"]))
+    def test_fractional_ok(self):
+        r = build_toss_order_create_request(_payload(limit_price=30.85), client_order_id="t")
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["request"]["price"], "30.85")
 
 
 # ── 6. clientOrderId ─────────────────────────────────────

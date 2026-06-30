@@ -29,9 +29,17 @@ def _policy():
     return compute_toss_live_pilot_policy(evaluated_count=0)
 
 
-def _full_flow(symbol="069500.KS", price=40000, qty=1, side="buy", **kw):
+def _policy_with_krw_cap(max_order_krw: int = 500_000) -> dict:
+    """기본 정책에 명시적 KRW 한도를 덮어쓴 정책 반환."""
+    p = compute_toss_live_pilot_policy(evaluated_count=0)
+    p["max_order_krw"] = max_order_krw
+    return p
+
+
+def _full_flow(symbol="069500.KS", price=40000, qty=1, side="buy", policy=None, **kw):
     """candidate → preview → payload → dispatch 전체 실행."""
-    policy = _policy()
+    if policy is None:
+        policy = _policy()
     candidate = {
         "symbol": symbol,
         "side": side,
@@ -89,7 +97,10 @@ class TestFullFlow069500(unittest.TestCase):
 class TestAmountBlockedFlow005930(unittest.TestCase):
     def setUp(self):
         # 종목 제한 해제됐지만 600,000 > 500,000 한도 → 금액 가드로 차단
-        self.prev, self.pld, self.disp = _full_flow("005930.KS", price=600000, qty=1)
+        # 기본 정책은 max_order_krw=None이므로 명시적 한도 정책 전달
+        self.prev, self.pld, self.disp = _full_flow(
+            "005930.KS", price=600000, qty=1, policy=_policy_with_krw_cap(500_000)
+        )
 
     def test_preview_blocked(self):
         self.assertFalse(self.prev["ok"])
@@ -121,7 +132,8 @@ class TestUnlockedFlow161510(unittest.TestCase):
 class TestAmountGuard(unittest.TestCase):
     def test_over_100k_blocked(self):
         # 최종 정책: max=500,000원. 600,000 초과.
-        prev, pld, _ = _full_flow("069500.KS", price=600_000, qty=1)
+        # 기본 정책은 max_order_krw=None이므로 명시적 한도 정책 전달
+        prev, pld, _ = _full_flow("069500.KS", price=600_000, qty=1, policy=_policy_with_krw_cap(500_000))
         self.assertFalse(prev["ok"] and pld["ok"])
 
     def test_under_100k_ok(self):

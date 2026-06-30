@@ -161,10 +161,10 @@ class TestSaveIntegration:
 class TestTelegram4Sections:
     """텔레그램 4섹션 — 실행 매도가 있어도 조건부 매수 섹션이 숨지 않음."""
 
-    def _msg(self, raw, briefing_type="KR_BEFORE"):
+    def _msg(self, raw, briefing_type="KR_BEFORE", prices=None):
         from core.models import BriefingResult
         from core.telegram import _build_impact_message
-        raw["normalized"] = normalize_actions(raw, briefing_type, {}, {})
+        raw["normalized"] = normalize_actions(raw, briefing_type, prices or {}, {})
         result = BriefingResult(title="t", raw_json=raw)
         return _build_impact_message(result, raw, "🇰🇷", "테스트", briefing_type)
 
@@ -199,6 +199,21 @@ class TestTelegram4Sections:
         msg = self._msg(raw)
         assert "🕐 *조건부 매수 후보*" in msg and "KODEX 반도체" in msg
         assert "오늘 실제 실행" in msg and "록히드" in msg
+
+    def test_order_cards_show_hermes_verdicts_and_fill_risk(self):
+        raw = {
+            "strategy_buy": [
+                {"ticker": "035720.KS", "name": "카카오", "account": "[ISA]",
+                 "entry_price": "₩40,000", "reason": "즉시 진입"},
+                {"ticker": "091160.KS", "name": "KODEX 반도체", "account": "[RIA]",
+                 "entry_price": "₩166,500", "reason": "추격 금지 눌림목"},
+            ],
+            "strategy_sell": [],
+        }
+        msg = self._msg(raw, prices={"035720.KS": 40_000, "091160.KS": 172_000})
+        assert "Hermes 판정: PASS" in msg
+        assert "Hermes 판정: HOLD" in msg
+        assert "체결 가능성" in msg
 
     def test_no_buy_reason_section(self):
         raw = {"strategy_buy": [], "strategy_sell": [], "next_action": "FOMC 대기"}

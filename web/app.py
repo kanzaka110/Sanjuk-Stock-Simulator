@@ -203,6 +203,13 @@ def api_toss_paper_policy():
     return JSONResponse(dd.toss_paper_policy_data())
 
 
+
+
+@app.get("/api/market/discovery")
+def api_market_discovery(range: str = "today", limit: int = 50):
+    return JSONResponse(dd.market_discovery_data(range_=range, limit=min(limit, 100)))
+
+
 @app.get("/api/toss/buy-candidates")
 def api_toss_buy_candidates(range: str = "today", limit: int = 20):
     return JSONResponse(dd.toss_buy_candidates_data(range_=range, limit=min(limit, 100)))
@@ -226,6 +233,11 @@ def api_toss_live_pilot_verifications(limit: int = 20):
 @app.get("/api/toss/live-pilot-events")
 def api_toss_live_pilot_events(limit: int = 50):
     return JSONResponse(dd.toss_live_pilot_events_data(min(limit, 200)))
+
+
+@app.get("/api/stock-agent/activity")
+def api_stock_agent_activity(limit: int = 20):
+    return JSONResponse(dd.stock_agent_activity_data(min(limit, 100)))
 
 
 @app.get("/api/recommendations/timeline")

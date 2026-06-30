@@ -1,6 +1,6 @@
 """tests/test_toss_live_pilot_buy_only.py
 
-BUY_ONLY 정책 + can_send sell 차단 + Telegram sell 문구 테스트.
+BUY_SELL 정책 + US-only 가드 + Telegram 차단 문구 테스트.
 
 1. policy: side_mode=BUY_ONLY, allowed_sides=["buy"], sell_allowed=False
 2. can_send: buy → 통과 가능, sell → sell_not_allowed_in_buy_only_pilot 차단
@@ -32,9 +32,10 @@ _POLICY_DISABLED = {
     "max_daily_krw": 300_000,
     "max_orders_per_day": 1,
     "blocked_symbols": ["005930.KS", "161510.KS", "MU"],
-    "side_mode": "BUY_ONLY",
-    "allowed_sides": ["buy"],
-    "sell_allowed": False,
+    "side_mode": "BUY_SELL",
+    "allowed_sides": ["buy", "sell"],
+    "sell_allowed": True,
+    "allowed_asset_types": ["US_STOCK"],
 }
 
 _POLICY_ENABLED = {
@@ -47,13 +48,14 @@ _POLICY_ENABLED = {
     "max_daily_krw": 300_000,
     "max_orders_per_day": 1,
     "blocked_symbols": ["005930.KS", "161510.KS", "MU"],
-    "side_mode": "BUY_ONLY",
-    "allowed_sides": ["buy"],
-    "sell_allowed": False,
+    "side_mode": "BUY_SELL",
+    "allowed_sides": ["buy", "sell"],
+    "sell_allowed": True,
+    "allowed_asset_types": ["US_STOCK"],
 }
 
 
-def _ok_preview(symbol="091180.KS", side="buy", price=30_000, qty=1):
+def _ok_preview(symbol="SOFI", side="buy", price=30_000, qty=1):
     return {
         "ok": True,
         "symbol": symbol,
@@ -84,20 +86,20 @@ class TestPolicyBuyOnly(unittest.TestCase):
     def tearDown(self):
         self._p.stop()
 
-    def test_side_mode_buy_only(self):
+    def test_side_mode_buy_sell(self):
         from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
         p = compute_toss_live_pilot_policy()
-        self.assertEqual(p["side_mode"], "BUY_ONLY")
+        self.assertEqual(p["side_mode"], "BUY_SELL")
 
-    def test_allowed_sides_buy(self):
+    def test_allowed_sides_buy_sell(self):
         from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
         p = compute_toss_live_pilot_policy()
-        self.assertEqual(p["allowed_sides"], ["buy"])
+        self.assertEqual(p["allowed_sides"], ["buy", "sell"])
 
-    def test_sell_allowed_false(self):
+    def test_sell_allowed_true(self):
         from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
         p = compute_toss_live_pilot_policy()
-        self.assertFalse(p["sell_allowed"])
+        self.assertTrue(p["sell_allowed"])
 
     def test_live_transport_status_not_configured(self):
         from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
@@ -107,19 +109,19 @@ class TestPolicyBuyOnly(unittest.TestCase):
 
 # ── 2. can_send: sell 차단 ────────────────────────────────
 
-class TestCanSendSellBlocked(unittest.TestCase):
-    def test_sell_blocked_buy_only(self):
+class TestCanSendSellAllowed(unittest.TestCase):
+    def test_sell_not_blocked_by_side_guard(self):
         from core.toss_live_pilot_adapter import can_send_live_pilot_order
-        preview = _ok_preview(side="sell")
+        with patch("core.toss_live_pilot_ledger.list_live_pilot_records", return_value=[]):
+            ok, reasons = can_send_live_pilot_order(_POLICY_ENABLED, _ok_preview(side="sell"), _ok_payload())
+        self.assertTrue(ok, reasons)
+
+    def test_kr_symbol_blocked(self):
+        from core.toss_live_pilot_adapter import can_send_live_pilot_order
+        preview = _ok_preview(symbol="091180.KS", side="buy")
         ok, reasons = can_send_live_pilot_order(_POLICY_ENABLED, preview, _ok_payload())
         self.assertFalse(ok)
-        self.assertTrue(any("sell_not_allowed" in r for r in reasons))
-
-    def test_sell_reason_specific(self):
-        from core.toss_live_pilot_adapter import can_send_live_pilot_order
-        preview = _ok_preview(side="sell")
-        _, reasons = can_send_live_pilot_order(_POLICY_ENABLED, preview, _ok_payload())
-        self.assertTrue(any("sell_not_allowed_in_buy_only_pilot" in r for r in reasons))
+        self.assertTrue(any("non_us_symbol_not_allowed" in r for r in reasons))
 
     def test_buy_not_blocked_by_side_guard(self):
         from core.toss_live_pilot_adapter import can_send_live_pilot_order
@@ -135,8 +137,7 @@ class TestCanSendSellBlocked(unittest.TestCase):
         preview = _ok_preview(side="sell")
         ok, reasons = can_send_live_pilot_order(_POLICY_DISABLED, preview, _ok_payload())
         self.assertFalse(ok)
-        # sell guard 있어야 함
-        self.assertTrue(any("sell_not_allowed" in r for r in reasons))
+        self.assertTrue(any("live_pilot_enabled=false" in r or "live_order_allowed=false" in r for r in reasons))
 
 
 # ── 3. Telegram confirm(sell) → BUY_ONLY 차단 문구 ───────
@@ -167,7 +168,7 @@ class TestTelegramSellConfirmBlocked(unittest.TestCase):
     def _create_sell_pilot(self) -> str:
         from core.toss_live_pilot_ledger import record_live_pilot_preview
         preview = {
-            "ok": True, "symbol": "091180.KS", "side": "sell",
+            "ok": True, "symbol": "SOFI", "side": "sell",
             "quantity": 1, "limit_price": 30000.0,
             "estimated_amount_krw": 30000.0, "blocks": [], "warnings": [],
         }
@@ -188,7 +189,7 @@ class TestTelegramSellConfirmBlocked(unittest.TestCase):
         with patch("core.toss_live_pilot_policy.compute_toss_live_pilot_policy",
                    return_value=_POLICY_ENABLED):
             result = handle_live_pilot_callback(f"tlp:confirm:{pilot_id}")
-        self.assertIn("BUY_ONLY", result["message"])
+        self.assertIn("주문 전송", result["message"])
         self.assertIn("아직 주문 전송 안 함", result["message"])
 
     def test_sell_confirm_no_forbidden_cta(self):
@@ -236,7 +237,7 @@ class TestTelegramBuyNotConfiguredTransport(unittest.TestCase):
     def _create_buy_pilot(self) -> str:
         from core.toss_live_pilot_ledger import record_live_pilot_preview
         preview = {
-            "ok": True, "symbol": "091180.KS", "side": "buy",
+            "ok": True, "symbol": "SOFI", "side": "buy",
             "quantity": 1, "limit_price": 30000.0,
             "estimated_amount_krw": 30000.0, "blocks": [], "warnings": [],
         }
@@ -313,12 +314,12 @@ class TestFakeBuyTransportSuccess(unittest.TestCase):
             }
 
         payload = {
-            "symbol": "091180.KS", "side": "buy", "order_type": "limit",
+            "symbol": "SOFI", "side": "buy", "order_type": "limit",
             "quantity": 1, "limit_price": 30000.0, "estimated_amount_krw": 30000.0,
         }
         result = dispatch_toss_order_live(payload, _POLICY_ENABLED, transport=_fake_buy)
         self.assertTrue(result["live_order_sent"])
-        self.assertIn("승인형 매수 pilot", result["message"])
+        self.assertIn("승인형 BUY pilot", result["message"])
         self.assertIn("Hermes PASS", result["message"])
 
     def test_fake_buy_success_no_forbidden_phrases(self):
@@ -328,7 +329,7 @@ class TestFakeBuyTransportSuccess(unittest.TestCase):
             return {"ok": True, "live_order_sent": True, "broker_order_id": "mock_123"}
 
         payload = {
-            "symbol": "091180.KS", "side": "buy", "quantity": 1,
+            "symbol": "SOFI", "side": "buy", "quantity": 1,
             "limit_price": 30000.0, "estimated_amount_krw": 30000.0,
         }
         result = dispatch_toss_order_live(payload, _POLICY_ENABLED, transport=_fake_buy)
@@ -343,7 +344,7 @@ class TestFakeBuyTransportSuccess(unittest.TestCase):
             return {"ok": True, "live_order_sent": True, "broker_order_id": "mock_123"}
 
         payload = {
-            "symbol": "091180.KS", "side": "buy", "quantity": 1,
+            "symbol": "SOFI", "side": "buy", "quantity": 1,
             "limit_price": 30000.0, "estimated_amount_krw": 30000.0,
         }
         result = dispatch_toss_order_live(payload, _POLICY_ENABLED, transport=_fake_buy)
@@ -376,7 +377,7 @@ class TestSellTransportNeverCalled(unittest.TestCase):
         m._schema_created = False
 
     def test_sell_transport_never_called_via_can_send(self):
-        """sell은 can_send guard에서 차단되므로 dispatch(transport)가 호출 안 됨."""
+        """sell은 BUY_SELL 정책에서 side 자체로는 차단되지 않는다."""
         from core.toss_live_pilot_adapter import can_send_live_pilot_order
 
         transport_called = []
@@ -385,10 +386,10 @@ class TestSellTransportNeverCalled(unittest.TestCase):
             transport_called.append("called!")
             return {"ok": True, "live_order_sent": True}
 
-        preview = _ok_preview(side="sell")
+        preview = _ok_preview(symbol="091180.KS", side="sell")
         ok, _ = can_send_live_pilot_order(_POLICY_ENABLED, preview, _ok_payload())
         self.assertFalse(ok)
-        # transport는 can_send 통과 후에만 호출됨 → 0건
+        # KR symbol은 can_send에서 차단 → transport 호출 전 0건
         self.assertEqual(transport_called, [])
 
 

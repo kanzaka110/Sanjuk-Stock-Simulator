@@ -46,7 +46,7 @@ class TestDefaultPolicy(unittest.TestCase):
         self.assertIn("비활성", self.policy["reason"])
 
     def test_max_daily_krw(self):
-        self.assertEqual(self.policy["max_daily_krw"], 2_000_000)
+        self.assertIsNone(self.policy["max_daily_krw"])
 
     def test_max_orders_per_day_unlimited(self):
         # 주문 건수 제한 없음
@@ -82,7 +82,7 @@ class TestSampleInsufficient(unittest.TestCase):
     def test_max_order_krw_fixed_even_insufficient(self):
         # 표본부족이어도 1회 한도는 고정 50만원
         policy = compute_toss_live_pilot_policy(evaluated_count=0)
-        self.assertEqual(policy["max_order_krw"], 500_000)
+        self.assertIsNone(policy["max_order_krw"])
 
     def test_warning_present(self):
         policy = compute_toss_live_pilot_policy(evaluated_count=2)
@@ -95,7 +95,7 @@ class TestSampleInsufficient(unittest.TestCase):
     def test_stable_sample_same_fixed_cap(self):
         # 표본 충분해도 한도는 동일 고정 (목표금액/증액 개념 아님)
         policy = compute_toss_live_pilot_policy(evaluated_count=10)
-        self.assertEqual(policy["max_order_krw"], 500_000)
+        self.assertIsNone(policy["max_order_krw"])
         self.assertFalse(policy["sample_insufficient"])
 
 
@@ -106,23 +106,23 @@ class TestFinalLimitPolicy(unittest.TestCase):
         self.policy = compute_toss_live_pilot_policy(evaluated_count=10)
 
     def test_max_order_krw_500k(self):
-        self.assertEqual(self.policy["max_order_krw"], 500_000)
+        self.assertIsNone(self.policy["max_order_krw"])
 
     def test_max_daily_krw_2m(self):
-        self.assertEqual(self.policy["max_daily_krw"], 2_000_000)
+        self.assertIsNone(self.policy["max_daily_krw"])
 
     def test_daily_is_cap_not_target(self):
-        self.assertTrue(self.policy["daily_krw_is_cap"])
+        self.assertFalse(self.policy["daily_krw_is_cap"])
         self.assertFalse(self.policy["daily_krw_is_target"])
 
     def test_order_count_unlimited(self):
         self.assertIsNone(self.policy["max_orders_per_day"])
         self.assertFalse(self.policy["order_count_limited"])
 
-    def test_buy_only_and_sell_blocked(self):
-        self.assertEqual(self.policy["side_mode"], "BUY_ONLY")
-        self.assertEqual(self.policy["allowed_sides"], ["buy"])
-        self.assertFalse(self.policy["sell_allowed"])
+    def test_buy_sell_enabled(self):
+        self.assertEqual(self.policy["side_mode"], "BUY_SELL")
+        self.assertEqual(self.policy["allowed_sides"], ["buy", "sell"])
+        self.assertTrue(self.policy["sell_allowed"])
 
     def test_requires_user_confirmation_kept(self):
         self.assertTrue(self.policy["requires_user_confirmation"])
@@ -137,8 +137,8 @@ class TestFinalLimitPolicy(unittest.TestCase):
     def test_hold_is_normal_phrasing(self):
         # 후보 없으면 매수 없음/HOLD가 정상이라는 의미가 정책에 표현됨
         note = self.policy["daily_policy_note"]
-        self.assertIn("목표 아님", note)
-        self.assertIn("HOLD", note)
+        self.assertIn("BUY+SELL", note)
+        self.assertIn("USD", note)
 
 
 class TestBlockedSymbols(unittest.TestCase):

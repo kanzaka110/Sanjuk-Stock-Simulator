@@ -125,7 +125,7 @@ def format_hermes_live_pilot_verify_message(context: dict) -> str:
     amount_str = f"₩{estimated:,.0f}" if estimated > 0 else "미확인"
 
     lines = [
-        "[Hermes 교차검증 요청 · Toss BUY_ONLY Live Pilot]",
+        "[Hermes 교차검증 요청 · Toss BUY_SELL Live Pilot]",
         "상태: Hermes 검증 대기",
         "실주문: 비활성",
         "아직 주문 전송 안 함",
@@ -354,12 +354,15 @@ def build_default_hermes_verdict(context: dict) -> dict:
     else:
         blocked_set = {s.strip() for s in str(blocked_symbols_raw).split(",") if s.strip()}
 
-    # 1. sell → BLOCK
-    if side == "sell":
+    # 1. sell guard — BUY_SELL 정책이므로 allowed_sides 기준으로 판정
+    allowed_sides = context.get("allowed_sides", ["buy", "sell"])
+    if isinstance(allowed_sides, str):
+        allowed_sides = [s.strip().lower() for s in allowed_sides.split(",")]
+    if side not in allowed_sides:
         return {
             "status": "BLOCK",
-            "reasons": ["sell_not_allowed_in_buy_only_pilot"],
-            "checks": {"sell_guard": "FAIL"},
+            "reasons": [f"side_not_allowed: {side}"],
+            "checks": {"sell_guard": f"FAIL: {side} not in {allowed_sides}"},
         }
 
     # 2. blocked symbol → BLOCK
@@ -386,23 +389,21 @@ def build_default_hermes_verdict(context: dict) -> dict:
             "checks": {"price_guard": "HOLD: price=0"},
         }
 
-    # 5. valid buy + transport not_configured → PASS (실행은 여전히 차단)
+    # 5. valid order within limits + price > 0 → PASS
     if (
-        side == "buy"
-        and estimated <= max_krw
+        side in allowed_sides
         and limit_price > 0
-        and live_transport_status == "not_configured"
+        and (not max_krw or estimated <= max_krw)
     ):
         return {
             "status": "PASS",
-            "reasons": ["초소액 BUY_ONLY 후보", "한도 내", "차단 종목 아님"],
+            "reasons": ["한도 내", "차단 종목 아님", f"side={side}"],
             "checks": {
-                "execution_blocked": True,
                 "adapter_status": adapter_status,
                 "live_transport_status": live_transport_status,
                 "live_order_allowed": live_order_allowed,
                 "note": (
-                    "Hermes PASS = 사용자 최종승인 검증 통과. "
+                    "Hermes PASS = 검증 통과. "
                     "실주문 가능 여부는 stock-bot gate 별도 판단."
                 ),
             },

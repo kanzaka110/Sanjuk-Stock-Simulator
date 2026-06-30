@@ -120,9 +120,17 @@ class TestPriceFailSafeExit(unittest.TestCase):
             self.assertEqual(ctx.exception.code, 0)
 
     def test_price_over_limit_exits_safely(self):
-        """1주 가격이 max_order_krw 초과 시 발송 안 함."""
+        """1주 가격이 max_order_krw 초과 시 발송 안 함 (max_krw 있을 때)."""
+        from core.toss_live_pilot_policy import compute_toss_live_pilot_policy as _real_compute
+
+        def _policy_with_limit(**kw):
+            p = _real_compute(**kw)
+            p["max_order_krw"] = 500_000
+            return p
+
         with patch("sys.argv", ["script.py"]), \
-             patch.object(script, "_get_live_price", return_value=999_999.0):
+             patch.object(script, "_get_live_price", return_value=999_999.0), \
+             patch("core.toss_live_pilot_policy.compute_toss_live_pilot_policy", side_effect=_policy_with_limit):
             with self.assertRaises(SystemExit) as ctx:
                 script.main()
             self.assertEqual(ctx.exception.code, 0)
