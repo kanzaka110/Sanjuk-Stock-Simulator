@@ -65,6 +65,25 @@ def test_toss_buy_candidates_uses_new_discovery_only(monkeypatch):
     assert item["read_only"] is True
 
 
+
+
+def test_toss_buy_candidates_excludes_user_blocked_krafton(monkeypatch):
+    sections = _sections(new=[
+        _new_cand("259960.KS", "크래프톤", price=300_000),
+        _new_cand("000111.KS", "소액주", price=30_000),
+    ])
+    _patch_sections(monkeypatch, sections)
+
+    result = dd.toss_buy_candidates_data(range_="today")
+
+    symbols = {i["symbol"] for i in result["items"]}
+    assert "259960.KS" not in symbols
+    assert "000111.KS" in symbols
+    excluded = [e for e in result["excluded"] if e.get("ticker") == "259960.KS" or e.get("symbol") == "259960.KS"]
+    assert excluded
+    assert "사용자 제외" in excluded[0]["reason"]
+    assert "259960.KS" in result["scan_summary"]["user_blocked_buy_symbols"]
+
 def test_toss_buy_candidates_excludes_reuse_and_scan_rejects_when_zero(monkeypatch):
     # 신규 통과 0개 + 탈락 사유 존재
     sections = _sections(

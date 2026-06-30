@@ -2026,9 +2026,40 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20) -> dict:
         scan_candidates = _fallback_universe_candidates(["KR"])
         sections = build_discovery_sections(scan_candidates=scan_candidates, briefing_type="KR_BEFORE")
         result = toss_eligible_new_candidates(sections, max_order_krw=max_order_krw)
+
+        # 승호 명시 제외: 크래프톤은 토스/신규 매수 후보에서 노출하지 않는다.
+        # config/settings.py 원본 유니버스는 건드리지 않고, 주문/후보 API 직전에서
+        # fail-closed로 제거해 자동 finalizer까지 도달하지 못하게 한다.
+        user_blocked_buy_symbols = {"259960.KS"}
+        blocked_items = []
+        kept_items = []
+        for item in result.get("items") or []:
+            sym = str(item.get("symbol") or item.get("ticker") or "")
+            if sym in user_blocked_buy_symbols:
+                blocked_items.append(item)
+                continue
+            kept_items.append(item)
+        if blocked_items:
+            result["items"] = kept_items
+            excluded = list(result.get("excluded") or [])
+            for item in blocked_items:
+                excluded.append({
+                    "ticker": item.get("symbol") or item.get("ticker"),
+                    "symbol": item.get("symbol") or item.get("ticker"),
+                    "name": item.get("name") or "크래프톤",
+                    "reason": "사용자 제외: 크래프톤은 매수 후보에서 제외",
+                    "scope": "user_blocked_buy_symbol",
+                })
+            result["excluded"] = excluded
+            result["count"] = len(kept_items)
+            result["excluded_count"] = len(excluded)
+
         scan_summary = result.setdefault("scan_summary", {})
         scan_summary["dependency_fallback_used"] = True
         scan_summary["source"] = "fast_universe_fallback"
+        scan_summary["user_blocked_buy_symbols"] = sorted(user_blocked_buy_symbols)
+        if blocked_items:
+            scan_summary["user_blocked_count"] = len(blocked_items)
 
         def _enrich_for_stock_agent(item: dict) -> dict:
             """Add complete read-only order-review fields for Hermes stock-agent.
