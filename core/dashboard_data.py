@@ -2273,7 +2273,23 @@ def stock_agent_activity_data(limit: int = 20) -> dict:
         try:
             ev = toss_live_pilot_events_data(limit=min(limit, 50)) or {}
             e_records = ev.get("records") or []
+            broker_orders = ev.get("broker_orders") or []
             out["summary"]["recent_events"] = len(e_records)
+            out["summary"]["broker_order_count"] = ev.get("broker_order_count", len(broker_orders))
+            out["summary"]["broker_open_count"] = ev.get("broker_open_count", 0)
+            out["summary"]["broker_closed_count"] = ev.get("broker_closed_count", 0)
+            for r in broker_orders[:5]:
+                symbol = r.get("symbol") or r.get("ticker") or ""
+                name = r.get("symbol_name") or r.get("name") or symbol or "브로커 주문"
+                qty = r.get("filled_quantity") or r.get("quantity") or "-"
+                price = r.get("filled_price") or "-"
+                activities.append({
+                    "kind": "broker_order",
+                    "title": f"브로커 체결/주문 · {name} ({symbol})" if symbol else f"브로커 체결/주문 · {name}",
+                    "status": r.get("broker_order_status") or r.get("status") or r.get("list_status") or "order",
+                    "time": r.get("filled_at") or r.get("ordered_at") or r.get("created_at") or "",
+                    "detail": f"{r.get('side') or '-'} · {qty}주 · 체결가 {price} · {r.get('read_only_source')}",
+                })
             for r in e_records[:5]:
                 symbol = r.get("symbol") or r.get("ticker") or ""
                 name = r.get("symbol_name") or r.get("name") or symbol or "이벤트"
@@ -2393,6 +2409,75 @@ def _stock_display_name(symbol: str) -> str:
     return sym
 
 
+
+
+def _mask_broker_order_id(order_id: object) -> str:
+    """Dashboard-safe broker order id display. Keeps enough for matching, no full id exposure."""
+    raw = str(order_id or "")
+    if not raw:
+        return ""
+    if len(raw) <= 18:
+        return raw
+    return f"{raw[:8]}…{raw[-6:]}"
+
+
+def _normalize_broker_symbol(symbol: object) -> str:
+    """Toss broker may return domestic symbols without suffix; normalize for display only."""
+    sym = str(symbol or "").strip()
+    if sym.isdigit() and len(sym) == 6:
+        return f"{sym}.KS"
+    return sym
+
+
+def _recent_toss_broker_orders(limit: int = 20) -> dict:
+    """Read-only broker order truth from Toss GET order lists."""
+    try:
+        from core.toss_live_order_http import list_orders
+    except Exception as e:
+        return {"ok": False, "error": str(e), "orders": [], "open_count": 0, "closed_count": 0}
+
+    orders: list[dict] = []
+    errors: list[str] = []
+    counts = {"OPEN": 0, "CLOSED": 0}
+    for status in ("OPEN", "CLOSED"):
+        try:
+            res = list_orders(status)
+        except Exception as e:
+            errors.append(f"{status}: {e}")
+            continue
+        if not res.get("ok"):
+            errors.append(f"{status}: {res.get('reason') or 'unknown'}")
+            continue
+        rows = res.get("orders") or []
+        counts[status] = len(rows)
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            out = dict(row)
+            broker_symbol = str(out.get("symbol") or "")
+            symbol = _normalize_broker_symbol(broker_symbol)
+            out["broker_symbol"] = broker_symbol
+            out["symbol"] = symbol or broker_symbol
+            out["ticker"] = out["symbol"]
+            out["list_status"] = status
+            out["event_type"] = "broker_order_truth"
+            out["status"] = out.get("broker_order_status") or status
+            out["created_at"] = out.get("filled_at") or out.get("ordered_at") or ""
+            out["read_only_source"] = "toss_broker_orders_get"
+            out["broker_order_id_masked"] = _mask_broker_order_id(out.get("broker_order_id"))
+            out.pop("broker_order_id", None)
+            orders.append(_decorate_stock_display(out))
+    orders.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+    return {
+        "ok": not errors,
+        "error": "; ".join(errors),
+        "orders": orders[:limit],
+        "open_count": counts["OPEN"],
+        "closed_count": counts["CLOSED"],
+        "source": "GET /api/v1/orders OPEN+CLOSED",
+        "read_only_notice": "브로커 주문 조회 전용 · 주문 생성/취소/수정 없음",
+    }
+
 def _decorate_stock_display(record: dict) -> dict:
     """대시보드/API 응답에서 종목코드 단독 표기를 피한다."""
     out = dict(record or {})
@@ -2473,18 +2558,50 @@ def toss_live_pilot_events_data(limit: int = 50) -> dict:
             policy = compute_toss_live_pilot_policy()
         except Exception:
             policy = {}
+        records = [_decorate_stock_display(r) for r in list_events(limit=limit)]
+        broker_truth = _recent_toss_broker_orders(limit=min(limit, 50))
+        broker_orders = broker_truth.get("orders") or []
+        autonomous_real_records = [
+            r for r in records
+            if r.get("event_type") == "autonomous_live_sent"
+            and r.get("live_order_sent")
+            and r.get("adapter_status") == "enabled"
+        ]
+        live_sent_real = int(summ.get("live_sent_real", 0)) + len(autonomous_real_records)
+        warnings = []
+        if broker_orders and not records:
+            warnings.append("브로커 주문은 있으나 live-pilot 이벤트 ledger가 비어 있음 — 표시/기록 경로 점검 필요")
+        allowed_assets = set(policy.get("allowed_asset_types") or [])
+        broker_assets = set()
+        for o in broker_orders:
+            sym = str(o.get("symbol") or "")
+            if sym.endswith((".KS", ".KQ")):
+                broker_assets.add("KR_STOCK")
+            elif sym:
+                broker_assets.add("US_STOCK")
+        missing_assets = sorted(a for a in broker_assets if allowed_assets and a not in allowed_assets)
+        if missing_assets:
+            warnings.append("브로커 주문 자산군이 현재 policy.allowed_asset_types와 불일치: " + ", ".join(missing_assets))
         return {
             "summary": summ.get("summary", {}),
-            "live_sent_real": summ.get("live_sent_real", 0),
+            "live_sent_real": live_sent_real,
             "live_sent_mock_or_artifact": summ.get("live_sent_mock_or_artifact", 0),
             "blocked_policy": summ.get("blocked_policy", 0),
             "blocked_transport": summ.get("blocked_transport", 0),
             "blocked_guard": summ.get("blocked_guard", 0),
-            "live_order_sent_total": summ.get("live_order_sent_total", 0),
+            "live_order_sent_total": live_sent_real,
             "live_order_allowed": bool(policy.get("live_order_allowed", False)),
             "adapter_status": policy.get("adapter_status", "disabled"),
             "live_transport_status": policy.get("live_transport_status", "not_configured"),
-            "records": [_decorate_stock_display(r) for r in list_events(limit=limit)],
+            "records": records,
+            "broker_orders": broker_orders,
+            "broker_order_count": len(broker_orders),
+            "broker_open_count": broker_truth.get("open_count", 0),
+            "broker_closed_count": broker_truth.get("closed_count", 0),
+            "broker_truth_ok": broker_truth.get("ok", False),
+            "broker_truth_error": broker_truth.get("error", ""),
+            "warnings": warnings,
+            "read_only_broker_source": broker_truth.get("source"),
         }
     except Exception as e:
         return {
