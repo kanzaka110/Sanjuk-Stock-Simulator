@@ -102,6 +102,22 @@ class TestTossAccountSummary:
         assert d["enabled"] is False
         assert d["account_count"] == 0
 
+    def test_accounts_retry_after_empty_response(self):
+        from core.dashboard_data import _fetch_toss_account_summary_raw
+
+        accounts = [{"accountSeq": 1, "accountType": "BROKERAGE", "accountNo": "99900001234"}]
+        with (
+            patch("core.toss_client.is_configured", return_value=True),
+            patch("core.toss_client.get_accounts", side_effect=[[], accounts]),
+            patch("core.toss_client.get_holdings", return_value={"items": [], "marketValue": {"amount": {"krw": "0"}}}),
+            patch("core.toss_client.get_exchange_rate", return_value={}),
+            patch("core.toss_client.get_buying_power", return_value={}),
+            patch("core.toss_client.sanitize_dict", side_effect=lambda x: x),
+        ):
+            d = _fetch_toss_account_summary_raw()
+
+        assert d["account_count"] == 1
+
     def test_with_holdings(self):
         holdings = {
             "items": [{"symbol": "AAPL", "quantity": 10}],
@@ -300,6 +316,64 @@ class TestHtmlLabels:
 
     def test_mobile_has_automation_api(self):
         assert "/api/toss/automation-status" in self._read_mobile()
+
+
+class TestTossLivePilotRuntimeDisplay:
+    """Live Pilot dashboard summaries must show current runtime policy, not stale ledger gates."""
+
+    def test_previews_summary_uses_current_runtime_policy(self):
+        from core.dashboard_data import toss_live_pilot_previews_data
+
+        policy = {
+            "live_order_allowed": True,
+            "adapter_status": "enabled",
+            "live_transport_status": "configured",
+            "autonomous_mode": True,
+            "autonomous_kill_switch": False,
+        }
+        stale_summary = {
+            "counts": {"previewed": 1},
+            "live_order_sent_total": 1,
+            "adapter_status": "disabled",
+            "live_order_allowed": False,
+        }
+        with (
+            patch("core.toss_live_pilot_ledger.list_live_pilot_records", return_value=[]),
+            patch("core.toss_live_pilot_ledger.live_pilot_ledger_summary", return_value=stale_summary),
+            patch("core.toss_live_pilot_policy.compute_toss_live_pilot_policy", return_value=policy),
+        ):
+            data = toss_live_pilot_previews_data(limit=5)
+
+        summary = data["summary"]
+        assert summary["live_order_allowed"] is True
+        assert summary["adapter_status"] == "enabled"
+        assert summary["live_transport_status"] == "configured"
+        assert summary["historical_live_order_allowed"] is False
+        assert summary["historical_adapter_status"] == "disabled"
+
+    def test_verifications_summary_keeps_gate_false_but_exposes_policy(self):
+        from core.dashboard_data import toss_live_pilot_verifications_data
+
+        policy = {
+            "live_order_allowed": True,
+            "adapter_status": "enabled",
+            "live_transport_status": "configured",
+            "autonomous_mode": True,
+            "autonomous_kill_switch": False,
+        }
+        with (
+            patch("core.toss_live_pilot_verification.verification_summary", return_value={"summary": {"PASS": 1}, "live_order_allowed": False}),
+            patch("core.toss_live_pilot_verification.list_verifications", return_value=[]),
+            patch("core.toss_live_pilot_hermes_bridge.get_mirror_status", return_value={"mirror_enabled": False, "mirror_target_configured": False}),
+            patch("core.toss_live_pilot_policy.compute_toss_live_pilot_policy", return_value=policy),
+        ):
+            data = toss_live_pilot_verifications_data(limit=5)
+
+        assert data["live_order_allowed"] is False
+        assert data["policy_live_order_allowed"] is True
+        assert data["summary"]["gate_live_order_allowed"] is False
+        assert data["summary"]["policy_live_order_allowed"] is True
+        assert data["summary"]["policy_adapter_status"] == "enabled"
 
 
 # ═══ API endpoint 검증 (automation) ═══

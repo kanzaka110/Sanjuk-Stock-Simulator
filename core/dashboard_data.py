@@ -1769,8 +1769,17 @@ def _fetch_toss_account_summary_raw() -> dict:
         base["error"] = "Toss API 미설정"
         return base
 
-    # 계좌 목록
+    # 계좌 목록. Dashboard 프로세스에서 Toss가 간헐적으로 401을 돌려주면
+    # 메모리 토큰을 비우고 1회 재시도한다. 실패값 0원을 캐시해 화면을
+    # 오도하지 않기 위한 read-only 복구 루트다.
     accounts = tc.get_accounts()
+    if not accounts:
+        try:
+            tc._mem_token = ""
+            tc._mem_expires = 0.0
+        except Exception:
+            pass
+        accounts = tc.get_accounts()
     base["account_count"] = len(accounts)
     base["accounts"] = [
         {
@@ -1831,6 +1840,13 @@ def _fetch_toss_account_summary_raw() -> dict:
 
     # 환율
     fx = tc.get_exchange_rate("USD", "KRW")
+    if not fx:
+        try:
+            tc._mem_token = ""
+            tc._mem_expires = 0.0
+        except Exception:
+            pass
+        fx = tc.get_exchange_rate("USD", "KRW")
     if fx:
         try:
             base["exchange_rate"] = {
@@ -2366,6 +2382,40 @@ def _decorate_stock_display(record: dict) -> dict:
     return out
 
 
+def _current_toss_live_policy_for_dashboard() -> dict:
+    """Return current runtime live-pilot policy for read-only display.
+
+    Ledger/verification rows intentionally keep their historical gate fields
+    (often false/disabled). Dashboard summaries need the *current* runtime
+    policy separately so old rows do not make an armed autonomous runtime look
+    disabled.
+    """
+    try:
+        from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
+        return compute_toss_live_pilot_policy() or {}
+    except Exception:
+        return {}
+
+
+def _merge_current_live_policy(summary: dict | None) -> dict:
+    out = dict(summary or {})
+    policy = _current_toss_live_policy_for_dashboard()
+    if policy:
+        historical_allowed = out.get("live_order_allowed")
+        historical_adapter = out.get("adapter_status")
+        out["historical_live_order_allowed"] = bool(historical_allowed)
+        out["historical_adapter_status"] = historical_adapter or "unknown"
+        out["live_order_allowed"] = bool(policy.get("live_order_allowed", False))
+        out["adapter_status"] = policy.get("adapter_status", "disabled")
+        out["live_transport_status"] = policy.get("live_transport_status", "not_configured")
+        out["policy_live_order_allowed"] = bool(policy.get("live_order_allowed", False))
+        out["policy_adapter_status"] = policy.get("adapter_status", "disabled")
+        out["policy_live_transport_status"] = policy.get("live_transport_status", "not_configured")
+        out["autonomous_mode"] = bool(policy.get("autonomous_mode", False))
+        out["autonomous_kill_switch"] = bool(policy.get("autonomous_kill_switch", False))
+    return out
+
+
 def toss_live_pilot_previews_data(limit: int = 20) -> dict:
     """최근 live pilot 미리보기 기록 (read-only). 실제 주문 0건."""
     try:
@@ -2375,7 +2425,7 @@ def toss_live_pilot_previews_data(limit: int = 20) -> dict:
         )
         records = [_decorate_stock_display(r) for r in list_live_pilot_records(limit=limit)]
         return {
-            "summary": live_pilot_ledger_summary(),
+            "summary": _merge_current_live_policy(live_pilot_ledger_summary()),
             "records": records,
         }
     except Exception as e:
@@ -2447,8 +2497,19 @@ def toss_live_pilot_verifications_data(limit: int = 20) -> dict:
         except Exception:
             policy = {}
 
+        summary = dict(summ or {})
+        # verification 자체는 gate-only라 live_order_allowed=false가 맞다.
+        # 대신 현재 runtime policy를 nested summary/top-level에 별도 표시해서
+        # 대시보드가 오래된 gate-only false를 시스템 disabled로 오판하지 않게 한다.
+        summary["gate_live_order_allowed"] = bool(summary.get("live_order_allowed", False))
+        summary["policy_live_order_allowed"] = bool(policy.get("live_order_allowed", False))
+        summary["policy_adapter_status"] = policy.get("adapter_status", "disabled")
+        summary["policy_live_transport_status"] = policy.get("live_transport_status", "not_configured")
+        summary["autonomous_mode"] = bool(policy.get("autonomous_mode", False))
+        summary["autonomous_kill_switch"] = bool(policy.get("autonomous_kill_switch", False))
+
         return {
-            "summary": summ,
+            "summary": summary,
             "records": [_decorate_stock_display(r) for r in list_verifications(limit=limit)],
             # 검증 레코드의 live_order_allowed는 PASS여도 false가 맞다(검증은 gate only).
             # 별도로 현재 운영 policy 상태를 노출해 대시보드/콜백이 false로 오판하지 않게 한다.
