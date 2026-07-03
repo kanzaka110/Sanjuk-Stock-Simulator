@@ -987,10 +987,40 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
         _data_failures += failed_personas
         _quality_warnings.append(f"페르소나 {failed_personas}명 분석 실패")
 
+    # 데이터 품질 게이트: 시세 결측(401/상장폐지)·가격 스케일 이상·FX 결측 판정.
+    # 실행제한이면 렌더링 계층이 매수/매도 실행 표현을 HOLD/BLOCK로 낮춘다.
+    from core.data_quality_gate import assess_data_quality
+    from config.settings import (
+        HOLDINGS_GENERAL as _HG, HOLDINGS_ISA as _HI, HOLDINGS_RIA as _HR,
+        HOLDINGS_IRP as _HIRP, HOLDINGS_PENSION as _HP,
+    )
+    _gate_holdings: dict = {}
+    for _hh in (_HG, _HI, _HR, _HIRP, _HP):
+        _gate_holdings.update(_hh)
+    # 이중 소스 교차검증 — 보유 종목만 (실행 판단에 쓰이는 가격이므로 비용 대비 가치 최우선)
+    try:
+        from core.market import cross_check_prices
+        _cross_check = cross_check_prices(
+            current_prices, tickers=[tk for tk in _gate_holdings if tk in current_prices],
+        )
+    except Exception as e:
+        log.debug("시세 교차검증 스킵: %s", e)
+        _cross_check = {}
+    dq_report = assess_data_quality(
+        snapshot, current_prices, portfolio, _gate_holdings,
+        price_cross_check=_cross_check,
+    )
+    if dq_report.warnings:
+        _quality_warnings.extend(dq_report.warnings)
+    _data_failures += len(dq_report.failed_sources)
+
     result = _build_briefing_result(data)
     # 품질 경고를 BriefingResult에 주입
     object.__setattr__(result, "quality_warnings", tuple(_quality_warnings))
     object.__setattr__(result, "data_failures", _data_failures)
+    object.__setattr__(result, "data_quality_status", dq_report.status)
+    object.__setattr__(result, "data_quality_header", dq_report.header_text())
+    object.__setattr__(result, "execution_limited", dq_report.execution_limited)
 
     # 추천 기록을 메모리에 저장 (정규화 결과 기반 — action_type/briefing_type 포함)
     saved = save_predictions_from_briefing(

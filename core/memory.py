@@ -1447,6 +1447,82 @@ def memory_to_text() -> str:
     return "\n".join(lines)
 
 
+def confidence_calibration_text(min_bucket_n: int = 5) -> str:
+    """확신도 구간별 실측 승률 캘리브레이션 테이블 (프롬프트 병기용).
+
+    "확신도 70"이 실제로 70% 맞는지 검증 — 과신/과소 구간을 CIO에게 알려
+    확신도 산출을 실측으로 교정한다. win/loss만 분모 (neutral/invalid 제외).
+    구간 표본 < min_bucket_n 이면 미표시 (노이즈 방지).
+    """
+    try:
+        conn = _get_conn()
+        rows = conn.execute(
+            """SELECT confidence, outcome FROM predictions
+               WHERE status='closed' AND outcome IN ('win','loss')
+                 AND confidence IS NOT NULL"""
+        ).fetchall()
+    except Exception as e:
+        log.debug("캘리브레이션 조회 실패: %s", e)
+        return ""
+    if not rows:
+        return ""
+
+    buckets = [(0, 40, "≤40"), (41, 55, "41-55"), (56, 70, "56-70"),
+               (71, 85, "71-85"), (86, 100, "86+")]
+    lines = []
+    for lo, hi, label in buckets:
+        sample = [r for r in rows if lo <= (r["confidence"] or 0) <= hi]
+        n = len(sample)
+        if n < min_bucket_n:
+            continue
+        wins = sum(1 for r in sample if r["outcome"] == "win")
+        actual = wins / n * 100
+        mid = (lo + hi) / 2 if lo else hi
+        gap = actual - mid
+        if gap <= -15:
+            verdict = f"과신 — 이 구간 확신도는 실측보다 {abs(gap):.0f}%p 높음, 하향하라"
+        elif gap >= 15:
+            verdict = f"과소 — 실측이 {gap:.0f}%p 더 좋음, 조건 충족 시 상향 가능"
+        else:
+            verdict = "실측 부합"
+        lines.append(f"  확신도 {label}: {n}건 실측 승률 {actual:.0f}% → {verdict}")
+    return "\n".join(lines)
+
+
+def reliability_directives_text() -> str:
+    """CIO system 프롬프트용 종목별 실측 신뢰도 보정 테이블 (간결판).
+
+    memory_to_text()는 user 프롬프트 깊숙이 들어가 CIO가 놓치기 쉬움 —
+    system 프롬프트의 보정 규칙(-15~-30/+5~+10) 바로 아래에 실측 데이터를 박는다.
+    - 표시: evaluated_count >= 3 종목만
+    - 판정: evaluated_count >= 5 에서만 위험(승률<30%)/고신뢰(승률>=70% & 평균수익+) — 게이트 기준과 동일
+    """
+    accuracy = get_accuracy_summary()
+    if not accuracy:
+        return ""
+
+    def _eval_cnt(s: dict) -> int:
+        return s.get("evaluated_count", s.get("wins", 0) + s.get("losses", 0))
+
+    lines = []
+    for ticker, s in sorted(accuracy.items(), key=lambda kv: -_eval_cnt(kv[1])):
+        n = _eval_cnt(s)
+        if n < 3:
+            continue
+        wr = s.get("win_rate", 0) or 0
+        avg = s.get("avg_pnl", 0) or 0
+        if n >= 5 and wr < 30:
+            adj = -30 if n >= 8 else -15
+            tag = f"🔴 확신도 {adj:+d}% 감점 필수"
+        elif n >= 5 and wr >= 70 and avg > 0:
+            adj = 10 if n >= 8 else 5
+            tag = f"🟢 확신도 +{adj}% 가중 허용"
+        else:
+            tag = "⚪ 보정 없음 (참고만 — 표본부족 종목을 위험 근거로 쓰지 마라)"
+        lines.append(f"  {ticker}: 평가 {n}건 · 승률 {wr:.0f}% · 평균 {avg:+.1f}% → {tag}")
+    return "\n".join(lines)
+
+
 def generate_open_positions_review(current_prices: dict[str, float]) -> str:
     """미결 추천 상세 점검 — 실제 보유 종목만. "이 포지션을 유지할 근거가 있는가?" 강제 점검.
 

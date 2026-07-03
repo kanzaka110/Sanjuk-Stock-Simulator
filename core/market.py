@@ -233,6 +233,51 @@ def _get_quote_realtime(ticker: str) -> Quote | None:
     return result.value
 
 
+# ─── 이중 소스 교차검증 ─────────────────────────────
+# 정규장 중 KIS vs yfinance는 수 초 시차 → 1% 미만이 정상.
+# 3% 이상이면 소스 이상 의심(경고), 10% 이상이면 자릿수/통화 오류급(실행제한 근거).
+CROSS_CHECK_WARN_PCT = 3.0
+CROSS_CHECK_CRITICAL_PCT = 10.0
+
+
+def cross_check_prices(
+    prices: dict[str, float],
+    tickers: list[str] | None = None,
+    max_checks: int = 12,
+) -> dict[str, tuple[float, float, float]]:
+    """주 시세(prices)를 yfinance 독립 조회와 교차검증.
+
+    Args:
+        prices: {ticker: 주 소스 가격} (폴백 체인 결과)
+        tickers: 검증 대상 (None이면 prices 전체). 보유 종목만 넘겨 비용 절약 권장.
+        max_checks: 최대 검증 종목 수 (API 비용 가드)
+
+    Returns:
+        {ticker: (primary, secondary, diff_pct)} — diff_pct ≥ CROSS_CHECK_WARN_PCT만 포함.
+        주 소스가 yfinance 폴백이었던 경우 같은 값이라 자연히 통과 (무해).
+    """
+    targets = [tk for tk in (tickers or list(prices)) if prices.get(tk, 0) > 0]
+    mismatches: dict[str, tuple[float, float, float]] = {}
+    for tk in targets[:max_checks]:
+        if tk.startswith("^") or "=" in tk:
+            continue  # 지수/매크로는 단일 소스 — 검증 불가
+        try:
+            secondary = _get_quote_yf_live(tk)
+        except Exception:
+            secondary = None
+        if secondary is None or secondary.price <= 0:
+            continue
+        primary = float(prices[tk])
+        diff_pct = abs(primary - secondary.price) / secondary.price * 100
+        if diff_pct >= CROSS_CHECK_WARN_PCT:
+            mismatches[tk] = (primary, secondary.price, round(diff_pct, 1))
+            logger.warning(
+                "시세 소스 불일치 [%s]: 주=%s vs yf=%s (%.1f%%)",
+                tk, primary, secondary.price, diff_pct,
+            )
+    return mismatches
+
+
 def _get_ticker_news(ticker: str, n: int = 3) -> list[str]:
     """종목별 최신 뉴스 헤드라인."""
     try:

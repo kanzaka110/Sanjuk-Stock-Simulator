@@ -68,6 +68,10 @@ class BriefingResult:
     # 품질 경고 (partial failure 추적)
     quality_warnings: tuple[str, ...] = ()  # 실패한 보조분석 목록
     data_failures: int = 0  # 실패한 데이터 소스 수
+    # 데이터 품질 게이트 (data_quality_gate) — 정상/경고/실행제한
+    data_quality_status: str = "정상"
+    data_quality_header: str = ""  # 브리핑 상단 헤더 텍스트
+    execution_limited: bool = False  # 실행 판단 제한 (매수/매도 → HOLD/BLOCK)
 
 
 @dataclass(frozen=True)

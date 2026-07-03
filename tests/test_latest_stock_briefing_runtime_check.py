@@ -235,11 +235,13 @@ class TestPaperPerformanceState(unittest.TestCase):
         s = get_paper_performance_summary().get("summary", {})
         self.assertEqual(s.get("duplicate_open_symbols", []), [])
 
-    def test_evaluated_count_zero(self):
-        """현재 표본부족 상태 — evaluated_count == 0 확인."""
+    def test_evaluated_count_non_negative_int(self):
+        """evaluated_count는 시간에 따라 증가하는 상태값 — 음수/비정상만 차단."""
         from core.toss_paper_performance import get_paper_performance_summary
         s = get_paper_performance_summary().get("summary", {})
-        self.assertEqual(s.get("evaluated_count", 0), 0)
+        count = s.get("evaluated_count", 0)
+        self.assertIsInstance(count, int)
+        self.assertGreaterEqual(count, 0)
 
 
 # ─── 7. write routes 없음 ─────────────────────────────────────────

@@ -800,6 +800,28 @@ def synthesize(
         _horizon_lines.extend(entries)
     horizon_text = "\n".join(_horizon_lines) if _horizon_lines else "  (정의된 시계 없음)"
 
+    # 종목별 실측 신뢰도 보정 테이블 — system 프롬프트 보정 규칙 바로 아래 주입
+    try:
+        from core.memory import reliability_directives_text
+        _reliability_table = reliability_directives_text()
+    except Exception:
+        _reliability_table = ""
+    reliability_block = (
+        f"\n  [종목별 실측 신뢰도 — 아래 보정을 확신도에 반드시 반영]\n{_reliability_table}"
+        if _reliability_table else ""
+    )
+
+    # 확신도 구간별 실측 캘리브레이션 — 체크리스트 규칙에 실측 교정 병기
+    try:
+        from core.memory import confidence_calibration_text
+        _calibration_table = confidence_calibration_text()
+    except Exception:
+        _calibration_table = ""
+    calibration_block = (
+        f"\n  [확신도 실측 캘리브레이션 — 과신 구간은 하향하라]\n{_calibration_table}"
+        if _calibration_table else ""
+    )
+
     system = f"""당신은 최고 투자 전략가(CIO)입니다. 4명의 분석가 의견을 종합하여 최종 전략을 결정합니다.
 
 ━━━ 매매 프레임워크 (모든 판단의 기준) ━━━
@@ -812,9 +834,9 @@ def synthesize(
   정보력이 없었다. 확신도는 아래 체크리스트 개수로 산출하라:
   · 충족 조건 수 0~1개 → 30~40 / 2개 → 50~60 / 3개 → 65~75 / 4개+ → 80~90
   · 조건: 기술 신호 합류(2개+) / 수급 동반(외인·기관 or 거래량) / 펀더멘털 뒷받침 / 페르소나 3명+ 동의 / 백테스트 해당 전략 승률 60%+
-  · 확신도 70+를 줄 수 없으면 그 이유를, 40 이하면 왜 그래도 언급하는지를 명시.
+  · 확신도 70+를 줄 수 없으면 그 이유를, 40 이하면 왜 그래도 언급하는지를 명시.{calibration_block}
 - 시세 미수집 종목은 가격 추측 금지 — "시세 확인 필요"로만 출력.
-- AI 메모리 신뢰도 보정 반영: 🔴 위험 종목 -15~-30% 감점, 🟢 고신뢰 +5~+10% 가중.
+- AI 메모리 신뢰도 보정 반영: 🔴 위험 종목 -15~-30% 감점, 🟢 고신뢰 +5~+10% 가중.{reliability_block}
 
 【B. 매수 판단 — "왜 지금 사야 하는가?"가 명확할 때만】
 - 매수 추천 시 반드시 포함: 계좌, 종목, 수량, 지정가, 손절가, 목표가, 근거.

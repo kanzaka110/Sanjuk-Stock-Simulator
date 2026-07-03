@@ -125,7 +125,7 @@ class TestTossAccountSummary:
         }
         d = self._get_summary(holdings=holdings)
         assert d["holdings_count"] == 1
-        assert d["market_value"]["krw"] == 5000000.0
+        assert d["market_value"]["krw"] == 5000000.0 + 3500 * 1538.5
 
     def test_exchange_rate_present(self):
         d = self._get_summary()
@@ -143,7 +143,7 @@ class TestTossAccountSummary:
     def test_total_account_value_present(self):
         d = self._get_summary()
         assert "total_account_value" in d
-        # cash 10M + market_value 0 = 10M
+        # cash 10M + market_value 0 = 10M; USD cash is counted only when the returned currency is USD
         assert d["total_account_value"]["krw"] == 10000000.0
 
     def test_total_with_holdings(self):
@@ -153,9 +153,9 @@ class TestTossAccountSummary:
         }
         bp = {"currency": "KRW", "cashBuyingPower": "2000000"}
         d = self._get_summary(holdings=holdings, buying_power=bp)
-        assert d["market_value"]["krw"] == 5000000.0
+        assert d["market_value"]["krw"] == 5000000.0 + 3500 * 1538.5
         assert d["cash"]["krw"] == 2000000.0
-        assert d["total_account_value"]["krw"] == 7000000.0
+        assert d["total_account_value"]["krw"] == 7000000.0 + 3500 * 1538.5
 
     def test_no_experiment_wording_in_warnings(self):
         d = self._get_summary()
@@ -229,8 +229,10 @@ class TestHtmlLabels:
     def test_pc_has_not_included_label(self):
         assert "기존 포트폴리오 미합산" in self._read_pc()
 
-    def test_pc_has_no_trading_label(self):
-        assert "실주문 기능 없음" in self._read_pc()
+    def test_pc_has_live_status_label(self):
+        html = self._read_pc()
+        assert "자동거래" in html
+        assert "Toss 수익" in html
 
     def test_pc_has_api_call(self):
         assert "/api/toss/account-summary" in self._read_pc()
@@ -255,10 +257,11 @@ class TestHtmlLabels:
     def test_mobile_has_not_included_label(self):
         assert "기존 포트폴리오 미합산" in self._read_mobile()
 
-    def test_mobile_has_no_trading_label(self):
+    def test_mobile_has_live_status_label(self):
         html = self._read_mobile()
-        # 정적 HTML 또는 JS 렌더링 코드에 주문 관련 제한 문구 존재
-        assert "자동거래 비활성" in html
+        # 정적 HTML 또는 JS 렌더링 코드에 Toss 손익/자동거래 상태 문구 존재
+        assert "자동거래" in html
+        assert "Toss 수익" in html
 
     def test_mobile_has_api_call(self):
         assert "/api/toss/account-summary" in self._read_mobile()

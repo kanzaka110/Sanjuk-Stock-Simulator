@@ -331,6 +331,7 @@ details summary::before{content:"▸";transition:transform .18s;color:var(--mt)}
 
 <!-- ═══ 홈 ═══ -->
 <div class="page on" id="p-home">
+  <div id="dq-banner" style="display:none;margin-bottom:12px;padding:10px 14px;border-radius:10px;font-size:12px;font-weight:700;line-height:1.5"></div>
   <section class="home-hero">
     <div class="portfolio-hero">
       <div class="hero-label">Portfolio Command Center</div>
@@ -450,6 +451,10 @@ details summary::before{content:"▸";transition:transform .18s;color:var(--mt)}
   <div class="grid" style="grid-template-columns:1fr 1fr">
     <div class="panel"><div class="ph"><h2>액션 타입별 성과</h2><span class="sub">30일 평균</span></div><div id="perf-act"></div></div>
     <div class="panel"><div class="ph"><h2>종목별 성과</h2></div><div id="perf-tk"></div></div>
+  </div>
+  <div class="panel" style="margin-top:14px">
+    <div class="ph"><h2>AI 추천 신뢰도 (종목별)</h2><span class="sub" id="perf-acc-sub">평가 완료 추천 기준 · 표본부족 종목은 승률로 위험 판단 금지</span></div>
+    <div id="perf-accuracy"><div class="emp">불러오는 중…</div></div>
   </div>
 </div>
 
@@ -617,12 +622,36 @@ function renderSched(){
 
 /* ════ PORTFOLIO ════ */
 let _pf=null;
+function pfTodayMetric(d){
+  let chg=0,items=[],available=false;
+  (d.accounts||[]).forEach(a=>(a.items||[]).forEach(it=>{
+    items.push({...it,account:a.name});
+    if(it.day_pct_source==="quote"||it.day_pct_source==="live_day_pct_snapshot"){available=true;chg+=(it.eval_krw||0)*(it.day_pct||0)/100;}
+  }));
+  return {chg,items,available,pct:(available&&d.total_eval)?chg/d.total_eval*100:null};
+}
+/* 데이터 품질 글로벌 배너 — 시세 결측/이상치(price_guard)를 홈 최상단에서 즉시 노출 */
+function renderDQBanner(d){
+  const el=document.getElementById("dq-banner");if(!el||!d)return;
+  const issues=[];
+  (d.accounts||[]).forEach(a=>(a.items||[]).forEach(it=>{
+    const g=it.price_guard;
+    if(g&&g!=="ok"&&g!=="broker_excel_snapshot")issues.push({t:it.ticker,g,w:it.price_warning||""});
+  }));
+  if(!issues.length){el.style.display="none";el.innerHTML="";return;}
+  const severe=issues.length>=3||issues.filter(x=>x.g==="missing").length>=2;
+  el.style.display="block";
+  el.style.background=severe?"rgba(239,68,68,.13)":"rgba(245,158,11,.11)";
+  el.style.border=`1px solid ${severe?"rgba(239,68,68,.45)":"rgba(245,158,11,.4)"}`;
+  el.style.color=severe?"#fca5a5":"#fbbf24";
+  const names=issues.slice(0,4).map(x=>E(x.t)).join(", ")+(issues.length>4?` 외 ${issues.length-4}종목`:"");
+  el.innerHTML=`${severe?"⛔ 데이터 품질: 실행제한 수준":"⚠️ 데이터 품질: 경고"} — 시세 결측/이상 ${issues.length}종목 (${names}) · 해당 종목 평가액은 평단 기준 보수 계산 · ${severe?"매수/매도 실행 판단 보류 권장":"해당 종목 실행 판단 주의"}`;
+}
 async function ldPF(){
   const d=await J("/api/portfolio");if(!d)return;_pf=d;
-  let todayChg=0,items=[];
-  (d.accounts||[]).forEach(a=>(a.items||[]).forEach(it=>{todayChg+=(it.eval_krw||0)*(it.day_pct||0)/100;items.push({...it,account:a.name})}));
+  renderDQBanner(d);
+  const tm=pfTodayMetric(d),todayChg=tm.chg,items=tm.items,todayPct=tm.pct;
   _pf._today=todayChg;_pf._items=items;
-  const todayPct=d.total_eval?todayChg/d.total_eval*100:0;
   const principal=d.total_principal ?? (d.accounts||[]).reduce((sum,a)=>sum+(a.principal ?? a.cost_total ?? 0),0);
   const principalPct=d.total_principal_pnl_pct ?? d.total_pnl_pct;
   const maxW=Math.max(...items.map(x=>x.weight||0),0);
@@ -631,7 +660,7 @@ async function ldPF(){
   setKPI("home-kpis",[
     ["전체 평가액",`₩${F(d.total_eval)}`,`원금 대비 ${cs(principalPct)}<br>투자 원금 ₩${F(principal)}`,prc(principalPct)],
     ["평가 손익",`${pnlAmt>=0?"+":""}₩${F(Math.abs(Math.round(pnlAmt)))}`,`총 손익률 ${cs(d.total_pnl_pct)}`,cc(d.total_pnl_pct)],
-    ["오늘 수익률",cs(todayPct),`${todayChg>=0?"+":""}${F(Math.round(todayChg))}₩`,cc(todayPct)],
+    ["오늘 수익률",cs(todayPct??0),todayPct==null?"엑셀 스냅샷: 일간 등락률 미연동":`${todayChg>=0?"+":""}${F(Math.round(todayChg))}₩`,todayPct==null?"mt":cc(todayPct)],
     ["현금 비중",`${d.cash_weight}%`,`₩${F(d.total_cash)}`,""],
   ]);
   window._kpiToday={pct:todayPct,amt:todayChg,maxW:maxW};
@@ -639,12 +668,12 @@ async function ldPF(){
   setKPI("pf-kpis",[
     ["총 평가자산",`₩${F(d.total_eval)}`,"",""],
     ["투자 원금",`₩${F(principal)}`,"입금 원금 기준",""],
-    ["오늘 손익",cs(todayPct),`${todayChg>=0?"+":""}${F(Math.round(todayChg))}₩`,cc(todayPct)],
+    ["오늘 손익",cs(todayPct??0),todayPct==null?"엑셀 스냅샷: 일간 등락률 미연동":`${todayChg>=0?"+":""}${F(Math.round(todayChg))}₩`,todayPct==null?"mt":cc(todayPct)],
     ["원금 대비",cs(principalPct),"입금 원금 기준",prc(principalPct)],
     ["현금 비중",`${d.cash_weight}%`,`₩${F(d.total_cash)}`,""],
   ]);
   // accounts
-  document.getElementById("home-accts").innerHTML=(d.accounts||[]).map(a=>`<div class="row"><div class="nm"><div class="t">${E(a.name)}</div><div class="s">${a.name==="RIA"&&a.principal===0?"원금 일반에 포함":"원금 ₩"+F(a.principal ?? a.cost_total ?? 0)} · 비중 ${a.weight||0}% · 현금 ₩${F(a.cash)}</div></div><div class="px"><div class="pr">₩${F(a.eval_total)}</div><div class="ch ${cc(a.pnl_pct)}">${cs(a.pnl_pct)}</div></div></div>`).join("")||'<div class="emp">없음</div>';
+  document.getElementById("home-accts").innerHTML=(d.accounts||[]).map(a=>`<div class="row"><div class="nm"><div class="t">${E(a.name)}</div><div class="s">${a.name==="RIA"&&a.principal===0?"원금 일반에 포함":"원금 ₩"+F(a.principal ?? a.cost_total ?? 0)} · 비중 ${a.weight||0}% · 현금 ₩${F(a.cash)}</div></div><div class="px"><div class="pr">₩${F(a.asset_total||a.eval_total)}</div><div class="ch ${cc(a.pnl_pct)}">${cs(a.pnl_pct)}</div></div></div>`).join("")||'<div class="emp">없음</div>';
   // alloc (도넛 + 범례)
   const alloc=d.allocation||[];
   const allocHTML=donut(alloc,d.total_eval);
@@ -761,7 +790,7 @@ function tradeCard(t){
   const st=t.applied===false?'<span class="trade-ledger-pending">미반영 거래</span>':'<span class="trade-ledger-complete">거래완료</span>';
   const qty=t.shares?`${t.shares}주`:"";
   const px=t.price?tradeUnit(t,t.price):"—";
-  return`<div class="trade-ledger-row" onclick='openTradeDetail(${JSON.stringify(t).replace(/'/g,"&#39;")})'><div class="tl-top"><div><div class="tl-name">${st}<span class="${isSell?"dn":"up"}">${side||"거래"}</span> · ${E(t.name||t.ticker||"")}</div><div class="tl-meta">${E(t.ticker||"")} · ${E(t.account||"")} · ${E((t.created_at||"").slice(5,16))} · ${qty} @ ${px}</div></div><div class="tl-value">${tradeMoney(t)}</div></div></div>`;
+  return`<div class="trade-ledger-row" onclick='openTradeDetail(${tossAttrJson(t)})'><div class="tl-top"><div><div class="tl-name">${st}<span class="${isSell?"dn":"up"}">${side||"거래"}</span> · ${E(t.name||t.ticker||"")}</div><div class="tl-meta">${E(t.ticker||"")} · ${E(t.account||"")} · ${E((t.created_at||"").slice(5,16))} · ${qty} @ ${px}</div></div><div class="tl-value">${tradeMoney(t)}</div></div></div>`;
 }
 function renderTradeLedger(){
   const items=(_tradeLedger.items||[]).slice(0,8);
@@ -887,6 +916,26 @@ async function ldPerf(){
   const mx=Math.max(...(d.by_action_type||[]).map(x=>Math.abs(x.avg_pnl||0)),1);
   document.getElementById("perf-act").innerHTML=(d.by_action_type||[]).length?(d.by_action_type).map(x=>{const pos=(x.avg_pnl||0)>=0,c=pos?"var(--up)":"var(--dn)";return`<div class="arow"><div class="k nowrap" style="width:108px">${E(LB(x.grp))}</div><div class="b"><div class="bar"><i style="width:${Math.abs(x.avg_pnl||0)/mx*100}%;background:${c}"></i></div></div><div class="v ${pos?"up":"dn"}">${cs(x.avg_pnl||0)}</div></div><div class="mt" style="font-size:10px;margin:-3px 0 5px">${x.total}건 · 승률 ${x.win_rate||0}%</div>`}).join(""):'<div class="emp">없음</div>';
   document.getElementById("perf-tk").innerHTML=(d.by_ticker||[]).length?(d.by_ticker).map(x=>`<div class="row"><div class="nm"><div class="t">${E(x.grp)}</div><div class="s">${x.total}건 · 승률 ${x.win_rate||0}%</div></div><div class="px"><div class="ch ${cc(x.avg_pnl)}">${cs(x.avg_pnl||0)}</div></div></div>`).join(""):'<div class="emp">없음</div>';
+  ldAccuracyBoard();
+}
+/* 종목별 AI 추천 신뢰도 보드 — 고신뢰/위험/표본부족 3등급 (표본부족은 승률 수치로 위험 판단 금지) */
+function accGrade(x){
+  const n=Number(x.evaluated_count||0),wr=Number(x.win_rate||0);
+  if(n<5)return{label:"표본부족",color:"var(--mt)",note:`평가 ${n}건 — 위험 취급 금지`};
+  if(wr>=60)return{label:"고신뢰",color:"var(--up)",note:"브리핑 가중 대상"};
+  if(wr<40)return{label:"위험",color:"var(--dn)",note:"브리핑 감점 대상"};
+  return{label:"보통",color:"var(--o)",note:""};
+}
+async function ldAccuracyBoard(){
+  const el=document.getElementById("perf-accuracy");if(!el)return;
+  const d=await J("/api/accuracy");const rows=((d&&d.by_ticker)||[]).slice().sort((a,b)=>(b.evaluated_count||0)-(a.evaluated_count||0));
+  if(!rows.length){el.innerHTML='<div class="emp">평가 완료된 추천 없음</div>';return;}
+  el.innerHTML=`<div class="tbl-scroll" style="max-height:300px"><table class="tbl"><thead><tr><th>종목</th><th>등급</th><th>승률</th><th>평가/전체</th><th>평균손익</th><th>기대값</th></tr></thead><tbody>${rows.map(x=>{
+    const g=accGrade(x),n=Number(x.evaluated_count||0);
+    return`<tr onclick="openTk('${E(x.ticker)}')" style="cursor:pointer"><td class="nm">${E(x.ticker)}</td><td><span style="color:${g.color};font-weight:800">${g.label}</span>${g.note?`<span class="mt" style="font-size:10px"> · ${g.note}</span>`:""}</td><td class="${n<5?"mt":cc((x.win_rate||0)-50)}">${n<5?"—":`${x.win_rate||0}%`}</td><td>${n}/${x.total_predictions||0}건</td><td class="${cc(x.avg_pnl)}">${cs(x.avg_pnl||0)}</td><td class="${cc(x.expectancy)}">${cs(x.expectancy||0)}</td></tr>`;
+  }).join("")}</tbody></table></div>`;
+  const hi=rows.filter(x=>accGrade(x).label==="고신뢰").length,lo=rows.filter(x=>accGrade(x).label==="위험").length,ns=rows.filter(x=>Number(x.evaluated_count||0)<5).length;
+  const sub=document.getElementById("perf-acc-sub");if(sub)sub.textContent=`고신뢰 ${hi} · 위험 ${lo} · 표본부족 ${ns} — 표본부족 종목은 승률로 위험 판단 금지`;
 }
 
 /* ════ NEWS ════ */
@@ -1182,14 +1231,18 @@ function openBrDetail(day){
 /* ════ TOSS 실전 AI 자동거래 계좌 (기존 포트폴리오 미합산) ════ */
 async function ldToss(){
   const d=await J("/api/toss/account-summary");
+  _tossAcct=d||{};
   const box=document.getElementById("toss-page");
   if(!box)return;
   if(!d||!d.enabled){box.innerHTML='<div class="emp">Toss API 미설정</div>';return;}
-  const mv=d.market_value||{};const mvKrw=mv.krw||0;
-  const cash=d.cash||{};const cashKrw=cash.krw||0;const cashUsd=cash.usd;
-  const total=d.total_account_value||{};const totalKrw=total.krw||0;
+  const mv=d.market_value||{};const mvKrw=mv.krw||0;const mvUsd=mv.usd;const mvUsdKrw=mv.usd_krw||0;
+  const cash=d.cash||{};const cashKrw=cash.krw||0;const cashKrwNative=cash.krw_native??cash.krw??0;const cashUsd=cash.usd;const cashUsdKrw=cash.usd_krw||0;
+  const total=d.total_account_value||{};const totalKrw=total.krw||0;const totalUsd=total.usd;const totalUsdKrw=total.usd_krw||0;
+  const pnlObj=d.profit_loss||{},todayPnl=d.today_profit_loss||{};
+  const plKrw=Number(pnlObj.krw||0),todayKrw=Number(todayPnl.krw||0);
+  const plRate=pnlObj.rate!=null?Number(pnlObj.rate)*100:null,todayRate=todayPnl.rate!=null?Number(todayPnl.rate)*100:null;
   const hc=d.holdings_count||0;
-  const fx=d.exchange_rate;const fxTxt=fx?`USD/KRW ${F(fx.rate)}`:"—";
+  const fx=d.exchange_rate;const fxTxt=fx?`USD/KRW ${F(fx.rate)} · USD 환산 ₩${F(Math.round(totalUsdKrw))} 포함`:"USD 환산 대기";
   const warns=(d.warnings||[]).map(w=>`<div style="font-size:11px;color:var(--mt);line-height:1.6">⚠ ${E(w)}</div>`).join("");
   const accts=(d.accounts||[]).map(a=>`<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border2);font-size:12.5px"><span style="font-weight:700">${E(a.account_type)}</span><span class="mt">계좌 #${a.account_seq}</span></div>`).join("");
   let holdingsHtml="";
@@ -1200,13 +1253,16 @@ async function ldToss(){
     }).join("")+'</div>';
   }
   box.innerHTML=`
-    <div class="kpis" style="grid-template-columns:repeat(5,1fr);margin-bottom:16px">
+    <div class="kpis" style="grid-template-columns:repeat(6,1fr);margin-bottom:16px">
       <div class="kpi"><div class="k">총 Toss 자산</div><div class="v">₩${F(Math.round(totalKrw))}</div><div class="x mt">${fxTxt}</div></div>
-      <div class="kpi"><div class="k">예수금/현금</div><div class="v">₩${F(Math.round(cashKrw))}</div><div class="x mt">${cashUsd?'$'+F(cashUsd):""}</div></div>
-      <div class="kpi"><div class="k">보유종목 평가</div><div class="v">₩${F(Math.round(mvKrw))}</div><div class="x mt">${hc}종목</div></div>
+      <div class="kpi"><div class="k">Toss 수익</div><div class="v ${plKrw>0?"up":plKrw<0?"dn":"mt"}">${plKrw>=0?"+":"-"}₩${F(Math.abs(Math.round(plKrw)))}</div><div class="x mt">${plRate!=null?`보유 손익 ${plRate>=0?"+":""}${plRate.toFixed(2)}%`:"profitLoss 원본"}</div></div>
+      <div class="kpi"><div class="k">오늘 수입</div><div class="v ${todayKrw>0?"up":todayKrw<0?"dn":"mt"}">${todayKrw>=0?"+":"-"}₩${F(Math.abs(Math.round(todayKrw)))}</div><div class="x mt">${todayRate!=null?`일간 ${todayRate>=0?"+":""}${todayRate.toFixed(2)}%`:"dailyProfitLoss 원본"}</div></div>
+      <div class="kpi"><div class="k">예수금/현금</div><div class="v">₩${F(Math.round(cashKrw))}</div><div class="x mt">KRW ₩${F(Math.round(cashKrwNative))}${cashUsd?` · USD $${F(cashUsd)}(₩${F(Math.round(cashUsdKrw))})`:""}</div></div>
+      <div class="kpi"><div class="k">보유종목 평가</div><div class="v">₩${F(Math.round(mvKrw))}</div><div class="x mt">${hc}종목${mvUsd?` · USD $${F(mvUsd)}`:""}</div></div>
       <div class="kpi" id="toss-auto-kpi"><div class="k">자동거래</div><div class="v" style="font-size:18px;color:var(--mt)">확인 중…</div></div>
       <div class="kpi" id="toss-transport-kpi"><div class="k">Transport</div><div class="v" style="font-size:18px;color:var(--mt)">확인 중…</div></div>
     </div>
+    <div class="note" style="margin:-6px 0 12px">Toss 수익/오늘 수입은 Toss 원본 holdings.profitLoss / dailyProfitLoss 합산이야. 삼성증권 포트폴리오와는 미합산.</div>
     <div class="grid" style="grid-template-columns:1fr 1fr;gap:14px">
       <div class="panel"><div class="ph"><h2>계좌 정보</h2></div>${accts||'<div class="emp">계좌 없음</div>'}<div style="margin-top:8px;font-size:11px;color:var(--mt)">갱신: ${E(d.updated_at||"—")}</div></div>
       <div class="panel"><div class="ph"><h2>안내</h2></div>${warns}</div>
@@ -1224,7 +1280,7 @@ async function ldToss(){
     const killSw=!!lp.autonomous_kill_switch;
     const modeLabel=isAutonomous?(killSw?"자율(정지)":"자율실행"):"수동 승인";
     const modeColor=isAutonomous?(killSw?"var(--dn)":"var(--up)"):"var(--o)";
-    const rows=((le||{}).records||[]).slice(0,6).map(r=>`<tr><td>${E((r.created_at||"").slice(5,16))}</td><td class="nm">${E(r.display_name||r.symbol_label||r.symbol||"—")}</td><td>${E((r.side||"").toUpperCase())}</td><td>${E(r.event_type||"—")}</td><td>${E(r.live_sent_classification||r.reason||"")}</td></tr>`).join("");
+    const rows=((le||{}).records||[]).filter(r=>r.live_order_sent===true||r.live_order_sent===1||r.event_type==="live_sent"||r.event_type==="autonomous_live_sent").slice(0,8).map(r=>`<tr onclick='openTossTradeDetail(${tossAttrJson(r)})' style="cursor:pointer"><td>${E((r.created_at||"").slice(5,16))}</td><td class="nm">${E(r.display_name||r.symbol_label||r.symbol||"—")}</td><td>${E((r.side||"").toUpperCase())}</td><td>${E(r.broker_order_status||r.status||r.event_type||"—")}</td><td>${E(tossTradePnlInfo(r).pnl==null?"손익 —":(tossTradePnlInfo(r).pnl>=0?"+":"-")+tossUnit(tossTradePnlInfo(r).cur,Math.abs(tossTradePnlInfo(r).pnl)))}</td></tr>`).join("");
     // 자동거래/transport KPI 업데이트
     const autoKpi=document.getElementById("toss-auto-kpi");
     if(autoKpi)autoKpi.innerHTML=`<div class="k">자동거래</div><div class="v" style="font-size:18px;color:${modeColor}">${modeLabel}</div><div class="x mt">${isAutonomous?"Hermes PASS → 자동주문":"버튼 승인 필요"}</div>`;
@@ -1241,7 +1297,7 @@ async function ldToss(){
         <div class="kpi"><div class="k">킬스위치</div><div class="v" style="font-size:18px;color:${killSw?"var(--dn)":"var(--up)"}">${killSw?"ON":"OFF"}</div><div class="x mt">${killSw?"모든 자율주문 차단":"정상"}</div></div>
       </div>
       <div style="font-size:11px;color:var(--mt);margin-bottom:8px">${E(lp.reason||lp.daily_policy_note||"")}</div>
-      ${rows?`<div class="tbl-scroll" style="max-height:260px"><table class="tbl"><thead><tr><th>시각</th><th>종목</th><th>방향</th><th>이벤트</th><th>분류/사유</th></tr></thead><tbody>${rows}</tbody></table></div>`:'<div class="emp">최근 이벤트 없음</div>'}
+      ${rows?`<div class="tbl-scroll" style="max-height:260px"><table class="tbl"><thead><tr><th>시각</th><th>종목</th><th>방향</th><th>상태</th><th>평가/실현손익</th></tr></thead><tbody>${rows}</tbody></table></div>`:'<div class="emp">최근 실제 거래 없음</div>'}
     </div>`;
   }
   // 품질 게이트 리포트 + 후보 상세
@@ -1362,6 +1418,50 @@ async function ldToss(){
   box.innerHTML+=liveHtml+qrHtml+bcHtml+autoHtml+ptHtml+dcHtml+ccHtml+plHtml+ppHtml;
 }
 
+
+let _tossAcct={};
+function tossNormSymbol(s){s=String(s||"").trim().toUpperCase();return s.endsWith(".KS")||s.endsWith(".KQ")?s.slice(0,-3):s;}
+function tossHoldingFor(r){const sym=tossNormSymbol(r.symbol||r.ticker);return ((_tossAcct&&_tossAcct.holdings_items)||[]).find(h=>tossNormSymbol(h.symbol||h.ticker)===sym)||{};}
+function tossIsKrSymbol(s){return /^\d{6}(\.(KS|KQ))?$/.test(String(s||"").trim().toUpperCase());}
+function tossTradeCurrency(r,h){return (h.currency||r.currency||(tossIsKrSymbol(r.symbol||r.ticker)?"KRW":"USD")).toUpperCase();}
+function tossAttrJson(r){return JSON.stringify(r).replace(/&/g,"&amp;").replace(/'/g,"&#39;").replace(/"/g,"&quot;");}
+function tossUnit(cur,v){const n=Number(v||0);return (cur==="USD"?"$":"₩")+F(cur==="USD"?Math.round(n*100)/100:Math.round(n));}
+function tossKrw(cur,v){const fx=Number((_tossAcct.exchange_rate||{}).rate||0);const n=Number(v||0);return cur==="USD"&&fx?`₩${F(Math.round(n*fx))}`:`₩${F(Math.round(n))}`;}
+function tossTradePrice(r){return Number(r.filled_price||r.limit_price||r.price||0);}
+function tossTradeQty(r){return Number(r.filled_quantity||r.quantity||r.shares||0);}
+function tossMaskOrderId(v){v=String(v||"");return v?v.slice(0,6)+"…"+v.slice(-4):"—";}
+function tossTradePnlInfo(r){
+  const h=tossHoldingFor(r),cur=tossTradeCurrency(r,h),side=String(r.side||"").toLowerCase(),isSell=side==="sell"||side.includes("매도");
+  const price=tossTradePrice(r),qty=tossTradeQty(r),curP=Number(h.lastPrice||h.current_price||0),avg=Number(h.averagePurchasePrice||h.avg_cost||0);
+  if(isSell&&avg>0&&price>0){const pnl=(price-avg)*qty,pct=(price-avg)/avg*100;return{label:"실현손익",pnl,pct,basis:`평단 ${tossUnit(cur,avg)} 기준 추정`,cur};}
+  if(!isSell&&curP>0&&price>0){const pnl=(curP-price)*qty,pct=(curP-price)/price*100;return{label:"평가손익",pnl,pct,basis:`현재가 ${tossUnit(cur,curP)} 기준 추정`,cur};}
+  return{label:isSell?"실현손익":"평가손익",pnl:null,pct:null,basis:"현재가/평단 데이터 부족",cur};
+}
+function openTossTradeDetail(r){
+  const h=tossHoldingFor(r),cur=tossTradeCurrency(r,h),side=String(r.side||"").toLowerCase(),isSell=side==="sell"||side.includes("매도"),qty=tossTradeQty(r),price=tossTradePrice(r),pnl=tossTradePnlInfo(r);
+  const priceLabel=isSell?"매도가/주문가":"매수가/체결가";
+  const amountCur=price*qty,amountKrw=Number(r.estimated_amount_krw||0)||((cur==="USD"?Number((_tossAcct.exchange_rate||{}).rate||0):1)*amountCur);
+  const status=E(r.broker_order_status||r.status||r.event_type||"—"),name=E(r.display_name||r.symbol_label||r.symbol_name||r.symbol||"—");
+  const pnlText=pnl.pnl==null?"—":`${pnl.pnl>=0?"+":"-"}${tossUnit(pnl.cur,Math.abs(pnl.pnl))}${pnl.cur==="USD"?` (${tossKrw("USD",Math.abs(pnl.pnl))})`:""} (${pnl.pct>=0?"+":""}${(Math.round(pnl.pct*10)/10)}%)`;
+  openInfo(`토스 실거래 상세 · ${name}`,
+    `${kv("종목",name)}`+
+    `${kv("방향",E(isSell?"매도":"매수"))}`+
+    `${kv("상태",status)}`+
+    `${kv("수량",`${qty||"—"}주`)}`+
+    `${kv(priceLabel,tossUnit(cur,price))}`+
+    `${kv("거래금액",`${tossUnit(cur,amountCur)}${cur==="USD"?` · ${tossKrw(cur,amountCur)}`:` · ₩${F(Math.round(amountKrw))}`}`)}`+
+    `${kv(pnl.label,`<span class="${pnl.pnl==null?"":cc(pnl.pnl)}">${pnlText}</span>`)}`+
+    `${kv("계산 기준",E(pnl.basis))}`+
+    `${kv("주문ID",E(r.broker_order_id_masked||tossMaskOrderId(r.broker_order_id)))}`+
+    `<div class="mt" style="margin-top:10px;line-height:1.6">Toss read-only 조회 기준이야. 평가/실현손익은 현재 보유 현재가·평단 기반 추정이며 수수료/세금/분할체결은 별도 정산 전이야.</div>`);
+}
+function tossTradeRow(r,compact=false){
+  const h=tossHoldingFor(r),cur=tossTradeCurrency(r,h),side=String(r.side||"").toUpperCase(),qty=tossTradeQty(r),price=tossTradePrice(r),pnl=tossTradePnlInfo(r),label=E(r.display_name||r.symbol_label||r.symbol_name||r.symbol||"—");
+  const pnlTxt=pnl.pnl==null?"손익 —":`${pnl.pnl>=0?"+":"-"}${tossUnit(pnl.cur,Math.abs(pnl.pnl))}`;
+  const data=tossAttrJson(r);
+  return `<div class="home-toss-row" onclick='openTossTradeDetail(${data})' style="cursor:pointer"><div class="sym">${label} <span class="${side==="SELL"?"dn":"up"}">${E(side||"BUY")}</span><div style="font-size:10px;color:var(--mt);font-weight:500">${qty||"—"}주 @ ${tossUnit(cur,price)} · 상세 ›</div></div><div class="meta">${E(r.broker_order_status||r.status||"전송")}<br><span class="${pnl.pnl==null?"mt":cc(pnl.pnl)}">${pnlTxt}</span></div></div>`;
+}
+
 /* ════ HOME TOSS LIVE PILOT WIDGET ════ */
 async function ldHomeToss(){
   const box=document.getElementById("home-toss-live");if(!box)return;
@@ -1374,9 +1474,15 @@ async function ldHomeToss(){
   ]);
   if(!acct&&!policy&&!previews&&!events&&!cands){box.innerHTML='<div class="emp">토스증권 상태 데이터 없음</div>';return;}
   const ac=acct||{},ps=policy||{},pv=previews||{},ev=events||{},bc=cands||{};
+  _tossAcct=ac;
   const totalKrw=Number(ac.total_account_value?.krw||0);
+  const totalUsd=Number(ac.total_account_value?.usd||0);
+  const totalUsdKrw=Number(ac.total_account_value?.usd_krw||0);
   const cashKrw=Number(ac.cash?.krw||0);
+  const cashUsd=Number(ac.cash?.usd||0);
+  const cashUsdKrw=Number(ac.cash?.usd_krw||0);
   const marketKrw=Number(ac.market_value?.krw||0);
+  const marketUsd=Number(ac.market_value?.usd||0);
   const principal=Number(ac.principal_krw||ac.initial_principal_krw||10000000);
   const pnl=totalKrw&&principal?totalKrw-principal:0;
   const pnlPct=principal?((pnl/principal)*100):0;
@@ -1385,26 +1491,24 @@ async function ldHomeToss(){
   const allowed=!!ps.live_order_allowed,allOpen=!!ps.all_live_gates_open;
   const sentReal=ev.live_sent_real||0,sentTotal=ev.live_order_sent_total||0;
   const adapter=ps.adapter_status||pv.summary?.adapter_status||"—";
-  const gateText=allOpen?"US BUY+SELL 준비":(allowed?"승인 대기":"차단/대기");
+  const gateText=allOpen?"KR+US 자동주문 준비":(allowed?"자동주문 대기":"차단/대기");
   const gateClass=allOpen?"up":allowed?"o":"dn";
   const scan=bc.scan_summary||{};
   const itemCount=bc.count||0;
   const topReject=(scan.top_reject_reasons||[]).slice(0,3).map(r=>`${E(r.reason||"기타")} ${r.count||0}`).join(" · ");
-  const realRows=(ev.records||[]).filter(r=>r.live_order_sent===true||r.live_order_sent===1||r.event_type==="live_sent").slice(0,3).map(r=>{
-    const label=r.symbol_label||r.symbol||"—",side=(r.side||"").toUpperCase(),amt=r.estimated_amount_krw||((r.limit_price||0)*(r.quantity||0));
-    return `<div class="home-toss-row"><div class="sym">${E(label)} <span class="${side==="BUY"?"up":"dn"}">${E(side)}</span></div><div class="meta">실제 전송 · ₩${F(Math.round(amt||0))}</div></div>`;
-  }).join("");
+  const realRows=(ev.records||[]).filter(r=>r.live_order_sent===true||r.live_order_sent===1||r.event_type==="live_sent"||r.event_type==="autonomous_live_sent").slice(0,5).map(r=>tossTradeRow(r,true)).join("");
   const candidateRows=(bc.items||[]).slice(0,2).map(r=>`<div class="home-toss-row"><div class="sym">${E(r.name||r.ticker||"—")} <span class="up">후보</span></div><div class="meta">${E(r.ticker||"")} · ₩${F(Math.round(r.entry_price||r.limit_price||0))}</div></div>`).join("");
   const rejectedRows=(bc.excluded||[]).filter(r=>r.scope&&r.scope!=="reuse_blocked").slice(0,2).map(r=>`<div class="home-toss-row"><div class="sym">${E(r.name||r.ticker||"—")}</div><div class="meta">${E(r.reason||"탈락")}</div></div>`).join("");
-  const brief=`토스 AI 계좌 ₩${F(Math.round(totalKrw))} · 평가손익 ${pnl>=0?"+":""}₩${F(Math.round(pnl))} (${pnlPct>=0?"+":""}${pnlPct.toFixed(2)}%) · 실제 거래 ${sentReal}건`;
-  const noTrade='<div class="emp">토스 실제 거래 내역 없음 · Hermes PASS + 사용자 최종승인 전까지 실행 안 함</div>';
+  const usdNote=totalUsd?` · USD $${F(totalUsd)}(₩${F(Math.round(totalUsdKrw))}) 포함`:"";
+  const brief=`토스 AI 계좌 ₩${F(Math.round(totalKrw))}${usdNote} · 평가손익 ${pnl>=0?"+":""}₩${F(Math.round(pnl))} (${pnlPct>=0?"+":""}${pnlPct.toFixed(2)}%) · 실제 거래 ${sentReal}건`;
+  const noTrade='<div class="emp">토스 실제 거래 내역 없음 · Hermes PASS + live gate 통과 시 자동 실행</div>';
   box.innerHTML=`
     <div class="hero-label">TOSS AI COMMAND CENTER</div>
     <div class="home-toss-brief"><div class="ai">✦</div><div class="txt">${brief}</div></div>
     <div class="home-toss-grid">
-      <div class="mini-kpi"><div class="k">총 평가액</div><div class="v">₩${F(Math.round(totalKrw))}</div><div class="x mt">보유평가 ₩${F(Math.round(marketKrw))}</div></div>
+      <div class="mini-kpi"><div class="k">총 평가액</div><div class="v">₩${F(Math.round(totalKrw))}</div><div class="x mt">보유 ₩${F(Math.round(marketKrw))}${marketUsd?` · $${F(marketUsd)}`:""}</div></div>
       <div class="mini-kpi"><div class="k">평가 손익</div><div class="v ${pnl>=0?"up":"dn"}">${pnl>=0?"+":""}₩${F(Math.round(pnl))}</div><div class="x mt">원금 ₩${F(Math.round(principal))}</div></div>
-      <div class="mini-kpi"><div class="k">수익률</div><div class="v ${pnlPct>=0?"up":"dn"}">${pnlPct>=0?"+":""}${pnlPct.toFixed(2)}%</div><div class="x mt">현금비중 ${cashRatio.toFixed(1)}%</div></div>
+      <div class="mini-kpi"><div class="k">수익률</div><div class="v ${pnlPct>=0?"up":"dn"}">${pnlPct>=0?"+":""}${pnlPct.toFixed(2)}%</div><div class="x mt">현금비중 ${cashRatio.toFixed(1)}% · USD현금 ₩${F(Math.round(cashUsdKrw))}</div></div>
       <div class="mini-kpi"><div class="k">실제 거래</div><div class="v ${sentReal?"dn":"up"}">${sentReal}건</div><div class="x mt">보유 ${hc}종목 · 전체전송 ${sentTotal}건</div></div>
     </div>
     <div class="home-toss-scan">
@@ -1413,14 +1517,14 @@ async function ldHomeToss(){
       <div class="mini-kpi"><div class="k">Pass / Reject</div><div class="v">${scan.pass_count??"—"} / ${scan.reject_count??"—"}</div></div>
       <div class="mini-kpi"><div class="k">Live Gate</div><div class="v ${gateClass}" style="${gateClass==="o"?"color:var(--o)":""}">${gateText}</div></div>
     </div>
-    <div style="font-size:10.5px;color:var(--mt);margin:7px 0">mode ${E(ps.side_mode||"BUY_SELL")} · allowed ${(ps.allowed_sides||[]).join("+")||"—"} · asset ${(ps.allowed_asset_types||[]).join(",")||"—"} · KRW cap ${ps.max_order_krw==null&&ps.max_daily_krw==null?"없음":"있음"} · adapter ${E(adapter)}</div>
+    <div style="font-size:10.5px;color:var(--mt);margin:7px 0">mode ${E(ps.side_mode||"BUY_SELL")} · allowed ${(ps.allowed_sides||[]).join("+")||"—"} · asset ${(ps.allowed_asset_types||[]).join(",")||"—"} · USD 현금/미국주 원화환산 포함 · adapter ${E(adapter)}</div>
     <div class="panel" style="padding:9px 10px;background:rgba(8,13,24,.42);border-color:rgba(255,255,255,.06);margin-top:8px">
       <div style="font-size:11px;font-weight:850;margin-bottom:5px">실제 거래 내역</div>
       ${realRows||noTrade}
     </div>
     <div class="panel" style="padding:9px 10px;background:rgba(8,13,24,.42);border-color:rgba(255,255,255,.06);margin-top:8px">
       <div style="font-size:11px;font-weight:850;margin-bottom:5px">신규 후보 / 탈락 사유</div>
-      ${candidateRows||rejectedRows||'<div class="emp">신규 후보 없음 · 탈락 사유 대기</div>'}
+      ${candidateRows||rejectedRows||'<div class="emp">토스 AI 계좌 신규 후보 없음 · 전체 시장 매수 후보와 별개 (타 계좌 추천은 액션 탭)</div>'}
       <div class="home-toss-reject">주요 탈락: ${topReject||"—"}</div>
     </div>
     <div style="margin-top:7px;font-size:10.5px;color:var(--mt);cursor:pointer" onclick="goto('toss')">토스 AI 탭에서 상세 보기 →</div>`;
@@ -1450,7 +1554,7 @@ function agentActivityHtml(d,compact=false){
   const detailRows=acts.map(a=>`<div class="home-toss-row"><div class="sym">${E(a.title||"활동")} <span class="mt">${E(a.kind||"log")}</span></div><div class="meta"><b>${E(a.status||"—")}</b>${a.time?" · "+E(a.time):""} · ${E(a.detail||"")}</div></div>`).join("");
   const rejectRows=excluded.map(x=>`<div class="home-toss-row"><div class="sym">${E(x.name||x.ticker||"탈락 후보")} <span class="mt">${E(x.ticker||"")}</span></div><div class="meta">${E(x.reason||"사유 없음")}</div></div>`).join("");
   const artifact=arts.recent_reviews_exists?`리뷰 저장됨 · ${E(arts.recent_reviews_mtime||"")}`:"리뷰 아티팩트 아직 없음";
-  const verdict=(s.ready_count||0)>0?`검토 가능한 종목 ${s.ready_count}개`:(s.candidate_count||0)>0?"후보는 있으나 추가 확인 필요":"현재 신규 실행 후보 없음";
+  const verdict=(s.ready_count||0)>0?`검토 가능한 종목 ${s.ready_count}개`:(s.candidate_count||0)>0?"후보는 있으나 추가 확인 필요":"토스 AI 계좌 신규 실행 후보 없음 (전체 매수 후보와 별개)";
   const scan=`Universe ${s.universe_count??"—"} · Scanned ${s.scanned_count??"—"} · Pass/Reject ${s.pass_count??"—"}/${s.reject_count??"—"}`;
   const candCards=cands.map(agentCandidateCard).join("") || '<div class="emp">표시할 종목 분석 없음</div>';
   return `<div class="agent-summary-first-v2" style="display:grid;grid-template-columns:1.15fr .85fr;gap:12px;align-items:stretch"><div class="panel" style="padding:14px;background:linear-gradient(135deg,rgba(47,107,255,.16),rgba(8,13,24,.55));border-color:rgba(47,107,255,.28)"><div style="font-size:12px;color:var(--mt);font-weight:800;margin-bottom:5px">현재 판단</div><div style="font-size:22px;font-weight:950;letter-spacing:-.4px">${E(verdict)}</div><div style="font-size:11px;color:var(--mt);margin-top:7px">${E(artifact)} · 주문 전송 없음</div></div><div class="panel" style="padding:14px;background:rgba(8,13,24,.42);border-color:rgba(255,255,255,.06)"><div style="font-size:12px;color:var(--mt);font-weight:800;margin-bottom:6px">스캔 범위</div><div style="font-size:13px;font-weight:850">${E(scan)}</div><div style="font-size:10.5px;color:var(--mt);margin-top:7px">GET-only · 주문 생성/승인/전송 없음</div></div></div>`+

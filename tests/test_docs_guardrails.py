@@ -92,6 +92,13 @@ ALLOWED_TOSS_FILES = {
     "scripts/reclassify_toss_live_pilot_artifacts.py",
     "tests/test_toss_live_pilot_transport_injection.py",
     "tests/test_toss_buy_candidates.py",
+    "core/toss_autonomous_finalizer.py",
+    "tests/test_toss_autonomous_finalizer.py",
+    "tests/test_toss_autonomous_duplicate_guard.py",
+    "tests/test_toss_autonomous_policy.py",
+    "tests/test_toss_autonomous_sell_guard.py",
+    "core/toss_quality_gate.py",
+    "tests/test_toss_quality_gate.py",
 }
 
 

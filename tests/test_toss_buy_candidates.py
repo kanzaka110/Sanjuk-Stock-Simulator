@@ -225,8 +225,13 @@ def test_toss_buy_candidates_stock_agent_review_fields(monkeypatch):
     assert item["current_price"] == 30_000.0
     assert item["entry_price"] == 30_000.0
     assert item["limit_price"] == 30_000.0
-    assert item["quantity"] == 1
-    assert item["estimated_amount_krw"] == 30_000.0
+    assert item["quantity"] == 8
+    assert item["estimated_amount_krw"] == 240_000.0
+    assert item["quantity_source"] == "confidence_rr_stop_sizing"
+    assert item["position_budget_krw"] == 250_000.0
+    assert item["position_sizing"]["score"] == 70.0
+    assert item["position_sizing"]["risk_reward"] == 1.8
+    assert item["position_sizing"]["stop_risk_pct"] == 6.0
     assert item["stop_loss"] == 28_200.0
     assert item["target_price"] == 31_500.0
     assert item["current_vs_limit_gap_pct"] == 0.0
@@ -237,6 +242,45 @@ def test_toss_buy_candidates_stock_agent_review_fields(monkeypatch):
     assert item["missing_fields"] == []
     assert item["stock_agent_ready"] is True
 
+
+
+def test_toss_buy_candidates_blocks_buy_limit_above_current(monkeypatch):
+    # KT 사례: 현재가 53,500원인데 지정가가 더 높으면 자동매수 후보로 PASS되면 안 된다.
+    monkeypatch.setattr(dd, "_cache", {}, raising=False)
+    monkeypatch.setattr(
+        disc, "_fallback_universe_candidates",
+        lambda markets: [],
+    )
+    monkeypatch.setattr(
+        disc, "build_discovery_sections",
+        lambda *a, **k: _sections(),
+    )
+    monkeypatch.setattr(
+        disc, "toss_eligible_new_candidates",
+        lambda sections, max_order_krw=500_000: {
+            "items": [{
+                "symbol": "030200.KS", "ticker": "030200.KS", "name": "KT",
+                "side": "buy", "quantity": 1, "current_price": 53_500.0,
+                "price": 53_500.0, "limit_price": 55_000.0,
+                "estimated_amount_krw": 55_000.0, "stop_loss": 50_000.0,
+                "target_price": 60_000.0, "execution_status": "conditional_small_entry",
+            }],
+            "excluded": [], "count": 1, "excluded_count": 0,
+            "scan_summary": {}, "note": "test",
+        },
+    )
+
+    result = dd.toss_buy_candidates_data(range_="today")
+
+    item = result["items"][0]
+    assert item["symbol"] == "030200.KS"
+    assert item["current_price"] == 53_500.0
+    assert item["limit_price"] == 55_000.0
+    assert item["execution_status"] == "chase_block"
+    assert item["executable_now"] is False
+    assert item["stock_agent_ready"] is False
+    assert "지정가가 현재가보다 높음" in item["fill_risk_note"]
+    assert "55,000원 > 현재가 53,500원" in item["block_reason"]
 
 def test_toss_buy_candidates_limit_exceeded_not_stock_agent_ready(monkeypatch):
     sections = _sections(new=[_new_cand("222.KS", "고가주", price=600_000)])
@@ -249,6 +293,29 @@ def test_toss_buy_candidates_limit_exceeded_not_stock_agent_ready(monkeypatch):
     assert item["missing_fields"] == []
     assert item["stock_agent_ready"] is False
     assert "한도" in " ".join(item["risk_notes"])
+
+
+def test_toss_buy_candidates_sizes_by_confidence_rr_and_stop(monkeypatch):
+    strong = _new_cand("000777.KS", "강한후보", price=50_000, score=88)
+    strong = strong.__class__(
+        **{**strong.__dict__, "risk_reward": 2.8, "stop_loss": 48_500.0}
+    )
+    cautious = _new_cand("000888.KS", "보수후보", price=50_000, score=66)
+    cautious = cautious.__class__(
+        **{**cautious.__dict__, "risk_reward": 1.3, "stop_loss": 46_000.0}
+    )
+    sections = _sections(new=[strong, cautious])
+    _patch_sections(monkeypatch, sections)
+
+    result = dd.toss_buy_candidates_data(range_="today")
+
+    by_symbol = {i["symbol"]: i for i in result["items"]}
+    assert by_symbol["000777.KS"]["quantity"] == 10
+    assert by_symbol["000777.KS"]["estimated_amount_krw"] == 500_000.0
+    assert by_symbol["000777.KS"]["position_sizing"]["stop_risk_pct"] == 3.0
+    assert by_symbol["000888.KS"]["quantity"] == 5
+    assert by_symbol["000888.KS"]["estimated_amount_krw"] == 250_000.0
+    assert by_symbol["000888.KS"]["position_sizing"]["stop_risk_pct"] == 8.0
 
 
 

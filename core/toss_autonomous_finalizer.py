@@ -62,6 +62,7 @@ def _finalize_impl(pilot_id: str) -> dict:
         record_live_send_blocked,
         record_live_sent,
         record_live_send_failed,
+        record_live_send_retryable,
     )
     from core.toss_live_pilot_verification import is_verification_passed
     from core.toss_live_pilot_telegram import resolve_live_transport_for_confirm
@@ -99,7 +100,7 @@ def _finalize_impl(pilot_id: str) -> dict:
     rec = matched[0]
 
     # 이미 처리된 경우 스킵
-    if rec.get("status") in ("live_sent", "cancelled", "live_send_failed"):
+    if rec.get("status") in ("live_sent", "cancelled", "live_send_failed", "live_send_retryable"):
         return {
             "ok": False,
             "action": "autonomous_finalize",
@@ -243,23 +244,31 @@ def _finalize_impl(pilot_id: str) -> dict:
             "broker_order_status": dispatch_result.get("broker_order_status", ""),
         }
     else:
+        fail_reason = dispatch_result.get("reason", "dispatch_failed") or "dispatch_failed"
+        error_body = dispatch_result.get("error_body", "")
+        failure_reason = (
+            dispatch_result.get("failure_reason")
+            or fail_reason
+            or "dispatch_failed"
+        )
+        fail_detail = f"{failure_reason}: {error_body}" if error_body else failure_reason
+        retryable = _is_retryable_dispatch_failure(failure_reason, error_body)
         try:
-            record_live_send_failed(
+            recorder = record_live_send_retryable if retryable else record_live_send_failed
+            recorder(
                 pilot_id,
-                failure_reason=dispatch_result.get("reason", ""),
+                failure_reason=fail_detail[:500],
                 payload_hash=dispatch_result.get("payload_hash", ""),
             )
         except Exception as e:
             log.warning("autonomous live_send_failed ledger failed: %s", e)
 
-        fail_reason = dispatch_result.get("reason", "dispatch_failed")
-        error_body = dispatch_result.get("error_body", "")
-        fail_detail = f"{fail_reason}: {error_body}" if error_body else fail_reason
-
+        event_type = "autonomous_send_retryable" if retryable else "autonomous_send_failed"
+        event_status = "live_send_retryable" if retryable else "live_send_failed"
         _record_event(
             pilot_id=pilot_id,
-            event_type="autonomous_send_failed",
-            status="live_send_failed",
+            event_type=event_type,
+            status=event_status,
             verification_id=verification_id,
             reason=fail_detail[:500],
             rec=rec,
@@ -278,6 +287,24 @@ def _finalize_impl(pilot_id: str) -> dict:
             "reason": fail_reason,
             "error_body": error_body[:300] if error_body else "",
         }
+
+
+def _is_retryable_dispatch_failure(reason: str, error_body: str = "") -> bool:
+    """일시적 transport/account/API 실패는 terminal failed로 소비하지 않는다."""
+    text = f"{reason} {error_body}".lower()
+    retryable_tokens = (
+        "dispatch_failed",
+        "transport_exception",
+        "network_error",
+        "account_unavailable",
+        "token_unavailable",
+        "http_401",
+        "http_429",
+        "rate limit",
+        "timeout",
+        "temporarily",
+    )
+    return any(tok in text for tok in retryable_tokens)
 
 
 # ── 이벤트 기록 ──────────────────────────────────────────────────

@@ -380,6 +380,12 @@ def _build_impact_message(
     # 헤더 — 결론 강조
     lines.append(f"{label}")
     lines.append(f"📅 {title}")
+    # 데이터 품질 헤더 (정상 외 상태만 상단 노출)
+    dq_status = getattr(result, "data_quality_status", "정상")
+    dq_header = getattr(result, "data_quality_header", "") or ""
+    if dq_status != "정상" and dq_header:
+        badge = "⛔" if getattr(result, "execution_limited", False) else "⚠️"
+        lines.append(f"{badge} {dq_header}")
     # 품질 배지
     if result.quality_warnings:
         lines.append(f"⚠️ 부분 분석: {', '.join(result.quality_warnings)}")

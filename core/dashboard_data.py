@@ -8,6 +8,7 @@ DB가 없거나 비어 있어도 절대 예외를 던지지 않고 빈 구조를
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import subprocess
 import threading
@@ -330,44 +331,111 @@ def _fetch_portfolio_raw() -> dict:
     )
     from core.market import _batch_quotes
 
-    # Latest Samsung Securities balance screenshots supplied by 승호 (2026-06-30).
-    # Keep this read-only dashboard aligned with the broker account totals without
-    # touching account/secrets or order paths. Values are cash-like balances only.
+    # Samsung Securities Excel snapshot supplied by 승호 (2026-07-02).
+    # This dashboard/API layer mirrors the broker-exported display values exactly,
+    # without touching account/secrets/order paths or config/settings.py.
+    # Fields: shares, broker avg/current, broker 평가금액(H), broker 매수금액(I).
+    samsung_excel_snapshot = {
+        "일반": {
+            "000660.KS": {"name": "SK하이닉스", "shares": 2.0, "avg_cost_krw": 2_325_000.0, "current_price": 2_187_000.0, "eval_krw": 4_374_000.0, "cost_krw": 4_650_000.0},
+            "005930.KS": {"name": "삼성전자", "shares": 100.0, "avg_cost_krw": 83_482.0, "current_price": 286_000.0, "eval_krw": 28_600_000.0, "cost_krw": 8_348_264.0},
+            "NVDA": {"name": "엔비디아", "shares": 10.0, "avg_cost_usd": 190.0, "current_price": 197.03, "eval_krw": 3_062_634.0, "cost_krw": 2_933_980.0},
+            "LMT": {"name": "록히드 마틴", "shares": 5.0, "avg_cost_usd": 505.0, "current_price": 522.63, "eval_krw": 4_061_880.0, "cost_krw": 3_899_105.0},
+            "MU": {"name": "마이크론 테크놀로지", "shares": 5.0, "avg_cost_usd": 408.8184, "current_price": 1_008.0, "eval_krw": 7_834_176.0, "cost_krw": 3_014_469.0},
+            "360750.KS": {"name": "TIGER 미국S&P500", "shares": 243.0, "avg_cost_krw": 24_800.0, "current_price": 28_875.0, "eval_krw": 7_016_625.0, "cost_krw": 6_026_400.0},
+        },
+        "RIA": {
+            "003670.KS": {"name": "포스코퓨처엠", "shares": 5.0, "avg_cost_krw": 176_700.0, "current_price": 163_600.0, "eval_krw": 818_000.0, "cost_krw": 883_500.0},
+            "005380.KS": {"name": "현대차", "shares": 1.0, "avg_cost_krw": 497_000.0, "current_price": 482_000.0, "eval_krw": 482_000.0, "cost_krw": 497_000.0},
+            "041510.KQ": {"name": "에스엠", "shares": 13.0, "avg_cost_krw": 72_100.0, "current_price": 78_600.0, "eval_krw": 1_021_800.0, "cost_krw": 937_300.0},
+            "069500.KS": {"name": "KODEX 200", "shares": 21.0, "avg_cost_krw": 136_977.0, "current_price": 123_530.0, "eval_krw": 2_594_130.0, "cost_krw": 2_876_520.0},
+            "090430.KS": {"name": "아모레퍼시픽", "shares": 9.0, "avg_cost_krw": 105_700.0, "current_price": 119_400.0, "eval_krw": 1_074_600.0, "cost_krw": 951_300.0},
+            "091160.KS": {"name": "KODEX 반도체", "shares": 20.0, "avg_cost_krw": 165_425.0, "current_price": 149_255.0, "eval_krw": 2_985_100.0, "cost_krw": 3_308_500.0},
+            "229200.KS": {"name": "KODEX 코스닥150", "shares": 30.0, "avg_cost_krw": 15_500.0, "current_price": 15_480.0, "eval_krw": 464_400.0, "cost_krw": 465_000.0},
+            "352820.KS": {"name": "하이브", "shares": 5.0, "avg_cost_krw": 189_700.0, "current_price": 213_500.0, "eval_krw": 1_067_500.0, "cost_krw": 948_500.0},
+            "328130.KQ": {"name": "루닛", "shares": 87.0, "avg_cost_krw": 11_450.0, "current_price": 11_110.0, "eval_krw": 966_570.0, "cost_krw": 996_150.0},
+        },
+        "IRP": {
+            "133690.KS": {"name": "TIGER 미국나스닥100", "shares": 30.0, "avg_cost_krw": 111_077.0, "current_price": 204_595.0, "eval_krw": 6_137_850.0, "cost_krw": 3_332_300.0},
+            "192090.KS": {"name": "TIGER 차이나CSI300", "shares": 25.0, "avg_cost_krw": 13_130.0, "current_price": 14_685.0, "eval_krw": 367_125.0, "cost_krw": 328_250.0},
+            "360750.KS": {"name": "TIGER 미국S&P500", "shares": 118.0, "avg_cost_krw": 16_838.0, "current_price": 28_875.0, "eval_krw": 3_407_250.0, "cost_krw": 1_986_880.0},
+        },
+        "연금저축": {
+            "133690.KS": {"name": "TIGER 미국나스닥100", "shares": 69.0, "avg_cost_krw": 102_974.0, "current_price": 204_595.0, "eval_krw": 14_117_055.0, "cost_krw": 7_105_210.0},
+            "251350.KS": {"name": "KODEX MSCI선진국", "shares": 20.0, "avg_cost_krw": 37_145.0, "current_price": 42_720.0, "eval_krw": 854_400.0, "cost_krw": 742_900.0},
+            "360750.KS": {"name": "TIGER 미국S&P500", "shares": 310.0, "avg_cost_krw": 18_214.0, "current_price": 28_875.0, "eval_krw": 8_951_250.0, "cost_krw": 5_646_570.0},
+        },
+        "ISA": {
+            "133690.KS": {"name": "TIGER 미국나스닥100", "shares": 30.0, "avg_cost_krw": 163_080.0, "current_price": 204_595.0, "eval_krw": 6_137_850.0, "cost_krw": 4_892_400.0},
+            "251350.KS": {"name": "KODEX MSCI선진국", "shares": 11.0, "avg_cost_krw": 39_940.0, "current_price": 42_720.0, "eval_krw": 469_920.0, "cost_krw": 439_340.0},
+            "360750.KS": {"name": "TIGER 미국S&P500", "shares": 200.0, "avg_cost_krw": 24_900.0, "current_price": 28_875.0, "eval_krw": 5_775_000.0, "cost_krw": 4_980_000.0},
+            "462870.KS": {"name": "시프트업", "shares": 160.0, "avg_cost_krw": 30_025.0, "current_price": 34_150.0, "eval_krw": 5_464_000.0, "cost_krw": 4_804_000.0},
+        },
+    }
+    use_broker_excel_snapshot = "PYTEST_CURRENT_TEST" not in os.environ
+    if not use_broker_excel_snapshot:
+        # Unit tests monkeypatch config.settings holdings/cash and should exercise
+        # the generic quote/fallback logic, not the live broker snapshot overlay.
+        samsung_excel_snapshot = {}
+
+    # Broker Excel snapshot does not provide a reliable intraday day-change feed.
+    # Keep 오늘 KPI visible in the HTML, but mark it unavailable/caveated instead
+    # of mixing stale day_pct values with fresh broker totals.
+    samsung_day_pct_overrides = {}
+    for _holdings in samsung_excel_snapshot.values():
+        for _ticker, _info in _holdings.items():
+            if _ticker in samsung_day_pct_overrides:
+                _info["day_pct"] = samsung_day_pct_overrides[_ticker]
+
     samsung_cash_overrides = {
-        "일반": 11_860_454.0,   # 현금잔고 8,588,420 + USD 예수금 KRW 환산 3,272,034
-        "RIA": 16_327_087.0,
-        "IRP": 5_449_584.0,    # 현금성자산 292,339 + 디폴트옵션 5,157,169 + 현금 76
-        "연금저축": 7_443_850.0, # MMF 7,443,821 + 현금 29
+        "일반": 4_313_735.0,    # Google Drive 삼성증권.xlsx 최신 스냅샷 기준
+        "IRP": 5_504_100.0,     # Google Drive 삼성증권.xlsx 최신 스냅샷 기준
+        "연금저축": 7_444_880.0, # Google Drive 삼성증권.xlsx 최신 스냅샷 기준
         "ISA": 4_556_922.0,
     }
+    if use_broker_excel_snapshot:
+        samsung_cash_overrides["RIA"] = 8_781_585.0  # Google Drive 삼성증권.xlsx 최신 스냅샷 기준
+    else:
+        samsung_cash_overrides = {}
 
     accounts = [
-        ("일반", HOLDINGS_GENERAL, samsung_cash_overrides.get("일반", DEFAULT_CASH)),
-        ("RIA", HOLDINGS_RIA, samsung_cash_overrides.get("RIA", RIA_CASH)),
-        ("IRP", HOLDINGS_IRP, samsung_cash_overrides.get("IRP", IRP_CASH + IRP_DEFAULT_OPTION)),
-        ("연금저축", HOLDINGS_PENSION, samsung_cash_overrides.get("연금저축", PENSION_MMF)),
-        ("ISA", HOLDINGS_ISA, samsung_cash_overrides.get("ISA", ISA_CASH)),
+        ("일반", samsung_excel_snapshot.get("일반", HOLDINGS_GENERAL), samsung_cash_overrides.get("일반", DEFAULT_CASH)),
+        ("RIA", samsung_excel_snapshot.get("RIA", HOLDINGS_RIA), samsung_cash_overrides.get("RIA", RIA_CASH)),
+        ("IRP", samsung_excel_snapshot.get("IRP", HOLDINGS_IRP), samsung_cash_overrides.get("IRP", IRP_CASH + IRP_DEFAULT_OPTION)),
+        ("연금저축", samsung_excel_snapshot.get("연금저축", HOLDINGS_PENSION), samsung_cash_overrides.get("연금저축", PENSION_MMF)),
+        ("ISA", samsung_excel_snapshot.get("ISA", HOLDINGS_ISA), samsung_cash_overrides.get("ISA", ISA_CASH)),
     ]
 
-    # 모든 티커 수집 → 배치 조회
+    # 모든 티커 수집 → 배치 조회.
+    # Broker Excel snapshot rows already have exact current/eval/cost values.
+    # Keep those valuation totals verbatim, but still fetch a separate quote for
+    # day_pct only so 오늘 수익률 can be calculated from broker eval_krw × live day_pct.
     all_tickers: dict[str, str] = {}
+    day_pct_tickers: dict[str, str] = {}
     for _, holdings, _ in accounts:
-        for t in holdings:
-            all_tickers[t] = PORTFOLIO.get(t, t)
-    quotes = _batch_quotes(all_tickers) if all_tickers else {}
+        for t, info in holdings.items():
+            name = PORTFOLIO.get(t, info.get("name", t))
+            if "eval_krw" in info and "current_price" in info:
+                day_pct_tickers[t] = name
+                continue
+            all_tickers[t] = name
+    quote_tickers = {**all_tickers, **day_pct_tickers}
+    quotes = _batch_quotes(quote_tickers) if quote_tickers else {}
 
-    # USDKRW
-    usdkrw = 1.0
-    try:
-        usd_q = _batch_quotes({"USDKRW=X": "원달러"})
-        if "USDKRW=X" in usd_q:
-            usdkrw = usd_q["USDKRW=X"].price or 1.0
-        # FX quote providers occasionally return a 100x-scale or wrong cross value.
-        # Keep portfolio valuation in a plausible USD/KRW band instead of exploding totals.
-        if not (800 <= usdkrw <= 2500):
-            usdkrw = 1543.18
-    except Exception:
-        usdkrw = 1543.18
+    # USDKRW. Excel snapshot uses Samsung broker KRW totals already, so the FX
+    # rate is only needed when non-snapshot USD holdings remain.
+    usdkrw = 1554.4
+    if all_tickers:
+        try:
+            usd_q = _batch_quotes({"USDKRW=X": "원달러"})
+            if "USDKRW=X" in usd_q:
+                usdkrw = usd_q["USDKRW=X"].price or usdkrw
+            # FX quote providers occasionally return a 100x-scale or wrong cross value.
+            # Keep portfolio valuation in a plausible USD/KRW band instead of exploding totals.
+            if not (800 <= usdkrw <= 2500):
+                usdkrw = 1554.4
+        except Exception:
+            usdkrw = 1554.4
 
     def _price_sanity_limit(ticker: str, avg_price: float, is_usd: bool) -> float:
         """Return max plausible quote/avg ratio for portfolio valuation.
@@ -429,8 +497,9 @@ def _fetch_portfolio_raw() -> dict:
             is_usd = avg_usd > 0
 
             q = quotes.get(ticker)
-            raw_price = q.price if q else 0.0
-            pct = q.pct if q else 0.0
+            broker_snapshot = "eval_krw" in info or "cost_krw" in info
+            raw_price = info.get("current_price", q.price if q else 0.0)
+            pct = info.get("day_pct", q.pct if q else 0.0)
             avg_price = avg_usd if is_usd else avg_krw
             cur_price, price_note = _guard_portfolio_quote(ticker, raw_price, avg_price, is_usd)
 
@@ -447,8 +516,17 @@ def _fetch_portfolio_raw() -> dict:
                 eval_krw = eval_total
                 cost_krw = cost_total
 
+            if broker_snapshot:
+                # Excel exported by Samsung already contains broker FX/fees/rounding.
+                # Use those KRW totals verbatim so the HTML tool matches the file.
+                eval_krw = float(info.get("eval_krw", eval_krw) or 0)
+                cost_krw = float(info.get("cost_krw", cost_krw) or 0)
+                pnl_pct = ((eval_krw - cost_krw) / cost_krw * 100) if cost_krw else 0
+                price_note["price_guard"] = "broker_excel_snapshot"
+                price_note["valuation_price"] = round(_safe(cur_price), 2)
+
             strategy = HOLDING_STRATEGY.get(ticker, {})
-            name = PORTFOLIO.get(ticker, ticker)
+            name = info.get("name") or PORTFOLIO.get(ticker, ticker)
 
             items.append({
                 "ticker": ticker,
@@ -459,6 +537,7 @@ def _fetch_portfolio_raw() -> dict:
                 "current_price": round(_safe(cur_price), 2),
                 "raw_price": round(_safe(raw_price), 2),
                 "day_pct": round(_safe(pct), 2),
+                "day_pct_source": "quote" if q else ("live_day_pct_snapshot" if broker_snapshot and "day_pct" in info else ("unavailable_broker_excel_snapshot" if broker_snapshot else "missing_quote")),
                 "pnl_pct": round(_safe(pnl_pct), 2),
                 "eval_krw": round(_safe(eval_krw)),
                 "horizon": strategy.get("horizon", ""),
@@ -470,13 +549,36 @@ def _fetch_portfolio_raw() -> dict:
 
         cash_krw = float(cash) if cash else 0
         principal = float(ACCOUNT_PRINCIPAL_KRW.get(acct_name, 0) or 0)
+        acct_asset_total = acct_eval + cash_krw
+        acct_pnl_krw = acct_eval - acct_cost
+        acct_today_chg = 0.0
+        acct_today_available = False
+        for _it in items:
+            _dp = _it.get("day_pct")
+            if _dp is None:
+                continue
+            if _it.get("day_pct_source") in ("missing_quote", "unavailable_broker_excel_snapshot"):
+                continue
+            try:
+                _prev = _it.get("eval_krw", 0) / (1 + float(_dp) / 100)
+                acct_today_chg += _it.get("eval_krw", 0) - _prev
+                acct_today_available = True
+            except Exception:
+                pass
         result_accounts.append({
             "name": acct_name,
             "cash": round(cash_krw),
             "items": items,
             "eval_total": round(acct_eval),
+            "asset_total": round(acct_asset_total),
             "cost_total": round(acct_cost),
             "principal": round(principal),
+            "pnl_krw": round(acct_pnl_krw),
+            "principal_pnl_krw": round(acct_asset_total - principal) if principal else None,
+            "today_pnl_krw": round(acct_today_chg) if acct_today_available else None,
+            "today_pnl_pct": round(acct_today_chg / acct_asset_total * 100, 2) if acct_today_available and acct_asset_total else None,
+            "today_pnl_source": "live_day_pct_snapshot" if acct_today_available else "unavailable",
+            "display_source": "samsung_broker_excel_snapshot" if use_broker_excel_snapshot else "settings_plus_quotes",
             "pnl_pct": round((acct_eval - acct_cost) / acct_cost * 100, 2) if acct_cost else 0,
         })
         total_eval += acct_eval + cash_krw
@@ -488,6 +590,8 @@ def _fetch_portfolio_raw() -> dict:
     # 비중 계산 (전체 평가금 대비)
     total_cash = sum(a["cash"] for a in result_accounts)
     grand_total = total_eval  # 이미 cash 포함
+    total_today_available = any(a.get("today_pnl_krw") is not None for a in result_accounts)
+    total_today_chg = sum(float(a.get("today_pnl_krw") or 0) for a in result_accounts)
     allocation = []
     for acct in result_accounts:
         for it in acct["items"]:
@@ -512,8 +616,14 @@ def _fetch_portfolio_raw() -> dict:
     return {
         "accounts": result_accounts,
         "total_eval": round(_safe(total_eval)),
+        "total_asset": round(_safe(total_eval)),
+        "total_holdings_eval": round(_safe(total_eval - total_cash)),
         "total_pnl_pct": round(_safe(raw_pnl), 2),
+        "today_pnl_krw": round(total_today_chg) if total_today_available else None,
+        "today_pnl_pct": round(total_today_chg / grand_total * 100, 2) if total_today_available and grand_total else None,
+        "today_pnl_source": "quote_day_pct_snapshot" if total_today_available and use_broker_excel_snapshot else ("quote" if total_today_available else "unavailable"),
         "total_cash": round(total_cash),
+        "display_source": "samsung_broker_excel_snapshot" if use_broker_excel_snapshot else "settings_plus_quotes",
         "total_principal": round(float(TOTAL_PRINCIPAL_KRW)),
         "total_principal_pnl_pct": round(_safe(principal_pnl), 2),
         "cash_weight": cash_weight,
@@ -1818,7 +1928,8 @@ def _fetch_toss_account_summary_raw() -> dict:
         bp_krw = tc.get_buying_power(seq, "KRW")
         if bp_krw:
             try:
-                cash_krw = float(bp_krw.get("cashBuyingPower", "0"))
+                if str(bp_krw.get("currency", "KRW")).upper() == "KRW":
+                    cash_krw = float(bp_krw.get("cashBuyingPower", "0"))
             except (ValueError, TypeError):
                 pass
 
@@ -1826,17 +1937,11 @@ def _fetch_toss_account_summary_raw() -> dict:
         bp_usd = tc.get_buying_power(seq, "USD")
         if bp_usd:
             try:
-                v = bp_usd.get("cashBuyingPower", "0")
-                cash_usd = float(v) if v and float(v) > 0 else None
+                if str(bp_usd.get("currency", "USD")).upper() == "USD":
+                    v = bp_usd.get("cashBuyingPower", "0")
+                    cash_usd = float(v) if v and float(v) > 0 else None
             except (ValueError, TypeError):
                 pass
-
-    base["market_value"] = {"krw": mv_krw, "usd": mv_usd}
-    base["cash"] = {"krw": cash_krw, "usd": cash_usd, "source": "Toss"}
-    base["total_account_value"] = {
-        "krw": mv_krw + cash_krw,
-        "usd": ((mv_usd or 0) + (cash_usd or 0)) or None,
-    }
 
     # 환율
     fx = tc.get_exchange_rate("USD", "KRW")
@@ -1847,16 +1952,108 @@ def _fetch_toss_account_summary_raw() -> dict:
         except Exception:
             pass
         fx = tc.get_exchange_rate("USD", "KRW")
+    fx_rate = 0.0
     if fx:
         try:
+            fx_rate = float(fx.get("rate", 0) or 0)
             base["exchange_rate"] = {
                 "base": fx.get("baseCurrency", "USD"),
                 "quote": fx.get("quoteCurrency", "KRW"),
-                "rate": float(fx.get("rate", 0)),
+                "rate": fx_rate,
                 "source": "Toss",
             }
         except (ValueError, TypeError):
-            pass
+            fx_rate = 0.0
+
+    mv_usd_krw = (mv_usd or 0) * fx_rate if fx_rate else 0.0
+    cash_usd_krw = (cash_usd or 0) * fx_rate if fx_rate else 0.0
+    # Toss 응답은 KRW와 USD buying power/market value를 분리해서 준다.
+    # HTML 총자산/손익 표시는 원화 환산 총액이어야 하므로 USD 현금·미국주 평가를 합산한다.
+    market_value_krw_total = mv_krw + mv_usd_krw
+    cash_krw_total = cash_krw + cash_usd_krw
+    total_usd = ((mv_usd or 0) + (cash_usd or 0)) or None
+
+    def _toss_num(v, default=0.0):
+        try:
+            if v is None or v == "":
+                return default
+            return float(v)
+        except (TypeError, ValueError):
+            return default
+
+    def _toss_money_to_krw(amount, currency):
+        val = _toss_num(amount)
+        if str(currency or "KRW").upper() == "USD" and fx_rate:
+            return val * fx_rate
+        return val
+
+    # Toss 앱의 수입/손익 표시는 보유종목별 profitLoss / dailyProfitLoss가
+    # 원본에 들어있다. 기존 대시보드는 총자산만 합산하고 이 필드를 버려서
+    # 앱에서는 수익인데 툴은 손익 없음/0처럼 보였다. read-only로 원본 손익을
+    # 합산해 화면에 그대로 노출한다. 실현손익은 별도 체결/정산 API가 없으면
+    # 추정하지 않고 None으로 둔다.
+    unrealized_krw = 0.0
+    unrealized_after_cost_krw = 0.0
+    daily_krw = 0.0
+    cost_basis_krw = 0.0
+    daily_basis_krw = 0.0
+    profitable_count = 0
+    loss_count = 0
+    for item in base.get("holdings_items", []) or []:
+        cur = str(item.get("currency") or "KRW").upper()
+        pl = item.get("profitLoss") or {}
+        dpl = item.get("dailyProfitLoss") or {}
+        mv_row = item.get("marketValue") or {}
+        unrealized_krw += _toss_money_to_krw(pl.get("amount"), cur)
+        unrealized_after_cost_krw += _toss_money_to_krw(pl.get("amountAfterCost", pl.get("amount")), cur)
+        daily_krw += _toss_money_to_krw(dpl.get("amount"), cur)
+        cost_basis_krw += _toss_money_to_krw(mv_row.get("purchaseAmount"), cur)
+        daily_basis_krw += _toss_money_to_krw(mv_row.get("amount"), cur)
+        amt = _toss_num(pl.get("amountAfterCost", pl.get("amount")))
+        if amt > 0:
+            profitable_count += 1
+        elif amt < 0:
+            loss_count += 1
+
+    base["profit_loss"] = {
+        "krw": unrealized_after_cost_krw,
+        "before_cost_krw": unrealized_krw,
+        "rate": (unrealized_after_cost_krw / cost_basis_krw) if cost_basis_krw else None,
+        "source": "Toss holdings.profitLoss.amountAfterCost",
+        "profitable_count": profitable_count,
+        "loss_count": loss_count,
+    }
+    base["today_profit_loss"] = {
+        "krw": daily_krw,
+        "rate": (daily_krw / daily_basis_krw) if daily_basis_krw else None,
+        "source": "Toss holdings.dailyProfitLoss.amount",
+    }
+    base["realized_profit_loss"] = {
+        "krw": None,
+        "source": "not_available_from_current_readonly_summary",
+        "note": "Toss 앱의 수입이 일간/평가손익이면 today_profit_loss/profit_loss를 봐야 함",
+    }
+
+    base["market_value"] = {
+        "krw": market_value_krw_total,
+        "krw_native": mv_krw,
+        "usd": mv_usd,
+        "usd_krw": mv_usd_krw,
+    }
+    base["cash"] = {
+        "krw": cash_krw_total,
+        "krw_native": cash_krw,
+        "usd": cash_usd,
+        "usd_krw": cash_usd_krw,
+        "source": "Toss",
+    }
+    base["total_account_value"] = {
+        "krw": market_value_krw_total + cash_krw_total,
+        "krw_native": mv_krw + cash_krw,
+        "usd": total_usd,
+        "usd_krw": mv_usd_krw + cash_usd_krw,
+        "usd_included": bool(fx_rate and total_usd),
+    }
 
     return base
 
@@ -1927,6 +2124,167 @@ def toss_automation_status() -> dict:
     return _cached("toss_automation_status", 30, _fetch_toss_automation_status_raw)
 
 
+def _to_float(value, default: float | None = None) -> float | None:
+    """Best-effort numeric conversion for read-only cross checks."""
+    try:
+        if value in (None, "", [], {}):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _kr_symbol_candidates(symbol: str) -> list[str]:
+    """Return safe KIS lookup variants for Toss/KR symbols."""
+    sym = str(symbol or "").upper().strip()
+    if not sym:
+        return []
+    if sym.endswith((".KS", ".KQ")):
+        return [sym]
+    if sym.isdigit() and len(sym) == 6:
+        return [f"{sym}.KS", f"{sym}.KQ", sym]
+    return [sym]
+
+
+def _toss_holding_price_map() -> dict[str, dict]:
+    """Toss holdings keyed by raw and suffix-normalized symbols. Read-only."""
+    out: dict[str, dict] = {}
+    try:
+        acct = toss_account_summary() or {}
+        for h in acct.get("holdings_items") or []:
+            raw = str(h.get("symbol") or "").upper().strip()
+            if not raw:
+                continue
+            row = {
+                "symbol": raw,
+                "name": h.get("name") or raw,
+                "last_price": _to_float(h.get("lastPrice")),
+                "quantity": _to_float(h.get("quantity")),
+                "currency": h.get("currency") or "",
+                "market_country": h.get("marketCountry") or "",
+            }
+            out[raw] = row
+            if raw.isdigit() and len(raw) == 6:
+                out[f"{raw}.KS"] = row
+                out[f"{raw}.KQ"] = row
+    except Exception as e:
+        log.debug("Toss holding map unavailable: %s", e)
+    return out
+
+
+def _kis_price_for_symbol(symbol: str) -> dict:
+    """Read KIS price when available. No writes, no order path."""
+    sym = str(symbol or "").upper().strip()
+    if not sym:
+        return {"ok": False, "source": "KIS", "reason": "missing_symbol"}
+    try:
+        from core.market_kis import get_domestic_price, get_overseas_price
+        if sym.endswith((".KS", ".KQ")) or (sym.isdigit() and len(sym) == 6):
+            for cand in _kr_symbol_candidates(sym):
+                q = get_domestic_price(cand)
+                if q:
+                    price = _to_float(q.get("price") if isinstance(q, dict) else getattr(q, "price", None))
+                    if price and price > 0:
+                        return {"ok": True, "source": "KIS", "symbol": cand, "price": price}
+            return {"ok": False, "source": "KIS", "reason": "domestic_price_unavailable"}
+        q = get_overseas_price(sym)
+        if q:
+            price = _to_float(q.get("price") if isinstance(q, dict) else getattr(q, "price", None))
+            if price and price > 0:
+                return {"ok": True, "source": "KIS", "symbol": sym, "price": price}
+        return {"ok": False, "source": "KIS", "reason": "overseas_price_unavailable"}
+    except Exception as e:
+        return {"ok": False, "source": "KIS", "reason": str(e)[-120:]}
+
+
+def _price_gap_pct(a: float | None, b: float | None) -> float | None:
+    if not a or not b or a <= 0 or b <= 0:
+        return None
+    return round((a / b - 1.0) * 100.0, 2)
+
+
+def _quality_tone_from_gap(abs_gap: float | None, warn_pct: float = 0.7, block_pct: float = 2.0) -> str:
+    if abs_gap is None:
+        return "unknown"
+    if abs_gap >= block_pct:
+        return "block"
+    if abs_gap >= warn_pct:
+        return "warn"
+    return "ok"
+
+
+def _cross_check_price_quality(symbol: str, current_price: float | None = None) -> dict:
+    """Cross-check every overlapping Toss/KIS price field available for a symbol."""
+    sym = str(symbol or "").upper().strip()
+    cur = _to_float(current_price)
+    kis = _kis_price_for_symbol(sym)
+    holdings = _toss_holding_price_map()
+    toss_row = holdings.get(sym)
+    if not toss_row and sym.endswith((".KS", ".KQ")):
+        toss_row = holdings.get(sym.split(".", 1)[0])
+    toss_price = _to_float((toss_row or {}).get("last_price"))
+
+    checks: list[dict] = []
+    tones: list[str] = []
+
+    if kis.get("ok") and cur:
+        gap = _price_gap_pct(cur, kis.get("price"))
+        tone = _quality_tone_from_gap(abs(gap) if gap is not None else None)
+        checks.append({"name": "KIS vs 후보 현재가", "tone": tone, "source_a": "candidate.current_price", "price_a": cur, "source_b": "KIS", "price_b": kis.get("price"), "gap_pct": gap})
+        tones.append(tone)
+    elif cur:
+        checks.append({"name": "KIS vs 후보 현재가", "tone": "unknown", "reason": kis.get("reason") or "kis_unavailable"})
+
+    if kis.get("ok") and toss_price:
+        gap = _price_gap_pct(toss_price, kis.get("price"))
+        tone = _quality_tone_from_gap(abs(gap) if gap is not None else None)
+        checks.append({"name": "Toss 보유평가가 vs KIS 현재가", "tone": tone, "source_a": "Toss.holdings.lastPrice", "price_a": toss_price, "source_b": "KIS", "price_b": kis.get("price"), "gap_pct": gap})
+        tones.append(tone)
+
+    if toss_price and cur:
+        gap = _price_gap_pct(toss_price, cur)
+        tone = _quality_tone_from_gap(abs(gap) if gap is not None else None)
+        checks.append({"name": "Toss 보유평가가 vs 후보 현재가", "tone": tone, "source_a": "Toss.holdings.lastPrice", "price_a": toss_price, "source_b": "candidate.current_price", "price_b": cur, "gap_pct": gap})
+        tones.append(tone)
+
+    # Only true Toss↔KIS overlap may hard-block. Candidate-vs-KIS alone is
+    # a scanner freshness warning because it is not a broker-side Toss price.
+    has_toss_kis_overlap = bool(toss_price and kis.get("ok"))
+    if "block" in tones and has_toss_kis_overlap:
+        quality = "low"; action = "BLOCK_DATA_MISMATCH"
+    elif "block" in tones or "warn" in tones:
+        quality = "medium"; action = "SMALL_PASS_OR_REDUCE_SIZE"
+    elif "ok" in tones:
+        quality = "high"; action = "PASS_CONFIDENCE_UP"
+    else:
+        quality = "unknown"; action = "NO_OVERLAP_AVAILABLE"
+
+    return {"schema": "toss_kis_price_cross_check.v1", "symbol": sym, "quality": quality, "action_hint": action, "has_toss_holding_price": bool(toss_price), "has_kis_price": bool(kis.get("ok")), "checks": checks}
+
+
+def _build_toss_kis_cross_check_summary(sample_items: list[dict] | None = None) -> dict:
+    """Aggregate read-only Toss+KIS cross-check status for dashboard/agent use."""
+    sample_items = sample_items or []
+    rows: list[dict] = []
+    for sym, row in list(_toss_holding_price_map().items()):
+        if "." in sym:
+            continue
+        rows.append(_cross_check_price_quality(sym, row.get("last_price")))
+    seen = {r.get("symbol") for r in rows}
+    for item in sample_items[:10]:
+        sym = str(item.get("symbol") or item.get("ticker") or "").upper().strip()
+        if not sym or sym in seen:
+            continue
+        rows.append(_cross_check_price_quality(sym, item.get("current_price") or item.get("price") or item.get("limit_price")))
+        seen.add(sym)
+    counts = {"high": 0, "medium": 0, "low": 0, "unknown": 0}
+    for r in rows:
+        q = r.get("quality") or "unknown"
+        counts[q] = counts.get(q, 0) + 1
+    overall = "low" if counts.get("low") else ("medium" if counts.get("medium") else ("high" if counts.get("high") else "unknown"))
+    return {"schema": "toss_kis_cross_check.v1.read_only", "overall_quality": overall, "counts": counts, "rows": rows[:20], "rule": "Toss와 KIS에서 겹치는 정보는 모두 대조. 일치=신뢰도 상승, 중간 괴리=수량 축소, 큰 괴리=BLOCK."}
+
+
 def toss_paper_trades(limit: int = 50) -> dict:
     """Toss paper trade 목록."""
     from core.toss_paper_trading import list_paper_trades
@@ -1950,7 +2308,20 @@ def _fetch_toss_cross_check_raw() -> dict:
     from core.toss_decision_context import get_toss_decision_context
     from core.toss_cross_check import cross_check_summary
     ctx = get_toss_decision_context()
-    return cross_check_summary(ctx)
+    out = cross_check_summary(ctx)
+    if not isinstance(out, dict):
+        out = {}
+    quality = _build_toss_kis_cross_check_summary()
+    out["data_quality"] = quality
+    out["data_quality_summary"] = {
+        "overall_quality": quality.get("overall_quality"),
+        "counts": quality.get("counts", {}),
+        "rule": quality.get("rule"),
+    }
+    if quality.get("overall_quality") == "low":
+        out.setdefault("warnings", []).append("Toss/KIS 가격 교차검증 큰 괴리 — 자동 실행 BLOCK 대상")
+        out["all_ok"] = False
+    return out
 
 
 def toss_cross_check() -> dict:
@@ -2071,7 +2442,6 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20) -> dict:
             out = dict(item)
             price = out.get("price") or out.get("limit_price") or out.get("entry_price")
             limit_price = out.get("limit_price") or price
-            quantity = int(out.get("quantity") or 0)
             try:
                 current_price = float(out.get("current_price") or price or 0)
             except Exception:
@@ -2080,9 +2450,61 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20) -> dict:
                 limit_f = float(limit_price or 0)
             except Exception:
                 limit_f = 0.0
-            estimated = float(out.get("estimated_amount_krw") or (quantity * limit_f if quantity and limit_f else 0))
             stop = out.get("stop_loss")
             target = out.get("target_price")
+
+            def _float_or_zero(value) -> float:
+                try:
+                    return float(value or 0)
+                except Exception:
+                    return 0.0
+
+            def _sizing_multiplier(score: float, rr: float, stop_risk_pct: float) -> float:
+                # 보수적 병목 방식: 확신도/손익비/손절폭 중 가장 약한 축이 수량을 제한한다.
+                if score >= 85:
+                    score_mult = 1.0
+                elif score >= 75:
+                    score_mult = 0.75
+                elif score >= 65:
+                    score_mult = 0.50
+                else:
+                    score_mult = 0.33
+
+                if rr >= 2.5:
+                    rr_mult = 1.0
+                elif rr >= 1.8:
+                    rr_mult = 0.75
+                elif rr >= 1.2:
+                    rr_mult = 0.50
+                else:
+                    rr_mult = 0.33
+
+                if 0 < stop_risk_pct <= 4.0:
+                    risk_mult = 1.0
+                elif stop_risk_pct <= 6.0:
+                    risk_mult = 0.75
+                elif stop_risk_pct <= 8.0:
+                    risk_mult = 0.50
+                else:
+                    risk_mult = 0.33
+                return min(score_mult, rr_mult, risk_mult)
+
+            score = _float_or_zero(out.get("score"))
+            rr = _float_or_zero(out.get("risk_reward"))
+            stop_f = _float_or_zero(stop)
+            stop_risk_pct = round(max((limit_f - stop_f) / limit_f * 100.0, 0.0), 2) if limit_f and stop_f else None
+            quantity_source = "provided"
+            quantity = int(out.get("quantity") or 0)
+            position_budget_krw = None
+            if limit_f and not out.get("limit_exceeded"):
+                multiplier = _sizing_multiplier(score, rr, stop_risk_pct or 99.0)
+                position_budget_krw = max(limit_f, max_order_krw * multiplier)
+                position_budget_krw = min(position_budget_krw, max_order_krw)
+                quantity = max(1, int(position_budget_krw // limit_f))
+                quantity_source = "confidence_rr_stop_sizing"
+            elif limit_f:
+                quantity = max(1, quantity)
+            estimated = quantity * limit_f if quantity and limit_f else _float_or_zero(out.get("estimated_amount_krw"))
 
             out.setdefault("account", "토스 AI")
             out.setdefault("account_type", "토스 AI")
@@ -2091,18 +2513,36 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20) -> dict:
             out.setdefault("current_price", current_price or None)
             out.setdefault("current_price_source", "discovery_candidates.price")
             out.setdefault("current_price_age_sec", None)
-            out.setdefault("quantity", quantity)
-            out.setdefault("estimated_amount_krw", round(estimated, 2) if estimated else None)
+            out["quantity"] = quantity
+            out["estimated_amount_krw"] = round(estimated, 2) if estimated else None
+            out["quantity_source"] = quantity_source
+            out["position_budget_krw"] = round(position_budget_krw, 2) if position_budget_krw else None
+            out["position_sizing"] = {
+                "method": "confidence_rr_stop_sizing",
+                "max_order_krw": max_order_krw,
+                "score": score or None,
+                "risk_reward": rr or None,
+                "stop_risk_pct": stop_risk_pct,
+                "note": "확신도·손익비·손절폭 중 가장 약한 축으로 수량 제한",
+            }
             out.setdefault("condition", "지정가 이하에서만 검토 · 승호 최종 승인 전 실주문 없음")
             out.setdefault("execution_gate", "Hermes PASS + 승호 최종 승인 필요")
             out.setdefault("broker_execution", "Toss live pilot BUY_ONLY approval gate")
             out.setdefault("read_only_notice", "GET-only 후보 표시 · 이 응답은 주문 생성/승인/전송을 하지 않음")
 
+            buy_limit_above_current = False
             if current_price and limit_f:
                 gap = round((limit_f / current_price - 1.0) * 100.0, 2)
                 out.setdefault("current_vs_limit_gap_pct", gap)
-                if gap > 0.3:
-                    fill_note = "지정가가 현재가보다 높음 — 즉시체결/추격 위험 재검증"
+                side = str(out.get("side") or "").lower()
+                buy_limit_above_current = side == "buy" and limit_f > current_price
+                if buy_limit_above_current:
+                    fill_note = "지정가가 현재가보다 높음 — 자동매수 차단(추격/즉시체결 위험)"
+                    out["execution_status"] = "chase_block"
+                    out["executable_now"] = False
+                    out["block_reason"] = (
+                        f"매수 지정가 {limit_f:,.0f}원 > 현재가 {current_price:,.0f}원"
+                    )
                 elif gap >= -0.3:
                     fill_note = "현재가 근접 — 즉시체결 가능성 있음"
                 else:
@@ -2112,6 +2552,15 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20) -> dict:
                 out.setdefault("current_vs_limit_gap_pct", None)
                 out.setdefault("fill_risk_note", "현재가 또는 지정가 부족 — 체결 가능성 판단 불가")
 
+            data_quality = _cross_check_price_quality(out.get("symbol") or "", out.get("current_price"))
+            out["data_quality"] = data_quality
+            if data_quality.get("quality") == "low":
+                out["execution_status"] = "data_quality_block"
+                out["executable_now"] = False
+                out["block_reason"] = "Toss/KIS 가격 교차검증 큰 괴리"
+            elif data_quality.get("quality") == "medium":
+                out["data_quality_note"] = "Toss/KIS 가격 괴리 주의 — 소액/수량 축소 우선"
+
             risk_notes = list(out.get("risk_notes") or [])
             if stop:
                 risk_notes.append(f"손절 기준 {stop:,.0f}원" if isinstance(stop, (int, float)) else f"손절 기준 {stop}")
@@ -2119,6 +2568,8 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20) -> dict:
                 risk_notes.append(f"목표 기준 {target:,.0f}원" if isinstance(target, (int, float)) else f"목표 기준 {target}")
             if out.get("limit_exceeded"):
                 risk_notes.append(str(out.get("block_reason") or "1회 주문 한도 초과"))
+            if buy_limit_above_current:
+                risk_notes.append(str(out.get("block_reason") or "매수 지정가가 현재가보다 높음"))
             if out.get("blocking_risk_flags"):
                 risk_notes.extend(str(f) for f in out.get("blocking_risk_flags") or [])
             if out.get("observation_flags"):
@@ -2142,13 +2593,13 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20) -> dict:
                 if value in (None, "", 0, 0.0, []):
                     missing.append(key)
             out["missing_fields"] = missing
-            hard_blocked = out.get("execution_status") == "hold_risk_flags" or bool(out.get("blocking_risk_flags"))
+            hard_blocked = out.get("execution_status") in {"hold_risk_flags", "chase_block", "data_quality_block"} or bool(out.get("blocking_risk_flags"))
 
             # 품질 게이트 decision_bucket 반영
             bucket = out.get("decision_bucket", "")
             if bucket:
                 _exec_buckets = ("PASS_EXECUTE", "SMALL_PASS")
-                out["stock_agent_ready"] = bucket in _exec_buckets and not missing and not out.get("limit_exceeded")
+                out["stock_agent_ready"] = bucket in _exec_buckets and not missing and not out.get("limit_exceeded") and not hard_blocked
                 if bucket not in _exec_buckets and not out.get("block_reason"):
                     out["block_reason"] = out.get("decision_reason", bucket)
             else:

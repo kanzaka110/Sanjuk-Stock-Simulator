@@ -98,18 +98,38 @@ class TestDryRunBlocked(unittest.TestCase):
     def setUp(self):
         self.transport = DryRunTossLiveTransport()
 
-    def test_sell_blocked(self):
-        r = self.transport.send_buy_order(_payload(side="sell"))
+    def test_invalid_side_blocked(self):
+        r = self.transport.send_buy_order(_payload(side="short"))
         self.assertFalse(r["ok"])
         self.assertTrue(r["blocked"])
         self.assertFalse(r["live_order_sent"])
         self.assertNotIn("order_request_preview", r)
 
-    def test_over_limit_blocked(self):
+    def test_sell_allowed_but_dry_run_stays_blocked(self):
+        # BUY+SELL 지정가 지원 — sell도 schema ok, 단 dry-run이므로 전송은 안 됨
+        r = self.transport.send_buy_order(_payload(side="sell"))
+        self.assertTrue(r["ok"])
+        self.assertTrue(r["blocked"])
+        self.assertFalse(r["live_order_sent"])
+        self.assertEqual(r["order_request_preview"]["side"], "SELL")
+
+    def test_over_limit_blocked_with_explicit_cap(self):
+        # 기본 cap은 0(없음) — payload에 max_order_krw를 명시한 경우만 한도 차단
+        r = self.transport.send_buy_order(
+            _payload(
+                limit_price=150000,
+                estimated_amount_krw=150000,
+                max_order_krw=100_000,
+            )
+        )
+        self.assertFalse(r["ok"])
+        self.assertFalse(r["live_order_sent"])
+
+    def test_no_default_cap_allows_amount(self):
         r = self.transport.send_buy_order(
             _payload(limit_price=150000, estimated_amount_krw=150000)
         )
-        self.assertFalse(r["ok"])
+        self.assertTrue(r["ok"])
         self.assertFalse(r["live_order_sent"])
 
 

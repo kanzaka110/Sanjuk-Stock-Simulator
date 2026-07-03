@@ -785,14 +785,40 @@ def test_risk_warning_no_forbidden_cta():
 
 
 def test_samsung_screenshot_trades_reflected_in_settings():
-    """2026-06-24 삼성증권 스샷 기준 보유/현금이 PC·모바일 공통 API 원본에 반영된다."""
+    """2026-07-01 삼성증권/RIA 체결 기준 보유/현금이 PC·모바일 공통 API 원본에 반영된다."""
     from config.settings import HOLDINGS_ISA, HOLDINGS_RIA, ISA_CASH, RIA_CASH
 
     assert "161510.KS" not in HOLDINGS_ISA
-    assert HOLDINGS_RIA["069500.KS"]["shares"] == 12
-    assert HOLDINGS_RIA["069500.KS"]["avg_cost_krw"] == 142_000
-    assert ISA_CASH == 4_556_922.0   # 삼성증권 스샷 2026-06-24
-    assert RIA_CASH == 17_341_329.0  # 삼성증권 스샷 2026-06-24
+    assert HOLDINGS_RIA["069500.KS"]["shares"] == 21
+    assert HOLDINGS_RIA["069500.KS"]["avg_cost_krw"] == 136_977
+    assert HOLDINGS_RIA["091160.KS"] == {"shares": 20, "avg_cost_krw": 165_425}
+    assert HOLDINGS_RIA["352820.KS"] == {"shares": 5, "avg_cost_krw": 189_700}
+    assert HOLDINGS_RIA["003670.KS"] == {"shares": 5, "avg_cost_krw": 176_700}
+    assert HOLDINGS_RIA["005380.KS"] == {"shares": 1, "avg_cost_krw": 497_000}
+    assert HOLDINGS_RIA["328130.KQ"] == {"shares": 87, "avg_cost_krw": 11_450}
+    assert HOLDINGS_RIA["041510.KQ"] == {"shares": 13, "avg_cost_krw": 72_100}
+    assert ISA_CASH == 4_556_922.0
+    assert RIA_CASH == 8_781_585.0
+
+
+def test_samsung_general_drive_excel_snapshot_reflected():
+    """Google Drive 삼성증권.xlsx 최신 스냅샷을 일반(종합) 보유 원본으로 사용한다."""
+    from config.settings import DEFAULT_CASH, HOLDINGS_GENERAL
+
+    assert HOLDINGS_GENERAL["005930.KS"]["shares"] == 100
+    assert HOLDINGS_GENERAL["005930.KS"]["avg_cost_krw"] == 83_482
+    assert HOLDINGS_GENERAL["000660.KS"] == {"shares": 2, "avg_cost_krw": 2_325_000}
+    assert DEFAULT_CASH == 4_313_735.0
+
+
+def test_dashboard_ria_cash_uses_live_settings_value():
+    """RIA 계좌는 dashboard_data에 하드코딩 override가 없어 settings.RIA_CASH 갱신이 바로 반영된다."""
+    import core.dashboard_data as dd
+    import config.settings as settings
+    import inspect
+
+    src = inspect.getsource(dd._fetch_portfolio_raw)
+    assert '"RIA":' not in src.split("samsung_cash_overrides = {")[1].split("}")[0]
 
 def test_trade_api_routes_in_source():
     """거래 ledger 조회 API는 GET-only로 존재한다."""
@@ -2343,3 +2369,87 @@ def test_stock_agent_activity_api_and_html_markers():
     assert "핵심 활동" in pc
     assert "핵심 활동" in mobile
     assert "주문 생성/승인/전송 없음" in data
+
+
+def test_portfolio_clamps_obvious_quote_outliers(monkeypatch):
+    """총평가액은 split/scale 의심 가격 하나로 급등하지 않도록 보수 계산한다."""
+    from core.models import Quote
+    from core import market
+    from config import settings
+
+    monkeypatch.setattr(settings, "HOLDINGS_GENERAL", {
+        "005930.KS": {"shares": 90, "avg_cost_krw": 60425},
+        "MU": {"shares": 5, "avg_cost_usd": 408.8181},
+    })
+    monkeypatch.setattr(settings, "HOLDINGS_RIA", {})
+    monkeypatch.setattr(settings, "HOLDINGS_IRP", {})
+    monkeypatch.setattr(settings, "HOLDINGS_PENSION", {})
+    monkeypatch.setattr(settings, "HOLDINGS_ISA", {})
+    monkeypatch.setattr(settings, "DEFAULT_CASH", 0)
+    monkeypatch.setattr(settings, "RIA_CASH", 0)
+    monkeypatch.setattr(settings, "IRP_CASH", 0)
+    monkeypatch.setattr(settings, "IRP_DEFAULT_OPTION", 0)
+    monkeypatch.setattr(settings, "PENSION_MMF", 0)
+    monkeypatch.setattr(settings, "ISA_CASH", 0)
+
+    def fake_batch_quotes(tickers):
+        if "USDKRW=X" in tickers:
+            return {"USDKRW=X": Quote("USDKRW=X", "원달러", 1543.18)}
+        return {
+            "005930.KS": Quote("005930.KS", "삼성전자", 328000, pct=1.55),
+            "MU": Quote("MU", "마이크론", 1138.65, pct=-0.58),
+        }
+
+    monkeypatch.setattr(market, "_batch_quotes", fake_batch_quotes)
+
+    p = dd._fetch_portfolio_raw()
+    general = next(a for a in p["accounts"] if a["name"] == "일반")
+    items = {it["ticker"]: it for it in general["items"]}
+
+    assert items["005930.KS"]["price_guard"] == "ok"
+    assert items["005930.KS"]["raw_price"] == 328000
+    assert items["005930.KS"]["current_price"] == 328000
+    assert items["005930.KS"]["eval_krw"] == 328000 * 90
+
+    assert items["MU"]["price_guard"] == "ok"
+    assert items["MU"]["raw_price"] == 1138.65
+    assert items["MU"]["current_price"] == 1138.65
+    assert items["MU"]["eval_krw"] == round(1138.65 * 5 * 1543.18)
+    assert "price_warning" not in items["MU"]
+
+    # Unit-test monkeypatch mode disables broker Excel overlays and cash overrides,
+    # so total_eval is exactly the two mocked holdings with mocked FX.
+    assert p["total_eval"] == items["005930.KS"]["eval_krw"] + items["MU"]["eval_krw"]
+
+
+def test_portfolio_missing_quote_uses_cost_with_warning(monkeypatch):
+    """현재가가 0/누락이면 평가액은 평단 기준으로 보수 계산하고 경고를 남긴다."""
+    from core.models import Quote
+    from core import market
+    from config import settings
+
+    monkeypatch.setattr(settings, "HOLDINGS_GENERAL", {"NVDA": {"shares": 10, "avg_cost_usd": 190}})
+    monkeypatch.setattr(settings, "HOLDINGS_RIA", {})
+    monkeypatch.setattr(settings, "HOLDINGS_IRP", {})
+    monkeypatch.setattr(settings, "HOLDINGS_PENSION", {})
+    monkeypatch.setattr(settings, "HOLDINGS_ISA", {})
+    monkeypatch.setattr(settings, "DEFAULT_CASH", 0)
+    monkeypatch.setattr(settings, "RIA_CASH", 0)
+    monkeypatch.setattr(settings, "IRP_CASH", 0)
+    monkeypatch.setattr(settings, "IRP_DEFAULT_OPTION", 0)
+    monkeypatch.setattr(settings, "PENSION_MMF", 0)
+    monkeypatch.setattr(settings, "ISA_CASH", 0)
+
+    def fake_batch_quotes(tickers):
+        if "USDKRW=X" in tickers:
+            return {"USDKRW=X": Quote("USDKRW=X", "원달러", 1500)}
+        return {"NVDA": Quote("NVDA", "엔비디아", 0)}
+
+    monkeypatch.setattr(market, "_batch_quotes", fake_batch_quotes)
+    p = dd._fetch_portfolio_raw()
+    item = next(a for a in p["accounts"] if a["name"] == "일반")["items"][0]
+
+    assert item["price_guard"] == "missing"
+    assert item["current_price"] == 190
+    assert item["eval_krw"] == 190 * 10 * 1500
+    assert "현재가 조회 실패" in item["price_warning"]

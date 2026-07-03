@@ -209,6 +209,10 @@ class MarketMonitor:
         alert_triggers = self._check_price_alerts(now, kr_tradeable, us_tradeable, kr_session, us_session)
         triggers.extend(alert_triggers)
 
+        # 미결 예약(비보유)의 무효화 조건 감시 — 셋업 붕괴 시 예약 취소 알림
+        invalidation_triggers = self._check_invalidation_alerts(now, kr_tradeable, us_tradeable, kr_session, us_session)
+        triggers.extend(invalidation_triggers)
+
         if triggers:
             log.info(f"트리거 {len(triggers)}건 감지 (KR={kr_session}, US={us_session})")
         return triggers
@@ -526,6 +530,87 @@ class MarketMonitor:
             log.info("가격 알림 트리거 %d건 (PRICE_ALERTS)", len(triggers))
         return triggers
 
+    def _check_invalidation_alerts(
+        self,
+        now: datetime,
+        kr_tradeable: bool,
+        us_tradeable: bool,
+        kr_session: str,
+        us_session: str,
+    ) -> list[AlertTrigger]:
+        """비보유 미결 매수 예약(눌림목 예약 등)의 무효화 조건 감시.
+
+        보유 종목 손절은 _check_price_targets가 커버 — 여기는 **비보유** 예약 전용.
+        예약을 걸어둔 종목이 손절선 아래로 붕괴하면, 지정가에 이미 체결됐거나
+        곧 체결될 위험 → "예약 취소·재평가" 알림을 보낸다.
+        """
+        from core.market import _get_quote_realtime
+
+        triggers: list[AlertTrigger] = []
+        try:
+            from datetime import timedelta
+
+            from config.settings import (
+                HOLDINGS_GENERAL, HOLDINGS_ISA, HOLDINGS_RIA,
+                HOLDINGS_IRP, HOLDINGS_PENSION,
+            )
+            held: set[str] = set()
+            for h in (HOLDINGS_GENERAL, HOLDINGS_ISA, HOLDINGS_RIA, HOLDINGS_IRP, HOLDINGS_PENSION):
+                held.update(h.keys())
+
+            from core.memory import _get_conn
+            cutoff = (datetime.now(KST) - timedelta(days=14)).isoformat()
+            rows = _get_conn().execute(
+                """SELECT ticker, name, stop_loss, invalidation_condition, created_at
+                   FROM predictions
+                   WHERE status='open' AND signal='매수'
+                     AND stop_loss > 0 AND created_at >= ?
+                   ORDER BY created_at DESC""",
+                (cutoff,),
+            ).fetchall()
+        except Exception as e:
+            log.debug("무효화 감시 조회 실패: %s", e)
+            return triggers
+
+        checked: set[str] = set()
+        for row in rows:
+            ticker = row["ticker"]
+            if ticker in checked or ticker in held:
+                continue  # 보유 종목은 _check_price_targets 담당
+            checked.add(ticker)
+
+            is_kr = ticker.endswith((".KS", ".KQ"))
+            if is_kr:
+                if not kr_tradeable:
+                    continue
+                sess = kr_session
+            else:
+                if not us_tradeable:
+                    continue
+                sess = us_session
+
+            quote = _get_quote_realtime(ticker)
+            if quote is None or quote.price <= 0:
+                continue
+
+            stop = float(row["stop_loss"] or 0)
+            if stop > 0 and quote.price <= stop:
+                cond = (row["invalidation_condition"] or "")[:60]
+                name = row["name"]
+                if cond:
+                    name = f"{name} (무효화: {cond})"
+                triggers.append(AlertTrigger(
+                    ticker=ticker, name=name,
+                    trigger_type=TriggerType.INVALIDATION,
+                    current_value=quote.price, threshold=stop,
+                    timestamp=now, market_session=sess,
+                ))
+            time.sleep(0.1)
+
+        if triggers:
+            log.info("무효화 조건 트리거 %d건 (미결 예약)", len(triggers))
+        return triggers
+
     def _cross_verify_price(self, ticker: str) -> float | None:
         """yfinance로 별도 가격 변동률 확인 (교차검증용)."""
         try:
@@ -551,6 +636,10 @@ class MarketMonitor:
         """트리거에 대해 심각도 판정 + AI 분석."""
         severity = self._classify_severity(trigger)
         ai_analysis = ""
+
+        # INVALIDATION은 매수/매도 판단이 아닌 '예약 취소' 통지 — AI 분석 불필요
+        if trigger.trigger_type == TriggerType.INVALIDATION:
+            return AlertResult(trigger=trigger, severity=severity)
 
         # CRITICAL/WARNING 시에만 CLI AI 호출하되, 비용 가드로 반복 호출을 막는다.
         if severity in (Severity.CRITICAL, Severity.WARNING) and self._should_run_ai_analysis(trigger):
@@ -615,6 +704,8 @@ class MarketMonitor:
             return Severity.WARNING  # 익절 검토
         if tt == TriggerType.STOP_LOSS_HIT:
             return Severity.CRITICAL  # 손절은 항상 알림
+        if tt == TriggerType.INVALIDATION:
+            return Severity.WARNING  # 예약 셋업 붕괴 — 취소 액션 필요
 
         return Severity.INFO
 
@@ -628,6 +719,11 @@ class MarketMonitor:
         if result.severity == Severity.INFO:
             log.info("알림 억제: %s — INFO", result.trigger.ticker)
             return False
+
+        # INVALIDATION → AI 주문 필드 게이트 미적용 (매수/매도가 아닌 '예약 취소' 액션)
+        if result.trigger.trigger_type == TriggerType.INVALIDATION:
+            log.info("알림 전송 결정: %s — invalidation_cancel", result.trigger.ticker)
+            return True
 
         # AI 응답 없으면 억제
         if not result.ai_analysis or not result.ai_analysis.strip():
@@ -843,8 +939,10 @@ def _build_alert_message(result: AlertResult) -> str:
     trigger = result.trigger
     analysis = result.ai_analysis or ""
 
-    # 액션 방향 (게이트 통과 시 [매수]/[매도] 보장)
-    if analysis.startswith("[매수]"):
+    # 액션 방향 (게이트 통과 시 [매수]/[매도] 보장 — INVALIDATION은 예약 취소)
+    if trigger.trigger_type == TriggerType.INVALIDATION:
+        action_title = "⛔ 예약 취소 액션"
+    elif analysis.startswith("[매수]"):
         action_title = "🟢 매수 긴급 액션"
     elif analysis.startswith("[매도]"):
         action_title = "🔴 매도 긴급 액션"
@@ -867,6 +965,7 @@ def _build_alert_message(result: AlertResult) -> str:
         TriggerType.PRICE_SURGE: "🔺",
         TriggerType.TARGET_HIT: "🎯",
         TriggerType.STOP_LOSS_HIT: "🛑",
+        TriggerType.INVALIDATION: "⛔",
         TriggerType.FX_CHANGE: "💱",
     }
     icon = type_icons.get(trigger.trigger_type, "📢")
@@ -931,6 +1030,12 @@ def _build_alert_message(result: AlertResult) -> str:
             # [관망] — 게이트에서 억제되므로 도달하지 않지만 방어
             lines.append("─" * 24)
             lines.append(f"🤖 {analysis[:200]}")
+        lines.append("")
+    elif trigger.trigger_type == TriggerType.INVALIDATION:
+        lines.append("─" * 24)
+        lines.append("📋 *액션: 걸어둔 예약매수 주문을 취소하라*")
+        lines.append("    셋업 붕괴 — 진입 근거였던 손절선이 이미 깨짐.")
+        lines.append("    이미 체결됐다면 손절 기준으로 즉시 재평가.")
         lines.append("")
 
     lines.append("━" * 24)

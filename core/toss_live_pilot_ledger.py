@@ -326,6 +326,34 @@ def record_live_send_failed(
     }
 
 
+def record_live_send_retryable(
+    pilot_id: str,
+    failure_reason: str = "",
+    payload_hash: str = "",
+) -> dict:
+    """일시적 전송 실패 기록. terminal failed로 소비하지 않고 보류 상태로 남긴다."""
+    with _db_lock:
+        conn = _conn()
+        try:
+            existing = conn.execute(
+                "SELECT status FROM live_pilot_ledger WHERE pilot_id=?", (pilot_id,)
+            ).fetchone()
+            if not existing:
+                return {"ok": False, "reason": "pilot_id not found"}
+            conn.execute(
+                "UPDATE live_pilot_ledger SET status='live_send_retryable', "
+                "live_order_sent=0, failure_reason=?, payload_hash=? WHERE pilot_id=?",
+                (failure_reason, payload_hash, pilot_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    return {
+        "ok": True, "pilot_id": pilot_id,
+        "status": "live_send_retryable", "live_order_sent": False,
+    }
+
+
 def cancel_live_pilot(pilot_id: str, reason: str = "user_cancelled") -> dict:
     """Live pilot 취소."""
     with _db_lock:
