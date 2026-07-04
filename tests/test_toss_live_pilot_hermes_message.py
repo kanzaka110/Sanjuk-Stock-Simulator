@@ -213,6 +213,42 @@ class TestBuildDefaultHermesVerdictAmountExceed(unittest.TestCase):
         self.assertTrue(any("amount" in r.lower() for r in verdict["reasons"]))
 
 
+class TestBuildDefaultHermesVerdictMaxOrderUnset(unittest.TestCase):
+    """max_order_krw=None/"" = 무제한(0) 취급 회귀 테스트 (2026-07-04 검수)."""
+
+    def test_none_limit_large_amount_is_pass(self):
+        # policy가 한도 미설정(None) → 무제한 → 대금액도 PASS
+        ctx = {**_BASE_CTX, "max_order_krw": None,
+               "estimated_amount_krw": 2_900_000}
+        verdict = build_default_hermes_verdict(ctx)
+        self.assertEqual(verdict["status"], "PASS")
+
+    def test_empty_string_limit_is_pass(self):
+        ctx = {**_BASE_CTX, "max_order_krw": "",
+               "estimated_amount_krw": 2_900_000}
+        verdict = build_default_hermes_verdict(ctx)
+        self.assertEqual(verdict["status"], "PASS")
+
+    def test_zero_limit_is_pass(self):
+        ctx = {**_BASE_CTX, "max_order_krw": 0,
+               "estimated_amount_krw": 2_900_000}
+        verdict = build_default_hermes_verdict(ctx)
+        self.assertEqual(verdict["status"], "PASS")
+
+    def test_explicit_limit_still_blocks(self):
+        ctx = {**_BASE_CTX, "max_order_krw": 100_000,
+               "estimated_amount_krw": 2_900_000}
+        verdict = build_default_hermes_verdict(ctx)
+        self.assertEqual(verdict["status"], "BLOCK")
+
+    def test_legacy_context_without_key_uses_default(self):
+        # key 자체가 없는 legacy context → 100,000 보수 기본값
+        ctx = {k: v for k, v in _BASE_CTX.items() if k != "max_order_krw"}
+        ctx["estimated_amount_krw"] = 2_900_000
+        verdict = build_default_hermes_verdict(ctx)
+        self.assertEqual(verdict["status"], "BLOCK")
+
+
 class TestBuildDefaultHermesVerdictPriceMissing(unittest.TestCase):
     def test_zero_price_is_hold(self):
         ctx = {**_BASE_CTX, "limit_price": 0}

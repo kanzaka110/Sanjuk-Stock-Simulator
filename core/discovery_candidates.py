@@ -573,6 +573,10 @@ def _universe_for(markets: list[str]) -> dict[str, tuple[str, str]]:
     return uni
 
 
+# fallback 유니버스 병렬 스캔 전체 예산 (초) — GET API 응답성 보호
+_FALLBACK_SCAN_BUDGET_SEC = 15
+
+
 def _fallback_universe_candidates(markets: list[str]) -> list[dict]:
     """pandas/pykrx 없이 SCAN_UNIVERSE를 직접 스캔 — 핵심 안전망.
 
@@ -581,6 +585,7 @@ def _fallback_universe_candidates(markets: list[str]) -> list[dict]:
     quote는 병렬로 조회하되, 결과 순서는 기존 유니버스 순서를 유지한다.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import TimeoutError as FuturesTimeout
 
     uni = _universe_for(markets)
     entries = list(uni.items())
@@ -597,9 +602,13 @@ def _fallback_universe_candidates(markets: list[str]) -> list[dict]:
 
     out_by_idx: dict[int, dict] = {}
     max_workers = min(12, max(1, len(entries)))
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = [ex.submit(_load, (idx, item)) for idx, item in enumerate(entries)]
-        for fut in as_completed(futures):
+    # 전체 스캔 예산: KIS 장애 시 종목당 chart(10s)+price(10s) 직렬 폴백이
+    # 워커 웨이브를 타고 25~50초로 번지는 것을 차단 (fail-fast).
+    # 정상 시엔 병렬 조회가 수 초 내 끝나 예산에 걸리지 않는다.
+    ex = ThreadPoolExecutor(max_workers=max_workers)
+    futures = [ex.submit(_load, (idx, item)) for idx, item in enumerate(entries)]
+    try:
+        for fut in as_completed(futures, timeout=_FALLBACK_SCAN_BUDGET_SEC):
             try:
                 idx, q = fut.result()
             except Exception as e:
@@ -607,6 +616,14 @@ def _fallback_universe_candidates(markets: list[str]) -> list[dict]:
                 continue
             if q is not None:
                 out_by_idx[idx] = q
+    except FuturesTimeout:
+        log.warning(
+            "fallback universe 스캔 예산(%ds) 초과 — %d/%d 종목만 사용 (조회 장애 fail-fast)",
+            _FALLBACK_SCAN_BUDGET_SEC, len(out_by_idx), len(entries),
+        )
+    finally:
+        # 미시작 작업은 취소, 진행 중 스레드는 기다리지 않음 (응답성 우선)
+        ex.shutdown(wait=False, cancel_futures=True)
     return [out_by_idx[i] for i in sorted(out_by_idx)]
 
 

@@ -343,9 +343,15 @@ def build_default_hermes_verdict(context: dict) -> dict:
     side = context.get("side", "buy")
     limit_price = float(context.get("limit_price") or 0)
     estimated = float(context.get("estimated_amount_krw") or 0)
-    # max_order_krw: 명시적 0 = 무제한 (한도 제거 정책), 미지정 = 100,000 기본
-    _max_raw = context.get("max_order_krw")
-    max_krw = float(_max_raw) if _max_raw not in (None, "") else 100_000.0
+    # max_order_krw 해석 기준 (2026-07-04 정리):
+    #   - key 존재 + None/"" → 0 = 무제한 (policy가 "한도 미설정"을 명시한 것)
+    #   - key 존재 + 숫자 → 그 값 (0 = 무제한)
+    #   - key 자체 부재 (legacy context) → 100,000 보수 기본값 유지
+    if "max_order_krw" in context:
+        _max_raw = context.get("max_order_krw")
+        max_krw = float(_max_raw) if _max_raw not in (None, "") else 0.0
+    else:
+        max_krw = 100_000.0
     live_transport_status = context.get("live_transport_status", "not_configured")
     live_order_allowed = context.get("live_order_allowed", False)
     adapter_status = context.get("adapter_status", "disabled")

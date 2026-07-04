@@ -55,10 +55,16 @@ class MarketMonitor:
             try:
                 now = datetime.now(KST)
 
+                # 보조 태스크 — market tradeable gate 밖에서 항상 실행.
+                # (각자 내부 스로틀/dedup/장중 게이트 보유 — 장외에 통째로 막히면
+                #  KST 16시 일일 리포트·DART 장외 공시 등이 유실됨)
+                self._run_auxiliary_tasks(now)
+
                 if not is_any_market_tradeable(now):
                     next_open = next_tradeable_session(now)
                     wait_sec = (next_open - now).total_seconds()
-                    wait_sec = max(60, min(wait_sec, 3600))  # 1분~1시간 대기
+                    # 장외에도 보조 태스크(일일 리포트/DART)는 돌아야 하므로 최대 10분 대기
+                    wait_sec = max(60, min(wait_sec, 600))
                     log.info(f"주문 가능 시간 아님 — {wait_sec:.0f}초 대기 (다음: {next_open.strftime('%H:%M')})")
                     self._sleep(wait_sec)
                     continue
@@ -94,50 +100,57 @@ class MarketMonitor:
                 # 조건 해소된 알림 제거 (다음에 다시 발동하면 재전송)
                 self._active_alerts -= (self._active_alerts - current_keys)
 
-                # Toss 미체결/exit 감시 (read-only, 내부 30분 스로틀)
-                try:
-                    from core.toss_order_watch import run_toss_order_watch
-                    run_toss_order_watch(now=now)
-                except Exception as e:
-                    log.warning(f"toss order watch 실패: {e}")
-
-                # Toss 자율 파이프라인 — PASS_EXECUTE 후보 자동 preview/검증/판정
-                # (내부 스로틀 기본 10분(env TOSS_PIPELINE_INTERVAL_MIN) + KR 장중 + autonomous mode 게이트)
-                try:
-                    from core.toss_autonomous_pipeline import run_toss_autonomous_pipeline
-                    run_toss_autonomous_pipeline(now=now)
-                except Exception as e:
-                    log.warning(f"toss autonomous pipeline 실패: {e}")
-
-                # 보유 포지션 일일 재평가 — 손절/익절 기준 초과 시 자동 매도 후보
-                # (KST 10시 이후 1일 1회, 내부 dedup)
-                try:
-                    from core.toss_position_review import run_toss_position_review
-                    run_toss_position_review(now=now)
-                except Exception as e:
-                    log.warning(f"toss position review 실패: {e}")
-
-                # 자율매매 일일 리포트 — 가동률 KPI + 파이프라인 결과 + 미거래 진단
-                # (KST 16시 이후 1일 1회, 내부 dedup)
-                try:
-                    from core.toss_autonomous_pipeline import send_daily_pipeline_report
-                    send_daily_pipeline_report(now=now)
-                except Exception as e:
-                    log.warning(f"toss daily pipeline report 실패: {e}")
-
-                # DART 공시 모니터 — 보유종목 리스크 공시 알림
-                # (DART_API_KEY 필요, 내부 30분 스로틀 + rcept_no dedup)
-                try:
-                    from core.dart_monitor import run_dart_monitor
-                    run_dart_monitor(now=now)
-                except Exception as e:
-                    log.warning(f"dart monitor 실패: {e}")
-
                 self._sleep(MONITOR_INTERVAL_SEC)
 
             except Exception as e:
                 log.error(f"모니터 오류: {e}")
                 self._sleep(60)
+
+    def _run_auxiliary_tasks(self, now: datetime) -> None:
+        """장 시간 게이트와 무관하게 매 루프 실행하는 보조 태스크.
+
+        가격 트리거 스캔(_scan_all)만 market tradeable gate 안에서 돌고,
+        아래 태스크는 각자 내부 스로틀/dedup/장중 조건을 갖고 있으므로
+        gate 밖에서 호출한다. 개별 실패는 루프를 중단시키지 않는다.
+        """
+        # Toss 미체결/exit 감시 (read-only, 내부 30분 스로틀)
+        try:
+            from core.toss_order_watch import run_toss_order_watch
+            run_toss_order_watch(now=now)
+        except Exception as e:
+            log.warning(f"toss order watch 실패: {e}")
+
+        # Toss 자율 파이프라인 — PASS_EXECUTE 후보 자동 preview/검증/판정
+        # (내부 스로틀 기본 10분(env TOSS_PIPELINE_INTERVAL_MIN) + KR 장중 + autonomous mode 게이트)
+        try:
+            from core.toss_autonomous_pipeline import run_toss_autonomous_pipeline
+            run_toss_autonomous_pipeline(now=now)
+        except Exception as e:
+            log.warning(f"toss autonomous pipeline 실패: {e}")
+
+        # 보유 포지션 일일 재평가 — 손절/익절 기준 초과 시 자동 매도 후보
+        # (KST 10시 이후 1일 1회, 내부 dedup)
+        try:
+            from core.toss_position_review import run_toss_position_review
+            run_toss_position_review(now=now)
+        except Exception as e:
+            log.warning(f"toss position review 실패: {e}")
+
+        # 자율매매 일일 리포트 — 가동률 KPI + 파이프라인 결과 + 미거래 진단
+        # (KST 16시 이후 1일 1회, 내부 dedup — 장외라도 16시 이후 첫 루프에서 발송)
+        try:
+            from core.toss_autonomous_pipeline import send_daily_pipeline_report
+            send_daily_pipeline_report(now=now)
+        except Exception as e:
+            log.warning(f"toss daily pipeline report 실패: {e}")
+
+        # DART 공시 모니터 — 보유종목 리스크 공시 알림
+        # (DART_API_KEY 필요, 내부 30분 스로틀 + rcept_no dedup — 장외 공시도 감시)
+        try:
+            from core.dart_monitor import run_dart_monitor
+            run_dart_monitor(now=now)
+        except Exception as e:
+            log.warning(f"dart monitor 실패: {e}")
 
     def stop(self) -> None:
         """감시 종료."""

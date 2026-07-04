@@ -34,6 +34,10 @@ _TOKEN_FILE = DB_DIR / "kis_token.json"
 
 _mem_token: str = ""
 _mem_expires: float = 0.0
+# 토큰 발급 실패 negative cache — KIS 장애 시 quote 호출마다 10초 재시도로
+# 대시보드 GET 전체가 타임아웃 되는 것을 방지 (fail-fast)
+_TOKEN_FAIL_COOLDOWN_SEC = 60.0
+_mem_token_fail_until: float = 0.0
 
 
 def _is_kis_configured() -> bool:
@@ -70,7 +74,7 @@ def _get_access_token() -> str | None:
     토큰 유효기간: 약 24시간. 만료 1시간 전에 갱신.
     KIS는 토큰 발급을 분당 1회로 제한하므로 파일 캐시 필수.
     """
-    global _mem_token, _mem_expires
+    global _mem_token, _mem_expires, _mem_token_fail_until
 
     now = time.time()
 
@@ -78,6 +82,9 @@ def _get_access_token() -> str | None:
     with _TOKEN_LOCK:
         if _mem_token and now < _mem_expires:
             return _mem_token
+        if now < _mem_token_fail_until:
+            # 최근 발급 실패 — 쿨다운 동안 즉시 None (호출측 yfinance 폴백)
+            return None
 
     # 2) 파일 캐시 확인
     file_token, file_expires = _load_token_from_file()
@@ -106,6 +113,8 @@ def _get_access_token() -> str | None:
 
         if not token:
             logger.warning("KIS 토큰 발급 실패: 응답에 access_token 없음")
+            with _TOKEN_LOCK:
+                _mem_token_fail_until = time.time() + _TOKEN_FAIL_COOLDOWN_SEC
             return None
 
         expires_at = now + expires_in - 3600  # 만료 1시간 전 갱신
@@ -120,6 +129,8 @@ def _get_access_token() -> str | None:
 
     except requests.RequestException as e:
         logger.warning("KIS 토큰 발급 실패: %s", e)
+        with _TOKEN_LOCK:
+            _mem_token_fail_until = time.time() + _TOKEN_FAIL_COOLDOWN_SEC
         return None
 
 
