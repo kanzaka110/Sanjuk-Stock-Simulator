@@ -101,6 +101,38 @@ class MarketMonitor:
                 except Exception as e:
                     log.warning(f"toss order watch 실패: {e}")
 
+                # Toss 자율 파이프라인 — PASS_EXECUTE 후보 자동 preview/검증/판정
+                # (내부 스로틀 기본 10분(env TOSS_PIPELINE_INTERVAL_MIN) + KR 장중 + autonomous mode 게이트)
+                try:
+                    from core.toss_autonomous_pipeline import run_toss_autonomous_pipeline
+                    run_toss_autonomous_pipeline(now=now)
+                except Exception as e:
+                    log.warning(f"toss autonomous pipeline 실패: {e}")
+
+                # 보유 포지션 일일 재평가 — 손절/익절 기준 초과 시 자동 매도 후보
+                # (KST 10시 이후 1일 1회, 내부 dedup)
+                try:
+                    from core.toss_position_review import run_toss_position_review
+                    run_toss_position_review(now=now)
+                except Exception as e:
+                    log.warning(f"toss position review 실패: {e}")
+
+                # 자율매매 일일 리포트 — 가동률 KPI + 파이프라인 결과 + 미거래 진단
+                # (KST 16시 이후 1일 1회, 내부 dedup)
+                try:
+                    from core.toss_autonomous_pipeline import send_daily_pipeline_report
+                    send_daily_pipeline_report(now=now)
+                except Exception as e:
+                    log.warning(f"toss daily pipeline report 실패: {e}")
+
+                # DART 공시 모니터 — 보유종목 리스크 공시 알림
+                # (DART_API_KEY 필요, 내부 30분 스로틀 + rcept_no dedup)
+                try:
+                    from core.dart_monitor import run_dart_monitor
+                    run_dart_monitor(now=now)
+                except Exception as e:
+                    log.warning(f"dart monitor 실패: {e}")
+
                 self._sleep(MONITOR_INTERVAL_SEC)
 
             except Exception as e:

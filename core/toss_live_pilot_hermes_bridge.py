@@ -343,7 +343,9 @@ def build_default_hermes_verdict(context: dict) -> dict:
     side = context.get("side", "buy")
     limit_price = float(context.get("limit_price") or 0)
     estimated = float(context.get("estimated_amount_krw") or 0)
-    max_krw = float(context.get("max_order_krw") or 100_000)
+    # max_order_krw: 명시적 0 = 무제한 (한도 제거 정책), 미지정 = 100,000 기본
+    _max_raw = context.get("max_order_krw")
+    max_krw = float(_max_raw) if _max_raw not in (None, "") else 100_000.0
     live_transport_status = context.get("live_transport_status", "not_configured")
     live_order_allowed = context.get("live_order_allowed", False)
     adapter_status = context.get("adapter_status", "disabled")
@@ -373,8 +375,8 @@ def build_default_hermes_verdict(context: dict) -> dict:
             "checks": {"symbol_guard": f"FAIL: {symbol}"},
         }
 
-    # 3. amount exceed → BLOCK
-    if estimated > max_krw:
+    # 3. amount exceed → BLOCK (max_krw <= 0 = 무제한)
+    if max_krw > 0 and estimated > max_krw:
         return {
             "status": "BLOCK",
             "reasons": [f"amount_over_limit: {estimated:,.0f} > {max_krw:,.0f}"],

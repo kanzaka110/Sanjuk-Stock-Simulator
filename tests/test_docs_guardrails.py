@@ -101,6 +101,10 @@ ALLOWED_TOSS_FILES = {
     "tests/test_toss_quality_gate.py",
     "core/toss_order_watch.py",
     "tests/test_toss_order_watch.py",
+    "core/toss_autonomous_pipeline.py",
+    "tests/test_toss_autonomous_pipeline.py",
+    "core/toss_position_review.py",
+    "tests/test_toss_position_review.py",
 }
 
 

@@ -68,6 +68,7 @@ class QualityScore:
     rr_ratio: float
     regime: str
     scored_at: str
+    score_supply_demand: float = 0.0  # KRX 기관/외국인 수급 보정 (-10 ~ +10)
 
     def to_dict(self) -> dict:
         return {
@@ -77,6 +78,7 @@ class QualityScore:
             "score_risk_reward": round(self.score_risk_reward, 1),
             "score_reliability": round(self.score_reliability, 1),
             "score_market_regime": round(self.score_market_regime, 1),
+            "score_supply_demand": round(self.score_supply_demand, 1),
             "penalty_overheat": round(self.penalty_overheat, 1),
             "penalty_duplicate": round(self.penalty_duplicate, 1),
             "penalty_event_risk": round(self.penalty_event_risk, 1),
@@ -86,6 +88,132 @@ class QualityScore:
             "rr_ratio": round(self.rr_ratio, 2),
             "regime": self.regime,
         }
+
+
+# ── 점수 가중치 (자동 캘리브레이션 구조, P3-4) ────────────────────
+#
+# 기본 1.0. db/data/quality_gate_weights.json이 있으면 override (0.5~1.5 clamp).
+# suggest_weight_calibration()은 outcome 30건+ 누적 시 제안 파일만 생성 —
+# 자동 적용하지 않음 (승호가 검토 후 weights 파일로 복사해야 반영).
+
+_DEFAULT_WEIGHTS: dict[str, float] = {
+    "momentum": 1.0,
+    "liquidity": 1.0,
+    "risk_reward": 1.0,
+    "reliability": 1.0,
+    "market_regime": 1.0,
+    "supply_demand": 1.0,
+}
+
+_WEIGHT_MIN, _WEIGHT_MAX = 0.5, 1.5
+
+# 각 sub-score 만점 (캘리브레이션 정규화용)
+_DIM_MAX: dict[str, float] = {
+    "momentum": 25.0,
+    "liquidity": 25.0,
+    "risk_reward": 20.0,
+    "reliability": 15.0,
+    "market_regime": 15.0,
+}
+
+_weights_cache: dict = {"mtime": None, "weights": dict(_DEFAULT_WEIGHTS)}
+
+
+def _weights_path() -> Path:
+    return _outcomes_db_path().parent / "quality_gate_weights.json"
+
+
+def get_score_weights() -> dict[str, float]:
+    """현재 점수 가중치. 파일 없으면 기본 1.0, 값은 0.5~1.5로 clamp."""
+    p = _weights_path()
+    try:
+        if not p.exists():
+            return dict(_DEFAULT_WEIGHTS)
+        mtime = p.stat().st_mtime
+        if _weights_cache["mtime"] == mtime:
+            return dict(_weights_cache["weights"])
+        import json
+        raw = json.loads(p.read_text(encoding="utf-8"))
+        weights = dict(_DEFAULT_WEIGHTS)
+        for k in weights:
+            try:
+                v = float(raw.get(k, 1.0))
+            except (TypeError, ValueError):
+                v = 1.0
+            weights[k] = max(_WEIGHT_MIN, min(_WEIGHT_MAX, v))
+        _weights_cache["mtime"] = mtime
+        _weights_cache["weights"] = dict(weights)
+        return weights
+    except Exception as e:
+        log.debug("weights load failed: %s", e)
+        return dict(_DEFAULT_WEIGHTS)
+
+
+def suggest_weight_calibration(min_outcomes: int = 30) -> dict:
+    """outcome 누적 기반 가중치 제안 (자동 적용 안 함).
+
+    win/loss 그룹의 sub-score 평균 차이를 만점으로 정규화해
+    1.0 ± 0.5 범위 제안. 제안은 quality_gate_weights_suggestion.json에 기록.
+    """
+    with _outcomes_lock:
+        conn = _outcomes_conn()
+        try:
+            rows = conn.execute(
+                "SELECT outcome, score_momentum, score_liquidity, "
+                "score_risk_reward, score_reliability, score_market_regime "
+                "FROM quality_gate_decisions WHERE outcome IN ('win','loss')"
+            ).fetchall()
+        finally:
+            conn.close()
+
+    if len(rows) < min_outcomes:
+        return {"ok": False, "reason": "insufficient_outcomes",
+                "evaluated": len(rows), "required": min_outcomes}
+
+    cols = {
+        "momentum": "score_momentum",
+        "liquidity": "score_liquidity",
+        "risk_reward": "score_risk_reward",
+        "reliability": "score_reliability",
+        "market_regime": "score_market_regime",
+    }
+    wins = [r for r in rows if r["outcome"] == "win"]
+    losses = [r for r in rows if r["outcome"] == "loss"]
+    if not wins or not losses:
+        return {"ok": False, "reason": "need_both_win_and_loss",
+                "wins": len(wins), "losses": len(losses)}
+
+    suggested = dict(_DEFAULT_WEIGHTS)
+    detail: dict[str, dict] = {}
+    for dim, col in cols.items():
+        win_avg = sum(float(r[col] or 0) for r in wins) / len(wins)
+        loss_avg = sum(float(r[col] or 0) for r in losses) / len(losses)
+        diff_norm = (win_avg - loss_avg) / _DIM_MAX[dim]
+        w = max(_WEIGHT_MIN, min(_WEIGHT_MAX, 1.0 + diff_norm * 0.5))
+        suggested[dim] = round(w, 3)
+        detail[dim] = {"win_avg": round(win_avg, 2),
+                       "loss_avg": round(loss_avg, 2),
+                       "suggested_weight": round(w, 3)}
+
+    result = {
+        "ok": True,
+        "evaluated": len(rows),
+        "wins": len(wins),
+        "losses": len(losses),
+        "suggested_weights": suggested,
+        "detail": detail,
+        "generated_at": datetime.now(KST).strftime("%Y-%m-%dT%H:%M:%S+09:00"),
+        "note": "자동 적용 안 됨 — 검토 후 quality_gate_weights.json으로 복사 시 반영",
+    }
+    try:
+        import json
+        p = _weights_path().parent / "quality_gate_weights_suggestion.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(result, ensure_ascii=False, indent=2),
+                     encoding="utf-8")
+    except Exception as e:
+        log.debug("weight suggestion save failed: %s", e)
+    return result
 
 
 # ── 점수 계산 ────────────────────────────────────────────────────
@@ -224,6 +352,73 @@ def _penalty_event_risk(ticker: str, pre_score: float) -> tuple[float, int]:
         return 0.0, -1
 
 
+_SUPPLY_DEMAND_DAYS = 5
+
+
+def _is_kr_ticker(ticker: str) -> bool:
+    base = ticker.split(".")[0]
+    return ticker.endswith((".KS", ".KQ")) or (base.isdigit() and len(base) == 6)
+
+
+def _score_supply_demand(
+    ticker: str,
+    pre_score: float,
+    fetch_budget: dict | None = None,
+) -> float:
+    """KRX 기관/외국인 수급 보정 (-10 ~ +10).
+
+    최근 5일 순매매 금액(주식수×종가) 기준:
+      외국인 순매수 → +5 / 순매도 → -5
+      기관 순매수 → +5 / 순매도 → -5
+
+    비용 관리:
+    - 한국 종목(.KS/.KQ)만 조회
+    - pre_score < 40 저점수 후보는 스킵 (event_risk와 동일 패턴)
+    - fetch_budget 지정 시 미캐시 심볼 네트워크 조회 횟수 제한
+      (대시보드 GET 배치 경로의 지연 방지 — _FRGN_CACHE는 프로세스 수명 캐시)
+    - 조회 실패/데이터 없음 → 0.0 중립 (fail-safe)
+    """
+    if not _is_kr_ticker(ticker):
+        return 0.0
+    if pre_score < 40:
+        return 0.0
+
+    code = ticker.split(".")[0]
+    try:
+        from core.kr_market import _FRGN_CACHE, _fetch_naver_frgn
+
+        if code not in _FRGN_CACHE and fetch_budget is not None:
+            if fetch_budget.get("remaining", 0) <= 0:
+                return 0.0
+            fetch_budget["remaining"] -= 1
+
+        rows = _fetch_naver_frgn(code)
+    except Exception as e:
+        log.debug("supply/demand check failed for %s: %s", ticker, e)
+        return 0.0
+
+    if not rows:
+        return 0.0
+
+    recent = rows[:_SUPPLY_DEMAND_DAYS]
+    try:
+        frgn_net = sum(float(r["foreign_shares"]) * float(r["close"]) for r in recent)
+        inst_net = sum(float(r["inst_shares"]) * float(r["close"]) for r in recent)
+    except Exception:
+        return 0.0
+
+    score = 0.0
+    if frgn_net > 0:
+        score += 5.0
+    elif frgn_net < 0:
+        score -= 5.0
+    if inst_net > 0:
+        score += 5.0
+    elif inst_net < 0:
+        score -= 5.0
+    return score
+
+
 # ── Decision 엔진 ────────────────────────────────────────────────
 
 def _decide_bucket(
@@ -292,6 +487,7 @@ def score_candidate(
     regime_obj=None,
     accuracy_stats: dict | None = None,
     expensive_checks: bool = True,
+    fetch_budget: dict | None = None,
 ) -> QualityScore:
     """단일 후보 품질 점수 계산."""
     ticker = candidate.get("symbol", "")
@@ -300,12 +496,13 @@ def score_candidate(
     has_stop = bool(candidate.get("stop_loss"))
     has_target = bool(candidate.get("target_price"))
 
-    # 각 sub-score
-    s_momentum = _score_momentum(candidate)
-    s_liquidity = _score_liquidity(candidate)
-    s_rr = _score_risk_reward(candidate)
-    s_reliability = _score_reliability(ticker, accuracy_stats)
-    s_regime = _score_market_regime(regime_obj)
+    # 각 sub-score (가중치: 기본 1.0, 캘리브레이션 파일 있으면 override)
+    w = get_score_weights()
+    s_momentum = _score_momentum(candidate) * w["momentum"]
+    s_liquidity = _score_liquidity(candidate) * w["liquidity"]
+    s_rr = _score_risk_reward(candidate) * w["risk_reward"]
+    s_reliability = _score_reliability(ticker, accuracy_stats) * w["reliability"]
+    s_regime = _score_market_regime(regime_obj) * w["market_regime"]
 
     p_overheat = _penalty_overheat(candidate)
     p_duplicate = _penalty_duplicate(candidate)
@@ -318,9 +515,13 @@ def score_candidate(
     else:
         p_event, days_to_earnings = 0.0, -1
 
+    # KRX 수급 보정: pre_score 게이트 + fetch_budget으로 비용 제한
+    s_supply = _score_supply_demand(ticker, pre_score, fetch_budget=fetch_budget) \
+        * w["supply_demand"]
+
     score_total = max(0.0, min(100.0,
         s_momentum + s_liquidity + s_rr + s_reliability + s_regime
-        + p_overheat + p_duplicate + p_event
+        + s_supply + p_overheat + p_duplicate + p_event
     ))
 
     regime_str = getattr(regime_obj, "regime", "판단불가") if regime_obj else "판단불가"
@@ -357,6 +558,7 @@ def score_candidate(
         rr_ratio=rr,
         regime=regime_str,
         scored_at=datetime.now(KST).strftime("%Y-%m-%dT%H:%M:%S+09:00"),
+        score_supply_demand=s_supply,
     )
 
 
@@ -393,6 +595,10 @@ def score_candidates_batch(
     except Exception as e:
         log.debug("accuracy stats load failed: %s", e)
 
+    # 수급 조회 예산: expensive_checks=False(GET 배치)는 미캐시 심볼 최대 3건만
+    # 네트워크 조회 (캐시된 심볼은 예산 소모 없이 항상 반영)
+    fetch_budget = None if expensive_checks else {"remaining": 3}
+
     for item in items:
         try:
             qs = score_candidate(
@@ -400,6 +606,7 @@ def score_candidates_batch(
                 regime_obj=regime_obj,
                 accuracy_stats=accuracy_stats,
                 expensive_checks=expensive_checks,
+                fetch_budget=fetch_budget,
             )
             item["quality_score"] = qs.score_total
             item["quality_breakdown"] = qs.to_dict()

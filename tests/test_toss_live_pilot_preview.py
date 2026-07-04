@@ -208,5 +208,50 @@ class TestPaperSeparation(unittest.TestCase):
         self.assertGreaterEqual(s.get("open", 0), 0)
 
 
+class TestUsCurrencyConversion(unittest.TestCase):
+    """US 종목 USD → KRW 환산 (기존 버그: USD 원값이 estimated_amount_krw에 저장)."""
+
+    _policy = {"max_order_krw": 0, "blocked_symbols": []}
+
+    def test_us_symbol_converted_to_krw(self):
+        from unittest.mock import patch
+        with patch("core.toss_live_pilot_preview._get_usdkrw", return_value=1400.0):
+            p = build_live_pilot_preview(
+                {"symbol": "LMT", "side": "buy", "quantity": 2, "limit_price": 505.0},
+                policy=self._policy,
+            )
+        self.assertTrue(p["ok"])
+        self.assertEqual(p["currency"], "USD")
+        self.assertEqual(p["usdkrw_rate"], 1400.0)
+        self.assertEqual(p["estimated_amount_krw"], 505.0 * 2 * 1400.0)
+
+    def test_kr_symbol_not_converted(self):
+        p = build_live_pilot_preview(_candidate("069500.KS", price=40000, qty=2))
+        self.assertEqual(p["currency"], "KRW")
+        self.assertIsNone(p["usdkrw_rate"])
+        self.assertEqual(p["estimated_amount_krw"], 80000)
+
+    def test_us_fx_failure_fail_closed(self):
+        from unittest.mock import patch
+        with patch("core.toss_live_pilot_preview._get_usdkrw", return_value=0.0):
+            p = build_live_pilot_preview(
+                {"symbol": "BBAI", "side": "buy", "quantity": 1, "limit_price": 4.0},
+                policy=self._policy,
+            )
+        self.assertFalse(p["ok"])
+        self.assertTrue(any("환율" in b for b in p["blocks"]))
+
+    def test_explicit_currency_overrides_symbol_heuristic(self):
+        from unittest.mock import patch
+        with patch("core.toss_live_pilot_preview._get_usdkrw", return_value=1400.0):
+            p = build_live_pilot_preview(
+                {"symbol": "CUSTOM", "side": "buy", "quantity": 1,
+                 "limit_price": 30000, "currency": "KRW"},
+                policy=self._policy,
+            )
+        self.assertEqual(p["currency"], "KRW")
+        self.assertEqual(p["estimated_amount_krw"], 30000)
+
+
 if __name__ == "__main__":
     unittest.main()

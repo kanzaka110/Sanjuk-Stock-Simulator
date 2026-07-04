@@ -303,7 +303,8 @@ def record_live_send_failed(
     failure_reason: str = "",
     payload_hash: str = "",
 ) -> dict:
-    """실제 주문 전송 실패 기록."""
+    """실제 주문 전송 실패 기록. failure_reason 빈칸 금지 (진단 의무화)."""
+    failure_reason = (failure_reason or "").strip() or "unspecified_failure"
     with _db_lock:
         conn = _conn()
         try:
@@ -331,7 +332,11 @@ def record_live_send_retryable(
     failure_reason: str = "",
     payload_hash: str = "",
 ) -> dict:
-    """일시적 전송 실패 기록. terminal failed로 소비하지 않고 보류 상태로 남긴다."""
+    """일시적 전송 실패 기록. terminal failed로 소비하지 않고 보류 상태로 남긴다.
+
+    failure_reason 빈칸 금지 (진단 의무화).
+    """
+    failure_reason = (failure_reason or "").strip() or "unspecified_failure"
     with _db_lock:
         conn = _conn()
         try:

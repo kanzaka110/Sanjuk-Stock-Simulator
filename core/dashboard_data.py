@@ -7,6 +7,7 @@ DB가 없거나 비어 있어도 절대 예외를 던지지 않고 빈 구조를
 
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import sqlite3
@@ -38,6 +39,222 @@ def _cached(key: str, ttl: int, fn):
     with _cache_lock:
         _cache[key] = (time.monotonic(), val)
     return val
+
+
+# Portfolio quote refresh is intentionally decoupled from request latency.
+# KIS/yfinance can hang for tens of seconds per ticker; /api/portfolio must
+# keep returning broker/stale data instead of blocking mobile/dashboard loads.
+_portfolio_quote_cache: dict[str, tuple[float, dict]] = {}
+_portfolio_quote_refreshing: dict[str, threading.Event] = {}
+
+_TOSS_READONLY_TIMEOUT_SEC = 3.0
+_TOSS_ACCOUNT_SUMMARY_OK_TTL = 60
+_TOSS_ACCOUNT_SUMMARY_STALE_TTL = 900
+_TOSS_ACCOUNT_FAILURE_COOLDOWN_SEC = 300
+_TOSS_BROKER_ORDERS_OK_TTL = 60
+_TOSS_BROKER_ORDERS_STALE_TTL = 900
+_TOSS_BROKER_ORDERS_FAILURE_COOLDOWN_SEC = 300
+_TOSS_POLICY_OK_TTL = 60
+_TOSS_POLICY_STALE_TTL = 900
+_toss_account_summary_last_good: tuple[float, dict] | None = None
+_toss_account_summary_cooldown_until = 0.0
+_toss_broker_orders_last_good: tuple[float, dict] | None = None
+_toss_broker_orders_cooldown_until = 0.0
+_toss_policy_refreshing: threading.Event | None = None
+
+
+def _set_toss_readonly_timeout(seconds: float = _TOSS_READONLY_TIMEOUT_SEC) -> None:
+    """Bound Toss read-only dashboard calls so broker outages do not hang GET APIs."""
+    try:
+        from core import toss_client as tc
+        current = float(getattr(tc, "TIMEOUT", 10) or 10)
+        if current > seconds:
+            tc.TIMEOUT = seconds
+    except Exception:
+        pass
+
+
+def _env_truthy(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
+def _csv_env(name: str) -> list[str]:
+    return [x.strip() for x in os.environ.get(name, "").split(",") if x.strip()]
+
+
+def _toss_live_policy_fallback(reason: str = "policy_refresh_pending") -> dict:
+    """Cheap dashboard-only live policy when full policy computation is slow."""
+    live_pilot_enabled = _env_truthy("TOSS_LIVE_PILOT_ENABLED")
+    live_order_env = _env_truthy("TOSS_LIVE_ORDER_ALLOWED")
+    adapter_enabled = _env_truthy("TOSS_LIVE_ADAPTER_ENABLED")
+    transport_armed = _env_truthy("TOSS_LIVE_TRANSPORT_ARMED")
+    autonomous_mode = _env_truthy("TOSS_AUTONOMOUS_MODE")
+    autonomous_kill_switch = _env_truthy("TOSS_AUTONOMOUS_KILL_SWITCH")
+    transport_status = "configured" if transport_armed else "not_configured"
+    adapter_status = "enabled" if adapter_enabled else "disabled"
+    all_live_gates_open = bool(
+        live_pilot_enabled
+        and live_order_env
+        and adapter_enabled
+        and transport_armed
+        and not autonomous_kill_switch
+    )
+    return {
+        "mode": "autonomous_live_pilot" if autonomous_mode and all_live_gates_open else "approval_only_live_pilot",
+        "live_pilot_enabled": live_pilot_enabled,
+        "live_order_allowed": all_live_gates_open,
+        "adapter_status": adapter_status,
+        "live_transport_status": transport_status,
+        "autonomous_mode": autonomous_mode,
+        "autonomous_kill_switch": autonomous_kill_switch,
+        "all_live_gates_open": all_live_gates_open,
+        "allowed_asset_types": _csv_env("TOSS_AUTONOMOUS_ALLOWED_ASSET_TYPES"),
+        "allowed_sides": _csv_env("TOSS_AUTONOMOUS_ALLOWED_SIDES"),
+        "cache_status": "fallback",
+        "policy_error": reason,
+        "read_only_notice": "대시보드 timeout 방지를 위한 env 기반 임시 policy",
+    }
+
+
+def _refresh_toss_live_policy() -> None:
+    global _toss_policy_refreshing
+    try:
+        from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
+        data = compute_toss_live_pilot_policy() or {}
+        if isinstance(data, dict):
+            data = dict(data)
+            data["cache_status"] = "live"
+            with _cache_lock:
+                _cache["toss_live_policy_fast"] = (time.monotonic(), data)
+    except Exception as e:
+        with _cache_lock:
+            _cache["toss_live_policy_last_error"] = (time.monotonic(), str(e)[-200:])
+    finally:
+        with _cache_lock:
+            event = _toss_policy_refreshing
+            _toss_policy_refreshing = None
+            if event:
+                event.set()
+
+
+def _toss_live_policy_fast(timeout: float = 0.25) -> dict:
+    """Return live-pilot policy without letting KIS/quality checks block dashboard APIs."""
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
+        return compute_toss_live_pilot_policy() or {}
+
+    global _toss_policy_refreshing
+    now = time.monotonic()
+    with _cache_lock:
+        entry = _cache.get("toss_live_policy_fast")
+        if entry:
+            ts, cached = entry
+            if now - ts < _TOSS_POLICY_OK_TTL:
+                return copy.deepcopy(cached)
+        else:
+            cached = None
+            ts = 0.0
+
+        if _toss_policy_refreshing is None:
+            _toss_policy_refreshing = threading.Event()
+            threading.Thread(target=_refresh_toss_live_policy, name="toss-policy-refresh", daemon=True).start()
+        event = _toss_policy_refreshing
+
+    if cached and now - ts <= _TOSS_POLICY_STALE_TTL:
+        out = copy.deepcopy(cached)
+        out["cache_status"] = "stale"
+        out["cache_age_sec"] = round(max(0.0, now - ts))
+        return out
+
+    if event:
+        event.wait(timeout)
+    with _cache_lock:
+        entry = _cache.get("toss_live_policy_fast")
+        if entry:
+            ts, cached = entry
+            out = copy.deepcopy(cached)
+            if time.monotonic() - ts >= _TOSS_POLICY_OK_TTL:
+                out["cache_status"] = "stale"
+                out["cache_age_sec"] = round(max(0.0, time.monotonic() - ts))
+            return out
+        err = _cache.get("toss_live_policy_last_error")
+    return _toss_live_policy_fallback(err[1] if err else "policy_refresh_pending")
+
+
+def _portfolio_quote_cache_key(ticker_map: dict[str, str]) -> str:
+    return "|".join(sorted(ticker_map))
+
+
+def _refresh_portfolio_quotes(cache_key: str, ticker_map: dict[str, str], fetch_fn) -> None:
+    try:
+        quotes = fetch_fn(dict(ticker_map))
+        if isinstance(quotes, dict):
+            with _cache_lock:
+                _portfolio_quote_cache[cache_key] = (time.monotonic(), quotes)
+    except Exception as e:
+        log.warning("portfolio quote refresh failed: %s", e)
+    finally:
+        with _cache_lock:
+            event = _portfolio_quote_refreshing.pop(cache_key, None)
+            if event:
+                event.set()
+
+
+def _portfolio_quotes_fast(
+    ticker_map: dict[str, str],
+    fetch_fn,
+    ttl: int = 300,
+    timeout: float = 3.0,
+) -> dict:
+    """Return cached quotes quickly and refresh slow providers in background.
+
+    Production dashboard endpoints must not wait on a flaky KIS/yfinance batch.
+    If a stale quote snapshot exists, return it immediately while one daemon
+    refresh runs. On cold start, wait only a tiny bounded window; broker Excel
+    values remain the fallback. Tests keep the old synchronous path.
+    """
+    if not ticker_map:
+        return {}
+
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return fetch_fn(ticker_map)
+
+    cache_key = _portfolio_quote_cache_key(ticker_map)
+    now = time.monotonic()
+
+    with _cache_lock:
+        entry = _portfolio_quote_cache.get(cache_key)
+        if entry:
+            ts, cached_quotes = entry
+            if now - ts < ttl:
+                return dict(cached_quotes)
+        else:
+            cached_quotes = {}
+
+        event = _portfolio_quote_refreshing.get(cache_key)
+        if event is None:
+            event = threading.Event()
+            _portfolio_quote_refreshing[cache_key] = event
+            threading.Thread(
+                target=_refresh_portfolio_quotes,
+                args=(cache_key, dict(ticker_map), fetch_fn),
+                name="portfolio-quote-refresh",
+                daemon=True,
+            ).start()
+
+    # Stale-but-known quotes are better than blocking the request path.
+    if cached_quotes:
+        return dict(cached_quotes)
+
+    # Cold start: give the provider a very short chance, then fall back to
+    # broker snapshot/cost values. The background thread will populate cache.
+    event.wait(timeout)
+    with _cache_lock:
+        entry = _portfolio_quote_cache.get(cache_key)
+        return dict(entry[1]) if entry else {}
 
 
 def _db_path():
@@ -420,7 +637,7 @@ def _fetch_portfolio_raw() -> dict:
                 continue
             all_tickers[t] = name
     quote_tickers = {**all_tickers, **day_pct_tickers}
-    quotes = _batch_quotes(quote_tickers) if quote_tickers else {}
+    quotes = _portfolio_quotes_fast(quote_tickers, _batch_quotes) if quote_tickers else {}
 
     # USDKRW. Excel snapshot uses Samsung broker KRW totals already, so the FX
     # rate is only needed when non-snapshot USD holdings remain.
@@ -498,8 +715,14 @@ def _fetch_portfolio_raw() -> dict:
 
             q = quotes.get(ticker)
             broker_snapshot = "eval_krw" in info or "cost_krw" in info
-            raw_price = info.get("current_price", q.price if q else 0.0)
-            pct = info.get("day_pct", q.pct if q else 0.0)
+            # Broker Excel snapshots are the broker-source baseline, but the HTML
+            # tool must move intraday. Prefer live quote price/day_pct when present;
+            # keep the Excel values separately for reconciliation/fallback.
+            broker_price = info.get("current_price", 0.0)
+            broker_eval_krw = float(info.get("eval_krw", 0) or 0) if broker_snapshot else None
+            broker_cost_krw = float(info.get("cost_krw", 0) or 0) if broker_snapshot else None
+            raw_price = q.price if q else broker_price
+            pct = q.pct if q else info.get("day_pct", 0.0)
             avg_price = avg_usd if is_usd else avg_krw
             cur_price, price_note = _guard_portfolio_quote(ticker, raw_price, avg_price, is_usd)
 
@@ -517,13 +740,19 @@ def _fetch_portfolio_raw() -> dict:
                 cost_krw = cost_total
 
             if broker_snapshot:
-                # Excel exported by Samsung already contains broker FX/fees/rounding.
-                # Use those KRW totals verbatim so the HTML tool matches the file.
-                eval_krw = float(info.get("eval_krw", eval_krw) or 0)
-                cost_krw = float(info.get("cost_krw", cost_krw) or 0)
+                # Preserve broker-exported totals, but do not freeze the live HTML
+                # valuation when a quote is available. If quote lookup fails, fall
+                # back to the broker snapshot so totals remain populated.
+                if q is None and broker_eval_krw is not None:
+                    eval_krw = broker_eval_krw
+                if broker_cost_krw is not None:
+                    cost_krw = broker_cost_krw
                 pnl_pct = ((eval_krw - cost_krw) / cost_krw * 100) if cost_krw else 0
-                price_note["price_guard"] = "broker_excel_snapshot"
+                price_note["price_guard"] = "live_quote_with_broker_excel_snapshot" if q else "broker_excel_snapshot"
                 price_note["valuation_price"] = round(_safe(cur_price), 2)
+                price_note["broker_snapshot_price"] = round(_safe(broker_price), 2)
+                price_note["broker_eval_krw"] = round(_safe(broker_eval_krw or 0))
+                price_note["broker_cost_krw"] = round(_safe(broker_cost_krw or 0))
 
             strategy = HOLDING_STRATEGY.get(ticker, {})
             name = info.get("name") or PORTFOLIO.get(ticker, ticker)
@@ -578,7 +807,7 @@ def _fetch_portfolio_raw() -> dict:
             "today_pnl_krw": round(acct_today_chg) if acct_today_available else None,
             "today_pnl_pct": round(acct_today_chg / acct_asset_total * 100, 2) if acct_today_available and acct_asset_total else None,
             "today_pnl_source": "live_day_pct_snapshot" if acct_today_available else "unavailable",
-            "display_source": "samsung_broker_excel_snapshot" if use_broker_excel_snapshot else "settings_plus_quotes",
+            "display_source": "live_quotes_plus_samsung_broker_snapshot" if use_broker_excel_snapshot else "settings_plus_quotes",
             "pnl_pct": round((acct_eval - acct_cost) / acct_cost * 100, 2) if acct_cost else 0,
         })
         total_eval += acct_eval + cash_krw
@@ -621,9 +850,9 @@ def _fetch_portfolio_raw() -> dict:
         "total_pnl_pct": round(_safe(raw_pnl), 2),
         "today_pnl_krw": round(total_today_chg) if total_today_available else None,
         "today_pnl_pct": round(total_today_chg / grand_total * 100, 2) if total_today_available and grand_total else None,
-        "today_pnl_source": "quote_day_pct_snapshot" if total_today_available and use_broker_excel_snapshot else ("quote" if total_today_available else "unavailable"),
+        "today_pnl_source": "live_quote_day_pct" if total_today_available and use_broker_excel_snapshot else ("quote" if total_today_available else "unavailable"),
         "total_cash": round(total_cash),
-        "display_source": "samsung_broker_excel_snapshot" if use_broker_excel_snapshot else "settings_plus_quotes",
+        "display_source": "live_quotes_plus_samsung_broker_snapshot" if use_broker_excel_snapshot else "settings_plus_quotes",
         "total_principal": round(float(TOTAL_PRINCIPAL_KRW)),
         "total_principal_pnl_pct": round(_safe(principal_pnl), 2),
         "cash_weight": cash_weight,
@@ -1835,13 +2064,10 @@ def ticker_chart_data(ticker: str, range_: str, interval: str) -> dict:
 def _fetch_toss_account_summary_raw() -> dict:
     """Toss 실전 AI 자동거래 계좌 요약. 기존 포트폴리오에 절대 합산하지 않음."""
     from core import toss_client as tc
+    _set_toss_readonly_timeout()
 
     now_str = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
-    try:
-        from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
-        live_policy = compute_toss_live_pilot_policy()
-    except Exception:
-        live_policy = {}
+    live_policy = _toss_live_policy_fast(timeout=0.2)
     effective_live = bool(
         live_policy.get("autonomous_mode")
         and not live_policy.get("autonomous_kill_switch")
@@ -1890,6 +2116,17 @@ def _fetch_toss_account_summary_raw() -> dict:
         except Exception:
             pass
         accounts = tc.get_accounts()
+    if not accounts:
+        base["error"] = "Toss account unavailable"
+        base["data_quality"] = {
+            "account_summary": "unavailable",
+            "reason": "accounts_empty_after_retry",
+            "cooldown_eligible": True,
+        }
+        base["warnings"].append(
+            "Toss 계좌 조회 실패 — 마지막 정상값 또는 쿨다운 응답 사용"
+        )
+        return base
     base["account_count"] = len(accounts)
     base["accounts"] = [
         {
@@ -2058,9 +2295,139 @@ def _fetch_toss_account_summary_raw() -> dict:
     return base
 
 
+def _toss_account_summary_is_live_good(data: dict) -> bool:
+    """Return True when the summary came from a usable live Toss account read."""
+    if not isinstance(data, dict):
+        return False
+    if data.get("error"):
+        return False
+    if not data.get("enabled"):
+        return True  # configured-off is cheap/static, not a transient Toss outage
+    try:
+        return int(data.get("account_count") or 0) > 0
+    except Exception:
+        return False
+
+
+def _toss_account_summary_unavailable(reason: str) -> dict:
+    """Minimal read-only response used while Toss account calls are cooling down."""
+    now_str = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
+    return {
+        "enabled": True,
+        "label": "Toss 실전 AI 자동거래 계좌",
+        "separate_from_portfolio": True,
+        "included_in_total_portfolio": False,
+        "trading_enabled": False,
+        "automation_status": "unknown",
+        "live_policy": {},
+        "account_count": 0,
+        "accounts": [],
+        "holdings_count": 0,
+        "holdings_items": [],
+        "market_value": {"krw": 0, "usd": None},
+        "cash": {"krw": 0, "usd": None, "source": "Toss"},
+        "total_account_value": {"krw": 0, "usd": None},
+        "exchange_rate": None,
+        "warnings": [
+            "기존 삼성증권/수동 포트폴리오에 합산하지 않음",
+            "Toss API 일시 오류 — 계좌 조회 쿨다운 중",
+        ],
+        "updated_at": now_str,
+        "error": reason,
+        "cache_status": "cooldown",
+        "stale": False,
+        "data_quality": {
+            "account_summary": "unavailable",
+            "reason": reason,
+            "cooldown_eligible": True,
+        },
+    }
+
+
+def _toss_account_summary_mark(data: dict, status: str, reason: str = "", source_ts: float | None = None) -> dict:
+    """Copy a Toss account summary and annotate cache/freshness state."""
+    out = copy.deepcopy(data) if isinstance(data, dict) else {}
+    out["cache_status"] = status
+    out["stale"] = status == "stale"
+    if source_ts is not None:
+        out["cache_age_sec"] = round(max(0.0, time.monotonic() - source_ts))
+    if reason:
+        out["stale_reason"] = reason
+        out["error"] = reason if status != "live" else out.get("error", "")
+        warnings = list(out.get("warnings") or [])
+        msg = "Toss API 일시 오류 — 마지막 정상값 표시"
+        if msg not in warnings:
+            warnings.append(msg)
+        out["warnings"] = warnings
+        dq = dict(out.get("data_quality") or {})
+        dq.update({"account_summary": status, "reason": reason})
+        out["data_quality"] = dq
+    return out
+
+
 def toss_account_summary() -> dict:
-    """Toss 실전 AI 자동거래 계좌 요약 (60초 캐시). 기존 포트폴리오 미합산."""
-    return _cached("toss_account_summary", 60, _fetch_toss_account_summary_raw)
+    """Toss 실전 AI 자동거래 계좌 요약.
+
+    Live Toss account calls can return repeated 401/429 and hammer the broker API.
+    Keep the dashboard read-only and responsive by returning a fresh cache, then
+    stale last-known-good data during a short cooldown, instead of caching a false
+    zero-account summary.
+    """
+    global _toss_account_summary_last_good, _toss_account_summary_cooldown_until
+
+    key = "toss_account_summary"
+    now = time.monotonic()
+    with _cache_lock:
+        entry = _cache.get(key)
+        if entry:
+            ts, val = entry
+            if now - ts < _TOSS_ACCOUNT_SUMMARY_OK_TTL:
+                return copy.deepcopy(val)
+        else:
+            val = None
+        last_good = _toss_account_summary_last_good
+        cooldown_until = _toss_account_summary_cooldown_until
+
+    if now < cooldown_until:
+        if last_good and now - last_good[0] <= _TOSS_ACCOUNT_SUMMARY_STALE_TTL:
+            stale = _toss_account_summary_mark(
+                last_good[1], "stale", "toss_api_cooldown", last_good[0]
+            )
+            with _cache_lock:
+                _cache[key] = (now, stale)
+            return stale
+        if isinstance(val, dict):
+            cooldown_val = _toss_account_summary_mark(val, "cooldown", "toss_api_cooldown")
+        else:
+            cooldown_val = _toss_account_summary_unavailable("toss_api_cooldown")
+        with _cache_lock:
+            _cache[key] = (now, cooldown_val)
+        return cooldown_val
+
+    data = _fetch_toss_account_summary_raw()
+    if _toss_account_summary_is_live_good(data):
+        live = _toss_account_summary_mark(data, "live")
+        with _cache_lock:
+            if live.get("enabled") and int(live.get("account_count") or 0) > 0:
+                _toss_account_summary_last_good = (now, live)
+            _toss_account_summary_cooldown_until = 0.0
+            _cache[key] = (now, live)
+        return live
+
+    reason = str((data or {}).get("error") or "toss_account_unavailable")
+    with _cache_lock:
+        _toss_account_summary_cooldown_until = now + _TOSS_ACCOUNT_FAILURE_COOLDOWN_SEC
+        last_good = _toss_account_summary_last_good
+    if last_good and now - last_good[0] <= _TOSS_ACCOUNT_SUMMARY_STALE_TTL:
+        stale = _toss_account_summary_mark(last_good[1], "stale", reason, last_good[0])
+        with _cache_lock:
+            _cache[key] = (now, stale)
+        return stale
+
+    unavailable = _toss_account_summary_mark(data or _toss_account_summary_unavailable(reason), "cooldown", reason)
+    with _cache_lock:
+        _cache[key] = (now, unavailable)
+    return unavailable
 
 
 def _fetch_toss_automation_status_raw() -> dict:
@@ -2813,11 +3180,8 @@ def stock_agent_activity_data(limit: int = 20) -> dict:
     return _cached(f"stock_agent_activity:{limit}", 60, _fetch)
 
 def toss_live_pilot_policy_data() -> dict:
-    """승인형 live pilot 정책 (60초 캐시). 실제 주문 0건. adapter disabled."""
-    def _fetch():
-        from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
-        return compute_toss_live_pilot_policy()
-    data = dict(_cached("toss_live_pilot_policy", 60, _fetch))
+    """승인형 live pilot 정책. 실제 주문 없음; dashboard path는 bounded."""
+    data = dict(_toss_live_policy_fast(timeout=1.0))
     # transport dry-run schema 상태 표시 (token/account 등 민감정보 미노출)
     transport_configured = data.get("live_transport_status") == "configured"
     live_order_sent_possible = bool(
@@ -2882,6 +3246,38 @@ def _normalize_broker_symbol(symbol: object) -> str:
 
 def _recent_toss_broker_orders(limit: int = 20) -> dict:
     """Read-only broker order truth from Toss GET order lists."""
+    global _toss_broker_orders_last_good, _toss_broker_orders_cooldown_until
+
+    _set_toss_readonly_timeout()
+    cache_key = f"toss_broker_orders:{int(limit or 20)}"
+    now = time.monotonic()
+    with _cache_lock:
+        entry = _cache.get(cache_key)
+        if entry:
+            ts, val = entry
+            if now - ts < _TOSS_BROKER_ORDERS_OK_TTL:
+                return copy.deepcopy(val)
+        last_good = _toss_broker_orders_last_good
+        cooldown_until = _toss_broker_orders_cooldown_until
+
+    if now < cooldown_until:
+        if last_good and now - last_good[0] <= _TOSS_BROKER_ORDERS_STALE_TTL:
+            stale = copy.deepcopy(last_good[1])
+            stale["ok"] = False
+            stale["cache_status"] = "stale"
+            stale["stale_reason"] = "toss_broker_orders_cooldown"
+            stale["cache_age_sec"] = round(max(0.0, now - last_good[0]))
+            stale["error"] = stale.get("error") or "toss_broker_orders_cooldown"
+            with _cache_lock:
+                _cache[cache_key] = (now, stale)
+            return stale
+        return {
+            "ok": False, "error": "toss_broker_orders_cooldown",
+            "orders": [], "open_count": 0, "closed_count": 0,
+            "cache_status": "cooldown", "source": "GET /api/v1/orders OPEN+CLOSED",
+            "read_only_notice": "브로커 주문 조회 전용 · 주문 생성/취소/수정 없음",
+        }
+
     try:
         from core.toss_live_order_http import list_orders
     except Exception as e:
@@ -2919,7 +3315,7 @@ def _recent_toss_broker_orders(limit: int = 20) -> dict:
             out.pop("broker_order_id", None)
             orders.append(_decorate_stock_display(out))
     orders.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
-    return {
+    result = {
         "ok": not errors,
         "error": "; ".join(errors),
         "orders": orders[:limit],
@@ -2927,7 +3323,16 @@ def _recent_toss_broker_orders(limit: int = 20) -> dict:
         "closed_count": counts["CLOSED"],
         "source": "GET /api/v1/orders OPEN+CLOSED",
         "read_only_notice": "브로커 주문 조회 전용 · 주문 생성/취소/수정 없음",
+        "cache_status": "live" if not errors else "error",
     }
+    with _cache_lock:
+        if not errors:
+            _toss_broker_orders_last_good = (now, result)
+            _toss_broker_orders_cooldown_until = 0.0
+        else:
+            _toss_broker_orders_cooldown_until = now + _TOSS_BROKER_ORDERS_FAILURE_COOLDOWN_SEC
+        _cache[cache_key] = (now, result)
+    return result
 
 def _decorate_stock_display(record: dict) -> dict:
     """대시보드/API 응답에서 종목코드 단독 표기를 피한다."""
@@ -2957,11 +3362,7 @@ def _current_toss_live_policy_for_dashboard() -> dict:
     policy separately so old rows do not make an armed autonomous runtime look
     disabled.
     """
-    try:
-        from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
-        return compute_toss_live_pilot_policy() or {}
-    except Exception:
-        return {}
+    return _toss_live_policy_fast(timeout=0.2)
 
 
 def _merge_current_live_policy(summary: dict | None) -> dict:
@@ -3004,11 +3405,7 @@ def toss_live_pilot_events_data(limit: int = 50) -> dict:
     try:
         from core.toss_live_pilot_events import list_events, event_summary
         summ = event_summary()
-        try:
-            from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
-            policy = compute_toss_live_pilot_policy()
-        except Exception:
-            policy = {}
+        policy = _toss_live_policy_fast(timeout=0.2)
         records = [_decorate_stock_display(r) for r in list_events(limit=limit)]
         broker_truth = _recent_toss_broker_orders(limit=min(limit, 50))
         broker_orders = broker_truth.get("orders") or []
@@ -3092,11 +3489,7 @@ def toss_live_pilot_verifications_data(limit: int = 20) -> dict:
         except Exception:
             pass
 
-        try:
-            from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
-            policy = compute_toss_live_pilot_policy()
-        except Exception:
-            policy = {}
+        policy = _toss_live_policy_fast(timeout=0.2)
 
         summary = dict(summ or {})
         # verification 자체는 gate-only라 live_order_allowed=false가 맞다.

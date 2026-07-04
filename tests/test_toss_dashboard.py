@@ -46,7 +46,8 @@ class TestTossAccountSummary:
              patch("core.toss_client.get_holdings", return_value=holdings), \
              patch("core.toss_client.get_exchange_rate", return_value=fx), \
              patch("core.toss_client.get_buying_power", return_value=buying_power), \
-             patch("core.toss_client.sanitize_dict", side_effect=lambda x: x):
+             patch("core.toss_client.sanitize_dict", side_effect=lambda x: x), \
+             patch("core.toss_live_pilot_policy.compute_toss_live_pilot_policy", return_value={}):
             return _fetch_toss_account_summary_raw()
 
     def test_included_in_total_portfolio_is_false(self):
@@ -113,6 +114,7 @@ class TestTossAccountSummary:
             patch("core.toss_client.get_exchange_rate", return_value={}),
             patch("core.toss_client.get_buying_power", return_value={}),
             patch("core.toss_client.sanitize_dict", side_effect=lambda x: x),
+            patch("core.toss_live_pilot_policy.compute_toss_live_pilot_policy", return_value={}),
         ):
             d = _fetch_toss_account_summary_raw()
 
@@ -161,6 +163,122 @@ class TestTossAccountSummary:
         d = self._get_summary()
         warns = " ".join(d.get("warnings", []))
         assert "실험" not in warns
+
+
+    def test_empty_accounts_fail_fast_before_fx(self):
+        from core.dashboard_data import _fetch_toss_account_summary_raw
+
+        with (
+            patch("core.toss_client.is_configured", return_value=True),
+            patch("core.toss_client.get_accounts", side_effect=[[], []]),
+            patch("core.toss_client.get_holdings") as get_holdings,
+            patch("core.toss_client.get_exchange_rate") as get_fx,
+            patch("core.toss_client.get_buying_power") as get_bp,
+            patch("core.toss_live_pilot_policy.compute_toss_live_pilot_policy", return_value={}),
+        ):
+            d = _fetch_toss_account_summary_raw()
+
+        assert d["account_count"] == 0
+        assert d["error"] == "Toss account unavailable"
+        assert d["data_quality"]["reason"] == "accounts_empty_after_retry"
+        get_holdings.assert_not_called()
+        get_fx.assert_not_called()
+        get_bp.assert_not_called()
+
+    def test_policy_fast_fallback_does_not_block_dashboard(self, monkeypatch):
+        import time
+        from core import dashboard_data as dd
+
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+        monkeypatch.setenv("TOSS_LIVE_PILOT_ENABLED", "true")
+        monkeypatch.setenv("TOSS_LIVE_ORDER_ALLOWED", "true")
+        monkeypatch.setenv("TOSS_LIVE_ADAPTER_ENABLED", "true")
+        monkeypatch.setenv("TOSS_LIVE_TRANSPORT_ARMED", "true")
+        monkeypatch.setenv("TOSS_AUTONOMOUS_MODE", "true")
+        monkeypatch.setenv("TOSS_AUTONOMOUS_KILL_SWITCH", "false")
+        monkeypatch.setenv("TOSS_AUTONOMOUS_ALLOWED_ASSET_TYPES", "US_STOCK,KR_STOCK")
+        dd._cache.pop("toss_live_policy_fast", None)
+        dd._cache.pop("toss_live_policy_last_error", None)
+        dd._toss_policy_refreshing = None
+
+        def slow_policy():
+            time.sleep(0.15)
+            return {"live_order_allowed": False, "adapter_status": "slow"}
+
+        started = time.monotonic()
+        with patch("core.toss_live_pilot_policy.compute_toss_live_pilot_policy", side_effect=slow_policy):
+            policy = dd._toss_live_policy_fast(timeout=0.01)
+
+        assert time.monotonic() - started < 0.08
+        assert policy["cache_status"] == "fallback"
+        assert policy["live_order_allowed"] is True
+        assert policy["adapter_status"] == "enabled"
+
+        # background refresh may still be finishing; reset so later tests are isolated
+        if dd._toss_policy_refreshing:
+            dd._toss_policy_refreshing.wait(0.3)
+        dd._cache.pop("toss_live_policy_fast", None)
+        dd._cache.pop("toss_live_policy_last_error", None)
+        dd._toss_policy_refreshing = None
+
+    def test_account_summary_uses_stale_cache_during_cooldown(self):
+        import time
+        from core import dashboard_data as dd
+
+        good = {
+            "enabled": True,
+            "label": "Toss 실전 AI 자동거래 계좌",
+            "separate_from_portfolio": True,
+            "included_in_total_portfolio": False,
+            "trading_enabled": True,
+            "automation_status": "autonomous_live_pilot",
+            "live_policy": {},
+            "account_count": 1,
+            "accounts": [{"account_seq": 1, "account_type": "BROKERAGE", "account_no_masked": "[REDACTED]"}],
+            "holdings_count": 1,
+            "holdings_items": [{"symbol": "AAPL"}],
+            "market_value": {"krw": 1000, "usd": None},
+            "cash": {"krw": 2000, "usd": None, "source": "Toss"},
+            "total_account_value": {"krw": 3000, "usd": None},
+            "exchange_rate": None,
+            "warnings": [],
+            "updated_at": "test",
+            "error": "",
+        }
+        bad = {
+            **good,
+            "account_count": 0,
+            "accounts": [],
+            "holdings_count": 0,
+            "holdings_items": [],
+            "error": "Toss account unavailable",
+        }
+
+        dd._cache.pop("toss_account_summary", None)
+        dd._toss_account_summary_last_good = None
+        dd._toss_account_summary_cooldown_until = 0.0
+
+        with patch.object(dd, "_fetch_toss_account_summary_raw", side_effect=[good, bad]) as fetch:
+            live = dd.toss_account_summary()
+            assert live["cache_status"] == "live"
+
+            with dd._cache_lock:
+                dd._cache["toss_account_summary"] = (time.monotonic() - 61, live)
+            stale = dd.toss_account_summary()
+
+            assert stale["cache_status"] == "stale"
+            assert stale["account_count"] == 1
+            assert stale["total_account_value"]["krw"] == 3000
+            assert stale["stale_reason"] == "Toss account unavailable"
+
+            dd._cache.pop("toss_account_summary", None)
+            again = dd.toss_account_summary()
+            assert again["cache_status"] == "stale"
+            assert fetch.call_count == 2
+
+        dd._cache.pop("toss_account_summary", None)
+        dd._toss_account_summary_last_good = None
+        dd._toss_account_summary_cooldown_until = 0.0
 
 
 # ═══ 기존 포트폴리오 오염 없음 ═══
@@ -377,6 +495,54 @@ class TestTossLivePilotRuntimeDisplay:
         assert data["summary"]["gate_live_order_allowed"] is False
         assert data["summary"]["policy_live_order_allowed"] is True
         assert data["summary"]["policy_adapter_status"] == "enabled"
+
+
+    def test_recent_broker_orders_failure_sets_cooldown(self):
+        import time
+        from core import dashboard_data as dd
+
+        dd._cache.pop("toss_broker_orders:2", None)
+        dd._toss_broker_orders_last_good = None
+        dd._toss_broker_orders_cooldown_until = 0.0
+
+        with patch("core.toss_live_order_http.list_orders", return_value={"ok": False, "reason": "http_401", "orders": []}) as list_orders:
+            out = dd._recent_toss_broker_orders(limit=2)
+
+        assert out["ok"] is False
+        assert out["cache_status"] == "error"
+        assert "http_401" in out["error"]
+        assert dd._toss_broker_orders_cooldown_until > time.monotonic()
+        assert list_orders.call_count == 2
+
+        dd._cache.pop("toss_broker_orders:2", None)
+        dd._toss_broker_orders_last_good = None
+        dd._toss_broker_orders_cooldown_until = 0.0
+
+    def test_recent_broker_orders_cooldown_returns_stale_without_external_call(self):
+        import time
+        from core import dashboard_data as dd
+
+        good = {
+            "ok": True, "error": "",
+            "orders": [{"symbol": "AAPL", "status": "FILLED"}],
+            "open_count": 0, "closed_count": 1,
+            "source": "GET /api/v1/orders OPEN+CLOSED",
+            "read_only_notice": "브로커 주문 조회 전용 · 주문 생성/취소/수정 없음",
+            "cache_status": "live",
+        }
+        dd._cache.pop("toss_broker_orders:1", None)
+        dd._toss_broker_orders_last_good = (time.monotonic(), good)
+        dd._toss_broker_orders_cooldown_until = time.monotonic() + 300
+
+        out = dd._recent_toss_broker_orders(limit=1)
+
+        assert out["cache_status"] == "stale"
+        assert out["orders"][0]["symbol"] == "AAPL"
+        assert out["stale_reason"] == "toss_broker_orders_cooldown"
+
+        dd._cache.pop("toss_broker_orders:1", None)
+        dd._toss_broker_orders_last_good = None
+        dd._toss_broker_orders_cooldown_until = 0.0
 
 
 # ═══ API endpoint 검증 (automation) ═══

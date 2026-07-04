@@ -24,6 +24,14 @@ from core.toss_quality_gate import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_network_supply(monkeypatch):
+    """수급 조회가 테스트에서 네트워크를 타지 않게 기본 차단."""
+    import core.kr_market as km
+    monkeypatch.setattr(km, "_fetch_naver_frgn", lambda code: [])
+    monkeypatch.setattr(km, "_FRGN_CACHE", {})
+
+
 def _candidate(**overrides):
     base = {
         "symbol": "316140.KS",
@@ -318,6 +326,213 @@ class TestStockAgentReadySmallPass:
         _exec = ("PASS_EXECUTE", "SMALL_PASS")
         ready = bucket in _exec
         assert ready is True
+
+
+# ── KRX 수급 보정 (P3-1) 테스트 ──────────────────────────────────
+
+def _frgn_rows(inst: float, frgn: float, days: int = 5) -> list[dict]:
+    return [
+        {"date": f"2026070{d}", "close": 10000.0,
+         "inst_shares": inst, "foreign_shares": frgn}
+        for d in range(days, 0, -1)
+    ]
+
+
+class TestSupplyDemand:
+
+    def _score(self, ticker="316140.KS", pre_score=60.0, rows=None,
+               budget=None, cache=None):
+        from core.toss_quality_gate import _score_supply_demand
+        with patch("core.kr_market._fetch_naver_frgn",
+                   return_value=rows if rows is not None else []) as mock_fetch, \
+             patch("core.kr_market._FRGN_CACHE", cache if cache is not None else {}):
+            score = _score_supply_demand(ticker, pre_score, fetch_budget=budget)
+        return score, mock_fetch
+
+    def test_both_net_buy_plus_10(self):
+        score, _ = self._score(rows=_frgn_rows(inst=100, frgn=200))
+        assert score == 10.0
+
+    def test_both_net_sell_minus_10(self):
+        score, _ = self._score(rows=_frgn_rows(inst=-100, frgn=-200))
+        assert score == -10.0
+
+    def test_mixed_zero(self):
+        score, _ = self._score(rows=_frgn_rows(inst=-100, frgn=100))
+        assert score == 0.0
+
+    def test_us_ticker_skipped(self):
+        score, mock_fetch = self._score(ticker="NVDA",
+                                        rows=_frgn_rows(inst=100, frgn=100))
+        assert score == 0.0
+        mock_fetch.assert_not_called()
+
+    def test_low_pre_score_skipped(self):
+        score, mock_fetch = self._score(pre_score=30.0,
+                                        rows=_frgn_rows(inst=100, frgn=100))
+        assert score == 0.0
+        mock_fetch.assert_not_called()
+
+    def test_fetch_failure_fail_safe(self):
+        score, _ = self._score(rows=[])
+        assert score == 0.0
+
+    def test_budget_exhausted_uncached_skips_fetch(self):
+        score, mock_fetch = self._score(rows=_frgn_rows(inst=100, frgn=100),
+                                        budget={"remaining": 0})
+        assert score == 0.0
+        mock_fetch.assert_not_called()
+
+    def test_cached_symbol_ignores_budget(self):
+        rows = _frgn_rows(inst=100, frgn=100)
+        score, _ = self._score(rows=rows, budget={"remaining": 0},
+                               cache={"316140": rows})
+        assert score == 10.0
+
+    def test_budget_decrements(self):
+        budget = {"remaining": 2}
+        self._score(rows=_frgn_rows(inst=100, frgn=100), budget=budget)
+        assert budget["remaining"] == 1
+
+    def test_bare_kr_code_accepted(self):
+        score, _ = self._score(ticker="316140",
+                               rows=_frgn_rows(inst=100, frgn=100))
+        assert score == 10.0
+
+    @patch("core.toss_quality_gate._score_momentum", return_value=15.0)
+    @patch("core.toss_quality_gate._penalty_event_risk", return_value=(0.0, -1))
+    def test_score_candidate_includes_supply(self, mock_event, mock_momentum):
+        c = _candidate(risk_reward=2.5)
+        with patch("core.toss_quality_gate._score_supply_demand",
+                   return_value=10.0):
+            qs = score_candidate(c)
+        assert qs.score_supply_demand == 10.0
+        assert qs.to_dict()["score_supply_demand"] == 10.0
+
+    @patch("core.toss_quality_gate._score_momentum", return_value=15.0)
+    @patch("core.toss_quality_gate._penalty_event_risk", return_value=(0.0, -1))
+    def test_supply_affects_total(self, mock_event, mock_momentum):
+        c = _candidate(risk_reward=2.5)
+        with patch("core.toss_quality_gate._score_supply_demand",
+                   return_value=0.0):
+            base = score_candidate(c).score_total
+        with patch("core.toss_quality_gate._score_supply_demand",
+                   return_value=-10.0):
+            lowered = score_candidate(c).score_total
+        assert lowered == base - 10.0
+
+    @patch("core.toss_quality_gate._score_momentum", return_value=15.0)
+    @patch("core.toss_quality_gate._penalty_event_risk", return_value=(0.0, -1))
+    @patch("core.regime.detect_regime")
+    def test_batch_passes_shared_budget(self, mock_regime, mock_event,
+                                        mock_momentum):
+        mock_regime.return_value = MagicMock(regime="강세장", risk_adjustment="중립")
+        seen = []
+        with patch("core.toss_quality_gate._score_supply_demand",
+                   side_effect=lambda t, p, fetch_budget=None:
+                   seen.append(fetch_budget) or 0.0):
+            score_candidates_batch(
+                [_candidate(symbol="A"), _candidate(symbol="B")], market="KR")
+        assert len(seen) == 2
+        assert seen[0] is seen[1]  # 배치 전체가 예산 공유
+        assert seen[0] == {"remaining": 3}
+
+
+# ── 가중치 캘리브레이션 구조 (P3-4) 테스트 ───────────────────────
+
+class TestScoreWeights:
+
+    def test_default_weights_all_one(self, tmp_path):
+        from core import toss_quality_gate as qg
+        with patch.object(qg, "_weights_path",
+                          return_value=tmp_path / "none.json"):
+            w = qg.get_score_weights()
+        assert all(v == 1.0 for v in w.values())
+        assert set(w) == {"momentum", "liquidity", "risk_reward",
+                          "reliability", "market_regime", "supply_demand"}
+
+    def test_file_override_and_clamp(self, tmp_path):
+        import json
+        from core import toss_quality_gate as qg
+        p = tmp_path / "quality_gate_weights.json"
+        p.write_text(json.dumps({"momentum": 1.2, "liquidity": 9.0,
+                                 "risk_reward": 0.1}), encoding="utf-8")
+        with patch.object(qg, "_weights_path", return_value=p):
+            qg._weights_cache["mtime"] = None
+            w = qg.get_score_weights()
+        assert w["momentum"] == 1.2
+        assert w["liquidity"] == 1.5   # clamp 상한
+        assert w["risk_reward"] == 0.5  # clamp 하한
+        assert w["supply_demand"] == 1.0  # 미지정 → 기본
+
+    @patch("core.toss_quality_gate._score_momentum", return_value=20.0)
+    @patch("core.toss_quality_gate._penalty_event_risk", return_value=(0.0, -1))
+    def test_weights_scale_scores(self, mock_event, mock_momentum):
+        from core import toss_quality_gate as qg
+        c = _candidate(risk_reward=2.5)
+        base_w = dict(qg._DEFAULT_WEIGHTS)
+        half_w = dict(base_w, momentum=0.5)
+        with patch.object(qg, "get_score_weights", return_value=base_w):
+            base = score_candidate(c)
+        with patch.object(qg, "get_score_weights", return_value=half_w):
+            halved = score_candidate(c)
+        assert halved.score_momentum == base.score_momentum / 2
+
+
+class TestWeightCalibration:
+
+    def _with_db(self, tmp_path, rows):
+        """임시 outcomes DB에 rows 삽입 후 suggest 실행."""
+        import core.toss_quality_gate as qg
+        db = tmp_path / "toss_quality_gate.db"
+        with patch.object(qg, "_outcomes_db_path", return_value=db):
+            qg._outcomes_schema_created = False
+            conn = qg._outcomes_conn()
+            for r in rows:
+                conn.execute(
+                    "INSERT INTO quality_gate_decisions "
+                    "(ticker, decided_at, decision_bucket, outcome, "
+                    " score_momentum, score_liquidity, score_risk_reward, "
+                    " score_reliability, score_market_regime) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    ("T", "2026-06-01T10:00:00+09:00", PASS_EXECUTE,
+                     r["outcome"], r["m"], 15, 15, 7.5, 10),
+                )
+            conn.commit()
+            conn.close()
+            result = qg.suggest_weight_calibration(min_outcomes=10)
+            qg._outcomes_schema_created = False
+        return result
+
+    def test_insufficient_outcomes(self, tmp_path):
+        rows = [{"outcome": "win", "m": 20}] * 5
+        r = self._with_db(tmp_path, rows)
+        assert r["ok"] is False
+        assert r["reason"] == "insufficient_outcomes"
+
+    def test_suggests_higher_weight_for_predictive_dim(self, tmp_path):
+        # win의 momentum이 loss보다 뚜렷이 높음 → momentum 가중치 > 1.0
+        rows = ([{"outcome": "win", "m": 22.0}] * 6
+                + [{"outcome": "loss", "m": 8.0}] * 6)
+        r = self._with_db(tmp_path, rows)
+        assert r["ok"] is True
+        assert r["suggested_weights"]["momentum"] > 1.0
+        # 차이 없는 차원은 1.0 유지
+        assert r["suggested_weights"]["liquidity"] == 1.0
+        assert r["suggested_weights"]["supply_demand"] == 1.0  # DB 미기록 → 기본
+
+    def test_need_both_outcomes(self, tmp_path):
+        rows = [{"outcome": "win", "m": 20}] * 12
+        r = self._with_db(tmp_path, rows)
+        assert r["ok"] is False
+        assert r["reason"] == "need_both_win_and_loss"
+
+    def test_suggestion_file_written(self, tmp_path):
+        import core.toss_quality_gate as qg
+        rows = ([{"outcome": "win", "m": 22.0}] * 6
+                + [{"outcome": "loss", "m": 8.0}] * 6)
+        self._with_db(tmp_path, rows)
+        assert (tmp_path / "quality_gate_weights_suggestion.json").exists()
 
 
 # ── 체결가 연동 (B) 테스트 ───────────────────────────────────────

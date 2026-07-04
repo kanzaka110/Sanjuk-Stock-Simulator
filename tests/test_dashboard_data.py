@@ -2422,6 +2422,36 @@ def test_portfolio_clamps_obvious_quote_outliers(monkeypatch):
     assert p["total_eval"] == items["005930.KS"]["eval_krw"] + items["MU"]["eval_krw"]
 
 
+def test_portfolio_quote_refresh_timeout_returns_fast_stale(monkeypatch):
+    """느린 KIS/yfinance 배치는 요청 경로를 막지 않고 백그라운드 갱신한다."""
+    import time
+    from core.models import Quote
+
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    dd._portfolio_quote_cache.clear()
+    dd._portfolio_quote_refreshing.clear()
+    calls = {"n": 0}
+
+    def slow_fetch(tickers):
+        calls["n"] += 1
+        time.sleep(0.15)
+        return {"005930.KS": Quote("005930.KS", "삼성전자", 70000, pct=1.2)}
+
+    started = time.monotonic()
+    cold = dd._portfolio_quotes_fast({"005930.KS": "삼성전자"}, slow_fetch, ttl=60, timeout=0.01)
+    elapsed = time.monotonic() - started
+
+    assert cold == {}
+    assert elapsed < 0.08
+    assert calls["n"] == 1
+
+    time.sleep(0.25)
+    warm = dd._portfolio_quotes_fast({"005930.KS": "삼성전자"}, slow_fetch, ttl=60, timeout=0.01)
+
+    assert warm["005930.KS"].price == 70000
+    assert calls["n"] == 1
+
+
 def test_portfolio_missing_quote_uses_cost_with_warning(monkeypatch):
     """현재가가 0/누락이면 평가액은 평단 기준으로 보수 계산하고 경고를 남긴다."""
     from core.models import Quote

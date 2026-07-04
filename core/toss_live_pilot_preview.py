@@ -27,6 +27,36 @@ def _gen_preview_id() -> str:
     return f"tlive_{ts}"
 
 
+# ── 통화 판별 / 환율 ─────────────────────────────────────
+
+def _is_kr_symbol(symbol: str) -> bool:
+    s = str(symbol or "")
+    return s.endswith(".KS") or s.endswith(".KQ") or s.isdigit()
+
+
+_fx_cache: dict = {"rate": 0.0, "at": None}
+_FX_TTL_SEC = 600
+
+
+def _get_usdkrw() -> float:
+    """USD/KRW 환율 조회 (10분 캐시). 실패 시 0.0."""
+    now = datetime.now(KST)
+    cached_at = _fx_cache.get("at")
+    if cached_at and (now - cached_at).total_seconds() < _FX_TTL_SEC and _fx_cache["rate"] > 0:
+        return _fx_cache["rate"]
+    try:
+        import yfinance as yf
+        info = yf.Ticker("USDKRW=X").fast_info
+        rate = float(getattr(info, "last_price", 0) or 0)
+        if rate > 0:
+            _fx_cache["rate"] = rate
+            _fx_cache["at"] = now
+            return rate
+    except Exception as e:
+        log.warning("USDKRW 환율 조회 실패: %s", e)
+    return _fx_cache["rate"] if _fx_cache["rate"] > 0 else 0.0
+
+
 def _get_live_pilot_policy() -> dict:
     try:
         from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
@@ -103,12 +133,23 @@ def build_live_pilot_preview(candidate: dict, policy: dict | None = None) -> dic
     side = candidate.get("side", "buy")
     quantity = int(candidate.get("quantity") or 0)
     limit_price = float(candidate.get("limit_price") or 0)
-    estimated_krw = limit_price * quantity
+
+    # 통화 환산: US 종목은 USD → KRW (기존 버그: USD 원값이 KRW 필드에 저장됨)
+    currency = str(candidate.get("currency") or ("KRW" if _is_kr_symbol(symbol) else "USD")).upper()
+    usdkrw_rate = 0.0
+    if currency == "USD":
+        usdkrw_rate = _get_usdkrw()
+        estimated_krw = limit_price * quantity * usdkrw_rate
+    else:
+        estimated_krw = limit_price * quantity
 
     # 차단 체크 (순서대로)
     blocks: list[str] = []
     blocks += _check_symbol_blocks(symbol, policy)
     blocks += _check_price_source(candidate)
+    if currency == "USD" and usdkrw_rate <= 0:
+        # 환율 없이는 KRW 한도/일일 캡 계산이 불가능 — fail-closed
+        blocks.append("환율_조회_실패_USD_환산_불가")
     if not blocks:  # 금액 체크는 기본 사항만 통과 시
         blocks += _check_amount(estimated_krw, policy)
 
@@ -128,6 +169,8 @@ def build_live_pilot_preview(candidate: dict, policy: dict | None = None) -> dic
         "quantity": quantity,
         "limit_price": limit_price,
         "estimated_amount_krw": estimated_krw,
+        "currency": currency,
+        "usdkrw_rate": usdkrw_rate if currency == "USD" else None,
         "live_pilot": True,
         "live_order_allowed": False,          # 이번 단계: 항상 False
         "live_order_sent": False,

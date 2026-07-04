@@ -150,7 +150,32 @@ class TestMessage(unittest.TestCase):
         for bad in ("자동매매 시작", "매수하기", "매도하기", "주문 실행"):
             self.assertNotIn(bad, msg)
         self.assertIn("자동 취소 안 함", msg)
-        self.assertIn("자동 매도 안 함", msg)
+        self.assertIn("매도 여부 직접 판단 필요", msg)
+
+    def test_message_promoted_sell_shown(self):
+        exits = tow.check_exit_levels(
+            now=_NOW, records=[_ledger_record()], price_fn=lambda s: 27000.0
+        )
+        promos = {"091180.KS:stop_loss_hit": {
+            "symbol": "091180.KS", "stage": "verdict_recorded",
+            "verdict": "PASS", "sell_quantity": 3, "exit_type": "stop_loss_hit",
+        }}
+        msg = tow.format_watch_message([], exits, promos)
+        self.assertIn("자동 매도 발동", msg)
+        self.assertIn("전량 손절 3주", msg)
+        self.assertNotIn("매도 여부 직접 판단 필요", msg)
+
+    def test_message_skipped_promotion_asks_manual(self):
+        exits = tow.check_exit_levels(
+            now=_NOW, records=[_ledger_record()], price_fn=lambda s: 35000.0
+        )
+        promos = {"091180.KS:target_hit": {
+            "symbol": "091180.KS", "stage": "skipped",
+            "reason": "sell_not_allowed_by_env",
+        }}
+        msg = tow.format_watch_message([], exits, promos)
+        self.assertIn("자동 매도 스킵: sell_not_allowed_by_env", msg)
+        self.assertIn("매도 여부 직접 판단 필요", msg)
 
     def test_empty_when_no_alerts(self):
         self.assertEqual(tow.format_watch_message([], []), "")
@@ -166,8 +191,10 @@ class TestRunWatch(unittest.TestCase):
              patch.object(tow, "check_exit_levels", return_value=[
                  {"pilot_id": "p1", "symbol": "091180.KS", "type": "target_hit",
                   "current_price": 35000, "entry_price": 30000,
-                  "stop_loss": 28000, "target_price": 34000},
-             ]):
+                  "stop_loss": 28000, "target_price": 34000, "quantity": 5},
+             ]), \
+             patch("core.toss_live_pilot_policy.compute_toss_live_pilot_policy",
+                   return_value={"autonomous_mode": False}):
             return tow.run_toss_order_watch(now=now, send=False, **kw)
 
     def test_first_run_alerts(self):
@@ -193,6 +220,95 @@ class TestRunWatch(unittest.TestCase):
             self._run(tmp)
             r2 = self._run(tmp, now=_NOW + timedelta(days=1))
             self.assertEqual(r2["exit_count"], 1)
+
+
+# ── 4.5 자동 매도 승격 ───────────────────────────────────────────
+
+_POLICY_AUTO_SELL = {
+    "autonomous_mode": True,
+    "autonomous_kill_switch": False,
+    "autonomous_allowed_sides": ["buy", "sell"],
+    "max_order_krw": 0,
+    "blocked_symbols": [],
+}
+
+_ALERT_STOP = {
+    "pilot_id": "p1", "symbol": "091180.KS", "type": "stop_loss_hit",
+    "current_price": 27000, "entry_price": 30000,
+    "stop_loss": 28000, "target_price": 34000, "quantity": 10,
+}
+
+
+class TestPromoteExitToSell(unittest.TestCase):
+    def test_sell_quantity_stop_full_target_half(self):
+        self.assertEqual(tow.compute_exit_sell_quantity(_ALERT_STOP, held_qty=10), 10)
+        target = dict(_ALERT_STOP, type="target_hit")
+        self.assertEqual(tow.compute_exit_sell_quantity(target, held_qty=10), 5)
+        # 실보유가 더 적으면 실보유 기준
+        self.assertEqual(tow.compute_exit_sell_quantity(_ALERT_STOP, held_qty=4), 4)
+        # 미보유 → 0
+        self.assertEqual(tow.compute_exit_sell_quantity(_ALERT_STOP, held_qty=0), 0)
+        # 목표 분할은 최소 1주
+        target1 = dict(_ALERT_STOP, type="target_hit", quantity=1)
+        self.assertEqual(tow.compute_exit_sell_quantity(target1, held_qty=1), 1)
+
+    def _promote(self, alert=None, policy=None, held=10.0, market_open=True,
+                 process_result=None):
+        alert = alert or dict(_ALERT_STOP)
+        policy = policy if policy is not None else dict(_POLICY_AUTO_SELL)
+        process_result = process_result or {
+            "symbol": alert["symbol"], "stage": "verdict_recorded", "verdict": "PASS",
+            "pilot_id": "tlive_sell_1",
+        }
+        with patch.object(tow, "_held_quantity", return_value=held), \
+             patch.object(tow, "_market_open_for_symbol", return_value=market_open), \
+             patch("core.toss_autonomous_pipeline.process_candidate",
+                   return_value=process_result) as mock_pc:
+            r = tow.promote_exit_to_sell(alert, policy, now=_NOW)
+        return r, mock_pc
+
+    def test_promotes_stop_loss_full_sell(self):
+        r, mock_pc = self._promote()
+        self.assertEqual(r["verdict"], "PASS")
+        self.assertEqual(r["sell_quantity"], 10)
+        cand = mock_pc.call_args[0][0]
+        self.assertEqual(cand["side"], "sell")
+        self.assertEqual(cand["quantity"], 10)
+        self.assertEqual(cand["limit_price"], 27000)
+        self.assertEqual(mock_pc.call_args.kwargs.get("reason"), "auto_exit_sell")
+
+    def test_target_hit_partial_sell(self):
+        alert = dict(_ALERT_STOP, type="target_hit", current_price=35000)
+        r, mock_pc = self._promote(alert=alert)
+        self.assertEqual(r["sell_quantity"], 5)
+        self.assertEqual(mock_pc.call_args[0][0]["quantity"], 5)
+
+    def test_autonomous_off_skips(self):
+        policy = dict(_POLICY_AUTO_SELL, autonomous_mode=False)
+        r, mock_pc = self._promote(policy=policy)
+        self.assertEqual(r["stage"], "skipped")
+        self.assertEqual(r["reason"], "autonomous_mode_disabled")
+        mock_pc.assert_not_called()
+
+    def test_kill_switch_skips(self):
+        policy = dict(_POLICY_AUTO_SELL, autonomous_kill_switch=True)
+        r, _ = self._promote(policy=policy)
+        self.assertEqual(r["reason"], "kill_switch_active")
+
+    def test_sell_not_allowed_env_skips(self):
+        policy = dict(_POLICY_AUTO_SELL, autonomous_allowed_sides=["buy"])
+        r, mock_pc = self._promote(policy=policy)
+        self.assertEqual(r["reason"], "sell_not_allowed_by_env")
+        mock_pc.assert_not_called()
+
+    def test_market_closed_skips(self):
+        r, _ = self._promote(market_open=False)
+        self.assertEqual(r["reason"], "market_closed")
+
+    def test_no_holding_skips(self):
+        r, mock_pc = self._promote(held=0.0)
+        self.assertIn("no_confirmed_holding", r["reason"])
+        mock_pc.assert_not_called()
 
 
 # ── 5. 소스 안전성 ───────────────────────────────────────────────

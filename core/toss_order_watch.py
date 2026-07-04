@@ -1,12 +1,17 @@
 """core/toss_order_watch.py
 
-Toss 미체결 주문 + exit 레벨 감시 (read-only, 알림 전용).
+Toss 미체결 주문 + exit 레벨 감시.
 
 A-1: 브로커 OPEN 주문 중 장시간 미체결 건 → 텔레그램 알림
 A-2: live_sent 매수 포지션의 stop_loss/target_price 도달 → 텔레그램 알림
+A-3: exit 도달 시 자동 매도 승격 — autonomous mode + sell 허용(env)일 때만
+     preview→검증→자동판정 경로(toss_autonomous_pipeline.process_candidate)로
+     연결. 이 모듈 자체는 주문 API를 직접 호출하지 않는다 (finalizer가 실행).
 
 원칙:
-- 주문/취소/정정 실행 없음 — GET 조회 + 알림만. (자동 매도/취소는 검증 후 별도 승인)
+- 이 파일에는 주문/취소/정정 API 호출 없음 — 실행은 기존 finalizer 경로 재사용
+- 자동 매도 가드: TOSS_AUTONOMOUS_MODE + kill switch + TOSS_AUTONOMOUS_ALLOWED_SIDES
+  + 정규장 시간 + Toss 실보유 수량 확인 (조회 실패 시 매도 안 함)
 - 알림 중복 방지: db/data/toss_order_watch_state.json (키별 1일 1회)
 - 민감정보(계좌/토큰) 저장·출력 금지
 """
@@ -189,12 +194,106 @@ def check_exit_levels(
             "entry_price": entry,
             "stop_loss": stop,
             "target_price": target,
+            "quantity": int(_as_float(r.get("quantity"))),
         }
         if stop > 0 and price <= stop:
             alerts.append({**base, "type": "stop_loss_hit"})
         elif target > 0 and price >= target:
             alerts.append({**base, "type": "target_hit"})
     return alerts
+
+
+# ── A-3: exit 자동 매도 승격 (autonomous mode 전용) ──────────────
+
+TARGET_PARTIAL_SELL_RATIO = 0.5  # 목표가 도달 시 분할 익절 비율
+
+
+def _held_quantity(symbol: str) -> float:
+    """Toss 실보유 수량 확인. 조회 실패/미보유 → 0 (fail-safe: 매도 안 함)."""
+    try:
+        from core.dashboard_data import _toss_holding_price_map
+        row = _toss_holding_price_map().get(str(symbol).upper().strip())
+        if not row:
+            return 0.0
+        return float(row.get("quantity") or 0)
+    except Exception as e:
+        log.debug("held quantity lookup failed %s: %s", symbol, e)
+        return 0.0
+
+
+def compute_exit_sell_quantity(alert: dict, held_qty: float) -> int:
+    """자동 매도 수량: 손절=전량, 목표=분할 익절 (실보유 초과 금지)."""
+    bought = int(_as_float(alert.get("quantity")))
+    held = int(held_qty)
+    base_qty = min(bought, held) if bought > 0 else held
+    if base_qty <= 0:
+        return 0
+    if alert.get("type") == "target_hit":
+        return max(1, int(base_qty * TARGET_PARTIAL_SELL_RATIO))
+    return base_qty
+
+
+def _market_open_for_symbol(symbol: str, now: datetime) -> bool:
+    from core.market_hours import is_kr_market_open, is_us_market_open
+    if symbol.endswith((".KS", ".KQ")) or symbol.isdigit():
+        return is_kr_market_open(now)
+    return is_us_market_open(now)
+
+
+def promote_exit_to_sell(alert: dict, policy: dict, now: datetime | None = None) -> dict:
+    """exit 레벨 도달 → 자동 SELL 주문 경로 승격.
+
+    preview → ledger → 검증 → 자동 판정 (PASS 시 finalizer 자동 발동)
+    — buy 자율 파이프라인과 동일한 process_candidate 경로 재사용.
+
+    가드:
+    - autonomous_mode ON + kill switch OFF
+    - autonomous_allowed_sides에 sell 포함 (env TOSS_AUTONOMOUS_ALLOWED_SIDES)
+    - 해당 시장 정규장 시간
+    - Toss 실보유 수량 확인 필수 (조회 실패 시 매도 안 함)
+    """
+    now = now or _now_kst()
+    symbol = str(alert.get("symbol", ""))
+
+    if not policy.get("autonomous_mode"):
+        return {"symbol": symbol, "stage": "skipped", "reason": "autonomous_mode_disabled"}
+    if policy.get("autonomous_kill_switch"):
+        return {"symbol": symbol, "stage": "skipped", "reason": "kill_switch_active"}
+    sides = [str(s).lower() for s in (policy.get("autonomous_allowed_sides") or [])]
+    if "sell" not in sides:
+        return {"symbol": symbol, "stage": "skipped", "reason": "sell_not_allowed_by_env"}
+    if not _market_open_for_symbol(symbol, now):
+        return {"symbol": symbol, "stage": "skipped", "reason": "market_closed"}
+
+    held = _held_quantity(symbol)
+    qty = compute_exit_sell_quantity(alert, held)
+    if qty <= 0:
+        return {
+            "symbol": symbol, "stage": "skipped",
+            "reason": f"no_confirmed_holding (held={held:g})",
+        }
+
+    exit_type = str(alert.get("type", ""))
+    candidate = {
+        "symbol": symbol,
+        "side": "sell",
+        "quantity": qty,
+        "limit_price": float(alert.get("current_price") or 0),
+        "stop_loss": alert.get("stop_loss"),
+        "target_price": alert.get("target_price"),
+    }
+    from core.toss_autonomous_pipeline import process_candidate
+    result = process_candidate(
+        candidate, policy,
+        reason="auto_exit_sell",
+        note=(
+            f"exit_type={exit_type} entry={alert.get('entry_price')} "
+            f"current={alert.get('current_price')} qty={qty}/{held:g}"
+        ),
+    )
+    result["exit_type"] = exit_type
+    result["sell_quantity"] = qty
+    return result
 
 
 # ── 메시지 조립 + 전송 ───────────────────────────────────────────
@@ -205,8 +304,16 @@ def _fmt_price(symbol: str, price: float) -> str:
     return f"${price:,.2f}"
 
 
-def format_watch_message(stale: list[dict], exits: list[dict]) -> str:
-    """알림 메시지 구성. 알림 없으면 빈 문자열."""
+def format_watch_message(
+    stale: list[dict],
+    exits: list[dict],
+    promotions: dict[str, dict] | None = None,
+) -> str:
+    """알림 메시지 구성. 알림 없으면 빈 문자열.
+
+    promotions: {f"{symbol}:{type}": promote_exit_to_sell 결과} — 자동 매도 승격 결과 표시.
+    """
+    promotions = promotions or {}
     lines: list[str] = []
     if stale:
         lines.append("⏳ [Toss 미체결 주문 감시]")
@@ -220,6 +327,7 @@ def format_watch_message(stale: list[dict], exits: list[dict]) -> str:
         if lines:
             lines.append("")
         lines.append("🎯 [Toss exit 레벨 도달]")
+        manual_needed = False
         for a in exits:
             label = "🔻 손절가 도달" if a["type"] == "stop_loss_hit" else "🔺 목표가 도달"
             level = a["stop_loss"] if a["type"] == "stop_loss_hit" else a["target_price"]
@@ -227,7 +335,27 @@ def format_watch_message(stale: list[dict], exits: list[dict]) -> str:
                 f"- {a['symbol']} {label}: 현재 {_fmt_price(a['symbol'], a['current_price'])} "
                 f"(레벨 {_fmt_price(a['symbol'], level)})"
             )
-        lines.append("→ 매도 여부 직접 판단 필요 (자동 매도 안 함)")
+            promo = promotions.get(f"{a['symbol']}:{a['type']}")
+            if promo:
+                verdict = promo.get("verdict", "")
+                if verdict == "PASS":
+                    kind = "전량 손절" if a["type"] == "stop_loss_hit" else "분할 익절"
+                    lines.append(
+                        f"  → 🤖 자동 매도 발동 ({kind} {promo.get('sell_quantity', 0)}주, 검증 PASS)"
+                    )
+                elif promo.get("stage") == "skipped":
+                    lines.append(f"  → 자동 매도 스킵: {promo.get('reason', '')}")
+                    manual_needed = True
+                else:
+                    lines.append(
+                        f"  → 자동 매도 미실행 ({promo.get('stage', '')}: "
+                        f"{str(promo.get('reason', ''))[:80]})"
+                    )
+                    manual_needed = True
+            else:
+                manual_needed = True
+        if manual_needed:
+            lines.append("→ 매도 여부 직접 판단 필요")
     return "\n".join(lines)
 
 
@@ -273,7 +401,25 @@ def run_toss_order_watch(
 
     _save_state(state)
 
-    message = format_watch_message(new_stale, new_exits)
+    # exit 도달 → 자동 매도 승격 (autonomous mode + sell 허용 시)
+    promotions: dict[str, dict] = {}
+    if new_exits:
+        try:
+            from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
+            policy = compute_toss_live_pilot_policy()
+            for a in new_exits:
+                key = f"{a['symbol']}:{a['type']}"
+                try:
+                    promotions[key] = promote_exit_to_sell(a, policy, now=now)
+                except Exception as e:
+                    log.warning("exit 자동 매도 승격 실패 %s: %s", key, e)
+                    promotions[key] = {
+                        "symbol": a["symbol"], "stage": "error", "reason": str(e)[:200],
+                    }
+        except Exception as e:
+            log.warning("exit 자동 매도 policy 조회 실패: %s", e)
+
+    message = format_watch_message(new_stale, new_exits, promotions)
     sent = False
     if message and send:
         try:
@@ -286,6 +432,7 @@ def run_toss_order_watch(
         "ok": True,
         "stale_count": len(new_stale),
         "exit_count": len(new_exits),
+        "promotions": promotions,
         "message": message,
         "sent": sent,
     }

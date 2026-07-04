@@ -436,10 +436,25 @@ def _handle_confirm(preview_id: str) -> dict:
             "message": sent_msg,
         }
     else:
+        # 실패 사유 의무화: reason/failure_reason/error_body를 모두 반영
+        _fail_reason = (
+            dispatch_result.get("failure_reason")
+            or dispatch_result.get("reason")
+            or "dispatch_failed"
+        )
+        _error_body = dispatch_result.get("error_body", "")
+        _fail_detail = f"{_fail_reason}: {_error_body}" if _error_body else _fail_reason
         try:
-            record_live_send_failed(
+            from core.toss_autonomous_finalizer import _is_retryable_dispatch_failure
+            from core.toss_live_pilot_ledger import record_live_send_retryable
+            _recorder = (
+                record_live_send_retryable
+                if _is_retryable_dispatch_failure(_fail_reason, _error_body)
+                else record_live_send_failed
+            )
+            _recorder(
                 preview_id,
-                failure_reason=dispatch_result.get("reason", ""),
+                failure_reason=_fail_detail[:500],
                 payload_hash=dispatch_result.get("payload_hash", ""),
             )
         except Exception as e:

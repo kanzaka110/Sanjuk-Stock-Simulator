@@ -29,17 +29,18 @@ import logging
 log = logging.getLogger(__name__)
 
 
-def try_autonomous_finalize(pilot_id: str) -> dict:
+def try_autonomous_finalize(pilot_id: str, allow_retry: bool = False) -> dict:
     """Hermes PASS 후 자율 주문 실행 시도.
 
     autonomous mode가 아니면 즉시 no-op 반환.
     모든 예외를 내부에서 잡아 호출부 안전 보장.
+    allow_retry=True면 live_send_retryable 상태도 재실행 허용 (retry sweep 전용).
 
     Returns:
         {"ok": bool, "action": str, "live_order_sent": bool, ...}
     """
     try:
-        return _finalize_impl(pilot_id)
+        return _finalize_impl(pilot_id, allow_retry=allow_retry)
     except Exception as e:
         log.error("autonomous finalize unexpected error: pilot_id=%s %s", pilot_id, e)
         return {
@@ -50,7 +51,7 @@ def try_autonomous_finalize(pilot_id: str) -> dict:
         }
 
 
-def _finalize_impl(pilot_id: str) -> dict:
+def _finalize_impl(pilot_id: str, allow_retry: bool = False) -> dict:
     """실제 자율 실행 로직."""
     from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
     from core.toss_live_pilot_adapter import (
@@ -99,8 +100,11 @@ def _finalize_impl(pilot_id: str) -> dict:
         }
     rec = matched[0]
 
-    # 이미 처리된 경우 스킵
-    if rec.get("status") in ("live_sent", "cancelled", "live_send_failed", "live_send_retryable"):
+    # 이미 처리된 경우 스킵 (retry sweep은 live_send_retryable 재실행 허용)
+    _skip_statuses = ("live_sent", "cancelled", "live_send_failed", "live_send_retryable")
+    if allow_retry:
+        _skip_statuses = ("live_sent", "cancelled", "live_send_failed")
+    if rec.get("status") in _skip_statuses:
         return {
             "ok": False,
             "action": "autonomous_finalize",

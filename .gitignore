@@ -42,3 +42,7 @@ Thumbs.db
 
 # Generated reconciliation reports
 reports/samsung_reconciliation_*.md
+
+# Runtime data (state files, personal financial data)
+db/data/
+logs/
