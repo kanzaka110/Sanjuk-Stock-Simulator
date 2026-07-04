@@ -85,12 +85,16 @@ class MarketMonitor:
                     result = self._process_trigger(trigger)
                     if self._is_actionable(result):
                         self._send_alert(result)
+                        self._record_alert_history(result, delivered=True)
                     else:
                         log.info(
                             "알림 억제 (비액션): %s %s — %s",
                             trigger.ticker,
                             trigger.trigger_type.value,
                             result.severity.value,
+                        )
+                        self._record_alert_history(
+                            result, delivered=False, suppress_reason="non_actionable",
                         )
                     # 비액션/빈응답도 조건이 유지되는 동안 재분석하지 않는다.
                     # 이전에는 전송 성공시에만 active 처리되어, 같은 급락/목표가 조건이
@@ -937,6 +941,28 @@ class MarketMonitor:
         sent = send_simple_message(msg)
         if sent:
             log.info(f"알림 전송: {result.trigger.ticker} {result.trigger.trigger_type.value}")
+
+    def _record_alert_history(
+        self, result: AlertResult, delivered: bool, suppress_reason: str = "",
+    ) -> None:
+        """알림 이력 저장 (대시보드 /api/alerts/history용) — 실패해도 모니터 무중단."""
+        try:
+            from core.memory import save_alert
+
+            analysis = (result.ai_analysis or "").strip()
+            save_alert({
+                "ticker": result.trigger.ticker,
+                "name": result.trigger.name,
+                "alert_type": result.trigger.trigger_type.value,
+                "severity": result.severity.value,
+                "title": result.trigger.description,
+                "message": analysis[:2000],
+                "price": result.trigger.current_value,
+                "delivered": delivered,
+                "suppress_reason": suppress_reason,
+            })
+        except Exception as e:
+            log.debug("알림 이력 저장 실패: %s", e)
 
     def _sleep(self, seconds: float) -> None:
         """인터럽트 가능한 sleep."""

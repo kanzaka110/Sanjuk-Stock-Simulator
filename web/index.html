@@ -923,6 +923,7 @@ details[open] summary::before{transform:rotate(90deg)}
 <div class="tc on fold-layout fold-grid fold-hybrid tablet-terminal" id="t-home">
 <!-- 1. Sticky Mini Command Bar (cmd) -->
 <div class="mini-command-bar" id="h-mcb"><div class="mcb-chip"><div class="l">오늘 상태</div><div class="v">…</div></div></div>
+<div id="ac-banner" onclick="go('act')"></div>
 <div id="dq-banner" style="display:none;margin:8px 0;padding:9px 12px;border-radius:10px;font-size:11.5px;font-weight:700;line-height:1.5"></div>
 
 <!-- 좌측 메인 (main): hero · 오늘 결론 · 우선순위 액션 -->
@@ -1027,6 +1028,10 @@ details[open] summary::before{transform:rotate(90deg)}
 
 <!-- ═══ 액션 ═══ -->
 <div class="tc" id="t-act">
+<!-- 1단: NOW — 레벨 도달/근접 (서버 판정) -->
+<div class="c"><h3>🚨 NOW — 주문 검토 <span class="mt" id="ac-now-sub"></span></h3><div id="ac-now"><div class="emp">불러오는 중…</div></div></div>
+<!-- 2단: 감시 중 — 레벨 거리 -->
+<div class="c"><h3>감시 중 — 레벨 거리 <span class="mt" id="ac-watch-sub"></span></h3><div id="ac-watch"><div class="emp">불러오는 중…</div></div></div>
 <div class="c"><h3>오늘 액션 요약</h3><div class="g4" id="a-sum"></div></div>
 <div class="c"><h3>미반영 거래</h3><div id="a-pending-trades"><div class="emp">확인 중…</div></div></div>
 <div class="c"><h3>최근 거래 내역</h3><div id="a-trades"><div class="emp">거래 내역 불러오는 중…</div></div></div>
@@ -1039,6 +1044,14 @@ details[open] summary::before{transform:rotate(90deg)}
 <div class="c"><details><summary>시간별 추천 타임라인 <span id="tl-new"></span></summary><div id="a-tl"></div></details></div>
 <div class="c"><details><summary>미결 예측 전체</summary><div id="a-open"></div></details></div>
 <div class="c"><details><summary>최근 추천 20건</summary><div id="a-recent"></div></details></div>
+<!-- 참고 정보 (접이식) — 실행 판단 뒤 배치 -->
+<div class="c"><h3>참고 정보</h3>
+  <details class="ac-sec"><summary>🔔 긴급 알림 이력 (48시간)<span class="ac-badge" id="ac-alerts-badge"></span></summary><div id="ac-alerts"><div class="emp">불러오는 중…</div></div></details>
+  <details class="ac-sec"><summary>📢 DART 공시 (보유 KR)<span class="ac-badge" id="ac-dart-badge"></span></summary><div id="ac-dart"><div class="emp">불러오는 중…</div></div></details>
+  <details class="ac-sec"><summary>📊 호가 임밸런스 (보유 KR)</summary><div id="ac-ob"><div class="emp">불러오는 중…</div></div></details>
+  <details class="ac-sec"><summary>🚦 Toss 품질게이트 판정</summary><div id="ac-qg"><div class="emp">불러오는 중…</div></div></details>
+  <details class="ac-sec"><summary>🔭 시장 스캐너 (광역 발굴)<span class="ac-badge" id="ac-scan-badge"></span></summary><div id="ac-scan"><div class="emp">불러오는 중…</div></div></details>
+</div>
 </div>
 
 <!-- ═══ 성과 ═══ -->
@@ -1134,6 +1147,7 @@ details[open] summary::before{transform:rotate(90deg)}
 <!-- ═══ 모달 ═══ -->
 <div class="mo fold-modal-sheet" id="mo"><div class="md" id="md"><div class="handle"></div><div id="mc"></div></div></div>
 
+<script src="/static/action_center.js"></script>
 <script>
 const E=s=>(s==null?"":String(s)).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 async function J(u){try{const r=await fetch(u);if(!r.ok)return null;return await r.json()}catch{return null}}
@@ -1522,7 +1536,7 @@ function _todayMetric(d){
   if(!d||!d.total_eval)return {pct:null,chg:0,available:false};
   let chg=0,available=false;
   (d.accounts||[]).forEach(a=>(a.items||[]).forEach(it=>{
-    if(it.day_pct_source==="quote"||it.day_pct_source==="live_day_pct_snapshot"){available=true;chg+=(it.eval_krw||0)*(it.day_pct||0)/100;}
+    if(it.day_pct_source==="quote"){available=true;chg+=(it.eval_krw||0)*(it.day_pct||0)/100;}
   }));
   return {pct:available?chg/d.total_eval*100:null,chg,available};
 }
@@ -1669,9 +1683,9 @@ function renderHomeSamsungSummary(d){
   const rows=top.map(a=>`<div style="display:flex;justify-content:space-between;gap:8px;padding:5px 0;border-bottom:1px solid var(--ln);font-size:11px"><span style="font-weight:800">${E(a.name)}</span><span>자산 ₩${Math.round(a.asset_total||0).toLocaleString()} · <b class="${cc(a.pnl_pct)}">${cs(a.pnl_pct)}</b></span></div>`).join("");
   el.innerHTML=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-bottom:8px">
     ${tossMiniKpi("삼성 총자산",`₩${Math.round(total).toLocaleString()}`,`보유 ₩${Math.round(hold).toLocaleString()} + 현금 ₩${Math.round(cash).toLocaleString()}`)}
-    ${tossMiniKpi("원금 대비",`${pnl>=0?"+":"-"}₩${Math.abs(Math.round(pnl)).toLocaleString()}`,`${cs(d.total_principal_pnl_pct)} · 스샷/엑셀 원본`,pnl>0?"up":pnl<0?"dn":"mt")}
-    ${tossMiniKpi("오늘 변동",todayAvail?`${today>=0?"+":"-"}₩${Math.abs(Math.round(today)).toLocaleString()}`:"산출불가",todayAvail?"일간 등락률 스냅샷 기준":"일간 등락률 미연동",today>0?"up":today<0?"dn":"mt")}
-    ${tossMiniKpi("표시 기준",d.display_source==="samsung_broker_excel_snapshot"?"삼성 원본":"설정+시세",`삼성은 수동 주문 전용`)}
+    ${tossMiniKpi("원금 대비",`${pnl>=0?"+":"-"}₩${Math.abs(Math.round(pnl)).toLocaleString()}`,`${cs(d.total_principal_pnl_pct)} · 입금 원금 기준`,pnl>0?"up":pnl<0?"dn":"mt")}
+    ${tossMiniKpi("오늘 변동",todayAvail?`${today>=0?"+":"-"}₩${Math.abs(Math.round(today)).toLocaleString()}`:"산출불가",todayAvail?"라이브 일간 등락률 기준":"일간 등락률 미수신",today>0?"up":today<0?"dn":"mt")}
+    ${tossMiniKpi("표시 기준",d.display_source==="live_settings_plus_pending_trades"?"라이브+매매반영":"설정+시세",d.pending_trade_count?`미반영 매매 ${d.pending_trade_count}건 반영됨`:`보유 기준 ${d.holdings_as_of||"—"}`)}
   </div>${rows}<div style="font-size:10px;color:var(--mt);margin-top:7px;line-height:1.45">총자산은 현금 포함. 계좌별 ‘평가’는 보유평가만이라 앱 총액과 다를 수 있어.</div>`;
 }
 
@@ -1681,7 +1695,7 @@ function renderDQBanner(d){
   const issues=[];
   (d.accounts||[]).forEach(a=>(a.items||[]).forEach(it=>{
     const g=it.price_guard;
-    if(g&&g!=="ok"&&g!=="broker_excel_snapshot")issues.push({t:it.ticker,g});
+    if(g&&g!=="ok")issues.push({t:it.ticker,g});
   }));
   if(!issues.length){el.style.display="none";el.innerHTML="";return;}
   const severe=issues.length>=3||issues.filter(x=>x.g==="missing").length>=2;
@@ -1708,7 +1722,7 @@ async function loadPF(){
   document.getElementById("h-pf").innerHTML=`<div class="g4"><div class="sb"><div class="v">${(d.total_eval||0).toLocaleString()}</div><div class="l">총 평가 (₩)</div></div><div class="sb"><div class="v">${principal.toLocaleString()}</div><div class="l">투자 원금 (₩)</div></div><div class="sb"><div class="v ${tc}">${todayPct==null?cs(0):cs(+todayPct.toFixed(2))}</div><div class="l">오늘 ${todayAmt}${todayPct==null?"":"₩"}</div></div><div class="sb"><div class="v ${pc}">${cs(principalPct)}</div><div class="l">원금 대비</div></div><div class="sb"><div class="v ${cc(d.total_pnl_pct)}">${cs(d.total_pnl_pct)}</div><div class="l">총 손익률</div></div><div class="sb"><div class="v">${d.cash_weight||0}%</div><div class="l">현금 비중</div></div></div>${alloc.length?'<div style="margin-top:12px">'+donut(alloc,cs(d.total_pnl_pct))+'</div>':""}`;
 
   // PF tab summary
-  document.getElementById("pf-sum").innerHTML=`<div class="g4"><div class="sb"><div class="v">${(d.total_eval||0).toLocaleString()}</div><div class="l">총 평가</div></div><div class="sb"><div class="v">${principal.toLocaleString()}</div><div class="l">투자 원금</div></div><div class="sb"><div class="v ${tc}">${todayPct==null?"—":cs(+todayPct.toFixed(2))}</div><div class="l">오늘 ${todayAmt}${todayPct==null?"":"₩"}</div></div><div class="sb"><div class="v ${pc}">${cs(principalPct)}</div><div class="l">원금 대비</div></div><div class="sb"><div class="v ${cc(d.total_pnl_pct)}">${cs(d.total_pnl_pct)}</div><div class="l">총 손익률</div></div><div class="sb"><div class="v">${(d.total_cash||0).toLocaleString()}</div><div class="l">현금</div></div><div class="sb"><div class="v">${d.usdkrw}</div><div class="l">USD/KRW</div></div></div>`;
+  document.getElementById("pf-sum").innerHTML=`<div class="g4"><div class="sb"><div class="v">${(d.total_eval||0).toLocaleString()}</div><div class="l">총 평가</div></div><div class="sb"><div class="v">${principal.toLocaleString()}</div><div class="l">투자 원금</div></div><div class="sb"><div class="v ${tc}">${todayPct==null?"—":cs(+todayPct.toFixed(2))}</div><div class="l">오늘 ${todayAmt}${todayPct==null?"":"₩"}</div></div><div class="sb"><div class="v ${pc}">${cs(principalPct)}</div><div class="l">원금 대비</div></div><div class="sb"><div class="v ${cc(d.total_pnl_pct)}">${cs(d.total_pnl_pct)}</div><div class="l">총 손익률</div></div><div class="sb"><div class="v">${(d.total_cash||0).toLocaleString()}</div><div class="l">현금</div></div><div class="sb"><div class="v">${d.usdkrw}</div><div class="l">USD/KRW</div></div></div><div style="font-size:10px;color:var(--mt);margin-top:7px">보유 기준 ${E(d.holdings_as_of||"—")}${d.pending_trade_count?` · <b style="color:var(--b)">미반영 매매 ${d.pending_trade_count}건 반영됨</b>`:""} · 수량·평단 = 설정+매매기록, 시세 = 라이브</div>`;
 
   // PF tab allocation donut
   document.getElementById("pf-alloc").innerHTML=alloc.length?donut(alloc,"₩"+(d.total_eval||0).toLocaleString()):'<div class="emp">데이터 없음</div>';
@@ -1728,8 +1742,9 @@ async function loadPF(){
     let mcards=acct.items.map(it=>{
       const ipc=cc(it.pnl_pct);const idc=cc(it.day_pct);const cur=it.currency==="USD"?"$":"₩";
       const isKr=it.ticker.endsWith(".KS")||it.ticker.endsWith(".KQ");
-      const src=isKr?"KIS":"yfinance";
-      return`<div class="kis-holding-card ticker-tap-detail" onclick="openM('${E(it.ticker)}')"><div class="khc-top"><div><div class="khc-name">${E(it.name)}</div><div class="khc-ticker">${E(it.ticker)} · ${it.shares}주${it.horizon?" · "+E(it.horizon):""}</div></div><div><div class="holding-live-price">${cur}${it.current_price?it.current_price.toLocaleString():"—"}</div><div class="holding-day-change ${idc}">${it.day_pct>0?"▲ ":it.day_pct<0?"▼ ":""}${cs(it.day_pct)}</div></div></div><div class="holding-pnl-grid"><div class="pg-item"><div class="k">평단</div><div class="v">${cur}${it.avg_cost?it.avg_cost.toLocaleString():""}</div></div><div class="pg-item"><div class="k">수익률</div><div class="v ${ipc}">${cs(it.pnl_pct)}</div></div><div class="pg-item"><div class="k">평가</div><div class="v">₩${it.eval_krw?it.eval_krw.toLocaleString():""}</div></div><div class="pg-item"><div class="k">비중</div><div class="v">${it.weight||0}%</div></div><div class="pg-item"><div class="k">일간</div><div class="v ${idc}">${cs(it.day_pct)}</div></div><div class="pg-item"><div class="k">현재가</div><div class="v">${cur}${it.current_price?it.current_price.toLocaleString():"—"}</div></div></div><div class="holding-source-meta"><span class="quote-source-badge${isKr?" kis":""}">${src}</span><span>준실시간 · 60초 캐시 · 실시간 보장 아님</span></div></div>`;
+      const src=it.price_source||(isKr?"KIS":"yfinance");
+      const age=it.price_age_sec!=null?(it.price_age_sec<90?` · ${it.price_age_sec}초 전`:` · ${Math.round(it.price_age_sec/60)}분 전`):"";
+      return`<div class="kis-holding-card ticker-tap-detail" onclick="openM('${E(it.ticker)}')"><div class="khc-top"><div><div class="khc-name">${E(it.name)}</div><div class="khc-ticker">${E(it.ticker)} · ${it.shares}주${it.horizon?" · "+E(it.horizon):""}</div></div><div><div class="holding-live-price">${cur}${it.current_price?it.current_price.toLocaleString():"—"}</div><div class="holding-day-change ${idc}">${it.day_pct>0?"▲ ":it.day_pct<0?"▼ ":""}${cs(it.day_pct)}</div></div></div><div class="holding-pnl-grid"><div class="pg-item"><div class="k">평단</div><div class="v">${cur}${it.avg_cost?it.avg_cost.toLocaleString():""}</div></div><div class="pg-item"><div class="k">수익률</div><div class="v ${ipc}">${cs(it.pnl_pct)}</div></div><div class="pg-item"><div class="k">평가</div><div class="v">₩${it.eval_krw?it.eval_krw.toLocaleString():""}</div></div><div class="pg-item"><div class="k">비중</div><div class="v">${it.weight||0}%</div></div><div class="pg-item"><div class="k">일간</div><div class="v ${idc}">${cs(it.day_pct)}</div></div><div class="pg-item"><div class="k">현재가</div><div class="v">${cur}${it.current_price?it.current_price.toLocaleString():"—"}</div></div></div><div class="holding-source-meta"><span class="quote-source-badge${isKr?" kis":""}">${E(src)}</span><span>준실시간${age} · 실시간 보장 아님</span></div></div>`;
     }).join("");
 
     ah+=`<div class="c"><h3>${E(acct.name)} <span class="${ap}">${cs(acct.pnl_pct)}</span><span class="mt" style="float:right">${acct.name==="RIA"&&acct.principal===0?"원금 일반에 포함":"원금 ₩"+(acct.principal ?? acct.cost_total ?? 0).toLocaleString()} · 평가 ₩${acct.eval_total?acct.eval_total.toLocaleString():0}</span></h3><table class="ptable"><tr><th>종목</th><th>현재가</th><th>등락</th><th>수량</th><th>평단</th><th>수익률</th><th>평가</th><th>비중</th></tr>${trows}</table><div class="cards-m">${mcards}</div></div>`;
@@ -3131,6 +3146,7 @@ async function ldToss(){
 
 /* ═══ INIT ═══ */
 async function init(){
+  if(window.initActionCenter)initActionCenter();
   await Promise.allSettled([loadMkt(),loadTrades(),loadAct(),loadPF(),loadPerf(),loadNews(),loadTimeline(),loadSimList(),loadSignals(),loadDBrief(),loadCalendar(),loadAnalytics(),loadBriefing(),ldToss(),ldHomeTossM(),ldStockAgentActivity()]);
   markRefreshSuccess();
 }

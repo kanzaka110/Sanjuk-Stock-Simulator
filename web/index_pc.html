@@ -331,6 +331,7 @@ details summary::before{content:"▸";transition:transform .18s;color:var(--mt)}
 
 <!-- ═══ 홈 ═══ -->
 <div class="page on" id="p-home">
+  <div id="ac-banner" onclick="goto('act')"></div>
   <div id="dq-banner" style="display:none;margin-bottom:12px;padding:10px 14px;border-radius:10px;font-size:12px;font-weight:700;line-height:1.5"></div>
   <section class="home-hero">
     <div class="portfolio-hero">
@@ -421,20 +422,45 @@ details summary::before{content:"▸";transition:transform .18s;color:var(--mt)}
 <!-- ═══ 액션 ═══ -->
 <div class="page" id="p-act">
   <div class="brief" style="margin-bottom:14px"><div class="ai">✦</div><div class="txt" id="act-brief">불러오는 중…</div></div>
-  <div class="panel" style="margin-bottom:14px">
-    <div class="ph"><h2>의사결정 브리핑</h2><span class="sub">참고용 · 실제 주문 아님</span></div>
-    <div id="act-dbrief"><div class="emp">불러오는 중…</div></div>
+  <div class="home-bento">
+    <!-- 좌: 지금 판단할 것 (위계 순) -->
+    <div class="home-main-stack">
+      <div class="panel">
+        <div class="ph"><h2>🚨 NOW — 주문 검토</h2><span class="sub" id="ac-now-sub">미결 추천·가격 알림 레벨 도달/근접(±2%)</span></div>
+        <div id="ac-now"><div class="emp">불러오는 중…</div></div>
+      </div>
+      <div class="panel">
+        <div class="ph"><h2>👁 감시 중 — 레벨 거리</h2><span class="sub" id="ac-watch-sub"></span></div>
+        <div id="ac-watch"><div class="emp">불러오는 중…</div></div>
+      </div>
+      <div class="kpis" style="grid-template-columns:repeat(4,1fr)" id="act-kpis"></div>
+      <div class="grid" style="grid-template-columns:1fr 1fr">
+        <div class="panel"><div class="ph"><h2>실행 필요</h2><span class="sub">매수 · 매도</span></div><div id="act-exec"></div></div>
+        <div class="panel"><div class="ph"><h2>조건부 매수</h2><span class="sub">트리거 대기</span></div><div id="act-cond"></div></div>
+      </div>
+      <div class="panel"><div class="ph"><h2>보유 관리 · 관망</h2></div><div id="act-mgmt"></div></div>
+    </div>
+    <!-- 우: 참고 정보 (접이식 펼침 대응 — sticky 해제) -->
+    <div class="home-side-stack" style="position:static">
+      <div class="panel">
+        <div class="ph"><h2>의사결정 브리핑</h2><span class="sub">참고용 · 실제 주문 아님</span></div>
+        <div id="act-dbrief"><div class="emp">불러오는 중…</div></div>
+      </div>
+      <div class="panel">
+        <div class="ph"><h2>거래 반영 상태</h2><span class="sub">텔레그램 매매 기록 기준</span></div>
+        <div id="pc-pending-trades" style="margin-bottom:10px"><div class="emp">확인 중…</div></div>
+        <details class="ac-sec"><summary>최근 거래 내역</summary><div id="pc-act-trades"><div class="emp">거래 내역 불러오는 중…</div></div></details>
+      </div>
+      <div class="panel">
+        <div class="ph"><h2>참고 정보</h2><span class="sub">알림 · 공시 · 호가 · 게이트 · 스캐너</span></div>
+        <details class="ac-sec"><summary>🔔 긴급 알림 이력 (48시간)<span class="ac-badge" id="ac-alerts-badge"></span></summary><div id="ac-alerts"><div class="emp">불러오는 중…</div></div></details>
+        <details class="ac-sec"><summary>📢 DART 공시 (보유 KR)<span class="ac-badge" id="ac-dart-badge"></span></summary><div id="ac-dart"><div class="emp">불러오는 중…</div></div></details>
+        <details class="ac-sec"><summary>📊 호가 임밸런스 (보유 KR)</summary><div id="ac-ob"><div class="emp">불러오는 중…</div></div></details>
+        <details class="ac-sec"><summary>🚦 Toss 품질게이트 판정</summary><div id="ac-qg"><div class="emp">불러오는 중…</div></div></details>
+        <details class="ac-sec"><summary>🔭 시장 스캐너 (광역 발굴)<span class="ac-badge" id="ac-scan-badge"></span></summary><div id="ac-scan"><div class="emp">불러오는 중…</div></div></details>
+      </div>
+    </div>
   </div>
-  <div class="kpis" style="margin-bottom:14px" id="act-kpis"></div>
-  <div class="grid" style="grid-template-columns:1fr 1fr;margin-bottom:14px">
-    <div class="panel"><div class="ph"><h2>미반영 거래</h2><span class="sub">포트폴리오 반영 전</span></div><div id="pc-pending-trades"><div class="emp">확인 중…</div></div></div>
-    <div class="panel"><div class="ph"><h2>최근 거래 내역</h2><span class="sub">매수/매도는 ledger 반영 거래 기준</span></div><div id="pc-act-trades"><div class="emp">거래 내역 불러오는 중…</div></div></div>
-  </div>
-  <div class="grid" style="grid-template-columns:1fr 1fr">
-    <div class="panel"><div class="ph"><h2>실행 필요</h2><span class="sub">매수 · 매도</span></div><div id="act-exec"></div></div>
-    <div class="panel"><div class="ph"><h2>조건부 매수</h2><span class="sub">트리거 대기</span></div><div id="act-cond"></div></div>
-  </div>
-  <div class="panel" style="margin-top:14px"><div class="ph"><h2>보유 관리 · 관망</h2></div><div id="act-mgmt"></div></div>
 </div>
 
 <!-- ═══ 성과 ═══ -->
@@ -516,6 +542,7 @@ details summary::before{content:"▸";transition:transform .18s;color:var(--mt)}
 </div><!-- /wrap -->
 <div class="mo" id="mo"><div class="md" id="md"></div></div>
 
+<script src="/static/action_center.js"></script>
 <script>
 const E=s=>(s==null?"":String(s)).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 const F=n=>Number(n||0).toLocaleString();
@@ -626,7 +653,7 @@ function pfTodayMetric(d){
   let chg=0,items=[],available=false;
   (d.accounts||[]).forEach(a=>(a.items||[]).forEach(it=>{
     items.push({...it,account:a.name});
-    if(it.day_pct_source==="quote"||it.day_pct_source==="live_day_pct_snapshot"){available=true;chg+=(it.eval_krw||0)*(it.day_pct||0)/100;}
+    if(it.day_pct_source==="quote"){available=true;chg+=(it.eval_krw||0)*(it.day_pct||0)/100;}
   }));
   return {chg,items,available,pct:(available&&d.total_eval)?chg/d.total_eval*100:null};
 }
@@ -636,7 +663,7 @@ function renderDQBanner(d){
   const issues=[];
   (d.accounts||[]).forEach(a=>(a.items||[]).forEach(it=>{
     const g=it.price_guard;
-    if(g&&g!=="ok"&&g!=="broker_excel_snapshot")issues.push({t:it.ticker,g,w:it.price_warning||""});
+    if(g&&g!=="ok")issues.push({t:it.ticker,g,w:it.price_warning||""});
   }));
   if(!issues.length){el.style.display="none";el.innerHTML="";return;}
   const severe=issues.length>=3||issues.filter(x=>x.g==="missing").length>=2;
@@ -660,7 +687,7 @@ async function ldPF(){
   setKPI("home-kpis",[
     ["전체 평가액",`₩${F(d.total_eval)}`,`원금 대비 ${cs(principalPct)}<br>투자 원금 ₩${F(principal)}`,prc(principalPct)],
     ["평가 손익",`${pnlAmt>=0?"+":""}₩${F(Math.abs(Math.round(pnlAmt)))}`,`총 손익률 ${cs(d.total_pnl_pct)}`,cc(d.total_pnl_pct)],
-    ["오늘 수익률",cs(todayPct??0),todayPct==null?"엑셀 스냅샷: 일간 등락률 미연동":`${todayChg>=0?"+":""}${F(Math.round(todayChg))}₩`,todayPct==null?"mt":cc(todayPct)],
+    ["오늘 수익률",cs(todayPct??0),todayPct==null?"일간 등락률 미수신":`${todayChg>=0?"+":""}${F(Math.round(todayChg))}₩`,todayPct==null?"mt":cc(todayPct)],
     ["현금 비중",`${d.cash_weight}%`,`₩${F(d.total_cash)}`,""],
   ]);
   window._kpiToday={pct:todayPct,amt:todayChg,maxW:maxW};
@@ -668,7 +695,7 @@ async function ldPF(){
   setKPI("pf-kpis",[
     ["총 평가자산",`₩${F(d.total_eval)}`,"",""],
     ["투자 원금",`₩${F(principal)}`,"입금 원금 기준",""],
-    ["오늘 손익",cs(todayPct??0),todayPct==null?"엑셀 스냅샷: 일간 등락률 미연동":`${todayChg>=0?"+":""}${F(Math.round(todayChg))}₩`,todayPct==null?"mt":cc(todayPct)],
+    ["오늘 손익",cs(todayPct??0),todayPct==null?"일간 등락률 미수신":`${todayChg>=0?"+":""}${F(Math.round(todayChg))}₩`,todayPct==null?"mt":cc(todayPct)],
     ["원금 대비",cs(principalPct),"입금 원금 기준",prc(principalPct)],
     ["현금 비중",`${d.cash_weight}%`,`₩${F(d.total_cash)}`,""],
   ]);
@@ -683,10 +710,11 @@ async function ldPF(){
   const byEval=[...items].sort((a,b)=>(b.eval_krw||0)-(a.eval_krw||0));
   document.getElementById("home-tbl-sub").textContent=`${items.length}종목`;
   document.getElementById("home-rows").innerHTML=byEval.map(rowHome).join("")||'<tr><td colspan="7"><div class="emp">없음</div></td></tr>';
-  // pf full rows
-  document.getElementById("pf-cnt").textContent=`${items.length}종목`;
+  // pf full rows — 신선도: 기준일 + 미반영 매매 반영 여부
+  const pendN=d.pending_trade_count||0;
+  document.getElementById("pf-cnt").textContent=`${items.length}종목 · 보유 기준 ${d.holdings_as_of||"—"}${pendN?` · 미반영 매매 ${pendN}건 반영됨`:""}`;
   document.getElementById("pf-rows").innerHTML=byEval.map(it=>{
-    return`<tr onclick="openTk('${E(it.ticker)}')"><td><span class="nm">${E(it.name)}</span> <span class="tk">${E(it.ticker)}</span></td><td>${cur(it)}${F(it.current_price)}</td><td class="${cc(it.day_pct)}">${cs(it.day_pct)}</td><td>${F(it.shares)}</td><td>${cur(it)}${F(it.avg_cost)}</td><td class="${cc(it.pnl_pct)}">${cs(it.pnl_pct)}</td><td>₩${F(it.eval_krw)}</td><td>${it.weight||0}%</td></tr>`;
+    return`<tr onclick="openTk('${E(it.ticker)}')"><td><span class="nm">${E(it.name)}</span> <span class="tk">${E(it.ticker)}</span></td><td>${cur(it)}${F(it.current_price)}${it.price_source?`<div style="font-size:9px;opacity:.5">${E(it.price_source)}${it.price_age_sec!=null?` · ${it.price_age_sec<90?it.price_age_sec+"s":Math.round(it.price_age_sec/60)+"m"}`:""}</div>`:""}</td><td class="${cc(it.day_pct)}">${cs(it.day_pct)}</td><td>${F(it.shares)}</td><td>${cur(it)}${F(it.avg_cost)}</td><td class="${cc(it.pnl_pct)}">${cs(it.pnl_pct)}</td><td>₩${F(it.eval_krw)}</td><td>${it.weight||0}%</td></tr>`;
   }).join("")||'<tr><td colspan="8"><div class="emp">없음</div></td></tr>';
   // contrib
   const contrib=items.map(it=>({...it,gain:it.pnl_pct?(it.eval_krw-it.eval_krw/(1+it.pnl_pct/100)):0})).sort((a,b)=>Math.abs(b.gain)-Math.abs(a.gain));
@@ -1571,7 +1599,7 @@ async function ldStockAgentActivity(){
 }
 
 /* ════ INIT ════ */
-async function init(){ldStatus();ldMkt();await Promise.allSettled([loadTrades(),ldPF()]);ldAct();ldPerf();ldNews();ldDecisionBrief();ldCalendar();ldAnalytics();ldWorkspace();ldBriefing();ldToss();ldHomeToss();ldStockAgentActivity();}
+async function init(){ldStatus();ldMkt();if(window.initActionCenter)initActionCenter();await Promise.allSettled([loadTrades(),ldPF()]);ldAct();ldPerf();ldNews();ldDecisionBrief();ldCalendar();ldAnalytics();ldWorkspace();ldBriefing();ldToss();ldHomeToss();ldStockAgentActivity();}
 init();
 setInterval(()=>{ldMkt();loadTrades();ldAct();ldStatus();ldDecisionBrief();ldHomeToss();},30000);
 setInterval(()=>{ldPF();ldPerf();ldAnalytics();ldWorkspace();ldBriefing();},120000);

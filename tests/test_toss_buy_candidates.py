@@ -44,8 +44,22 @@ def _sections(new=(), rejected=(), market="KR"):
     )
 
 
+def _patch_network(monkeypatch):
+    """KIS 실시세 네트워크 호출 차단 (샌드박스에서 재시도 지연으로 타임아웃 유발)."""
+    # 라이브 정책 계산은 KIS 시세 조회(~6초+)를 하므로 고정값으로 대체
+    from core import toss_live_pilot_policy as tlp
+    monkeypatch.setattr(tlp, "compute_toss_live_pilot_policy",
+                        lambda *a, **k: {"max_order_krw": 500_000})
+    # 후보별 Toss/KIS 교차검증도 KIS 실시세 조회를 하므로 차단
+    monkeypatch.setattr(dd, "_cross_check_price_quality",
+                        lambda sym, cur=None: {"quality": "unknown", "checks": []})
+
+
 def _patch_sections(monkeypatch, sections):
     monkeypatch.setattr(dd, "_cache", {}, raising=False)
+    # 테스트에서 실제 유니버스 병렬 시세 스캔(네트워크, 최대 15초/호출) 차단
+    monkeypatch.setattr(disc, "_fallback_universe_candidates", lambda markets: [])
+    _patch_network(monkeypatch)
     monkeypatch.setattr(
         disc, "build_discovery_sections",
         lambda *a, **k: sections,
@@ -173,6 +187,7 @@ def test_toss_buy_candidates_us_excluded(monkeypatch):
 def test_toss_buy_candidates_returns_scan_summary(monkeypatch):
     # pandas 미설치 + 네트워크 없는 경량 시세 → 실제 universe fallback 스캔
     monkeypatch.setattr(dd, "_cache", {}, raising=False)
+    _patch_network(monkeypatch)
     monkeypatch.setattr(disc, "_pandas_available", lambda: False)
     monkeypatch.setattr(
         disc, "_light_quote",
@@ -198,6 +213,7 @@ def test_toss_buy_candidates_returns_scan_summary(monkeypatch):
 
 def test_toss_buy_candidates_scan_failure_has_reasons(monkeypatch):
     monkeypatch.setattr(dd, "_cache", {}, raising=False)
+    _patch_network(monkeypatch)
     monkeypatch.setattr(disc, "_pandas_available", lambda: False)
     monkeypatch.setattr(disc, "_light_quote", lambda t, m: None)
 
@@ -247,6 +263,7 @@ def test_toss_buy_candidates_stock_agent_review_fields(monkeypatch):
 def test_toss_buy_candidates_blocks_buy_limit_above_current(monkeypatch):
     # KT 사례: 현재가 53,500원인데 지정가가 더 높으면 자동매수 후보로 PASS되면 안 된다.
     monkeypatch.setattr(dd, "_cache", {}, raising=False)
+    _patch_network(monkeypatch)
     monkeypatch.setattr(
         disc, "_fallback_universe_candidates",
         lambda markets: [],

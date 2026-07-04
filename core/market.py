@@ -114,6 +114,8 @@ def _get_quote_extended(ticker: str) -> Quote | None:
             pct=round(pct, 2),
             high=round(ext_price, 2),
             low=round(ext_price, 2),
+            source="afterhours",
+            as_of=time.time(),
         )
     except Exception:
         yfinance_breaker.record_failure()
@@ -173,6 +175,8 @@ def _get_quote_yf_live(ticker: str) -> Quote | None:
             pct=round((price - prev_close) / prev_close * 100, 2),
             high=round(float(fi.day_high), 2) if fi.day_high else round(price, 2),
             low=round(float(fi.day_low), 2) if fi.day_low else round(price, 2),
+            source="yf_fast",
+            as_of=time.time(),
         )
     except Exception:
         yfinance_breaker.record_failure()
@@ -195,6 +199,8 @@ def _get_quote_daily(ticker: str) -> Quote | None:
                 pct=round((c - p) / p * 100, 2),
                 high=round(float(h["High"].iloc[-1]), 2),
                 low=round(float(h["Low"].iloc[-1]), 2),
+                source="yf_daily",
+                as_of=time.time(),
             )
         if len(h) == 1:
             c = float(h["Close"].iloc[-1])
@@ -204,6 +210,8 @@ def _get_quote_daily(ticker: str) -> Quote | None:
                 price=c,
                 high=c,
                 low=c,
+                source="yf_daily",
+                as_of=time.time(),
             )
     except Exception:
         pass
@@ -396,6 +404,8 @@ def _batch_quotes(ticker_map: dict[str, str]) -> dict[str, Quote]:
                     pct=round((price - prev_close) / prev_close * 100, 2),
                     high=round(float(col["High"].max()), 2),
                     low=round(float(col["Low"].min()), 2),
+                    source="yf_batch",
+                    as_of=time.time(),
                 )
             except Exception:
                 q = _get_quote_realtime(tk)

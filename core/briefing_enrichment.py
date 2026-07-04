@@ -133,6 +133,96 @@ def kis_orderbook_briefing_text(tickers: list[str] | None = None) -> str:
         return ""
 
 
+# ── 구조화 데이터 (대시보드 read-only API용) ─────────────────────
+
+def dart_disclosures_data(days: int = 3) -> dict:
+    """보유 KR 종목 DART 공시 구조화 dict — /api/dart/disclosures용.
+
+    Returns {"ok", "reason", "risk": [...], "items": [...]} — 실패 시 ok=False.
+    """
+    try:
+        from core.dart_monitor import fetch_recent_disclosures, screen_disclosures
+        codes = _all_holding_kr_codes()
+        if not codes:
+            return {"ok": False, "reason": "no_kr_holdings", "risk": [], "items": []}
+        fetched = fetch_recent_disclosures(days=days)
+        if not fetched.get("ok"):
+            return {"ok": False, "reason": fetched.get("reason", "fetch_failed"),
+                    "risk": [], "items": []}
+        items = fetched.get("items", [])
+        risk_hits = screen_disclosures(items, set(codes))
+        risk_nos = {h.get("rcept_no") for h in risk_hits}
+
+        def _slim(it: dict, extra: dict | None = None) -> dict:
+            base = {
+                "corp_name": it.get("corp_name", ""),
+                "stock_code": it.get("stock_code", ""),
+                "name": codes.get(it.get("stock_code", ""), it.get("corp_name", "")),
+                "report_nm": (it.get("report_nm") or "").strip(),
+                "rcept_dt": it.get("rcept_dt", ""),
+                "rcept_no": it.get("rcept_no", ""),
+            }
+            if extra:
+                base.update(extra)
+            return base
+
+        risk = [
+            _slim(h, {"keyword": h.get("keyword", ""),
+                      "severity": h.get("severity", ""),
+                      "url": h.get("url", "")})
+            for h in risk_hits
+        ]
+        normal = [
+            _slim(it) for it in items
+            if it.get("stock_code") in codes and it.get("rcept_no") not in risk_nos
+        ][:_MAX_DART_ITEMS * 2]
+        return {"ok": True, "reason": "", "risk": risk, "items": normal}
+    except Exception as e:
+        log.debug("DART 구조화 데이터 실패: %s", e)
+        return {"ok": False, "reason": str(e), "risk": [], "items": []}
+
+
+def orderbook_summary_data(tickers: list[str] | None = None) -> dict:
+    """국내 보유종목 호가 임밸런스 구조화 dict — /api/orderbook/summary용."""
+    try:
+        from core.market_kis import get_domestic_orderbook
+        if tickers is None:
+            codes = _all_holding_kr_codes()
+            name_map = dict(codes)
+            targets = list(codes)[:_MAX_ORDERBOOK_TICKERS]
+        else:
+            name_map = {}
+            targets = [
+                t.split(".")[0] for t in tickers
+                if t.split(".")[0].isdigit() and len(t.split(".")[0]) == 6
+            ][:_MAX_ORDERBOOK_TICKERS]
+        if not targets:
+            return {"ok": False, "reason": "no_kr_targets", "items": []}
+
+        out: list[dict] = []
+        for code in targets:
+            try:
+                ob = get_domestic_orderbook(code)
+            except Exception:
+                continue
+            if not ob or ob.get("error"):
+                continue
+            imb = float(ob.get("imbalance_pct") or 0)
+            out.append({
+                "code": code,
+                "name": name_map.get(code, code),
+                "imbalance_pct": round(imb, 1),
+                "side": "매수우위" if imb > 5 else ("매도우위" if imb < -5 else "균형"),
+                "liquidity": ob.get("liquidity_label", ""),
+                "spread_pct": round(float(ob.get("spread_pct") or 0), 2),
+            })
+        return {"ok": bool(out), "reason": "" if out else "no_orderbook_data",
+                "items": out}
+    except Exception as e:
+        log.debug("호가 구조화 데이터 실패: %s", e)
+        return {"ok": False, "reason": str(e), "items": []}
+
+
 # ── 3. Toss 품질게이트 요약 ──────────────────────────────────────
 
 def quality_gate_briefing_text() -> str:

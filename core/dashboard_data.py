@@ -548,111 +548,59 @@ def _fetch_portfolio_raw() -> dict:
     )
     from core.market import _batch_quotes
 
-    # Samsung Securities Excel snapshot supplied by 승호 (2026-07-02).
-    # This dashboard/API layer mirrors the broker-exported display values exactly,
-    # without touching account/secrets/order paths or config/settings.py.
-    # Fields: shares, broker avg/current, broker 평가금액(H), broker 매수금액(I).
-    samsung_excel_snapshot = {
-        "일반": {
-            "000660.KS": {"name": "SK하이닉스", "shares": 2.0, "avg_cost_krw": 2_325_000.0, "current_price": 2_187_000.0, "eval_krw": 4_374_000.0, "cost_krw": 4_650_000.0},
-            "005930.KS": {"name": "삼성전자", "shares": 100.0, "avg_cost_krw": 83_482.0, "current_price": 286_000.0, "eval_krw": 28_600_000.0, "cost_krw": 8_348_264.0},
-            "NVDA": {"name": "엔비디아", "shares": 10.0, "avg_cost_usd": 190.0, "current_price": 197.03, "eval_krw": 3_062_634.0, "cost_krw": 2_933_980.0},
-            "LMT": {"name": "록히드 마틴", "shares": 5.0, "avg_cost_usd": 505.0, "current_price": 522.63, "eval_krw": 4_061_880.0, "cost_krw": 3_899_105.0},
-            "MU": {"name": "마이크론 테크놀로지", "shares": 5.0, "avg_cost_usd": 408.8184, "current_price": 1_008.0, "eval_krw": 7_834_176.0, "cost_krw": 3_014_469.0},
-            "360750.KS": {"name": "TIGER 미국S&P500", "shares": 243.0, "avg_cost_krw": 24_800.0, "current_price": 28_875.0, "eval_krw": 7_016_625.0, "cost_krw": 6_026_400.0},
-        },
-        "RIA": {
-            "003670.KS": {"name": "포스코퓨처엠", "shares": 5.0, "avg_cost_krw": 176_700.0, "current_price": 163_600.0, "eval_krw": 818_000.0, "cost_krw": 883_500.0},
-            "005380.KS": {"name": "현대차", "shares": 1.0, "avg_cost_krw": 497_000.0, "current_price": 482_000.0, "eval_krw": 482_000.0, "cost_krw": 497_000.0},
-            "041510.KQ": {"name": "에스엠", "shares": 13.0, "avg_cost_krw": 72_100.0, "current_price": 78_600.0, "eval_krw": 1_021_800.0, "cost_krw": 937_300.0},
-            "069500.KS": {"name": "KODEX 200", "shares": 21.0, "avg_cost_krw": 136_977.0, "current_price": 123_530.0, "eval_krw": 2_594_130.0, "cost_krw": 2_876_520.0},
-            "090430.KS": {"name": "아모레퍼시픽", "shares": 9.0, "avg_cost_krw": 105_700.0, "current_price": 119_400.0, "eval_krw": 1_074_600.0, "cost_krw": 951_300.0},
-            "091160.KS": {"name": "KODEX 반도체", "shares": 20.0, "avg_cost_krw": 165_425.0, "current_price": 149_255.0, "eval_krw": 2_985_100.0, "cost_krw": 3_308_500.0},
-            "229200.KS": {"name": "KODEX 코스닥150", "shares": 30.0, "avg_cost_krw": 15_500.0, "current_price": 15_480.0, "eval_krw": 464_400.0, "cost_krw": 465_000.0},
-            "352820.KS": {"name": "하이브", "shares": 5.0, "avg_cost_krw": 189_700.0, "current_price": 213_500.0, "eval_krw": 1_067_500.0, "cost_krw": 948_500.0},
-            "328130.KQ": {"name": "루닛", "shares": 87.0, "avg_cost_krw": 11_450.0, "current_price": 11_110.0, "eval_krw": 966_570.0, "cost_krw": 996_150.0},
-        },
-        "IRP": {
-            "133690.KS": {"name": "TIGER 미국나스닥100", "shares": 30.0, "avg_cost_krw": 111_077.0, "current_price": 204_595.0, "eval_krw": 6_137_850.0, "cost_krw": 3_332_300.0},
-            "192090.KS": {"name": "TIGER 차이나CSI300", "shares": 25.0, "avg_cost_krw": 13_130.0, "current_price": 14_685.0, "eval_krw": 367_125.0, "cost_krw": 328_250.0},
-            "360750.KS": {"name": "TIGER 미국S&P500", "shares": 118.0, "avg_cost_krw": 16_838.0, "current_price": 28_875.0, "eval_krw": 3_407_250.0, "cost_krw": 1_986_880.0},
-        },
-        "연금저축": {
-            "133690.KS": {"name": "TIGER 미국나스닥100", "shares": 69.0, "avg_cost_krw": 102_974.0, "current_price": 204_595.0, "eval_krw": 14_117_055.0, "cost_krw": 7_105_210.0},
-            "251350.KS": {"name": "KODEX MSCI선진국", "shares": 20.0, "avg_cost_krw": 37_145.0, "current_price": 42_720.0, "eval_krw": 854_400.0, "cost_krw": 742_900.0},
-            "360750.KS": {"name": "TIGER 미국S&P500", "shares": 310.0, "avg_cost_krw": 18_214.0, "current_price": 28_875.0, "eval_krw": 8_951_250.0, "cost_krw": 5_646_570.0},
-        },
-        "ISA": {
-            "133690.KS": {"name": "TIGER 미국나스닥100", "shares": 30.0, "avg_cost_krw": 163_080.0, "current_price": 204_595.0, "eval_krw": 6_137_850.0, "cost_krw": 4_892_400.0},
-            "251350.KS": {"name": "KODEX MSCI선진국", "shares": 11.0, "avg_cost_krw": 39_940.0, "current_price": 42_720.0, "eval_krw": 469_920.0, "cost_krw": 439_340.0},
-            "360750.KS": {"name": "TIGER 미국S&P500", "shares": 200.0, "avg_cost_krw": 24_900.0, "current_price": 28_875.0, "eval_krw": 5_775_000.0, "cost_krw": 4_980_000.0},
-            "462870.KS": {"name": "시프트업", "shares": 160.0, "avg_cost_krw": 30_025.0, "current_price": 34_150.0, "eval_krw": 5_464_000.0, "cost_krw": 4_804_000.0},
-        },
-    }
-    use_broker_excel_snapshot = "PYTEST_CURRENT_TEST" not in os.environ
-    if not use_broker_excel_snapshot:
-        # Unit tests monkeypatch config.settings holdings/cash and should exercise
-        # the generic quote/fallback logic, not the live broker snapshot overlay.
-        samsung_excel_snapshot = {}
+    from config.settings import HOLDINGS_AS_OF
+    from core.portfolio_live import effective_holdings, pending_trades
 
-    # Broker Excel snapshot does not provide a reliable intraday day-change feed.
-    # Keep 오늘 KPI visible in the HTML, but mark it unavailable/caveated instead
-    # of mixing stale day_pct values with fresh broker totals.
-    samsung_day_pct_overrides = {}
-    for _holdings in samsung_excel_snapshot.values():
-        for _ticker, _info in _holdings.items():
-            if _ticker in samsung_day_pct_overrides:
-                _info["day_pct"] = samsung_day_pct_overrides[_ticker]
+    # USDKRW 먼저 조회 — USD 보유 평가 + 미반영 매매 현금 델타 환산에 필요.
+    # FX quote providers occasionally return a 100x-scale or wrong cross value.
+    # Keep portfolio valuation in a plausible USD/KRW band instead of exploding totals.
+    usdkrw = 0.0
+    fx_source = "quote"
+    try:
+        usd_q = _batch_quotes({"USDKRW=X": "원달러"})
+        if "USDKRW=X" in usd_q:
+            usdkrw = float(usd_q["USDKRW=X"].price or 0)
+    except Exception:
+        usdkrw = 0.0
+    if not (800 <= usdkrw <= 2500):
+        usdkrw = 1554.4
+        fx_source = "fallback_const"
 
-    samsung_cash_overrides = {
-        "일반": 4_313_735.0,    # Google Drive 삼성증권.xlsx 최신 스냅샷 기준
-        "IRP": 5_504_100.0,     # Google Drive 삼성증권.xlsx 최신 스냅샷 기준
-        "연금저축": 7_444_880.0, # Google Drive 삼성증권.xlsx 최신 스냅샷 기준
-        "ISA": 4_556_922.0,
-    }
-    if use_broker_excel_snapshot:
-        samsung_cash_overrides["RIA"] = 8_781_585.0  # Google Drive 삼성증권.xlsx 최신 스냅샷 기준
+    # 라이브 합성: settings HOLDINGS/CASH(base) + 텔레그램 미반영 매매(applied=0).
+    # "매매반영" 처리 후에는 델타 0 → settings 값 그대로 (core/portfolio_live.py).
+    # 단위 테스트는 monkeypatch된 settings만으로 결정론적으로 검증 (실 DB 미접근).
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        pending_by_account, pending_warnings = {}, []
     else:
-        samsung_cash_overrides = {}
+        pending_by_account, pending_warnings = pending_trades(as_of=HOLDINGS_AS_OF)
 
-    accounts = [
-        ("일반", samsung_excel_snapshot.get("일반", HOLDINGS_GENERAL), samsung_cash_overrides.get("일반", DEFAULT_CASH)),
-        ("RIA", samsung_excel_snapshot.get("RIA", HOLDINGS_RIA), samsung_cash_overrides.get("RIA", RIA_CASH)),
-        ("IRP", samsung_excel_snapshot.get("IRP", HOLDINGS_IRP), samsung_cash_overrides.get("IRP", IRP_CASH + IRP_DEFAULT_OPTION)),
-        ("연금저축", samsung_excel_snapshot.get("연금저축", HOLDINGS_PENSION), samsung_cash_overrides.get("연금저축", PENSION_MMF)),
-        ("ISA", samsung_excel_snapshot.get("ISA", HOLDINGS_ISA), samsung_cash_overrides.get("ISA", ISA_CASH)),
+    base_accounts = [
+        ("일반", HOLDINGS_GENERAL, DEFAULT_CASH),
+        ("RIA", HOLDINGS_RIA, RIA_CASH),
+        ("IRP", HOLDINGS_IRP, IRP_CASH + IRP_DEFAULT_OPTION),
+        ("연금저축", HOLDINGS_PENSION, PENSION_MMF),
+        ("ISA", HOLDINGS_ISA, ISA_CASH),
     ]
+    accounts = []
+    account_pending_meta: dict[str, dict] = {}
+    total_pending_trades = 0
+    for _acct_name, _base_h, _base_c in base_accounts:
+        _h, _c, _meta = effective_holdings(
+            _acct_name, _base_h, _base_c, usdkrw,
+            pending_by_account=pending_by_account,
+        )
+        accounts.append((_acct_name, _h, _c))
+        account_pending_meta[_acct_name] = _meta
+        total_pending_trades += int(_meta.get("pending_trade_count", 0))
+        pending_warnings.extend(_meta.get("pending_notes", []))
 
-    # 모든 티커 수집 → 배치 조회.
-    # Broker Excel snapshot rows already have exact current/eval/cost values.
-    # Keep those valuation totals verbatim, but still fetch a separate quote for
-    # day_pct only so 오늘 수익률 can be calculated from broker eval_krw × live day_pct.
+    # 모든 티커 수집 → 배치 조회 (수량 × 라이브 시세 단일 경로)
     all_tickers: dict[str, str] = {}
-    day_pct_tickers: dict[str, str] = {}
     for _, holdings, _ in accounts:
         for t, info in holdings.items():
-            name = PORTFOLIO.get(t, info.get("name", t))
-            if "eval_krw" in info and "current_price" in info:
-                day_pct_tickers[t] = name
-                continue
-            all_tickers[t] = name
-    quote_tickers = {**all_tickers, **day_pct_tickers}
-    quotes = _portfolio_quotes_fast(quote_tickers, _batch_quotes) if quote_tickers else {}
-
-    # USDKRW. Excel snapshot uses Samsung broker KRW totals already, so the FX
-    # rate is only needed when non-snapshot USD holdings remain.
-    usdkrw = 1554.4
-    if all_tickers:
-        try:
-            usd_q = _batch_quotes({"USDKRW=X": "원달러"})
-            if "USDKRW=X" in usd_q:
-                usdkrw = usd_q["USDKRW=X"].price or usdkrw
-            # FX quote providers occasionally return a 100x-scale or wrong cross value.
-            # Keep portfolio valuation in a plausible USD/KRW band instead of exploding totals.
-            if not (800 <= usdkrw <= 2500):
-                usdkrw = 1554.4
-        except Exception:
-            usdkrw = 1554.4
+            all_tickers[t] = PORTFOLIO.get(t, info.get("name", t))
+    quotes = _portfolio_quotes_fast(all_tickers, _batch_quotes) if all_tickers else {}
+    _now_epoch = time.time()
 
     def _price_sanity_limit(ticker: str, avg_price: float, is_usd: bool) -> float:
         """Return max plausible quote/avg ratio for portfolio valuation.
@@ -714,15 +662,8 @@ def _fetch_portfolio_raw() -> dict:
             is_usd = avg_usd > 0
 
             q = quotes.get(ticker)
-            broker_snapshot = "eval_krw" in info or "cost_krw" in info
-            # Broker Excel snapshots are the broker-source baseline, but the HTML
-            # tool must move intraday. Prefer live quote price/day_pct when present;
-            # keep the Excel values separately for reconciliation/fallback.
-            broker_price = info.get("current_price", 0.0)
-            broker_eval_krw = float(info.get("eval_krw", 0) or 0) if broker_snapshot else None
-            broker_cost_krw = float(info.get("cost_krw", 0) or 0) if broker_snapshot else None
-            raw_price = q.price if q else broker_price
-            pct = q.pct if q else info.get("day_pct", 0.0)
+            raw_price = q.price if q else 0.0
+            pct = q.pct if q else 0.0
             avg_price = avg_usd if is_usd else avg_krw
             cur_price, price_note = _guard_portfolio_quote(ticker, raw_price, avg_price, is_usd)
 
@@ -739,21 +680,6 @@ def _fetch_portfolio_raw() -> dict:
                 eval_krw = eval_total
                 cost_krw = cost_total
 
-            if broker_snapshot:
-                # Preserve broker-exported totals, but do not freeze the live HTML
-                # valuation when a quote is available. If quote lookup fails, fall
-                # back to the broker snapshot so totals remain populated.
-                if q is None and broker_eval_krw is not None:
-                    eval_krw = broker_eval_krw
-                if broker_cost_krw is not None:
-                    cost_krw = broker_cost_krw
-                pnl_pct = ((eval_krw - cost_krw) / cost_krw * 100) if cost_krw else 0
-                price_note["price_guard"] = "live_quote_with_broker_excel_snapshot" if q else "broker_excel_snapshot"
-                price_note["valuation_price"] = round(_safe(cur_price), 2)
-                price_note["broker_snapshot_price"] = round(_safe(broker_price), 2)
-                price_note["broker_eval_krw"] = round(_safe(broker_eval_krw or 0))
-                price_note["broker_cost_krw"] = round(_safe(broker_cost_krw or 0))
-
             strategy = HOLDING_STRATEGY.get(ticker, {})
             name = info.get("name") or PORTFOLIO.get(ticker, ticker)
 
@@ -766,7 +692,12 @@ def _fetch_portfolio_raw() -> dict:
                 "current_price": round(_safe(cur_price), 2),
                 "raw_price": round(_safe(raw_price), 2),
                 "day_pct": round(_safe(pct), 2),
-                "day_pct_source": "quote" if q else ("live_day_pct_snapshot" if broker_snapshot and "day_pct" in info else ("unavailable_broker_excel_snapshot" if broker_snapshot else "missing_quote")),
+                "day_pct_source": "quote" if q else "missing_quote",
+                "price_source": (getattr(q, "source", "") or "quote") if q else "",
+                "price_age_sec": (
+                    round(max(0.0, _now_epoch - q.as_of))
+                    if q and getattr(q, "as_of", 0) else None
+                ),
                 "pnl_pct": round(_safe(pnl_pct), 2),
                 "eval_krw": round(_safe(eval_krw)),
                 "horizon": strategy.get("horizon", ""),
@@ -786,7 +717,7 @@ def _fetch_portfolio_raw() -> dict:
             _dp = _it.get("day_pct")
             if _dp is None:
                 continue
-            if _it.get("day_pct_source") in ("missing_quote", "unavailable_broker_excel_snapshot"):
+            if _it.get("day_pct_source") == "missing_quote":
                 continue
             try:
                 _prev = _it.get("eval_krw", 0) / (1 + float(_dp) / 100)
@@ -806,8 +737,10 @@ def _fetch_portfolio_raw() -> dict:
             "principal_pnl_krw": round(acct_asset_total - principal) if principal else None,
             "today_pnl_krw": round(acct_today_chg) if acct_today_available else None,
             "today_pnl_pct": round(acct_today_chg / acct_asset_total * 100, 2) if acct_today_available and acct_asset_total else None,
-            "today_pnl_source": "live_day_pct_snapshot" if acct_today_available else "unavailable",
-            "display_source": "live_quotes_plus_samsung_broker_snapshot" if use_broker_excel_snapshot else "settings_plus_quotes",
+            "today_pnl_source": "live_quote_day_pct" if acct_today_available else "unavailable",
+            "display_source": "live_settings_plus_pending_trades",
+            "pending_trade_count": int(account_pending_meta.get(acct_name, {}).get("pending_trade_count", 0)),
+            "pending_trades": account_pending_meta.get(acct_name, {}).get("pending_trades", []),
             "pnl_pct": round((acct_eval - acct_cost) / acct_cost * 100, 2) if acct_cost else 0,
         })
         total_eval += acct_eval + cash_krw
@@ -850,9 +783,13 @@ def _fetch_portfolio_raw() -> dict:
         "total_pnl_pct": round(_safe(raw_pnl), 2),
         "today_pnl_krw": round(total_today_chg) if total_today_available else None,
         "today_pnl_pct": round(total_today_chg / grand_total * 100, 2) if total_today_available and grand_total else None,
-        "today_pnl_source": "live_quote_day_pct" if total_today_available and use_broker_excel_snapshot else ("quote" if total_today_available else "unavailable"),
+        "today_pnl_source": "live_quote_day_pct" if total_today_available else "unavailable",
         "total_cash": round(total_cash),
-        "display_source": "live_quotes_plus_samsung_broker_snapshot" if use_broker_excel_snapshot else "settings_plus_quotes",
+        "display_source": "live_settings_plus_pending_trades",
+        "holdings_as_of": HOLDINGS_AS_OF,
+        "pending_trade_count": total_pending_trades,
+        "pending_warnings": pending_warnings,
+        "fx_source": fx_source,
         "total_principal": round(float(TOTAL_PRINCIPAL_KRW)),
         "total_principal_pnl_pct": round(_safe(principal_pnl), 2),
         "cash_weight": cash_weight,
@@ -3527,3 +3464,196 @@ def toss_live_pilot_verifications_data(limit: int = 20) -> dict:
             "pending_count": 0,
             "expired_count": 0,
         }
+
+
+# ─── 액션센터 (실시간 주문 판단) ─────────────────────────
+# read-only: 미결 추천(memory) + PRICE_ALERTS 를 라이브 시세로 판정.
+# state: HIT(레벨 도달) / NEAR(±2% 이내) / FAR
+
+_NEAR_PCT = 2.0
+_STATE_RANK = {"HIT": 0, "NEAR": 1, "FAR": 2}
+
+
+def _open_predictions_slim() -> list[dict]:
+    """미결 추천(open predictions) 슬림 조회 — 실패 시 빈 리스트."""
+    try:
+        from core.memory import _get_conn
+        conn = _get_conn()
+        rows = conn.execute(
+            """SELECT created_at, ticker, name, signal, entry_price,
+                      target_price, stop_loss, confidence, reasoning,
+                      COALESCE(account_type, '') AS account,
+                      COALESCE(strategy_type, '') AS strategy_type
+               FROM predictions WHERE status = 'open'
+               ORDER BY created_at DESC LIMIT 40"""
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        log.debug("미결 추천 조회 실패: %s", e)
+        return []
+
+
+def _level_state(price: float, level: float, direction: str) -> tuple[str, float]:
+    """레벨 판정. direction: 'below'=가격이 레벨 이하면 HIT, 'above'=이상이면 HIT.
+
+    Returns (state, dist_pct) — 레벨까지 남은 거리 % (양수=미도달, 0 이하=도달).
+    """
+    if price <= 0 or level <= 0:
+        return "FAR", 999.0
+    if direction == "below":
+        dist = (price - level) / level * 100
+    else:
+        dist = (level - price) / level * 100
+    if dist <= 0:
+        return "HIT", round(dist, 2)
+    if dist <= _NEAR_PCT:
+        return "NEAR", round(dist, 2)
+    return "FAR", round(dist, 2)
+
+
+def _quote_meta(q, now_epoch: float) -> dict:
+    return {
+        "price": float(q.price) if q else 0.0,
+        "price_source": (getattr(q, "source", "") or "quote") if q else "",
+        "price_age_sec": (
+            round(max(0.0, now_epoch - q.as_of))
+            if q and getattr(q, "as_of", 0) else None),
+    }
+
+
+def _fetch_action_center_raw() -> dict:
+    from config import settings
+    from core.market import _batch_quotes
+
+    preds = _open_predictions_slim()
+    alerts = getattr(settings, "PRICE_ALERTS", {}) or {}
+    portfolio = getattr(settings, "PORTFOLIO", {}) or {}
+
+    ticker_map: dict[str, str] = {}
+    for p in preds:
+        t = p.get("ticker", "")
+        if t:
+            ticker_map[t] = p.get("name") or portfolio.get(t, t)
+    for t, cfg in alerts.items():
+        ticker_map[t] = cfg.get("name", t)
+
+    quotes = _portfolio_quotes_fast(ticker_map, _batch_quotes) if ticker_map else {}
+    now_epoch = time.time()
+
+    items: list[dict] = []
+
+    for p in preds:
+        t = p.get("ticker", "")
+        q = quotes.get(t)
+        meta = _quote_meta(q, now_epoch)
+        signal = (p.get("signal") or "").strip()
+        is_buy = "매수" in signal or "BUY" in signal.upper()
+        levels: list[dict] = []
+        for key, label, direction in (
+            ("entry_price", "진입가", "below" if is_buy else "above"),
+            ("target_price", "목표가", "above"),
+            ("stop_loss", "손절가", "below"),
+        ):
+            lv = float(p.get(key) or 0)
+            if lv <= 0:
+                continue
+            state, dist = _level_state(meta["price"], lv, direction)
+            levels.append({"type": label, "level": lv, "direction": direction,
+                           "state": state, "dist_pct": dist})
+        if not levels:
+            continue
+        best = min(levels, key=lambda l: _STATE_RANK[l["state"]])
+        items.append({
+            "kind": "recommendation",
+            "ticker": t,
+            "name": p.get("name") or ticker_map.get(t, t),
+            "signal": signal,
+            "account": p.get("account", ""),
+            "strategy_type": p.get("strategy_type", ""),
+            "created_at": p.get("created_at", ""),
+            "confidence": p.get("confidence", 0),
+            "reason": (p.get("reasoning") or "").strip()[:200],
+            **meta,
+            "levels": levels,
+            "state": best["state"],
+            "nearest_level": best,
+        })
+
+    for t, cfg in alerts.items():
+        q = quotes.get(t)
+        meta = _quote_meta(q, now_epoch)
+        levels = []
+        for direction in ("below", "above"):
+            lv = float(cfg.get(direction) or 0)
+            if lv <= 0:
+                continue
+            state, dist = _level_state(meta["price"], lv, direction)
+            label = "하락 알림가" if direction == "below" else "상승 알림가"
+            levels.append({"type": label, "level": lv, "direction": direction,
+                           "state": state, "dist_pct": dist})
+        if not levels:
+            continue
+        best = min(levels, key=lambda l: _STATE_RANK[l["state"]])
+        items.append({
+            "kind": "price_alert",
+            "ticker": t,
+            "name": cfg.get("name", t),
+            "signal": "가격 알림",
+            "account": "",
+            "strategy_type": "",
+            "created_at": "",
+            "confidence": 0,
+            "reason": (cfg.get("reason") or "").strip()[:200],
+            **meta,
+            "levels": levels,
+            "state": best["state"],
+            "nearest_level": best,
+        })
+
+    urgent = [it for it in items if it["state"] in ("HIT", "NEAR")]
+    watching = [it for it in items if it["state"] == "FAR"]
+    urgent.sort(key=lambda it: (0 if it["state"] == "HIT" else 1,
+                                abs(it["nearest_level"]["dist_pct"])))
+    watching.sort(key=lambda it: it["nearest_level"]["dist_pct"])
+    return {
+        "generated_at": datetime.now(KST).isoformat(timespec="seconds"),
+        "urgent_count": len(urgent),
+        "urgent": [_decorate_stock_display(it) for it in urgent],
+        "watching": [_decorate_stock_display(it) for it in watching],
+        "open_recommendation_count": len(preds),
+        "near_threshold_pct": _NEAR_PCT,
+    }
+
+
+def action_center_data() -> dict:
+    return _cached("action_center", 30, _fetch_action_center_raw)
+
+
+def alerts_history_data(hours: int = 48) -> dict:
+    def _fetch() -> dict:
+        try:
+            from core.memory import recent_alerts
+            items = recent_alerts(hours=hours)
+        except Exception as e:
+            log.debug("알림 이력 조회 실패: %s", e)
+            items = []
+        return {
+            "hours": hours,
+            "count": len(items),
+            "items": [_decorate_stock_display(it) for it in items],
+        }
+    return _cached(f"alerts_history_{hours}", 20, _fetch)
+
+
+def dart_disclosures() -> dict:
+    def _fetch() -> dict:
+        from core.briefing_enrichment import dart_disclosures_data
+        return dart_disclosures_data(days=3)
+    return _cached("dart_disclosures", 600, _fetch)
+
+
+def orderbook_summary() -> dict:
+    def _fetch() -> dict:
+        from core.briefing_enrichment import orderbook_summary_data
+        return orderbook_summary_data()
+    return _cached("orderbook_summary", 60, _fetch)

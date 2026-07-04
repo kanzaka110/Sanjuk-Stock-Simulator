@@ -284,6 +284,11 @@ TOTAL_PRINCIPAL_KRW: float = sum(ACCOUNT_PRINCIPAL_KRW.values())
 # 매수 이력:
 #   - Google Drive 삼성증권.xlsx 최신 스냅샷(2026-07-02 14:51 KST)을 원본으로 사용
 #   - 최신 스냅샷: 삼성전자 95주 평단 72,508 / SK하이닉스 1주 평단 2,350,000
+# HOLDINGS/CASH 최종 수동 갱신일 — 대시보드 신선도 표시 + 매매 자동반영 기준.
+# 이 날짜 이전의 미반영 매매(trades applied=0)는 이미 settings에 반영됐을 수
+# 있어 대시보드 라이브 합성에서 제외된다 (core/portfolio_live.py).
+HOLDINGS_AS_OF: str = "2026-07-03"
+
 HOLDINGS_GENERAL: dict[str, dict] = {
     "000660.KS": {"shares": 2, "avg_cost_krw": 2_325_000},  # Google Drive 삼성증권.xlsx 최신 스냅샷 기준
     "005930.KS": {"shares": 100, "avg_cost_krw": 83_482},  # Google Drive 삼성증권.xlsx 최신 스냅샷 기준

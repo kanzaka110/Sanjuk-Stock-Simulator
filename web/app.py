@@ -259,6 +259,26 @@ def api_timeline(
     )
 
 
+@app.get("/api/action-center")
+def api_action_center():
+    return JSONResponse(dd.action_center_data())
+
+
+@app.get("/api/alerts/history")
+def api_alerts_history(hours: int = 48):
+    return JSONResponse(dd.alerts_history_data(min(max(hours, 1), 168)))
+
+
+@app.get("/api/dart/disclosures")
+def api_dart_disclosures():
+    return JSONResponse(dd.dart_disclosures())
+
+
+@app.get("/api/orderbook/summary")
+def api_orderbook_summary():
+    return JSONResponse(dd.orderbook_summary())
+
+
 # ─── HTML 대시보드 (모바일/PC 자동 분기) ─────────────
 _MOBILE_RE = re.compile(r"iPhone|Android|Mobile|iPod|Opera Mini|IEMobile", re.I)
 
@@ -288,6 +308,22 @@ def index(request: Request, view: str | None = Query(None)):
             "Pragma": "no-cache",
             "Expires": "0",
         },
+    )
+
+
+@app.get("/static/action_center.js")
+def action_center_js():
+    """액션센터 공용 프론트 스크립트 (PC/모바일 HTML 공유, hot-read)."""
+    from pathlib import Path
+    from fastapi.responses import Response
+
+    path = Path(__file__).parent / "static" / "action_center.js"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="not found")
+    return Response(
+        path.read_text(encoding="utf-8"),
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
     )
 
 

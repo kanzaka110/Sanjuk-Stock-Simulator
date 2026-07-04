@@ -812,13 +812,15 @@ def test_samsung_general_drive_excel_snapshot_reflected():
 
 
 def test_dashboard_ria_cash_uses_live_settings_value():
-    """RIA 계좌는 dashboard_data에 하드코딩 override가 없어 settings.RIA_CASH 갱신이 바로 반영된다."""
+    """계좌 보유/현금은 하드코딩 스냅샷 없이 settings + 미반영 매매 라이브 합성이다."""
     import core.dashboard_data as dd
-    import config.settings as settings
     import inspect
 
     src = inspect.getsource(dd._fetch_portfolio_raw)
-    assert '"RIA":' not in src.split("samsung_cash_overrides = {")[1].split("}")[0]
+    assert "samsung_cash_overrides" not in src
+    assert "samsung_excel_snapshot" not in src
+    assert "effective_holdings" in src
+    assert "RIA_CASH" in src
 
 def test_trade_api_routes_in_source():
     """거래 ledger 조회 API는 GET-only로 존재한다."""

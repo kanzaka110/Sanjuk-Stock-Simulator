@@ -67,6 +67,22 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             ON predictions(ticker);
         CREATE INDEX IF NOT EXISTS idx_predictions_status
             ON predictions(status);
+
+        CREATE TABLE IF NOT EXISTS alert_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            name TEXT,
+            alert_type TEXT,
+            severity TEXT,
+            title TEXT,
+            message TEXT,
+            price REAL DEFAULT 0,
+            delivered INTEGER DEFAULT 0,
+            suppress_reason TEXT DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_alert_history_created
+            ON alert_history(created_at);
     """)
     # Phase 2 마이그레이션: 기존 DB에 새 컬럼 추가
     _migrate_phase2(conn)
@@ -1671,6 +1687,58 @@ def generate_open_positions_review(current_prices: dict[str, float]) -> str:
 
     lines.append("위 모든 미결 포지션에 대해 strategy_sell 또는 분석에 유지/매도 판단을 반드시 포함하세요.")
     return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════
+# 긴급 알림 이력 — 모니터가 전송/억제한 알림을 대시보드에서 조회
+# ═══════════════════════════════════════════════════════
+def save_alert(alert: dict) -> int:
+    """모니터 알림 기록 (전송/억제 모두). Returns row id, 실패 시 0.
+
+    alert keys: ticker, name, alert_type, severity, title, message,
+                price, delivered(bool), suppress_reason
+    """
+    try:
+        conn = _get_conn()
+        cur = conn.execute(
+            """INSERT INTO alert_history
+               (created_at, ticker, name, alert_type, severity, title,
+                message, price, delivered, suppress_reason)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (
+                datetime.now(KST).isoformat(),
+                str(alert.get("ticker", "")),
+                str(alert.get("name", "")),
+                str(alert.get("alert_type", "")),
+                str(alert.get("severity", "")),
+                str(alert.get("title", ""))[:200],
+                str(alert.get("message", ""))[:2000],
+                float(alert.get("price", 0) or 0),
+                1 if alert.get("delivered") else 0,
+                str(alert.get("suppress_reason", ""))[:200],
+            ),
+        )
+        conn.commit()
+        return cur.lastrowid or 0
+    except sqlite3.Error as e:
+        log.warning("알림 이력 저장 실패: %s", e)
+        return 0
+
+
+def recent_alerts(hours: int = 48, limit: int = 100) -> list[dict]:
+    """최근 N시간 알림 이력 (전송+억제) — 대시보드 read-only API용."""
+    try:
+        conn = _get_conn()
+        cutoff = (datetime.now(KST) - timedelta(hours=hours)).isoformat()
+        rows = conn.execute(
+            """SELECT * FROM alert_history WHERE created_at >= ?
+               ORDER BY created_at DESC LIMIT ?""",
+            (cutoff, max(1, min(int(limit), 500))),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except sqlite3.Error as e:
+        log.warning("알림 이력 조회 실패: %s", e)
+        return []
 
 
 def generate_weekly_review() -> str:

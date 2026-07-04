@@ -210,6 +210,8 @@ def get_domestic_price(ticker: str) -> Quote | None:
             pct=round(pct, 2),
             high=round(high, 0),
             low=round(low, 0),
+            source="kis",
+            as_of=time.time(),
         )
 
     except requests.RequestException as e:
@@ -345,6 +347,8 @@ def _fetch_overseas_quote(
             pct=round(pct, 2),
             high=round(high, 2),
             low=round(low, 2),
+            source="kis",
+            as_of=time.time(),
         )
 
     except requests.RequestException:
