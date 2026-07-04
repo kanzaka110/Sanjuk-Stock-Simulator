@@ -94,6 +94,13 @@ class MarketMonitor:
                 # 조건 해소된 알림 제거 (다음에 다시 발동하면 재전송)
                 self._active_alerts -= (self._active_alerts - current_keys)
 
+                # Toss 미체결/exit 감시 (read-only, 내부 30분 스로틀)
+                try:
+                    from core.toss_order_watch import run_toss_order_watch
+                    run_toss_order_watch(now=now)
+                except Exception as e:
+                    log.warning(f"toss order watch 실패: {e}")
+
                 self._sleep(MONITOR_INTERVAL_SEC)
 
             except Exception as e:

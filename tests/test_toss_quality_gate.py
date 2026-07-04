@@ -318,3 +318,37 @@ class TestStockAgentReadySmallPass:
         _exec = ("PASS_EXECUTE", "SMALL_PASS")
         ready = bucket in _exec
         assert ready is True
+
+
+# ── 체결가 연동 (B) 테스트 ───────────────────────────────────────
+
+class TestFillPriceIntegration:
+
+    def test_get_fill_price_empty_pilot(self):
+        from core.toss_quality_gate import _get_fill_price
+        assert _get_fill_price("") == 0.0
+
+    def test_get_fill_price_uses_events(self):
+        from core import toss_quality_gate as qg
+        with patch("core.toss_live_pilot_events.latest_fill_for_pilot",
+                   return_value={"filled_price": 30500.0, "filled_quantity": 1}):
+            assert qg._get_fill_price("tlive_x") == 30500.0
+
+    def test_get_fill_price_no_fill(self):
+        from core import toss_quality_gate as qg
+        with patch("core.toss_live_pilot_events.latest_fill_for_pilot",
+                   return_value={}):
+            assert qg._get_fill_price("tlive_x") == 0.0
+
+    def test_current_price_uses_realtime_quote(self):
+        """존재하지 않는 core.market.get_price 대신 _get_quote_realtime 사용."""
+        from core import toss_quality_gate as qg
+        q = MagicMock()
+        q.price = 31000.0
+        with patch("core.market._get_quote_realtime", return_value=q):
+            assert qg._get_current_price("091180.KS") == 31000.0
+
+    def test_current_price_none_quote(self):
+        from core import toss_quality_gate as qg
+        with patch("core.market._get_quote_realtime", return_value=None):
+            assert qg._get_current_price("091180.KS") == 0.0

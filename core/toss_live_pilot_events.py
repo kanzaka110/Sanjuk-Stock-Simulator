@@ -294,6 +294,38 @@ def list_events(limit: int = 50) -> list[dict]:
         return []
 
 
+def latest_fill_for_pilot(pilot_id: str) -> dict:
+    """pilot_id의 최신 체결 정보 조회 (read-only).
+
+    반환: {"filled_price": float, "filled_quantity": float, "broker_order_status": str}
+    체결 정보 없으면 빈 dict.
+    """
+    pid = str(pilot_id or "").strip()
+    if not pid:
+        return {}
+    try:
+        with _db_lock:
+            conn = _conn()
+            row = conn.execute(
+                "SELECT filled_price, filled_quantity, broker_order_status "
+                "FROM live_pilot_events "
+                "WHERE pilot_id=? AND event_type='live_sent' AND filled_price > 0 "
+                "ORDER BY created_at DESC LIMIT 1",
+                (pid,),
+            ).fetchone()
+            conn.close()
+        if not row:
+            return {}
+        return {
+            "filled_price": float(row["filled_price"] or 0),
+            "filled_quantity": float(row["filled_quantity"] or 0),
+            "broker_order_status": str(row["broker_order_status"] or ""),
+        }
+    except Exception as e:
+        log.warning("latest_fill_for_pilot failed: %s", e)
+        return {}
+
+
 def event_summary() -> dict:
     """이벤트 타입별 건수 요약 (read-only).
 

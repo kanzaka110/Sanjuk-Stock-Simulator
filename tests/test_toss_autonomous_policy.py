@@ -108,14 +108,15 @@ class TestAutonomousAssetTypes:
 
 class TestAutonomousLimits:
 
-    def test_default_kr_limits(self):
+    def test_default_kr_limits_removed(self):
+        # 2026-07-04 사용자 승인으로 금액 cap 제거 — 0 = 한도 없음
         p = _policy()
-        assert p["autonomous_kr_max_order_krw"] == 500_000
-        assert p["autonomous_kr_max_daily_buy_krw"] == 1_500_000
+        assert p["autonomous_kr_max_order_krw"] == 0
+        assert p["autonomous_kr_max_daily_buy_krw"] == 0
 
-    def test_default_us_limits(self):
+    def test_default_us_limits_removed(self):
         p = _policy()
-        assert p["autonomous_us_max_order_usd"] == 1_000
+        assert p["autonomous_us_max_order_usd"] == 0
 
     def test_default_weight(self):
         p = _policy()

@@ -531,7 +531,7 @@ def evaluate_outcomes() -> dict:
         conn = _outcomes_conn()
         try:
             rows = conn.execute(
-                "SELECT id, ticker, entry_price, stop_loss, target_price "
+                "SELECT id, ticker, entry_price, stop_loss, target_price, pilot_id "
                 "FROM quality_gate_decisions "
                 "WHERE outcome IS NULL AND decided_at < ?",
                 (cutoff,),
@@ -540,6 +540,10 @@ def evaluate_outcomes() -> dict:
             for row in rows:
                 rid, ticker, entry, stop, target = row["id"], row["ticker"], row["entry_price"], row["stop_loss"], row["target_price"]
                 try:
+                    # 실제 체결가가 있으면 entry로 사용 (B: 체결가 연동)
+                    fill_price = _get_fill_price(row["pilot_id"] if "pilot_id" in row.keys() else "")
+                    if fill_price > 0:
+                        entry = fill_price
                     price = _get_current_price(ticker)
                     if price <= 0 or entry <= 0:
                         continue
@@ -551,8 +555,10 @@ def evaluate_outcomes() -> dict:
                     else:
                         outcome = "expired"
                     conn.execute(
-                        "UPDATE quality_gate_decisions SET outcome=?, return_5d=?, outcome_evaluated_at=? WHERE id=?",
-                        (outcome, round(ret, 4), datetime.now(KST).strftime("%Y-%m-%dT%H:%M:%S+09:00"), rid),
+                        "UPDATE quality_gate_decisions SET outcome=?, return_5d=?, "
+                        "entry_price=?, outcome_evaluated_at=? WHERE id=?",
+                        (outcome, round(ret, 4), entry,
+                         datetime.now(KST).strftime("%Y-%m-%dT%H:%M:%S+09:00"), rid),
                     )
                     evaluated += 1
                 except Exception as e:
@@ -567,10 +573,26 @@ def evaluate_outcomes() -> dict:
 
 
 def _get_current_price(ticker: str) -> float:
-    """시세 조회 (기존 market.py 재사용)."""
+    """시세 조회 (기존 market.py 재사용).
+
+    주의: core.market에 get_price()는 없음 — _get_quote_realtime 사용.
+    (기존 코드가 존재하지 않는 get_price를 import해 항상 0 반환하던 버그 수정)
+    """
     try:
-        from core.market import get_price
-        return float(get_price(ticker) or 0)
+        from core.market import _get_quote_realtime
+        q = _get_quote_realtime(ticker)
+        return float(q.price) if q else 0.0
+    except Exception:
+        return 0.0
+
+
+def _get_fill_price(pilot_id: str) -> float:
+    """pilot_id의 실제 체결가 조회 (없으면 0)."""
+    if not pilot_id:
+        return 0.0
+    try:
+        from core.toss_live_pilot_events import latest_fill_for_pilot
+        return float(latest_fill_for_pilot(pilot_id).get("filled_price", 0) or 0)
     except Exception:
         return 0.0
 

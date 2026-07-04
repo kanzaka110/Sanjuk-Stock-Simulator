@@ -259,13 +259,13 @@ def _check_autonomous_guards(
 
     # KR_STOCK 한도
     if asset_type == "KR_STOCK":
-        kr_max = policy.get("autonomous_kr_max_order_krw", 500_000)
+        kr_max = policy.get("autonomous_kr_max_order_krw", 0)
         if kr_max and estimated_krw > kr_max:
             reasons.append(f"autonomous_kr_order_over_limit: {estimated_krw:,.0f} > {kr_max:,.0f}")
 
         # KR daily BUY cap
         if side == "buy":
-            kr_daily_max = policy.get("autonomous_kr_max_daily_buy_krw", 1_500_000)
+            kr_daily_max = policy.get("autonomous_kr_max_daily_buy_krw", 0)
             if kr_daily_max:
                 try:
                     today_kr_buy_total = _today_kr_buy_total()
@@ -279,7 +279,7 @@ def _check_autonomous_guards(
 
     # US_STOCK 한도 (USD 기준)
     if asset_type == "US_STOCK":
-        us_max = policy.get("autonomous_us_max_order_usd", 1_000)
+        us_max = policy.get("autonomous_us_max_order_usd", 0)
         if us_max and limit_price > 0:
             qty = int(preview.get("quantity") or 0)
             order_usd = limit_price * qty

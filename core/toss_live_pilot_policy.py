@@ -47,9 +47,11 @@ _LIVE_PILOT_ALLOWED_SIDES: list[str] = ["buy", "sell"]
 _LIVE_PILOT_BLOCK_SELL: bool = False
 
 # ── Autonomous 기본값 ─────────────────────────────────────────────
-_AUTONOMOUS_KR_MAX_ORDER_KRW = 500_000
-_AUTONOMOUS_KR_MAX_DAILY_BUY_KRW = 1_500_000
-_AUTONOMOUS_US_MAX_ORDER_USD = 1_000
+# 0 = 임의 금액 한도 없음 (2026-07-04 사용자 승인으로 KRW/USD cap 제거).
+# 나머지 안전장치(kill switch/Hermes PASS/품질게이트/stop_loss 필수/중복 방지)는 유지.
+_AUTONOMOUS_KR_MAX_ORDER_KRW = 0
+_AUTONOMOUS_KR_MAX_DAILY_BUY_KRW = 0
+_AUTONOMOUS_US_MAX_ORDER_USD = 0
 _AUTONOMOUS_SYMBOL_MAX_WEIGHT_PCT = 15
 
 

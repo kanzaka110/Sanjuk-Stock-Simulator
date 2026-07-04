@@ -99,6 +99,8 @@ ALLOWED_TOSS_FILES = {
     "tests/test_toss_autonomous_sell_guard.py",
     "core/toss_quality_gate.py",
     "tests/test_toss_quality_gate.py",
+    "core/toss_order_watch.py",
+    "tests/test_toss_order_watch.py",
 }
 
 
