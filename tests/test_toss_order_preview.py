@@ -90,17 +90,22 @@ _EMPTY_POLICY = {
 
 import unittest.mock as _mock
 
-class TestNormalCandidate:
-    # policy는 빈 상태 mock — consensus_anomaly 없는 정상 후보 렌더 검증용
-    def setup_method(self):
-        self._policy_patch = _mock.patch(
-            "core.toss_paper_policy.compute_toss_paper_policy",
-            return_value=_EMPTY_POLICY,
-        )
-        self._policy_patch.start()
+import pytest
 
-    def teardown_method(self):
-        self._policy_patch.stop()
+
+@pytest.fixture(autouse=True)
+def _no_network_policy():
+    # compute_toss_paper_policy → get_paper_performance_summary → 실가격 조회(KIS/yfinance)
+    # 네트워크 행 방지: 전 테스트에서 policy를 빈 상태 mock으로 고정
+    with _mock.patch(
+        "core.toss_paper_policy.compute_toss_paper_policy",
+        return_value=_EMPTY_POLICY,
+    ):
+        yield
+
+
+class TestNormalCandidate:
+    # policy는 빈 상태 mock — consensus_anomaly 없는 정상 후보 렌더 검증용 (autouse fixture 적용)
 
     def test_renders_symbol(self):
         ctx = _ctx()
