@@ -396,6 +396,46 @@ def classify_row(signal: str, reason: str, strategy_type: str = "",
     return WATCH_ONLY
 
 
+# 목표가 도달 가능성 한도 (시계별 최대 상승폭 %)
+_TARGET_UPSIDE_CAPS: tuple[tuple[int, float], ...] = (
+    (7, 25.0),   # 7일 이내 시계: +25%까지
+    (14, 40.0),
+    (30, 60.0),
+)
+
+
+def _validate_buy_logic(action: dict) -> str:
+    """매수 액션 레벨 논리 검증. 문제 없으면 빈 문자열, 있으면 사유 반환.
+
+    - 목표가 ≤ 진입가 / 손절가 ≥ 진입가 → 모순
+    - 목표 상승폭이 투자 시계 대비 비현실적 → 재산정 필요
+    """
+    entry = _num(action.get("price", ""))
+    target = _num(action.get("target", ""))
+    stop = _num(action.get("stop", ""))
+    if entry <= 0:
+        return ""
+
+    if target > 0 and target <= entry:
+        return f"레벨모순: 목표가({target:,.0f})≤진입가({entry:,.0f})"
+    if stop > 0 and stop >= entry:
+        return f"레벨모순: 손절가({stop:,.0f})≥진입가({entry:,.0f})"
+
+    if target > 0:
+        raw = action.get("_raw") or {}
+        strategy = str(action.get("strategy_type", ""))
+        if strategy != "장기적립":
+            horizon = int(_num(raw.get("horizon_days", "")) or 7)
+            upside = (target - entry) / entry * 100
+            for max_days, cap in _TARGET_UPSIDE_CAPS:
+                if horizon <= max_days:
+                    if upside > cap:
+                        return (f"목표가 비현실: {horizon}일 시계에 +{upside:.0f}% "
+                                f"(한도 +{cap:.0f}%) — 재산정 필요")
+                    break
+    return ""
+
+
 def normalize_actions(
     raw: dict,
     briefing_type: str,
@@ -548,6 +588,27 @@ def normalize_actions(
             integrity_errors.append(f"{name or ticker}: 이벤트 대기 중 즉시매수 충돌")
             continue
         executable.append(_mk(AI_ADD_BUY if held else AI_NEW_BUY))
+
+    # ── 매수 논리 검증 포스트 패스 (목표가 도달 가능성 / 레벨 모순) ──
+    def _apply_buy_logic_gate(actions: list[dict]) -> list[dict]:
+        kept = []
+        for a in actions:
+            if a.get("side") != "buy":
+                kept.append(a)
+                continue
+            problem = _validate_buy_logic(a)
+            if not problem:
+                kept.append(a)
+                continue
+            a["action_type"] = BLOCKED_BUY
+            a["blocked"] = True
+            a["block_reason"] = problem
+            blocked_buys.append(a)
+            integrity_errors.append(f"{a.get('name') or a.get('ticker')}: {problem}")
+        return kept
+
+    executable = _apply_buy_logic_gate(executable)
+    conditional_buy = _apply_buy_logic_gate(conditional_buy)
 
     # ── 매도 분류 ──
     for row in raw.get("strategy_sell", []) or []:

@@ -82,22 +82,19 @@ def gather_news(briefing_type: str = "MANUAL") -> str:
 
 각 항목별로 핵심 내용을 정리해서 텍스트로 반환해주세요. 출처도 포함해주세요."""
 
-    # 공통: 최신성 제약 (오래된 기사 혼입 방지)
-    prompt += (
-        "\n\n※ 최신성 규칙: 최근 24시간 이내 기사를 우선하세요. "
-        "그보다 오래된 정보를 인용할 때는 발행 날짜를 반드시 명시하고, "
-        "1주일 이상 지난 기사는 제외하세요 (정책/구조적 이슈 예외)."
-    )
+    # 공통: 최신성 제약 (오래된 기사 혼입 방지) — 프롬프트 지시 + 코드 필터 이중화
+    from core.news_freshness import FRESHNESS_PROMPT_RULES, annotate_news_freshness
+    prompt += FRESHNESS_PROMPT_RULES
 
     # 1차: Claude CLI + WebSearch (Max 구독 활용, 비용 $0)
     cli_text = _gather_news_cli(prompt)
     if cli_text:
-        return cli_text
+        return annotate_news_freshness(cli_text)
 
     # 2차 폴백: Gemini CLI + Google Search (OAuth 무료 모드, 크레딧 무관)
     gem_cli_text = _gather_news_gemini_cli(prompt)
     if gem_cli_text:
-        return gem_cli_text
+        return annotate_news_freshness(gem_cli_text)
 
     # 3차 폴백: Gemini SDK 2.5 Pro + Google Search (API 키, 크레딧 필요)
     if not GEMINI_API_KEY:
@@ -113,7 +110,7 @@ def gather_news(briefing_type: str = "MANUAL") -> str:
                 max_output_tokens=5000,
             ),
         )
-        return response.text.strip()
+        return annotate_news_freshness(response.text.strip())
     except Exception as e:
         return f"(뉴스 수집 실패: {e})"
 

@@ -300,6 +300,95 @@ class TestPriceDivergenceGate:
         assert saved == 0, "시세 미수집 종목은 저장되면 안 됨"
 
 
+class TestLevelConsistencyGate:
+    """레벨 정합성 게이트 — 목표/손절이 진입가와 모순이면 차단."""
+
+    def test_buy_target_below_entry_blocked(self):
+        from core.memory import _quality_gate, ACTION_BLOCKED
+        grade, _, reason = _quality_gate(
+            "005930.KS", "매수", 70, 70000, 65000, 2.0, "하락", "일반", 0, 4,
+            target_price=68000,
+        )
+        assert grade == ACTION_BLOCKED
+        assert "레벨모순" in reason
+
+    def test_buy_stop_above_entry_blocked(self):
+        from core.memory import _quality_gate, ACTION_BLOCKED
+        grade, _, reason = _quality_gate(
+            "005930.KS", "매수", 70, 70000, 72000, 2.0, "하락", "일반", 0, 4,
+            target_price=80000,
+        )
+        assert grade == ACTION_BLOCKED
+        assert "레벨모순" in reason
+
+    def test_buy_consistent_levels_pass(self):
+        from core.memory import _quality_gate, ACTION_BLOCKED
+        grade, _, reason = _quality_gate(
+            "005930.KS", "매수", 70, 70000, 65000, 2.0, "하락", "일반", 0, 4,
+            target_price=80000,
+        )
+        assert grade != ACTION_BLOCKED
+        assert "레벨모순" not in reason
+
+    def test_sell_target_above_entry_blocked(self):
+        from core.memory import _quality_gate, ACTION_BLOCKED
+        # 매도 평가는 숏 관점 — 목표가가 진입가 위면 즉시 win 0%로 종료되던 모순
+        grade, _, reason = _quality_gate(
+            "091160.KS", "매도", 70, 150000, 160000, 2.0, "반등", "일반", 0, 4,
+            target_price=170000,
+        )
+        assert grade == ACTION_BLOCKED
+        assert "레벨모순" in reason
+
+    def test_sell_stop_below_entry_blocked(self):
+        from core.memory import _quality_gate, ACTION_BLOCKED
+        grade, _, reason = _quality_gate(
+            "091160.KS", "매도", 70, 150000, 140000, 2.0, "반등", "일반", 0, 4,
+            target_price=130000,
+        )
+        assert grade == ACTION_BLOCKED
+        assert "레벨모순" in reason
+
+    def test_sell_consistent_levels_pass(self):
+        from core.memory import _quality_gate, ACTION_BLOCKED
+        grade, _, reason = _quality_gate(
+            "091160.KS", "매도", 70, 150000, 160000, 2.0, "반등", "일반", 0, 4,
+            target_price=130000,
+        )
+        assert grade != ACTION_BLOCKED
+
+    def test_no_target_skips_check(self):
+        from core.memory import _quality_gate, ACTION_BLOCKED
+        grade, _, reason = _quality_gate(
+            "005930.KS", "매수", 70, 70000, 65000, 2.0, "하락", "일반", 0, 4,
+        )
+        assert "레벨모순" not in reason
+
+
+class TestZeroPnlInvalidGuard:
+    """생성 당일 0% win/loss → invalid 재분류 (레거시 보호)."""
+
+    def test_same_day_zero_pnl_win_becomes_invalid(self):
+        from datetime import datetime
+        import core.memory as mem
+        conn = mem._get_conn()
+        now = datetime.now(mem.KST).isoformat()
+        # 매도인데 target이 entry 위 → 즉시 도달 (구버전에서 win 0%로 종료되던 케이스)
+        conn.execute(
+            """INSERT INTO predictions
+               (created_at, ticker, name, signal, entry_price, target_price, stop_loss)
+               VALUES (?, '091160.KS', 'KODEX 반도체', '매도', 150000, 160000, 140000)""",
+            (now,),
+        )
+        conn.commit()
+        mem.evaluate_open_predictions({"091160.KS": 150000.0})
+        row = conn.execute(
+            "SELECT outcome, status FROM predictions WHERE ticker='091160.KS'"
+        ).fetchone()
+        assert row["status"] == "closed"
+        assert row["outcome"] == "invalid"
+
+
 class TestTickerNormalization:
     """티커 정규화 유틸리티 테스트."""
 
@@ -727,6 +816,59 @@ class TestPhase4Expectancy:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(predictions)").fetchall()}
         for col in ("action_grade", "action_type", "account_type", "briefing_type", "original_signal", "data_quality"):
             assert col in cols, f"Phase 4 컬럼 {col} 누락"
+
+
+class TestLosingStreak:
+    """3연패 자동 회피 — losing_streak_tickers + calibrate 상한."""
+
+    def _insert_closed(self, conn, ticker, outcomes):
+        """outcomes를 과거→최근 순으로 삽입."""
+        for i, outcome in enumerate(outcomes):
+            ts = f"2026-06-{10 + i:02d}T00:00:00"
+            pnl = 5.0 if outcome == "win" else -5.0
+            conn.execute(
+                """INSERT INTO predictions
+                   (created_at, ticker, name, signal, entry_price, target_price,
+                    stop_loss, confidence, status, closed_at, pnl_pct, outcome)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (ts, ticker, ticker, "매수", 100, 110, 90, 60,
+                 "closed", ts, pnl, outcome),
+            )
+        conn.commit()
+
+    def test_three_losses_detected(self):
+        import core.memory as mem
+        conn = mem._get_conn()
+        self._insert_closed(conn, "BAD.KS", ["win", "loss", "loss", "loss"])
+        assert mem.losing_streak_tickers(min_streak=3) == {"BAD.KS": 3}
+
+    def test_recent_win_breaks_streak(self):
+        import core.memory as mem
+        conn = mem._get_conn()
+        self._insert_closed(conn, "OK.KS", ["loss", "loss", "loss", "win"])
+        assert "OK.KS" not in mem.losing_streak_tickers(min_streak=3)
+
+    def test_two_losses_below_threshold(self):
+        import core.memory as mem
+        conn = mem._get_conn()
+        self._insert_closed(conn, "MEH.KS", ["loss", "loss"])
+        assert "MEH.KS" not in mem.losing_streak_tickers(min_streak=3)
+
+    def test_streak_caps_confidence_at_40(self):
+        import core.memory as mem
+        conn = mem._get_conn()
+        self._insert_closed(conn, "BAD.KS", ["loss", "loss", "loss"])
+        mem._update_accuracy_stats()
+        result = mem.calibrate_confidence("BAD.KS", 80)
+        assert result <= 40, f"3연패 종목은 확신도 상한 40, got {result}"
+
+    def test_streak_shown_in_reliability_directives(self):
+        import core.memory as mem
+        conn = mem._get_conn()
+        self._insert_closed(conn, "BAD.KS", ["loss", "loss", "loss"])
+        mem._update_accuracy_stats()
+        text = mem.reliability_directives_text()
+        assert "⛔" in text and "연패" in text and "신규 매수 금지" in text
 
 
 class TestReliabilityReport:

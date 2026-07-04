@@ -147,15 +147,47 @@ class Prediction:
     agreement_count: int = 0     # 분석가 동의 수 (4명 중)
 
 
-def calibrate_confidence(ticker: str, raw_confidence: int) -> int:
-    """종목별 기대값(expectancy) + profit_factor 기반 확신도 보정.
+def losing_streak_tickers(min_streak: int = 3) -> dict[str, int]:
+    """종목별 최근 연속 손실(연패) 횟수 — min_streak 이상만 반환.
 
-    보정 기준 (Phase 4):
+    가장 최근 closed(win/loss) 기록부터 거슬러 세어 연속 loss 횟수를 계산.
+    neutral/invalid/data_error는 연패 판정에서 제외 (건너뜀 아님 — 분모 제외).
+    """
+    try:
+        conn = _get_conn()
+        rows = conn.execute(
+            """SELECT ticker, outcome FROM predictions
+               WHERE status='closed' AND outcome IN ('win','loss')
+               ORDER BY closed_at DESC, id DESC"""
+        ).fetchall()
+    except Exception as e:
+        log.debug("연패 조회 실패: %s", e)
+        return {}
+
+    streaks: dict[str, int] = {}
+    done: set[str] = set()
+    for r in rows:
+        t = normalize_ticker(r["ticker"])
+        if t in done:
+            continue
+        if r["outcome"] == "loss":
+            streaks[t] = streaks.get(t, 0) + 1
+        else:
+            done.add(t)  # 최근에 win이 나오면 연패 종료
+    return {t: n for t, n in streaks.items() if n >= min_streak}
+
+
+def calibrate_confidence(ticker: str, raw_confidence: int) -> int:
+    """종목별 기대값(expectancy) + profit_factor + 연패 기반 확신도 보정.
+
+    보정 기준 (2026-07 확대판 — 오염 통계 정리 후 실측 기반):
         - evaluated_count < 3 → 보정 없음 (샘플부족)
-        - expectancy > 0 & profit_factor > 1.2 & evaluated >= 5 → +5~+10
+        - expectancy > 0 & profit_factor > 1.5 & evaluated >= 8 → +15
+        - expectancy > 0 & profit_factor > 1.2 & evaluated >= 5 → +10
         - expectancy > 0 & profit_factor > 1.0 → +3~+5
+        - 심각한 음수 expectancy & evaluated >= 8 → -30 (>= 5 → -20)
         - expectancy < 0 or profit_factor < 1.0 → -5~-15
-        - 심각한 음수 expectancy & evaluated >= 5 → -20
+        - 3연패 이상 → 추가 -10 + 결과 상한 40 (자동 회피 신호)
         - 결과: 10~95 범위로 클램프
     """
     ticker = normalize_ticker(ticker)
@@ -172,7 +204,10 @@ def calibrate_confidence(ticker: str, raw_confidence: int) -> int:
     pf = s.get("profit_factor", 0) or 0
     adjustment = 0
 
-    if exp > 0 and pf > 1.2 and evaluated >= 5:
+    if exp > 0 and pf > 1.5 and evaluated >= 8:
+        # 최고신뢰: 검증된 우위 + 대표본
+        adjustment = 15
+    elif exp > 0 and pf > 1.2 and evaluated >= 5:
         # 고신뢰: 양수 기대값 + 높은 profit_factor + 충분한 샘플
         adjustment = 10
     elif exp > 0 and pf > 1.0:
@@ -180,17 +215,23 @@ def calibrate_confidence(ticker: str, raw_confidence: int) -> int:
         adjustment = 5 if evaluated >= 5 else 3
     elif exp < -3 and evaluated >= 5:
         # 심각: 음수 기대값 + 충분한 샘플 → 강한 감점
-        adjustment = -20
+        adjustment = -30 if evaluated >= 8 else -20
     elif exp < 0 or pf < 1.0:
         # 부진: 음수 기대값 또는 profit_factor < 1
         adjustment = -15 if evaluated >= 5 else -5
 
-    calibrated = max(10, min(95, raw_confidence + adjustment))
+    streak = losing_streak_tickers(min_streak=3).get(ticker, 0)
+    cap = 95
+    if streak:
+        adjustment -= 10
+        cap = 40  # 3연패 종목은 어떤 근거로도 고확신 금지
+
+    calibrated = max(10, min(cap, raw_confidence + adjustment))
 
     if adjustment != 0:
         log.info(
-            "확신도 보정: %s %d%% → %d%% (조정 %+d, expectancy=%.1f%%, PF=%.2f, %d건)",
-            ticker, raw_confidence, calibrated, adjustment, exp, pf, evaluated,
+            "확신도 보정: %s %d%% → %d%% (조정 %+d, expectancy=%.1f%%, PF=%.2f, %d건, 연패=%d)",
+            ticker, raw_confidence, calibrated, adjustment, exp, pf, evaluated, streak,
         )
 
     return calibrated
@@ -395,6 +436,7 @@ def _quality_gate(
     data_failures: int = 0,
     agreement_count: int = 0,
     current_price: float | None = None,
+    target_price: float = 0.0,
 ) -> tuple[str, int, str]:
     """추천 품질 게이트. (action_grade, adjusted_confidence, gate_reason) 반환.
 
@@ -482,6 +524,30 @@ def _quality_gate(
         grade = max_grade(grade, ACTION_BLOCKED)
         reasons.append("진입가0→저장금지")
 
+    # 레벨 정합성 — 목표/손절이 진입가와 모순이면 차단
+    # (모순 레벨은 평가 시점에 즉시 win/loss 0%로 종료돼 승률 통계를 오염시킴)
+    if entry_price > 0:
+        if signal == "매수":
+            if target_price > 0 and target_price <= entry_price:
+                grade = max_grade(grade, ACTION_BLOCKED)
+                reasons.append(
+                    f"레벨모순: 매수 목표가({target_price:,.0f})≤진입가({entry_price:,.0f})")
+            if stop_loss > 0 and stop_loss >= entry_price:
+                grade = max_grade(grade, ACTION_BLOCKED)
+                reasons.append(
+                    f"레벨모순: 매수 손절가({stop_loss:,.0f})≥진입가({entry_price:,.0f})")
+        elif signal == "매도":
+            # 평가 로직은 매도를 숏 관점(진입가 대비 하락=수익)으로 채점하므로
+            # 목표가는 진입가 아래, 손절가는 진입가 위여야 한다
+            if target_price > 0 and target_price >= entry_price:
+                grade = max_grade(grade, ACTION_BLOCKED)
+                reasons.append(
+                    f"레벨모순: 매도 목표가({target_price:,.0f})≥진입가({entry_price:,.0f})")
+            if stop_loss > 0 and stop_loss <= entry_price:
+                grade = max_grade(grade, ACTION_BLOCKED)
+                reasons.append(
+                    f"레벨모순: 매도 손절가({stop_loss:,.0f})≤진입가({entry_price:,.0f})")
+
     # 가격 괴리 검증 (current_price가 명시적으로 전달된 경우만 적용)
     # 단 신규진입 눌림목 예약(매수): 진입가가 현재가보다 낮은 건 의도된 것 — 차단 예외.
     # (발굴주가 급등 후 눌림목 대기인데 괴리 게이트에 막혀 매수로 못 가던 숨은 버그)
@@ -568,7 +634,7 @@ def save_prediction(
     grade, gated_conf, gate_reason = _quality_gate(
         ticker, signal, calibrated, entry_price, stop_loss,
         risk_reward, invalidation_condition, strategy_type, data_failures,
-        agreement_count, current_price,
+        agreement_count, current_price, target_price=target_price,
     )
 
     if grade == ACTION_BLOCKED:
@@ -862,6 +928,11 @@ def evaluate_open_predictions(current_prices: dict[str, float]) -> int:
 
         if should_close:
             pnl_pct = (current - entry) / entry * 100 if signal == "매수" else (entry - current) / entry * 100
+            # 레벨 모순 가드: 생성 당일 0% win/loss는 목표/손절이 진입가와 모순이었다는 뜻
+            # (저장 게이트 도입 전 레거시 레코드 보호 — 승률 통계 오염 방지)
+            if outcome in ("win", "loss") and abs(pnl_pct) < 0.01 and _days_since(row["created_at"]) < 1:
+                outcome = "invalid"
+                log.info("레벨 모순 감지: %s %s 즉시 0%% 종료 → invalid", ticker, signal)
             # 비현실 수익률 → data_error 처리
             threshold = _unrealistic_pnl_threshold(ticker)
             if abs(pnl_pct) > threshold:
@@ -1504,6 +1575,7 @@ def reliability_directives_text() -> str:
     def _eval_cnt(s: dict) -> int:
         return s.get("evaluated_count", s.get("wins", 0) + s.get("losses", 0))
 
+    streaks = losing_streak_tickers(min_streak=3)
     lines = []
     for ticker, s in sorted(accuracy.items(), key=lambda kv: -_eval_cnt(kv[1])):
         n = _eval_cnt(s)
@@ -1511,7 +1583,10 @@ def reliability_directives_text() -> str:
             continue
         wr = s.get("win_rate", 0) or 0
         avg = s.get("avg_pnl", 0) or 0
-        if n >= 5 and wr < 30:
+        if ticker in streaks:
+            tag = (f"⛔ {streaks[ticker]}연패 — 신규 매수 금지 (자동 회피). "
+                   "승리 기록이 나오기 전까지 이 종목은 관망만 허용")
+        elif n >= 5 and wr < 30:
             adj = -30 if n >= 8 else -15
             tag = f"🔴 확신도 {adj:+d}% 감점 필수"
         elif n >= 5 and wr >= 70 and avg > 0:

@@ -59,6 +59,77 @@ class TestNormalizeBuy:
         assert len(n["conditional_buy_candidates"]) == 1
 
 
+class TestBuyLogicGate:
+    """매수 논리 검증 — 레벨 모순/비현실 목표가 차단."""
+
+    def _raw_buy(self, **kw):
+        row = {"ticker": "035720.KS", "name": "카카오", "account": "[ISA]",
+               "entry_price": "₩40,000", "reason": "과매도 반등"}
+        row.update(kw)
+        return {"strategy_buy": [row], "strategy_sell": []}
+
+    def test_target_below_entry_blocked(self):
+        n = normalize_actions(
+            self._raw_buy(target_price="₩38,000"), "KR_BEFORE", {}, {})
+        assert len(n["executable_actions"]) == 0
+        assert len(n["blocked_buys"]) == 1
+        assert "레벨모순" in n["blocked_buys"][0]["block_reason"]
+        assert any("레벨모순" in e for e in n["integrity_errors"])
+
+    def test_stop_above_entry_blocked(self):
+        n = normalize_actions(
+            self._raw_buy(target_price="₩48,000", stop_loss="₩42,000"),
+            "KR_BEFORE", {}, {})
+        assert len(n["blocked_buys"]) == 1
+        assert "레벨모순" in n["blocked_buys"][0]["block_reason"]
+
+    def test_unrealistic_target_short_horizon_blocked(self):
+        # 7일 시계에 +50% 목표 → 비현실
+        n = normalize_actions(
+            self._raw_buy(target_price="₩60,000", stop_loss="₩38,000",
+                          horizon_days=7),
+            "KR_BEFORE", {}, {})
+        assert len(n["blocked_buys"]) == 1
+        assert "목표가 비현실" in n["blocked_buys"][0]["block_reason"]
+
+    def test_realistic_target_passes(self):
+        n = normalize_actions(
+            self._raw_buy(target_price="₩44,000", stop_loss="₩38,000",
+                          horizon_days=7),
+            "KR_BEFORE", {}, {})
+        assert len(n["executable_actions"]) == 1
+        assert len(n["blocked_buys"]) == 0
+
+    def test_long_horizon_allows_bigger_target(self):
+        # 30일 시계 +50%는 한도(60%) 이내
+        n = normalize_actions(
+            self._raw_buy(target_price="₩60,000", stop_loss="₩38,000",
+                          horizon_days=30),
+            "KR_BEFORE", {}, {})
+        assert len(n["executable_actions"]) == 1
+
+    def test_long_term_accumulation_exempt(self):
+        # 장기적립은 목표 상승폭 한도 면제 (단 신규진입 아님 → 즉시매수 경로)
+        n = normalize_actions(
+            self._raw_buy(target_price="₩80,000", stop_loss="₩38,000",
+                          strategy_type="장기적립", reason="장기 적립 매수",
+                          horizon_days=90),
+            "KR_BEFORE", {}, {})
+        assert len(n["blocked_buys"]) == 0
+
+    def test_conditional_buy_also_gated(self):
+        n = normalize_actions(
+            self._raw_buy(target_price="₩38,000", reason="눌림목 예약"),
+            "KR_BEFORE", {}, {})
+        assert len(n["conditional_buy_candidates"]) == 0
+        assert len(n["blocked_buys"]) == 1
+
+    def test_no_target_passes(self):
+        n = normalize_actions(self._raw_buy(stop_loss="₩38,000"),
+                              "KR_BEFORE", {}, {})
+        assert len(n["executable_actions"]) == 1
+
+
 class TestNormalizeSell:
     @pytest.mark.parametrize("phrase,expect", [
         ("매도 취소", CANCEL_SELL), ("홀딩 전환", HOLD_REVIEW),
@@ -554,13 +625,14 @@ class TestPriceGapNote:
 class TestConditionalBuyCard:
     """조건부 매수 8필드 주문 카드 (계좌/지정가/수량/총액/괴리/조건/미체결)."""
 
-    def _card(self, account="[RIA]", entry="₩138,000", cur=143000, conf="55"):
+    def _card(self, account="[RIA]", entry="₩138,000", cur=143000, conf="55",
+              target="₩145,000"):
         # cur=143000이면 138000은 -3.5% 진짜 눌림목 (게이트 통과)
         from core.models import BriefingResult
         from core.telegram import _build_impact_message
         raw = {"strategy_buy": [{"ticker": "069500.KS", "name": "KODEX 200",
                                  "account": account, "entry_price": entry,
-                                 "target_price": "₩145,000", "confidence": conf,
+                                 "target_price": target, "confidence": conf,
                                  "reason": "눌림목 대기"}],
                "strategy_sell": []}
         raw["normalized"] = normalize_actions(raw, "KR_BEFORE", {"069500.KS": cur}, {})
@@ -597,7 +669,8 @@ class TestConditionalBuyCard:
 
     def test_shortage_when_qty_zero(self):
         # 고가주 → 예산 부족 (cur=730000이면 700000은 -4.1% 눌림목)
-        c, msg = self._card(entry="₩700,000", cur=730000, conf="35")
+        c, msg = self._card(entry="₩700,000", cur=730000, conf="35",
+                            target="₩760,000")
         assert c["shortage"] is True
         assert "예산 부족/가격 과대" in msg
 

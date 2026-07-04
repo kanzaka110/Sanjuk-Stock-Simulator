@@ -679,6 +679,15 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
     # 추가 컨텍스트
     extra_context = ""
 
+    # 이전 브리핑 컨텍스트 (중복/반복 방지 — 직전 대비 '변한 것'만 서술하도록 강제)
+    try:
+        from core.briefing_context import build_previous_briefing_context
+        prev_ctx = build_previous_briefing_context()
+        if prev_ctx:
+            extra_context += f"\n\n━━━ 🔁 이전 브리핑 컨텍스트 (중복 금지) ━━━\n{prev_ctx}"
+    except Exception as e:
+        log.warning("이전 브리핑 컨텍스트 실패: %s", e)
+
     # 미결 포지션 점검 (이전 브리핑 추천 → 현재 상태 → 유지/매도 강제 판단)
     try:
         positions_review = generate_open_positions_review(current_prices)
@@ -787,6 +796,15 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
             extra_context += f"\n\n━━━ Toss Paper 성과 ━━━\n{paper_perf_text}"
     except Exception as e:
         log.debug("Toss Paper 성과 스킵: %s", e)
+
+    # 수집 데이터 통합 주입 — DART 공시 / KIS 호가 / Toss 품질게이트 (KR 브리핑만)
+    try:
+        from core.briefing_enrichment import build_enrichment_context
+        enrichment = build_enrichment_context(briefing_type)
+        if enrichment:
+            extra_context += f"\n\n{enrichment}"
+    except Exception as e:
+        log.debug("수집 데이터 통합 주입 스킵: %s", e)
 
     # 시장 기회 스캐너 결과 수합 (백그라운드)
     try:
