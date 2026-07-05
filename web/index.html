@@ -1010,6 +1010,7 @@ details[open] summary::before{transform:rotate(90deg)}
 <div class="c"><h3>장 상태</h3><div id="m-sess"></div></div>
 <div class="c"><h3>주요 지수</h3><div id="m-idx"></div></div>
 <div class="c"><h3>매크로</h3><div id="m-mac"></div></div>
+<div class="c"><h3>미국 매크로 · 심리 <span class="mt" style="font-size:10px;font-weight:400">FRED 공식 · CNN F&amp;G</span></h3><div id="m-fred"><div class="emp">불러오는 중…</div></div></div>
 <div class="c"><h3>시장 뉴스</h3>
 <div class="cat-bar" id="cat-bar"></div>
 <div id="m-news"></div>
@@ -1020,6 +1021,7 @@ details[open] summary::before{transform:rotate(90deg)}
 <div class="tc" id="t-pf">
 <div class="c"><h3>총 평가</h3><div id="pf-sum"></div></div>
 <div class="c"><h3>자산 배분</h3><div id="pf-alloc"></div></div>
+<div class="c"><h3>공매도 동향 <span class="mt" style="font-size:10px;font-weight:400">KIS 거래비중 · 잔고 아님</span></h3><div id="pf-short"><div class="emp">불러오는 중…</div></div></div>
 <div id="pf-accts"></div>
 <div class="c"><h3>최근 거래 내역</h3><div id="pf-trades"><div class="emp">거래 내역 불러오는 중…</div></div></div>
 <div class="c"><h3>수익률 랭킹</h3><div id="pf-rank"></div></div>
@@ -2835,6 +2837,36 @@ function markRefreshError(scope){
   setRefreshState("error",`<span class="refresh-error-state">일부 갱신 실패 · 기존 데이터 유지</span><span class="stale-data-badge">stale</span>`);
 }
 
+/* ═══ 미국 매크로(FRED)+Fear&Greed / 공매도 동향 ═══ */
+async function loadMacroX(){
+  const el=document.getElementById("m-fred");if(!el)return;
+  const d=await J("/api/macro");
+  const f=(d&&d.fred)||{},g=(d&&d.fear_greed)||{};
+  const rows=[];
+  if(g.score!=null){
+    const extreme=g.score<=25||g.score>=75;
+    rows.push(["Fear & Greed",`<span style="font-weight:700;${extreme?"color:var(--o)":""}">${Math.round(g.score)}/100 ${E(g.rating_kr||"")}</span>`]);
+  }
+  if(f.t10y2y)rows.push(["10Y-2Y 금리차",`<span style="${f.t10y2y.value<0?"color:var(--o);font-weight:700":""}">${f.t10y2y.value>=0?"+":""}${f.t10y2y.value.toFixed(2)}%p · ${E(f.t10y2y.label||"")}</span>`]);
+  if(f.dgs10)rows.push(["미 10년물",`${f.dgs10.value.toFixed(2)}% <span class="mt" style="font-size:11px">(20일 ${f.dgs10.chg_20d>=0?"+":""}${f.dgs10.chg_20d}%p)</span>`]);
+  if(f.dff)rows.push(["연방기금금리",`${f.dff.value.toFixed(2)}%`]);
+  if(f.cpi_yoy)rows.push(["CPI YoY",`${f.cpi_yoy.value.toFixed(1)}%`]);
+  if(f.unrate)rows.push(["실업률",`${f.unrate.value.toFixed(1)}% <span class="mt" style="font-size:11px">(3개월 ${f.unrate.chg_3m>=0?"+":""}${f.unrate.chg_3m}%p)</span>`]);
+  el.innerHTML=rows.length?rows.map(([k,v])=>`<div class="pi"><span style="font-weight:600">${k}</span><span style="font-weight:700;text-align:right">${v}</span></div>`).join("")+(f.as_of?`<div class="mt" style="font-size:10px;margin-top:4px">FRED ${E(f.as_of)}</div>`:""):'<div class="emp">데이터 없음</div>';
+}
+async function loadShortX(){
+  const el=document.getElementById("pf-short");if(!el)return;
+  const d=await J("/api/short-selling");
+  const items=d&&d.items?Object.entries(d.items):[];
+  if(!items.length){el.innerHTML='<div class="emp">데이터 없음 (KIS 조회 대기 또는 장 데이터 없음)</div>';return}
+  items.sort((a,b)=>(b[1].short_ratio_pct||0)-(a[1].short_ratio_pct||0));
+  el.innerHTML=items.map(([tk,s])=>{
+    const warn=s.trend==="급증"||s.trend==="증가";
+    const tstyle=warn?"color:var(--o);font-weight:700":"color:var(--mt)";
+    return`<div class="pi"><span style="font-weight:600">${E(s.name||tk)}</span><div><span style="font-weight:700">${(s.short_ratio_pct??0).toFixed(1)}%</span><span class="mt" style="margin-left:6px;font-size:11px">5일평균 ${(s.avg5_ratio_pct??0).toFixed(1)}%</span><span style="margin-left:6px;font-size:11px;${tstyle}">${warn?"⚠️ ":""}${E(s.trend||"")}</span></div></div>`;
+  }).join("")+'<div class="mt" style="font-size:10px;margin-top:4px">공매도 거래 비중(당일) — 공매도 잔고와 다름</div>';
+}
+
 async function refreshAllNow(){
   if(_refreshing)return;
   _refreshing=true;
@@ -3128,14 +3160,14 @@ async function ldToss(){
 /* ═══ INIT ═══ */
 async function init(){
   if(window.initActionCenter)initActionCenter();
-  await Promise.allSettled([loadMkt(),loadTrades(),loadAct(),loadPF(),loadPerf(),loadNews(),loadTimeline(),loadSimList(),loadSignals(),loadDBrief(),loadCalendar(),loadAnalytics(),loadBriefing(),ldToss(),ldHomeTossM(),ldStockAgentActivity()]);
+  await Promise.allSettled([loadMkt(),loadTrades(),loadAct(),loadPF(),loadPerf(),loadNews(),loadTimeline(),loadSimList(),loadSignals(),loadDBrief(),loadCalendar(),loadAnalytics(),loadBriefing(),ldToss(),ldHomeTossM(),ldStockAgentActivity(),loadMacroX(),loadShortX()]);
   markRefreshSuccess();
 }
 init();
 safeInterval(()=>{loadMkt();loadTrades();loadAct();loadTimeline();loadDBrief()},30000);
 safeInterval(()=>{loadPF();loadPerf();loadSimList();loadAnalytics();loadBriefing()},120000);
 safeInterval(()=>{loadSignals()},300000);
-safeInterval(()=>{loadNews();loadCalendar()},600000);
+safeInterval(()=>{loadNews();loadCalendar();loadMacroX();loadShortX()},600000);
 </script>
 </body>
 </html>

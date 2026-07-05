@@ -325,6 +325,15 @@ def _discoveries_followup() -> str:
     return "\n".join(lines[:8])
 
 
+def _source_health_section() -> str:
+    """데이터 소스 신선도 — fail-safe 소스의 조용한 죽음 감지."""
+    try:
+        from core.source_health import source_health_report
+        return source_health_report()
+    except Exception as e:
+        return f"  (헬스체크 실패: {e})"
+
+
 # ═══════════════════════════════════════════════════════
 # 리포트 생성 + 전송
 # ═══════════════════════════════════════════════════════
@@ -377,6 +386,9 @@ def generate_weekly_report() -> str:
 
 🔭 발굴 종목 사후 추적 (1~4주 전 발굴분)
 {_discoveries_followup()}
+
+🩺 데이터 소스 헬스체크
+{_source_health_section()}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━"""
     return report

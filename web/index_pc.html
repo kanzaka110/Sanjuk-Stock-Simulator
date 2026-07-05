@@ -361,6 +361,7 @@ details summary::before{content:"▸";transition:transform .18s;color:var(--mt)}
       </div>
       <div class="panel"><div class="ph"><h2>내 계좌</h2></div><div id="home-accts"></div></div>
       <div class="panel"><div class="ph"><h2>리스크 보드</h2></div><div id="home-risk"></div></div>
+      <div class="panel"><div class="ph"><h2>매크로 · 심리</h2><span class="sub">FRED · CNN F&amp;G</span></div><div id="home-macro"><div class="emp">불러오는 중…</div></div></div>
     </div>
   </section>
 
@@ -418,6 +419,7 @@ details summary::before{content:"▸";transition:transform .18s;color:var(--mt)}
     <div>
       <div class="panel" style="margin-bottom:14px"><div class="ph"><h2>자산 배분</h2></div><div id="pf-alloc"></div></div>
       <div class="panel"><div class="ph"><h2>수익 기여도</h2><span class="sub">평가손익 ₩</span></div><div id="pf-contrib"></div></div>
+      <div class="panel" style="margin-top:14px"><div class="ph"><h2>공매도 동향</h2><span class="sub">KIS 거래비중 · 잔고 아님</span></div><div id="pf-short"><div class="emp">불러오는 중…</div></div></div>
     </div>
   </div>
 </div>
@@ -767,6 +769,36 @@ function renderRisk(){
     <div class="risk-row"><span class="k">오늘 변동</span><span class="v ${cc(tp.pct)}">${cs(tp.pct||0)}</span></div>
     <div class="risk-row"><span class="k">현금 비중</span><span class="v">${d?d.cash_weight:"—"}%</span></div>
     <div class="risk-row"><span class="k">최대 종목 집중</span><span class="v ${concC==="o"?"":concC}" style="${concC==="o"?"color:var(--o)":""}">${tp.maxW?tp.maxW.toFixed(1):"—"}%</span></div>`+flagHTML;
+}
+
+/* ════ 매크로(FRED)+Fear&Greed / 공매도 동향 ════ */
+async function ldMacro(){
+  const el=document.getElementById("home-macro");if(!el)return;
+  const d=await J("/api/macro");
+  const f=(d&&d.fred)||{},g=(d&&d.fear_greed)||{};
+  const rows=[];
+  if(g.score!=null){
+    const extreme=g.score<=25||g.score>=75;
+    rows.push(["Fear & Greed",`<span style="font-weight:800;${extreme?"color:var(--o)":""}">${Math.round(g.score)}/100 ${E(g.rating_kr||"")}</span>`]);
+  }
+  if(f.t10y2y)rows.push(["10Y-2Y 금리차",`<span style="${f.t10y2y.value<0?"color:var(--o);font-weight:700":""}">${f.t10y2y.value>=0?"+":""}${f.t10y2y.value.toFixed(2)}%p · ${E(f.t10y2y.label||"")}</span>`]);
+  if(f.dgs10)rows.push(["미 10년물",`${f.dgs10.value.toFixed(2)}% <span class="mt" style="font-size:10.5px">(20일 ${f.dgs10.chg_20d>=0?"+":""}${f.dgs10.chg_20d}%p)</span>`]);
+  if(f.dff)rows.push(["연방기금금리",`${f.dff.value.toFixed(2)}%`]);
+  if(f.cpi_yoy)rows.push(["CPI YoY",`${f.cpi_yoy.value.toFixed(1)}%`]);
+  if(f.unrate)rows.push(["실업률",`${f.unrate.value.toFixed(1)}% <span class="mt" style="font-size:10.5px">(3개월 ${f.unrate.chg_3m>=0?"+":""}${f.unrate.chg_3m}%p)</span>`]);
+  el.innerHTML=rows.length?rows.map(([k,v])=>`<div class="risk-row"><span class="k">${k}</span><span class="v">${v}</span></div>`).join(""):'<div class="emp">데이터 없음</div>';
+}
+async function ldShort(){
+  const el=document.getElementById("pf-short");if(!el)return;
+  const d=await J("/api/short-selling");
+  const items=d&&d.items?Object.entries(d.items):[];
+  if(!items.length){el.innerHTML='<div class="emp">데이터 없음 (KIS 조회 대기)</div>';return}
+  items.sort((a,b)=>(b[1].short_ratio_pct||0)-(a[1].short_ratio_pct||0));
+  el.innerHTML=items.map(([tk,s])=>{
+    const warn=s.trend==="급증"||s.trend==="증가";
+    const tstyle=warn?"color:var(--o);font-weight:700":"color:var(--mt)";
+    return`<div class="risk-row"><span class="k">${E(s.name||tk)}</span><span class="v">${(s.short_ratio_pct??0).toFixed(1)}% <span class="mt" style="font-size:10.5px">5일 ${(s.avg5_ratio_pct??0).toFixed(1)}%</span> <span style="font-size:10.5px;${tstyle}">${warn?"⚠️ ":""}${E(s.trend||"")}</span></span></div>`;
+  }).join("")+'<div class="mt" style="font-size:10px;margin-top:6px">공매도 거래 비중(당일) — 공매도 잔고와 다름</div>';
 }
 
 /* ════ STATUS ════ */
@@ -1602,11 +1634,11 @@ async function ldStockAgentActivity(){
 }
 
 /* ════ INIT ════ */
-async function init(){ldStatus();ldMkt();if(window.initActionCenter)initActionCenter();await Promise.allSettled([loadTrades(),ldPF()]);ldAct();ldPerf();ldNews();ldDecisionBrief();ldCalendar();ldAnalytics();ldWorkspace();ldBriefing();ldToss();ldHomeToss();ldStockAgentActivity();}
+async function init(){ldStatus();ldMkt();if(window.initActionCenter)initActionCenter();await Promise.allSettled([loadTrades(),ldPF()]);ldAct();ldPerf();ldNews();ldDecisionBrief();ldCalendar();ldAnalytics();ldWorkspace();ldBriefing();ldToss();ldHomeToss();ldStockAgentActivity();ldMacro();ldShort();}
 init();
 setInterval(()=>{ldMkt();loadTrades();ldAct();ldStatus();ldDecisionBrief();ldHomeToss();},30000);
 setInterval(()=>{ldPF();ldPerf();ldAnalytics();ldWorkspace();ldBriefing();},120000);
-setInterval(()=>{ldNews();ldCalendar();},600000);
+setInterval(()=>{ldNews();ldCalendar();ldMacro();ldShort();},600000);
 </script>
 </body>
 </html>

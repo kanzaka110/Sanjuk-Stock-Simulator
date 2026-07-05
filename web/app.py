@@ -143,6 +143,16 @@ def api_news():
     return JSONResponse(dd.news_data())
 
 
+@app.get("/api/macro")
+def api_macro():
+    return JSONResponse(dd.macro_data())
+
+
+@app.get("/api/short-selling")
+def api_short_selling():
+    return JSONResponse(dd.short_selling_data())
+
+
 @app.get("/api/signals")
 def api_signals():
     return JSONResponse(dd.live_signals())

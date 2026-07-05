@@ -1203,6 +1203,25 @@ def news_data() -> dict:
     return _cached("news", 600, _fetch_news_raw)
 
 
+# ─── /api/macro — FRED 매크로 + Fear&Greed (홈 카드용) ──────
+def macro_data() -> dict:
+    """미국 매크로(FRED) + CNN Fear&Greed 스냅샷 (30분 캐시 — 원천은 자체 파일캐시)."""
+    def _fetch() -> dict:
+        from core.fear_greed import fetch_fear_greed
+        from core.macro_fred import fetch_macro_snapshot
+        return {"fred": fetch_macro_snapshot(), "fear_greed": fetch_fear_greed()}
+    return _cached("macro", 1800, _fetch)
+
+
+# ─── /api/short-selling — 보유 KR 종목 공매도 거래비중 ──────
+def short_selling_data() -> dict:
+    """KIS 공매도 일별추이 (30분 캐시 — 종목당 1 API콜이라 짧은 TTL 금지)."""
+    def _fetch() -> dict:
+        from core.kr_market import fetch_short_selling
+        return {"items": fetch_short_selling()}
+    return _cached("short_selling", 1800, _fetch)
+
+
 # ─── /api/calendar — 이벤트 캘린더 (경제·실적·배당 D-day) ──
 def _fetch_calendar_raw() -> dict:
     """경제 일정(ECONOMIC_CALENDAR) + 보유 종목 실적/배당 + D-day.

@@ -126,3 +126,101 @@ def test_kr_market_text_includes_short_selling():
     assert "공매도" in text
     assert "시프트업" in text
     assert "6.3" in text
+
+
+# ── EDGAR 8-K Item 파싱 ──────────────────────────────────────
+
+def _fake_submissions_items(forms, dates, accessions, items):
+    class R:
+        status_code = 200
+
+        def json(self):
+            return {"filings": {"recent": {
+                "form": forms,
+                "filingDate": dates,
+                "accessionNumber": accessions,
+                "primaryDocDescription": [""] * len(forms),
+                "items": items,
+            }}}
+    return R()
+
+
+def test_edgar_item_labels_and_severity_downgrade(monkeypatch):
+    today = datetime.now(KST).strftime("%Y-%m-%d")
+    monkeypatch.setattr(em.requests, "get", lambda *a, **k: _fake_submissions_items(
+        ["8-K", "8-K"], [today, today], ["a1", "a2"], ["5.02,9.01", "5.07"]))
+    hits = fetch_recent_filings("NVDA", 1045810)
+    # 5.02 포함 → high 유지 + 한글 라벨
+    assert hits[0]["severity"] == "high"
+    assert any("임원" in s for s in hits[0]["items"])
+    # 5.07(주총)만 → medium 하향
+    assert hits[1]["severity"] == "medium"
+    assert any("주주총회" in s for s in hits[1]["items"])
+
+
+def test_edgar_message_shows_items():
+    from core.edgar_monitor import _format_alert_message
+    msg = _format_alert_message([{
+        "ticker": "NVDA", "form": "8-K", "severity": "high",
+        "filing_date": "2026-07-02", "accession": "x", "description": "",
+        "items": ["5.02 임원/이사 선임·사임"], "url": "http://u",
+    }])
+    assert "5.02 임원/이사 선임·사임" in msg
+
+
+# ── 실적 D-1 알림 ────────────────────────────────────────────
+
+def _fake_fd(ticker, name, date, days_to, confirmed=True):
+    from core.fundamentals import FinancialData
+    return FinancialData(
+        ticker=ticker, name=name, earnings_date=date, days_to_earnings=days_to,
+        earnings_confirmed=confirmed, eps_estimate=2.08, surprise_avg_4q=4.6,
+    )
+
+
+def test_earnings_alert_sends_and_dedups(monkeypatch, tmp_path):
+    import core.earnings_alert as ea
+    import core.fundamentals as fu
+    monkeypatch.setattr(ea, "_state_path", lambda: tmp_path / "state.json")
+    monkeypatch.setattr(ea, "_holding_tickers", lambda: {"NVDA": "엔비디아"})
+    monkeypatch.setattr(
+        fu, "fetch_financial_data",
+        lambda tk, nm="": _fake_fd(tk, nm, "2026-08-26", 1),
+    )
+    sent = []
+    import core.telegram as tg
+    monkeypatch.setattr(tg, "send_simple_message", lambda m: sent.append(m) or True)
+
+    r1 = ea.run_earnings_alert(force=True)
+    assert r1["upcoming"] == 1 and r1["sent"] is True
+    assert "엔비디아" in sent[0] and "D-1" in sent[0] and "확정" in sent[0]
+    r2 = ea.run_earnings_alert(force=True)
+    assert r2["upcoming"] == 0 and r2["sent"] is False
+
+
+def test_earnings_alert_skips_far_dates(monkeypatch, tmp_path):
+    import core.earnings_alert as ea
+    import core.fundamentals as fu
+    monkeypatch.setattr(ea, "_state_path", lambda: tmp_path / "state.json")
+    monkeypatch.setattr(ea, "_holding_tickers", lambda: {"MU": "마이크론"})
+    monkeypatch.setattr(
+        fu, "fetch_financial_data",
+        lambda tk, nm="": _fake_fd(tk, nm, "2026-09-23", 79),
+    )
+    r = ea.run_earnings_alert(force=True)
+    assert r["upcoming"] == 0 and r["sent"] is False
+
+
+# ── 소스 헬스체크 ────────────────────────────────────────────
+
+def test_source_health_flags(monkeypatch, tmp_path):
+    import time as _time
+    import core.source_health as sh
+    monkeypatch.setattr(sh, "_data_dir", lambda: tmp_path)
+    # FRED 신선 / F&G 낡음 / 나머지 없음
+    (tmp_path / "fred_cache.json").write_text('{"saved_at": %f}' % _time.time())
+    (tmp_path / "fear_greed_cache.json").write_text('{"saved_at": %f}' % (_time.time() - 100 * 3600))
+    report = sh.source_health_report()
+    assert "✅ FRED" in report
+    assert "⚠️ CNN Fear&Greed" in report
+    assert "❌ SEC EDGAR" in report

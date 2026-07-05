@@ -164,6 +164,14 @@ class MarketMonitor:
         except Exception as e:
             log.warning(f"edgar monitor 실패: {e}")
 
+        # 실적 발표 D-1 알림 — 보유종목 실적일 임박 시 지정가/헤지 판단용
+        # (KST 08~20시 + 12시간 스로틀 → 사실상 하루 1회, ticker:date dedup)
+        try:
+            from core.earnings_alert import run_earnings_alert
+            run_earnings_alert(now=now)
+        except Exception as e:
+            log.warning(f"earnings alert 실패: {e}")
+
     def stop(self) -> None:
         """감시 종료."""
         self._running = False

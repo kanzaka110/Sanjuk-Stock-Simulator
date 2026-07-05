@@ -47,6 +47,31 @@ WATCH_FORMS: dict[str, str] = {
     "SC 13D": "medium",  # 5%+ 지분 공시 (행동주의)
 }
 
+# 8-K Item 번호 → 한글 라벨 (submissions API items 필드 — 문서 파싱 불필요)
+ITEM_LABELS: dict[str, str] = {
+    "1.01": "중요 계약 체결",
+    "1.02": "중요 계약 종료",
+    "1.03": "파산/법정관리",
+    "2.01": "자산 인수/처분 완료",
+    "2.02": "실적 발표",
+    "2.03": "채무/부외의무 발생",
+    "2.05": "구조조정 비용",
+    "2.06": "자산 손상",
+    "3.01": "상장 유지 미달 통보",
+    "4.01": "회계법인 변경",
+    "4.02": "재무제표 신뢰 불가 (재작성)",
+    "5.01": "지배권 변경",
+    "5.02": "임원/이사 선임·사임",
+    "5.03": "정관 변경",
+    "5.07": "주주총회 결과",
+    "7.01": "Reg FD 공정공시",
+    "8.01": "기타 주요 이벤트",
+    "9.01": "재무제표/증빙 첨부",
+}
+
+# 노이즈성 Item만으로 구성된 8-K는 심각도 하향 (예: 주총 결과, 증빙 첨부)
+_LOW_SIGNAL_ITEMS = {"5.07", "7.01", "9.01"}
+
 _CHECK_INTERVAL_MIN = 60   # 최소 재조회 간격 (미국 공시는 하루 수건 수준)
 _MAX_SEEN = 300
 _CIK_CACHE_TTL_SEC = 30 * 86400
@@ -141,6 +166,7 @@ def fetch_recent_filings(ticker: str, cik: int, days: int = _LOOKBACK_DAYS) -> l
     dates = recent.get("filingDate") or []
     accessions = recent.get("accessionNumber") or []
     docs = recent.get("primaryDocDescription") or []
+    items_list = recent.get("items") or []
 
     cutoff = (datetime.now(KST) - timedelta(days=days)).strftime("%Y-%m-%d")
     hits: list[dict] = []
@@ -151,13 +177,25 @@ def fetch_recent_filings(ticker: str, cik: int, days: int = _LOOKBACK_DAYS) -> l
         filing_date = str(dates[i]) if i < len(dates) else ""
         if filing_date < cutoff:
             break  # recent은 최신순 — 컷오프 이전이면 중단
+
+        severity = WATCH_FORMS[form]
+        raw_items = str(items_list[i]) if i < len(items_list) else ""
+        item_nums = [s.strip() for s in raw_items.split(",") if s.strip()]
+        item_labels = [
+            f"{n} {ITEM_LABELS[n]}" if n in ITEM_LABELS else n for n in item_nums
+        ]
+        # 8-K가 노이즈성 Item(주총 결과/공정공시/증빙)뿐이면 medium으로 하향
+        if form == "8-K" and item_nums and all(n in _LOW_SIGNAL_ITEMS for n in item_nums):
+            severity = "medium"
+
         hits.append({
             "ticker": ticker,
             "form": form,
-            "severity": WATCH_FORMS[form],
+            "severity": severity,
             "filing_date": filing_date,
             "accession": str(accessions[i]) if i < len(accessions) else "",
             "description": str(docs[i]) if i < len(docs) else "",
+            "items": item_labels,
             "url": _FILING_URL.format(cik=cik, form=form),
         })
     return hits
@@ -174,6 +212,8 @@ def _format_alert_message(hits: list[dict]) -> str:
         icon = _SEVERITY_ICON.get(h.get("severity", ""), "⚠️")
         lines.append("")
         lines.append(f"{icon} {h.get('ticker')} — {h.get('form')}")
+        for label in h.get("items") or []:
+            lines.append(f"  · {label}")
         desc = h.get("description") or ""
         if desc and desc != h.get("form"):
             lines.append(f"  {desc[:80]}")
