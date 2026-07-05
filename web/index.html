@@ -931,7 +931,6 @@ details[open] summary::before{transform:rotate(90deg)}
 <!-- 2. Bento Hero Grid -->
 <div class="bento-hero" id="h-hero"><div class="bento-main"><div class="emp">데이터 대기</div></div></div>
 <div class="c mobile-home-toss-card"><h3>토스 AI Live <span class="mt" style="font-size:10px;font-weight:400">실전 계좌 · 자동주문 · 손익/체결</span></h3><div id="h-toss-live-m"><div class="emp">토스 정보 불러오는 중…</div></div></div>
-<div class="c mobile-home-samsung-card"><h3>삼성증권 원본 <span class="mt" style="font-size:10px;font-weight:400">스샷/엑셀 반영 · 수동 주문 전용</span></h3><div id="h-samsung-live-m"><div class="emp">삼성증권 정보 불러오는 중…</div></div></div>
 <!-- KIS 보유 실시간 스트립 -->
 <div class="kis-holding-strip" id="h-kis-strip"></div>
 <!-- 3. Today Decision Strip -->
@@ -1671,24 +1670,6 @@ function renderPortfolioBento(){
   el.innerHTML=html||'<div class="emp">데이터 대기</div>';
 }
 
-function renderHomeSamsungSummary(d){
-  const el=document.getElementById("h-samsung-live-m");if(!el)return;
-  if(!d||!(d.accounts||[]).length){el.innerHTML='<div class="emp">삼성증권 포트폴리오 데이터 없음</div>';return}
-  const accts=d.accounts||[];
-  const total=Number(d.total_asset||d.total_eval||0),hold=Number(d.total_holdings_eval||0),cash=Number(d.total_cash||0);
-  const today=accts.reduce((s,a)=>s+(Number(a.today_pnl_krw)||0),0);
-  const todayAvail=accts.some(a=>a.today_pnl_krw!=null);
-  const pnl=total-Number(d.total_principal||0);
-  const top=accts.slice().sort((a,b)=>Number(b.asset_total||0)-Number(a.asset_total||0)).slice(0,3);
-  const rows=top.map(a=>`<div style="display:flex;justify-content:space-between;gap:8px;padding:5px 0;border-bottom:1px solid var(--ln);font-size:11px"><span style="font-weight:800">${E(a.name)}</span><span>자산 ₩${Math.round(a.asset_total||0).toLocaleString()} · <b class="${cc(a.pnl_pct)}">${cs(a.pnl_pct)}</b></span></div>`).join("");
-  el.innerHTML=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-bottom:8px">
-    ${tossMiniKpi("삼성 총자산",`₩${Math.round(total).toLocaleString()}`,`보유 ₩${Math.round(hold).toLocaleString()} + 현금 ₩${Math.round(cash).toLocaleString()}`)}
-    ${tossMiniKpi("원금 대비",`${pnl>=0?"+":"-"}₩${Math.abs(Math.round(pnl)).toLocaleString()}`,`${cs(d.total_principal_pnl_pct)} · 입금 원금 기준`,pnl>0?"up":pnl<0?"dn":"mt")}
-    ${tossMiniKpi("오늘 변동",todayAvail?`${today>=0?"+":"-"}₩${Math.abs(Math.round(today)).toLocaleString()}`:"산출불가",todayAvail?"라이브 일간 등락률 기준":"일간 등락률 미수신",today>0?"up":today<0?"dn":"mt")}
-    ${tossMiniKpi("표시 기준",d.display_source==="live_settings_plus_pending_trades"?"라이브+매매반영":"설정+시세",d.pending_trade_count?`미반영 매매 ${d.pending_trade_count}건 반영됨`:`보유 기준 ${d.holdings_as_of||"—"}`)}
-  </div>${rows}<div style="font-size:10px;color:var(--mt);margin-top:7px;line-height:1.45">총자산은 현금 포함. 계좌별 ‘평가’는 보유평가만이라 앱 총액과 다를 수 있어.</div>`;
-}
-
 /* ═══ 데이터 품질 배너 ═══ */
 function renderDQBanner(d){
   const el=document.getElementById("dq-banner");if(!el||!d)return;
@@ -1771,7 +1752,7 @@ async function loadPF(){
   const conc=allItems.length?Math.max(...allItems.map(x=>x.weight||0)):0;
   _riskPF={conc:Math.round(conc),cash:d.cash_weight||0,todayPct:todayPct};
   renderRiskBoard();
-  _heroPF=d;renderHero();renderHomeExecTrades();renderMCB();renderHomeSamsungSummary(d);
+  _heroPF=d;renderHero();renderHomeExecTrades();renderMCB();
   _bentoItems=allItems;renderPortfolioBento();
   renderKisStrip(allItems);
 }
