@@ -520,6 +520,7 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
         fetch_cumulative_flows,
         fetch_fundamentals,
         fetch_institutional_flow,
+        fetch_short_selling,
         kr_market_to_text,
     )
     from core.memory import (
@@ -558,6 +559,22 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
         if kr_regime.confidence > 0:
             regime_text += f"\n{kr_regime.to_text()}"
     log.info(f"  레짐: {regime.regime} ({regime.confidence}%, {regime.index_name}) — {regime.risk_adjustment}")
+    # FRED 매크로 (금리/물가/고용 — 키 불필요, 6시간 캐시)
+    try:
+        from core.macro_fred import fetch_macro_snapshot, macro_to_text
+        macro_text = macro_to_text(fetch_macro_snapshot())
+        if macro_text:
+            regime_text += f"\n{macro_text}"
+    except Exception as e:
+        log.warning("FRED 매크로 조회 실패: %s", e)
+    # CNN Fear & Greed (심리 보조 — 비공식 엔드포인트, 실패 시 생략)
+    try:
+        from core.fear_greed import fear_greed_to_text, fetch_fear_greed
+        fg_text = fear_greed_to_text(fetch_fear_greed())
+        if fg_text:
+            regime_text += f"\n{fg_text}"
+    except Exception as e:
+        log.warning("Fear&Greed 조회 실패: %s", e)
 
     # 3단계: 기술 지표 계산 (로컬)
     log.info("[3/11] 기술 지표 계산 중...")
@@ -643,7 +660,13 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
         except Exception as e:
             log.warning("누적 수급 조회 실패: %s", e)
             cumulative = None
-        kr_text = kr_market_to_text(flows, fundamentals, cumulative)
+        # 공매도 거래 비중 (KIS 일별추이 — 잔고 아님)
+        try:
+            short_selling = fetch_short_selling()
+        except Exception as e:
+            log.warning("공매도 조회 실패: %s", e)
+            short_selling = None
+        kr_text = kr_market_to_text(flows, fundamentals, cumulative, short_selling)
     else:
         log.info("[8/13] 한국 시장 데이터 스킵 (미국장 브리핑)")
 

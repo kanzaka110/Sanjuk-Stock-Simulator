@@ -41,6 +41,10 @@ class FinancialData:
     # 실적 발표
     earnings_date: str = ""  # 다음 실적 발표일
     days_to_earnings: int = -1  # 실적까지 남은 일수
+    earnings_confirmed: bool = False  # calendar·earnings_dates 두 소스 일치 여부
+    earnings_note: str = ""  # 추정 범위/소스 불일치 등 주석
+    eps_estimate: float = 0.0  # 차기 실적 EPS 컨센서스
+    surprise_avg_4q: float = 0.0  # 최근 4개 분기 EPS 서프라이즈 평균 (%)
 
 
 @dataclass(frozen=True)
@@ -77,18 +81,53 @@ def fetch_financial_data(ticker: str, name: str = "") -> FinancialData | None:
         # 실적 발표일
         earnings_date = ""
         days_to = -1
+        earnings_confirmed = False
+        earnings_note = ""
+        eps_estimate = 0.0
+        surprise_avg = 0.0
         try:
             cal = tk.calendar
+            cal_window_end = ""
             if cal is not None:
                 if isinstance(cal, dict):
                     ed = cal.get("Earnings Date")
                     if ed:
                         if isinstance(ed, list) and len(ed) > 0:
                             earnings_date = str(ed[0])[:10]
+                            cal_window_end = str(ed[-1])[:10]
                         else:
                             earnings_date = str(ed)[:10]
                 elif hasattr(cal, "iloc"):
                     earnings_date = str(cal.iloc[0, 0])[:10] if len(cal) > 0 else ""
+
+            # 교차검증: calendar(추정 가능) vs earnings_dates(발표 이력 기반)
+            # - 범위형(시작≠종료)이면 아직 미확정 추정 → 명시
+            # - 두 소스 날짜 일치 시 확정 취급 + EPS 컨센서스/서프라이즈 이력 확보
+            if earnings_date and cal_window_end and cal_window_end != earnings_date:
+                earnings_note = f"추정 범위 ~{cal_window_end}"
+            try:
+                hist = tk.get_earnings_dates(limit=8)
+                if hist is not None and len(hist) > 0:
+                    future = hist[hist["Reported EPS"].isna()]
+                    past = hist[hist["Reported EPS"].notna()]
+                    if len(future) > 0:
+                        next_dt = str(future.index[-1])[:10]
+                        est = future["EPS Estimate"].iloc[-1]
+                        if est == est:  # NaN 체크
+                            eps_estimate = round(float(est), 2)
+                        if earnings_date and not earnings_note:
+                            if next_dt == earnings_date:
+                                earnings_confirmed = True
+                            else:
+                                earnings_note = f"소스 불일치 (이력 기반 {next_dt})"
+                        elif not earnings_date:
+                            earnings_date = next_dt
+                    if len(past) >= 2:
+                        sur = past["Surprise(%)"].dropna().head(4)
+                        if len(sur) > 0:
+                            surprise_avg = round(float(sur.mean()), 1)
+            except Exception:
+                pass
 
             if earnings_date:
                 try:
@@ -118,6 +157,10 @@ def fetch_financial_data(ticker: str, name: str = "") -> FinancialData | None:
             dividend_yield=round(float(info.get("dividendYield", 0) or 0) * 100, 2),
             earnings_date=earnings_date,
             days_to_earnings=days_to,
+            earnings_confirmed=earnings_confirmed,
+            earnings_note=earnings_note,
+            eps_estimate=eps_estimate,
+            surprise_avg_4q=surprise_avg,
         )
     except Exception as e:
         log.warning(f"재무 데이터 조회 실패 ({ticker}): {e}")
@@ -151,9 +194,13 @@ def fundamentals_to_text(data: list[FinancialData]) -> str:
     if upcoming:
         lines.append("\n  [!! 실적 발표 임박 !!]")
         for d in upcoming:
-            lines.append(
-                f"  {d.name}: {d.earnings_date} ({d.days_to_earnings}일 후)"
-            )
+            status = "확정" if d.earnings_confirmed else (d.earnings_note or "추정")
+            parts = [f"  {d.name}: {d.earnings_date} ({d.days_to_earnings}일 후, {status})"]
+            if d.eps_estimate:
+                parts.append(f"EPS 컨센서스 {d.eps_estimate:,.2f}")
+            if d.surprise_avg_4q:
+                parts.append(f"최근4Q 서프라이즈 평균 {d.surprise_avg_4q:+.1f}%")
+            lines.append(" | ".join(parts))
 
     lines.append("\n  [밸류에이션]")
     for d in data:

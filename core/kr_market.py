@@ -309,10 +309,59 @@ def fetch_cumulative_flows(days: int = 5) -> dict[str, dict]:
     return cumulative
 
 
+def fetch_short_selling(days: int = 10) -> dict[str, dict]:
+    """KIS 공매도 일별추이 기반 종목별 공매도 요약 (포트폴리오 KR 종목).
+
+    KRX 잔고 데이터는 로그인 게이트라 불가 → KIS '거래' 기반 지표 사용.
+
+    Returns:
+        {ticker: {"name", "short_ratio_pct"(당일), "avg5_ratio_pct"(5일 평균),
+                  "trend"(급증/증가/보통/감소), "date"}}
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from core.market_kis import get_domestic_short_sale
+
+    KST = timezone(timedelta(hours=9))
+    end = datetime.now(KST)
+    start = end - timedelta(days=days + 7)  # 휴장일 여유
+
+    results: dict[str, dict] = {}
+    for tk in KRW_TICKERS:
+        series = get_domestic_short_sale(
+            tk, start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
+        )
+        if not series:
+            continue
+        latest = series[0]
+        ratios = [r["short_ratio_pct"] for r in series[:5]]
+        avg5 = sum(ratios) / len(ratios) if ratios else 0.0
+        today = latest["short_ratio_pct"]
+
+        if avg5 >= 1 and today >= avg5 * 2 and today >= 8:
+            trend = "급증"
+        elif today > avg5 * 1.3 and today >= 5:
+            trend = "증가"
+        elif today < avg5 * 0.6:
+            trend = "감소"
+        else:
+            trend = "보통"
+
+        results[tk] = {
+            "name": _name_for(_krx_ticker(tk)),
+            "short_ratio_pct": today,
+            "avg5_ratio_pct": round(avg5, 2),
+            "trend": trend,
+            "date": latest["date"],
+        }
+    return results
+
+
 def kr_market_to_text(
     flows: list[InstitutionalFlow],
     fundamentals: list[Fundamental],
     cumulative: dict[str, dict] | None = None,
+    short_selling: dict[str, dict] | None = None,
 ) -> str:
     """한국 시장 데이터를 텍스트로 변환."""
     lines = ["【한국 시장 심층 데이터】"]
@@ -330,6 +379,19 @@ def kr_market_to_text(
             lines.append(
                 f"  {f.name}: 외국인 {f.foreign_net:+,.0f}백만 ({f.foreign_label}) | "
                 f"기관 {f.institution_net:+,.0f}백만 ({f.institution_label}){cum_info}"
+            )
+
+    if short_selling:
+        lines.append("\n  [공매도 거래 비중 — KIS 일별추이 (잔고 아님)]")
+        for tk, s in sorted(
+            short_selling.items(),
+            key=lambda kv: kv[1]["short_ratio_pct"],
+            reverse=True,
+        ):
+            mark = " ⚠️" if s["trend"] in ("급증", "증가") else ""
+            lines.append(
+                f"  {s['name']}: 당일 {s['short_ratio_pct']:.1f}% | "
+                f"5일 평균 {s['avg5_ratio_pct']:.1f}% | {s['trend']}{mark}"
             )
 
     if fundamentals:

@@ -693,3 +693,74 @@ def get_domestic_orderbook(ticker: str) -> dict | None:
     except requests.RequestException as e:
         logger.warning("KIS 호가 조회 실패 [%s]: %s", ticker, e)
         return None
+
+
+def get_domestic_short_sale(
+    ticker: str, start_date: str, end_date: str
+) -> list[dict] | None:
+    """KIS API 국내주식 공매도 일별추이 조회 (FHPST04830000). read-only 판단 보조용.
+
+    Args:
+        ticker: yfinance 형식 티커 (예: 462870.KS)
+        start_date/end_date: YYYYMMDD
+
+    Returns:
+        최신순 dict 리스트 [{"date", "close", "short_qty", "short_ratio_pct",
+        "cum_short_qty", "cum_short_ratio_pct"}, ...] 또는 실패 시 None.
+        비고: KRX 공매도 '잔고'(로그인 게이트)가 아닌 '거래' 기반 지표.
+    """
+    if not _is_kis_configured():
+        return None
+
+    token = _get_access_token()
+    if not token:
+        return None
+
+    stock_code = _ticker_to_kis_code(ticker)
+
+    try:
+        resp = requests.get(
+            f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/daily-short-sale",
+            headers={
+                "authorization": f"Bearer {token}",
+                "appkey": KIS_APP_KEY,
+                "appsecret": KIS_APP_SECRET,
+                "tr_id": "FHPST04830000",
+                "content-type": "application/json; charset=utf-8",
+            },
+            params={
+                "FID_COND_MRKT_DIV_CODE": "J",
+                "FID_INPUT_ISCD": stock_code,
+                "FID_INPUT_DATE_1": start_date,
+                "FID_INPUT_DATE_2": end_date,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        if data.get("rt_cd") != "0":
+            logger.warning(
+                "KIS 공매도 조회 실패 [%s]: %s", ticker, data.get("msg1", "unknown")
+            )
+            return None
+
+        rows = data.get("output2") or data.get("output") or []
+        result: list[dict] = []
+        for r in rows:
+            try:
+                result.append({
+                    "date": str(r.get("stck_bsop_date", "")),
+                    "close": float(r.get("stck_clpr", 0)),
+                    "short_qty": int(float(r.get("ssts_cntg_qty", 0))),
+                    "short_ratio_pct": float(r.get("ssts_vol_rlim", 0)),
+                    "cum_short_qty": int(float(r.get("acml_ssts_cntg_qty", 0))),
+                    "cum_short_ratio_pct": float(r.get("acml_ssts_cntg_qty_rlim", 0)),
+                })
+            except (ValueError, TypeError):
+                continue
+        return result or None
+
+    except requests.RequestException as e:
+        logger.warning("KIS 공매도 조회 실패 [%s]: %s", ticker, e)
+        return None

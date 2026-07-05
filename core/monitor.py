@@ -156,6 +156,14 @@ class MarketMonitor:
         except Exception as e:
             log.warning(f"dart monitor 실패: {e}")
 
+        # SEC EDGAR 공시 모니터 — 미국 보유종목 신규 공시 알림
+        # (키 불필요, 내부 60분 스로틀 + accession dedup — 일요일 KST만 스킵)
+        try:
+            from core.edgar_monitor import run_edgar_monitor
+            run_edgar_monitor(now=now)
+        except Exception as e:
+            log.warning(f"edgar monitor 실패: {e}")
+
     def stop(self) -> None:
         """감시 종료."""
         self._running = False
