@@ -180,7 +180,7 @@ BRIEFING_TYPE=MANUAL     →  전체 포트폴리오 (기본값)
 
 ```bash
 GEMINI_API_KEY=       # Gemini 2.5 Pro/Flash (뉴스 + 감성 + 차트)
-CLAUDE_API_KEY=       # Claude Haiku/Sonnet (페르소나 + 종합 판단)
+# Claude 호출은 Max 구독(CLI subprocess + OAuth 토큰)으로 처리 — API 키 불필요, 종량 과금 없음
 KIS_APP_KEY=          # 한국투자증권 앱키 (국내+해외 실시간 시세)
 KIS_APP_SECRET=       # 한국투자증권 앱시크릿
 KIS_HTS_ID=           # HTS 로그인 ID
