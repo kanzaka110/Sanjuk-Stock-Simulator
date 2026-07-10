@@ -221,8 +221,19 @@ def api_market_discovery(range: str = "today", limit: int = 50):
 
 
 @app.get("/api/toss/buy-candidates")
-def api_toss_buy_candidates(range: str = "today", limit: int = 20):
-    return JSONResponse(dd.toss_buy_candidates_data(range_=range, limit=min(limit, 100)))
+def api_toss_buy_candidates(range: str = "today", limit: int = 20, market: str = "KR"):
+    return JSONResponse(dd.toss_buy_candidates_data(range_=range, limit=min(limit, 100), market=market))
+
+
+@app.get("/api/toss/ai-berkshire-research-queue")
+def api_toss_ai_berkshire_research_queue(limit: int = 100):
+    """AI Berkshire 재리서치 대상 (read-only). 주문/판정 부작용 없음."""
+    return JSONResponse(dd.ai_berkshire_research_queue_data(limit=min(limit, 200)))
+
+
+@app.get("/api/toss/rebalance-plan")
+def api_toss_rebalance_plan(limit: int = 80, market: str = "ALL"):
+    return JSONResponse(dd.toss_rebalance_plan_data(limit=min(limit, 100), market=market))
 
 
 @app.get("/api/toss/live-pilot-policy")

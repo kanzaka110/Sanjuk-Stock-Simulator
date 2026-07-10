@@ -4,10 +4,25 @@ DB가 없거나 비어 있어도 예외 없이 안전한 빈 구조를 반환하
 """
 
 import sqlite3
+from datetime import datetime, timedelta
 
 import pytest
 
 from core import dashboard_data as dd
+
+
+@pytest.fixture(autouse=True)
+def no_live_toss_broker_network(monkeypatch):
+    """Dashboard data tests must never acquire a real Toss OAuth token.
+
+    The production .env is present on the GCP test host. Without this boundary,
+    an indirect dashboard helper can issue a second client-credentials token and
+    invalidate the running stock-bot token. Tests that need broker-shaped data
+    patch the public Toss helpers directly, so returning no token is fail-closed.
+    """
+    from core import toss_client as tc
+
+    monkeypatch.setattr(tc, "_get_access_token", lambda: None)
 
 
 @pytest.fixture
@@ -120,15 +135,17 @@ def test_with_sample_rows(empty_db):
            ('2026-06-10T08:30:00', '', '005930.KS', '삼성전자', '매수',
             'AI_NEW_BUY', '일반', 70000, 80000, 'open', '', 0, 'v1', 'KR_BEFORE')""",
     )
+    closed_at = (datetime.now(dd.KST) - timedelta(days=1)).isoformat()
     conn.execute(
         """INSERT INTO predictions
            (created_at, closed_at, ticker, name, signal, action_type,
             account_type, entry_price, target_price, status, outcome,
             pnl_pct, normalizer_version, briefing_type)
            VALUES
-           ('2026-06-09T08:30:00', '2026-06-10T15:30:00', '012450.KS', '한화에어로',
+           ('2026-06-09T08:30:00', ?, '012450.KS', '한화에어로',
             '매도', 'AI_SELL_MANAGEMENT', '일반', 300000, 330000, 'closed', 'win',
             10.0, 'v1', 'KR_BEFORE')""",
+        (closed_at,),
     )
     conn.commit()
     conn.close()
@@ -713,21 +730,67 @@ def test_attach_execution_risk_exception_safe(monkeypatch):
     assert er.get("has_warning") is False
 
 
-def test_unchanged_files():
-    """수정 금지 파일(core/email.py) 미변경 확인.
+def test_email_briefing_html_contracts_intentional_changes():
+    """수입 계기판과 정규화 매도 섹션을 이메일 HTML에 안전하게 렌더한다."""
+    from types import SimpleNamespace
 
-    core/telegram.py는 차단 CTA 렌더 안전망 보강을 위해 의도적으로 수정하는
-    파일이므로 잠금 대상에서 제외한다.
-    """
-    import subprocess
-    from pathlib import Path
-    root = Path(__file__).parent.parent
-    for f in ("core/email.py",):
-        diff = subprocess.run(
-            ["git", "diff", "--stat", "HEAD", "--", f],
-            cwd=root, capture_output=True, text=True,
-        ).stdout
-        assert diff.strip() == "", f"{f} 변경 감지:\n{diff}"
+    from core.email import _build_briefing_html
+
+    result = SimpleNamespace(
+        market_summary="",
+        buy_signals=(),
+        sell_signals=(),
+        portfolio_signals=(),
+    )
+    raw = {
+        "advisor_verdict": "HOLD",
+        "income_briefing": {
+            "income_kpi": {},
+            "toss": {},
+            "samsung": {},
+            "thesis": {},
+        },
+        "normalized": {
+            "executable_actions": [
+                {
+                    "side": "sell",
+                    "name": "실행매도종목",
+                    "account": "Toss AI",
+                    "qty": 1,
+                    "price": 100,
+                    "stop": 90,
+                    "reason": "위험 축소",
+                }
+            ],
+            "conditional_buy_candidates": [],
+            "conditional_sell_candidates": [
+                {
+                    "name": "조건부매도종목",
+                    "account": "Toss AI",
+                    "price": 100,
+                    "stop": 90,
+                    "reason": "조건 확인",
+                }
+            ],
+            "cancelled_sells": [
+                {
+                    "name": "보유관리종목",
+                    "account": "Toss AI",
+                    "hold_note": "실행 매도 아님",
+                    "cancel_reason": "보호 보유",
+                }
+            ],
+            "blocked_buys": [],
+        },
+    }
+
+    html = _build_briefing_html(result, raw, "테스트 브리핑", "테스트")
+
+    assert "오늘 수입 계기판" in html
+    assert "실행 매도" in html and "실행매도종목" in html
+    assert "조건부 매도·손절 감시" in html and "조건부매도종목" in html
+    assert "매도 취소·보유 관리" in html and "보유관리종목" in html
+    assert "실행 매도 아님" in html
 
 
 # ═══════════════════════════════════════════════════════

@@ -12,6 +12,7 @@ import logging
 import os
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timezone, timedelta
@@ -79,6 +80,19 @@ def _env_truthy(name: str, default: bool = False) -> bool:
     if raw is None:
         return default
     return str(raw).strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
+def _dashboard_toss_broker_reads_isolated() -> bool:
+    """Keep autonomous Toss OAuth ownership in the stock-bot process.
+
+    The read-only dashboard is a separate long-running Python process. If it
+    issues or refreshes the same client-credentials token as stock-bot, an
+    in-flight live order can retain the previous token and fail with HTTP 401.
+    During autonomous mode the dashboard therefore serves local policy/ledger
+    data but never calls Toss account/order broker GET endpoints directly.
+    """
+    args = [str(arg).strip().lower() for arg in sys.argv[1:]]
+    return "dashboard" in args and _env_truthy("TOSS_AUTONOMOUS_MODE")
 
 
 def _csv_env(name: str) -> list[str]:
@@ -2019,6 +2033,13 @@ def ticker_chart_data(ticker: str, range_: str, interval: str) -> dict:
 # ─── /api/toss/account-summary (읽기 전용, 기존 포트폴리오 미합산) ──
 def _fetch_toss_account_summary_raw() -> dict:
     """Toss 실전 AI 자동거래 계좌 요약. 기존 포트폴리오에 절대 합산하지 않음."""
+    if _dashboard_toss_broker_reads_isolated():
+        data = _toss_account_summary_unavailable("dashboard_broker_read_isolated")
+        data["read_only_notice"] = (
+            "자율매매 중 OAuth 충돌 방지: dashboard 프로세스는 Toss 계좌 API를 직접 조회하지 않음"
+        )
+        return data
+
     from core import toss_client as tc
     _set_toss_readonly_timeout()
 
@@ -2495,6 +2516,69 @@ def _toss_holding_price_map() -> dict[str, dict]:
     return out
 
 
+def _recent_toss_risk_sell_symbols(limit: int = 100) -> dict[str, dict]:
+    """최근 리스크 기반 SELL 심볼 맵. 신규 매수 재진입 cooldown용. Read-only."""
+    out: dict[str, dict] = {}
+    try:
+        from core.toss_live_pilot_ledger import list_live_pilot_records
+        records = list_live_pilot_records(limit=limit)
+    except Exception as e:
+        log.debug("recent risk sell lookup unavailable: %s", e)
+        records = []
+    risk_reasons = {"position_review_sell", "auto_exit_sell", "income_rebalance_sell_to_fund"}
+    for r in records:
+        side = str(r.get("side") or "").lower()
+        symbol = str(r.get("symbol") or "").upper().strip()
+        reason = str(r.get("reason") or "")
+        if side != "sell" or not symbol:
+            continue
+        if reason not in risk_reasons:
+            continue
+        out[symbol] = {
+            "reason": reason,
+            "created_at": r.get("created_at") or r.get("sent_at") or "",
+            "status": r.get("status") or "",
+        }
+        if symbol.endswith((".KS", ".KQ")):
+            out[symbol.split(".", 1)[0]] = out[symbol]
+    return out
+
+
+def _pending_toss_order_symbols(limit: int = 150) -> dict[str, dict]:
+    """신규 BUY 차단용 same-symbol pending/live_sent 주문 맵. Read-only."""
+    out: dict[str, dict] = {}
+    try:
+        from core.toss_live_pilot_ledger import list_live_pilot_records
+        records = list_live_pilot_records(limit=limit)
+    except Exception as e:
+        log.debug("pending order lookup unavailable: %s", e)
+        records = []
+    pending_statuses = {
+        "previewed", "reviewed", "payload_validated", "confirmed_but_not_sent",
+        "live_send_retryable", "live_sent",
+    }
+    terminal_statuses = {"cancelled", "canceled", "blocked", "live_send_blocked", "live_send_failed", "filled", "rejected"}
+    for r in records:
+        side = str(r.get("side") or "buy").lower()
+        status = str(r.get("status") or "").lower()
+        symbol = str(r.get("symbol") or "").upper().strip()
+        if side != "buy" or not symbol:
+            continue
+        if status in terminal_statuses:
+            continue
+        if status not in pending_statuses and "pending" not in status:
+            continue
+        out[symbol] = {
+            "side": side,
+            "status": status or "pending",
+            "created_at": r.get("created_at") or r.get("sent_at") or "",
+            "pilot_id": r.get("pilot_id") or "",
+        }
+        if symbol.endswith((".KS", ".KQ")):
+            out[symbol.split(".", 1)[0]] = out[symbol]
+    return out
+
+
 def _kis_price_for_symbol(symbol: str) -> dict:
     """Read KIS price when available. No writes, no order path."""
     sym = str(symbol or "").upper().strip()
@@ -2690,16 +2774,96 @@ def market_discovery_data(range_: str = "today", limit: int = 50) -> dict:
     return _cached(f"market_discovery:{range_}:{limit}", 120, _fetch)
 
 
+
+def toss_rebalance_plan_data(limit: int = 80, market: str = "ALL") -> dict:
+    """Toss income 리밸런싱 계획 (GET-only). 주문/취소/정정 없음."""
+    try:
+        account = toss_account_summary() or {}
+    except Exception as e:
+        account = {"error": str(e)[:180], "holdings_items": [], "holdings_count": 0}
+    try:
+        candidates = toss_buy_candidates_data(range_="today", limit=limit, market=market) or {}
+        items = candidates.get("items") or []
+    except Exception as e:
+        candidates = {"error": str(e)[:180]}
+        items = []
+    try:
+        from core.toss_income_strategy import build_rebalance_plan
+        plan = build_rebalance_plan(account, items)
+    except Exception as e:
+        plan = {"version": "income_rebalance_v1", "read_only": True, "error": str(e)[:180]}
+    plan["source"] = "toss_rebalance_plan_data"
+    plan["candidate_error"] = candidates.get("error") if isinstance(candidates, dict) else None
+    return plan
+
 # ─── /api/toss/buy-candidates — 토스 전용 매수 후보 (신규 발굴 기반) ─────────────
-def toss_buy_candidates_data(range_: str = "today", limit: int = 20) -> dict:
+_AI_BERKSHIRE_BUY_GATE_VERSION = "ai_berkshire_buy_gate_avoid_only_v1"
+
+
+def _apply_ai_berkshire_buy_gate(out: dict, scores: dict | None) -> dict:
+    """신규 BUY 후보에 AI Berkshire avoid 게이트를 적용 (in-place).
+
+    근거가 살아있는 avoid만 stock_agent_ready에서 하드 차단한다. unscored /
+    expired / invalid / gray_zone은 진단 필드만 남기고 기존 판정을 유지한다.
+    SELL 후보와 게이트 계산 실패는 기존 결과를 바꾸지 않는다.
+    """
+    from core.ai_berkshire_toss import evaluate_ai_berkshire_buy_gate
+
+    symbol = str(out.get("symbol") or out.get("ticker") or "")
+    if str(out.get("side") or "buy").lower() != "buy":
+        return out
+    try:
+        gate = evaluate_ai_berkshire_buy_gate(symbol, scores=scores or {})
+    except Exception as e:                              # 게이트 오류로 후보를 잃지 않는다
+        log.warning("ai_berkshire buy gate failed (%s): %s", symbol, e)
+        out["ai_berkshire_buy_block"] = False
+        out["ai_berkshire_buy_reason"] = "ai_berkshire_gate_error"
+        out["ai_berkshire_research_status"] = "needs_research"
+        return out
+
+    out["ai_berkshire_buy_block"] = gate["buy_block"]
+    out["ai_berkshire_buy_reason"] = gate["buy_reason"]
+    out["ai_berkshire_research_status"] = gate["research_status"]
+    out["ai_berkshire_buy_gate"] = {
+        "version": _AI_BERKSHIRE_BUY_GATE_VERSION,
+        "stored_classification": gate["stored_classification"],
+        "classification": gate["classification"],
+        "freshness_valid": gate["freshness_valid"],
+        "thesis_expired": gate["thesis_expired"],
+        "freshness_issues": gate["freshness_issues"],
+        "as_of": gate["as_of"],
+        "valid_until": gate["valid_until"],
+        "confidence": gate["confidence"],
+        "source_urls": gate["source_urls"],
+    }
+    if not gate["buy_block"]:
+        return out
+
+    block_reason = "AI Berkshire avoid 판정 — 신규 BUY 차단 (기존 보유/매도 판단은 불변)"
+    out["stock_agent_ready"] = False
+    out["executable_now"] = False
+    out["execution_status"] = "hold_ai_berkshire_avoid"
+    out["block_reason"] = block_reason
+    out.setdefault("risk_notes", []).append(block_reason)
+    return out
+
+
+def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str = "KR") -> dict:
     """토스 전용 매수 후보 조회 (read-only) — 신규 발굴 기반.
 
     삼성/RIA/ISA/IRP 등 기존 계좌 추천(predictions DB)을 재사용하지 않는다.
-    `core.discovery_candidates`의 신규 발굴 KR 후보를 `items`에 노출한다. 1주 가격이
-    1회 한도를 넘어도 후보에서 배제하지 않고 execution_status=limit_exceeded /
-    executable_now=False로 표시한다(한도는 실주문 gate 전용). items가 0이면 `excluded`에
-    '기존 후보 제외' + '신규 스캔 탈락 이유'를 함께 담는다. 주문 생성/승인/전송은 하지 않는다.
+    market은 "KR" | "US" | "ALL". 기존 KR 고정 후보 공급 때문에 USD 예수금이
+    남아도 미장 자동매매가 돌지 않던 문제를 막기 위해 시장별 후보를 분리한다.
+    주문 생성/승인/전송은 하지 않는다.
     """
+    market_norm = str(market or "KR").strip().upper()
+    if market_norm in ("BOTH", "KRUS", "KR_US"):
+        market_norm = "ALL"
+    if market_norm not in {"KR", "US", "ALL"}:
+        market_norm = "KR"
+    markets = ["KR", "US"] if market_norm == "ALL" else [market_norm]
+    briefing_type = "US_BEFORE" if market_norm == "US" else ("MANUAL" if market_norm == "ALL" else "KR_BEFORE")
+
     def _fetch():
         from core.discovery_candidates import (
             build_discovery_sections,
@@ -2708,34 +2872,136 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20) -> dict:
         )
         from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
 
+        # 정책의 max_order_krw=None/0은 명시적인 "고정 한도 없음"이다.
+        # 후보 API에서 int(None) 예외를 50만원으로 되살리지 않는다. 고정 한도가
+        # 없을 때 1주 적격성은 실제 원화 예수금으로 확인하고, 최종 수량은 아래의
+        # 계좌 위험/집중도 sizing에서 별도로 제한한다.
         try:
-            max_order_krw = int(compute_toss_live_pilot_policy().get("max_order_krw", 500_000))
+            account_for_cash_gate = toss_account_summary() or {}
         except Exception:
+            account_for_cash_gate = {}
+        cash_for_candidate = account_for_cash_gate.get("cash") or {}
+        try:
+            available_native_krw = int(float(
+                cash_for_candidate.get("krw_native", cash_for_candidate.get("krw")) or 0
+            ))
+        except (TypeError, ValueError):
+            available_native_krw = 0
+
+        try:
+            raw_max_order_krw = compute_toss_live_pilot_policy().get("max_order_krw")
+            if raw_max_order_krw in (None, "", 0, "0"):
+                max_order_krw = None
+            else:
+                max_order_krw = max(0, int(raw_max_order_krw))
+        except Exception:
+            # 정책 자체를 읽지 못한 경우만 기존 fail-safe 50만원을 유지한다.
             max_order_krw = 500_000
+        candidate_affordability_limit_krw = (
+            max_order_krw if max_order_krw is not None else available_native_krw
+        )
+
+        # AI Berkshire 판정 1회 로드 → 후보별 BUY 게이트에서 재사용.
+        # 파일 누락/파손은 빈 dict → 전 후보 needs_research 진단 (하드 차단 없음).
+        from core.ai_berkshire_toss import load_ai_berkshire_scores
+        try:
+            berkshire_scores = load_ai_berkshire_scores() or {}
+        except Exception as e:
+            log.warning("ai_berkshire scores unavailable for buy gate: %s", e)
+            berkshire_scores = {}
 
         # 대시보드 GET은 응답성이 우선이다. 전체 scanner/discover 경로는
         # cold start에서 30~60초 걸릴 수 있으므로, 토스 후보 API는 병렬 경량
         # 유니버스 quote를 주 소스로 사용한다. 주문 전송 경로의 최종 gate는
         # 별도로 유지된다.
-        scan_candidates = _fallback_universe_candidates(["KR"])
-        sections = build_discovery_sections(scan_candidates=scan_candidates, briefing_type="KR_BEFORE")
-        result = toss_eligible_new_candidates(sections, max_order_krw=max_order_krw)
+        scan_candidates = _fallback_universe_candidates(markets)
+        sections = build_discovery_sections(scan_candidates=scan_candidates, briefing_type=briefing_type)
+        result = toss_eligible_new_candidates(
+            sections,
+            max_order_krw=candidate_affordability_limit_krw,
+        )
 
         # 승호 명시 제외: 크래프톤은 토스/신규 매수 후보에서 노출하지 않는다.
         # config/settings.py 원본 유니버스는 건드리지 않고, 주문/후보 API 직전에서
         # fail-closed로 제거해 자동 finalizer까지 도달하지 못하게 한다.
         user_blocked_buy_symbols = {"259960.KS"}
+        try:
+            toss_held_map = _toss_holding_price_map()
+        except Exception:
+            toss_held_map = {}
+        try:
+            recent_risk_sells = _recent_toss_risk_sell_symbols()
+        except Exception:
+            recent_risk_sells = {}
+        try:
+            pending_order_symbols = _pending_toss_order_symbols()
+        except Exception:
+            pending_order_symbols = {}
         blocked_items = []
+        wrong_market_items = []
+        already_held_items = []
+        recent_risk_sell_items = []
         kept_items = []
         for item in result.get("items") or []:
-            sym = str(item.get("symbol") or item.get("ticker") or "")
+            sym = str(item.get("symbol") or item.get("ticker") or "").upper().strip()
+            item_market = str(item.get("market") or ("KR" if sym.endswith((".KS", ".KQ")) else "US")).upper()
+            held_row = toss_held_map.get(sym)
+            if not held_row and sym.endswith((".KS", ".KQ")):
+                held_row = toss_held_map.get(sym.split(".", 1)[0])
+            recent_risk_sell = recent_risk_sells.get(sym)
+            if not recent_risk_sell and sym.endswith((".KS", ".KQ")):
+                recent_risk_sell = recent_risk_sells.get(sym.split(".", 1)[0])
+            if market_norm != "ALL" and item_market != market_norm:
+                wrong_market_items.append(item)
+                continue
             if sym in user_blocked_buy_symbols:
                 blocked_items.append(item)
                 continue
+            if held_row:
+                held_item = dict(item)
+                held_item["_held_row"] = held_row
+                already_held_items.append(held_item)
+                continue
+            if recent_risk_sell:
+                risk_item = dict(item)
+                risk_item["_risk_sell_row"] = recent_risk_sell
+                recent_risk_sell_items.append(risk_item)
+                continue
             kept_items.append(item)
-        if blocked_items:
+        if blocked_items or wrong_market_items or already_held_items or recent_risk_sell_items:
             result["items"] = kept_items
             excluded = list(result.get("excluded") or [])
+            for item in wrong_market_items:
+                excluded.append({
+                    "ticker": item.get("symbol") or item.get("ticker"),
+                    "symbol": item.get("symbol") or item.get("ticker"),
+                    "name": item.get("name") or item.get("symbol") or item.get("ticker"),
+                    "reason": f"요청 시장({market_norm})과 다른 후보 제외",
+                    "scope": "market_scope_excluded",
+                })
+            for item in already_held_items:
+                held_row = item.get("_held_row") or {}
+                excluded.append({
+                    "ticker": item.get("symbol") or item.get("ticker"),
+                    "symbol": item.get("symbol") or item.get("ticker"),
+                    "name": item.get("name") or held_row.get("name") or item.get("symbol") or item.get("ticker"),
+                    "reason": "이미 Toss 보유 중 — 신규 매수 후보 제외, 보유/매도 관리 루프로 판단",
+                    "scope": "already_held_toss_position",
+                    "quantity": held_row.get("quantity"),
+                    "last_price": held_row.get("last_price"),
+                })
+            for item in recent_risk_sell_items:
+                risk_row = item.get("_risk_sell_row") or {}
+                excluded.append({
+                    "ticker": item.get("symbol") or item.get("ticker"),
+                    "symbol": item.get("symbol") or item.get("ticker"),
+                    "name": item.get("name") or item.get("symbol") or item.get("ticker"),
+                    "reason": "최근 리스크 매도 종목 — 재진입 cooldown, 다음 검토 주기까지 신규 매수 제외",
+                    "scope": "recent_risk_sell_cooldown",
+                    "risk_sell_reason": risk_row.get("reason"),
+                    "risk_sell_at": risk_row.get("created_at"),
+                    "risk_sell_status": risk_row.get("status"),
+                })
             for item in blocked_items:
                 excluded.append({
                     "ticker": item.get("symbol") or item.get("ticker"),
@@ -2749,11 +3015,30 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20) -> dict:
             result["excluded_count"] = len(excluded)
 
         scan_summary = result.setdefault("scan_summary", {})
+        if already_held_items:
+            scan_summary["toss_held_excluded_count"] = len(already_held_items)
+            scan_summary["toss_held_excluded_symbols"] = [
+                str(i.get("symbol") or i.get("ticker") or "") for i in already_held_items[:20]
+            ]
+        else:
+            scan_summary.setdefault("toss_held_excluded_count", 0)
+        if recent_risk_sell_items:
+            scan_summary["recent_risk_sell_excluded_count"] = len(recent_risk_sell_items)
+            scan_summary["recent_risk_sell_excluded_symbols"] = [
+                str(i.get("symbol") or i.get("ticker") or "") for i in recent_risk_sell_items[:20]
+            ]
+        else:
+            scan_summary.setdefault("recent_risk_sell_excluded_count", 0)
         scan_summary["dependency_fallback_used"] = True
         scan_summary["source"] = "fast_universe_fallback"
+        scan_summary["market"] = market_norm
+        scan_summary["markets"] = list(markets)
         scan_summary["user_blocked_buy_symbols"] = sorted(user_blocked_buy_symbols)
         if blocked_items:
             scan_summary["user_blocked_count"] = len(blocked_items)
+
+        scan_summary["configured_max_order_krw"] = max_order_krw
+        scan_summary["candidate_affordability_limit_krw"] = candidate_affordability_limit_krw
 
         def _enrich_for_stock_agent(item: dict) -> dict:
             """Add complete read-only order-review fields for Hermes stock-agent.
@@ -2816,18 +3101,85 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20) -> dict:
             rr = _float_or_zero(out.get("risk_reward"))
             stop_f = _float_or_zero(stop)
             stop_risk_pct = round(max((limit_f - stop_f) / limit_f * 100.0, 0.0), 2) if limit_f and stop_f else None
+            market_for_size = str(out.get("market") or "KR").upper()
+            asset_type = "KR_STOCK" if market_for_size == "KR" else "US_STOCK"
+            currency = "KRW" if asset_type == "KR_STOCK" else "USD"
+            out["asset_type"] = asset_type
+            out["currency"] = currency
             quantity_source = "provided"
             quantity = int(out.get("quantity") or 0)
             position_budget_krw = None
-            if limit_f and not out.get("limit_exceeded"):
-                multiplier = _sizing_multiplier(score, rr, stop_risk_pct or 99.0)
-                position_budget_krw = max(limit_f, max_order_krw * multiplier)
-                position_budget_krw = min(position_budget_krw, max_order_krw)
-                quantity = max(1, int(position_budget_krw // limit_f))
-                quantity_source = "confidence_rr_stop_sizing"
-            elif limit_f:
+            sizing_method = "confidence_rr_stop_sizing"
+            sizing_details: dict = {}
+            if asset_type == "US_STOCK":
+                # US limit_price is USD. Never divide a KRW budget by a USD price;
+                # keep the upstream 1-share/default USD sizing and preserve KRW conversion.
                 quantity = max(1, quantity)
-            estimated = quantity * limit_f if quantity and limit_f else _float_or_zero(out.get("estimated_amount_krw"))
+                quantity_source = "provided_usd" if out.get("quantity") else "default_1_us_share"
+                estimated_usd = quantity * limit_f if quantity and limit_f else _float_or_zero(out.get("estimated_amount_usd"))
+                out["estimated_amount_usd"] = round(estimated_usd, 2) if estimated_usd else out.get("estimated_amount_usd")
+                existing_krw = _float_or_zero(out.get("estimated_amount_krw"))
+                fx = _float_or_zero(out.get("fx_usdkrw"))
+                if not fx and existing_krw and estimated_usd:
+                    fx = existing_krw / estimated_usd
+                    out["fx_usdkrw"] = round(fx, 4)
+                estimated = existing_krw or (estimated_usd * fx if estimated_usd and fx else estimated_usd)
+                position_budget_krw = estimated if estimated else None
+            else:
+                if limit_f and not out.get("limit_exceeded"):
+                    multiplier = _sizing_multiplier(score, rr, stop_risk_pct or 99.0)
+                    if max_order_krw is None:
+                        # 고정 금액 cap이 없을 때는 무제한 수량이 아니라
+                        # 계좌 1% 손절 위험 + 단일 포지션 15% + 실제 현금으로 제한한다.
+                        total_value = _float_or_zero(
+                            (account_for_cash_gate.get("total_account_value") or {}).get("krw")
+                        )
+                        available_cash = _float_or_zero(
+                            (account_for_cash_gate.get("cash") or {}).get(
+                                "krw_native",
+                                (account_for_cash_gate.get("cash") or {}).get("krw"),
+                            )
+                        )
+                        account_risk_budget = total_value * 0.01
+                        concentration_budget = total_value * 0.15
+                        per_share_risk = max(limit_f - stop_f, 0.0)
+                        risk_qty = int(account_risk_budget // per_share_risk) if per_share_risk > 0 else 0
+                        concentration_qty = int(concentration_budget // limit_f) if concentration_budget > 0 else 0
+                        cash_qty = int(available_cash // limit_f) if available_cash > 0 else 0
+                        base_qty = min(risk_qty, concentration_qty, cash_qty)
+                        sizing_method = "account_risk_concentration_sizing"
+                        sizing_details = {
+                            "account_risk_budget_pct": 1.0,
+                            "max_position_pct": 15.0,
+                            "account_risk_budget_krw": round(account_risk_budget, 2),
+                            "concentration_budget_krw": round(concentration_budget, 2),
+                            "available_native_krw": round(available_cash, 2),
+                            "risk_quantity_cap": risk_qty,
+                            "concentration_quantity_cap": concentration_qty,
+                            "cash_quantity_cap": cash_qty,
+                        }
+                        if base_qty <= 0:
+                            quantity = max(1, quantity)
+                            out["limit_exceeded"] = True
+                            out["execution_status"] = "dynamic_risk_limit"
+                            out["executable_now"] = False
+                            out["block_reason"] = "1주가 계좌 위험 1%·단일 포지션 15%·가용 현금 한도 중 하나를 초과"
+                            position_budget_krw = quantity * limit_f
+                            quantity_source = "dynamic_risk_limit_blocked"
+                        else:
+                            quantity = base_qty
+                            if quantity > 1:
+                                quantity = max(1, int(quantity * multiplier))
+                            position_budget_krw = quantity * limit_f
+                            quantity_source = "account_risk_concentration_sizing"
+                    else:
+                        position_budget_krw = max(limit_f, max_order_krw * multiplier)
+                        position_budget_krw = min(position_budget_krw, max_order_krw)
+                        quantity = max(1, int(position_budget_krw // limit_f))
+                        quantity_source = "confidence_rr_stop_sizing"
+                elif limit_f:
+                    quantity = max(1, quantity)
+                estimated = quantity * limit_f if quantity and limit_f else _float_or_zero(out.get("estimated_amount_krw"))
 
             out.setdefault("account", "토스 AI")
             out.setdefault("account_type", "토스 AI")
@@ -2840,17 +3192,84 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20) -> dict:
             out["estimated_amount_krw"] = round(estimated, 2) if estimated else None
             out["quantity_source"] = quantity_source
             out["position_budget_krw"] = round(position_budget_krw, 2) if position_budget_krw else None
+
+            cash_info = account_for_cash_gate.get("cash") or {}
+            cash_check = {"checked": bool(cash_info), "asset_type": asset_type}
+            if str(out.get("side") or "buy").lower() == "buy" and cash_info:
+                if asset_type == "KR_STOCK":
+                    native_present = "krw_native" in cash_info
+                    available = _float_or_zero(cash_info.get("krw_native") if native_present else cash_info.get("krw"))
+                    required = _float_or_zero(out.get("estimated_amount_krw"))
+                    cash_check.update({
+                        "currency": "KRW",
+                        "available": available,
+                        "required": required,
+                        "native_cash_used": native_present,
+                    })
+                    if native_present and required and available < required:
+                        out["execution_status"] = "cash_unavailable"
+                        out["executable_now"] = False
+                        out["block_reason"] = f"KRW 예수금 부족: 필요 {required:,.0f}원 > 가용 {available:,.0f}원"
+                else:
+                    available = _float_or_zero(cash_info.get("usd"))
+                    required = _float_or_zero(out.get("estimated_amount_usd")) or (limit_f * quantity if limit_f and quantity else 0.0)
+                    cash_check.update({
+                        "currency": "USD",
+                        "available": available,
+                        "required": required,
+                    })
+                    if required and available < required:
+                        out["execution_status"] = "cash_unavailable"
+                        out["executable_now"] = False
+                        out["block_reason"] = f"USD 예수금 부족: 필요 ${required:,.2f} > 가용 ${available:,.2f}"
+            out["cash_check"] = cash_check
+
             out["position_sizing"] = {
-                "method": "confidence_rr_stop_sizing",
+                "method": sizing_method,
                 "max_order_krw": max_order_krw,
                 "score": score or None,
                 "risk_reward": rr or None,
                 "stop_risk_pct": stop_risk_pct,
-                "note": "확신도·손익비·손절폭 중 가장 약한 축으로 수량 제한",
+                "note": (
+                    "계좌 손절위험 1%·단일 포지션 15%·가용 현금으로 수량 제한"
+                    if sizing_method == "account_risk_concentration_sizing"
+                    else "확신도·손익비·손절폭 중 가장 약한 축으로 수량 제한"
+                ),
+                **sizing_details,
             }
+
+            try:
+                from core.toss_income_strategy import prepare_income_buy_plan
+                out = prepare_income_buy_plan(out)
+            except Exception as e:
+                out.setdefault("income_exit_plan_error", str(e)[:180])
+
+            try:
+                from core.toss_income_strategy import compute_income_edge
+                income_strategy = compute_income_edge(
+                    out,
+                    account=account_for_cash_gate,
+                    pending_orders=pending_order_symbols,
+                    recent_risk_sells=recent_risk_sells,
+                )
+            except Exception as e:
+                income_strategy = {
+                    "version": "income_v1",
+                    "income_pass": False,
+                    "income_grade": "BLOCK",
+                    "income_block_reason": "income_gate_error",
+                    "income_block_label": f"수입 게이트 계산 실패: {e}"[:180],
+                }
+            out["income_strategy"] = income_strategy
+            if not income_strategy.get("income_pass") and not out.get("block_reason"):
+                out["block_reason"] = "수입 기대값 gate 차단: " + str(
+                    income_strategy.get("income_block_label")
+                    or income_strategy.get("income_block_reason")
+                    or "income_pass=false"
+                )
             out.setdefault("condition", "지정가 이하에서만 검토 · 승호 최종 승인 전 실주문 없음")
             out.setdefault("execution_gate", "Hermes PASS + 승호 최종 승인 필요")
-            out.setdefault("broker_execution", "Toss live pilot BUY_ONLY approval gate")
+            out.setdefault("broker_execution", "Toss live pilot autonomous gate")
             out.setdefault("read_only_notice", "GET-only 후보 표시 · 이 응답은 주문 생성/승인/전송을 하지 않음")
 
             buy_limit_above_current = False
@@ -2897,6 +3316,12 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20) -> dict:
                 risk_notes.extend(str(f) for f in out.get("blocking_risk_flags") or [])
             if out.get("observation_flags"):
                 risk_notes.extend(str(f) for f in out.get("observation_flags") or [])
+            income_strategy = out.get("income_strategy") or {}
+            if income_strategy and not income_strategy.get("income_pass"):
+                risk_notes.append(
+                    "수입 기대값 gate 차단: "
+                    + str(income_strategy.get("income_block_label") or income_strategy.get("income_block_reason") or "income_pass=false")
+                )
             out["risk_notes"] = risk_notes
 
             missing = []
@@ -2916,20 +3341,89 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20) -> dict:
                 if value in (None, "", 0, 0.0, []):
                     missing.append(key)
             out["missing_fields"] = missing
-            hard_blocked = out.get("execution_status") in {"hold_risk_flags", "chase_block", "data_quality_block"} or bool(out.get("blocking_risk_flags"))
+            hard_blocked = out.get("execution_status") in {"hold_risk_flags", "chase_block", "data_quality_block", "cash_unavailable"} or bool(out.get("blocking_risk_flags"))
+            income_pass = bool((out.get("income_strategy") or {}).get("income_pass"))
 
-            # 품질 게이트 decision_bucket 반영
+            # 품질 게이트 + 수입 기대값 gate decision 반영
             bucket = out.get("decision_bucket", "")
             if bucket:
                 _exec_buckets = ("PASS_EXECUTE", "SMALL_PASS")
-                out["stock_agent_ready"] = bucket in _exec_buckets and not missing and not out.get("limit_exceeded") and not hard_blocked
+                out["stock_agent_ready"] = bucket in _exec_buckets and income_pass and not missing and not out.get("limit_exceeded") and not hard_blocked
                 if bucket not in _exec_buckets and not out.get("block_reason"):
                     out["block_reason"] = out.get("decision_reason", bucket)
             else:
-                out["stock_agent_ready"] = not missing and not out.get("limit_exceeded") and not hard_blocked
+                out["stock_agent_ready"] = income_pass and not missing and not out.get("limit_exceeded") and not hard_blocked
+
+            _apply_ai_berkshire_buy_gate(out, berkshire_scores)
             return out
 
         items = [_enrich_for_stock_agent(i) for i in result["items"][:limit]]
+
+        def _income_expected(item: dict) -> float:
+            try:
+                return float((item.get("income_strategy") or {}).get("expected_pnl_krw") or 0)
+            except Exception:
+                return 0.0
+
+        # 포트폴리오 상태를 신규 BUY gate에 연결한다.
+        # 보유가 이미 많으면 후보 품질이 좋아도 무조건 추가 매수하지 않는다.
+        try:
+            holdings_count_for_cap = int(account_for_cash_gate.get("holdings_count") or 0)
+        except Exception:
+            holdings_count_for_cap = 0
+        ready_items = [i for i in items if i.get("stock_agent_ready")]
+        portfolio_cap_block_count = 0
+        if holdings_count_for_cap > 20:
+            for item in ready_items:
+                item["stock_agent_ready"] = False
+                item["executable_now"] = False
+                item["execution_status"] = "portfolio_rebalance_required"
+                item["block_reason"] = "보유 20개 초과 — 신규 BUY 전 보유 리밸런싱/매도 루프 필요"
+                item.setdefault("risk_notes", []).append(item["block_reason"])
+                portfolio_cap_block_count += 1
+            scan_summary["portfolio_rebalance_required"] = True
+            scan_summary["portfolio_income_ready_cap"] = 0
+        elif holdings_count_for_cap > 12 and len(ready_items) > 3:
+            ranked_ready = sorted(ready_items, key=_income_expected, reverse=True)
+            allowed_ids = {id(i) for i in ranked_ready[:3]}
+            for item in ready_items:
+                if id(item) in allowed_ids:
+                    continue
+                item["stock_agent_ready"] = False
+                item["executable_now"] = False
+                item["execution_status"] = "portfolio_income_cap"
+                item["block_reason"] = "보유 12개 초과 — income expected 상위 3개만 신규 BUY 허용"
+                item.setdefault("risk_notes", []).append(item["block_reason"])
+                portfolio_cap_block_count += 1
+            scan_summary["portfolio_rebalance_required"] = False
+            scan_summary["portfolio_income_ready_cap"] = 3
+        else:
+            scan_summary["portfolio_rebalance_required"] = False
+            scan_summary["portfolio_income_ready_cap"] = None
+
+        scan_summary["holdings_count_for_income_gate"] = holdings_count_for_cap
+        scan_summary["portfolio_cap_block_count"] = portfolio_cap_block_count
+        if holdings_count_for_cap > 20:
+            for item in items:
+                if (item.get("income_strategy") or {}).get("income_pass"):
+                    item["rebalance_required"] = True
+                    item.setdefault("risk_notes", []).append("보유 20개 초과 — 신규 BUY 전 리밸런싱 계획 확인")
+        try:
+            from core.toss_income_strategy import build_rebalance_plan
+            scan_summary["rebalance_plan"] = build_rebalance_plan(account_for_cash_gate, items)
+        except Exception as e:
+            scan_summary["rebalance_plan_error"] = str(e)[:180]
+        income_pass_count = sum(1 for i in items if (i.get("income_strategy") or {}).get("income_pass"))
+        income_block_count = sum(1 for i in items if not (i.get("income_strategy") or {}).get("income_pass"))
+        scan_summary["income_pass_count"] = income_pass_count
+        scan_summary["income_block_count"] = income_block_count
+        scan_summary["income_ready_count"] = sum(1 for i in items if i.get("stock_agent_ready"))
+        scan_summary["income_gate_version"] = "income_v1"
+        scan_summary["ai_berkshire_gate_version"] = _AI_BERKSHIRE_BUY_GATE_VERSION
+        scan_summary["ai_berkshire_buy_block_count"] = sum(
+            1 for i in items if i.get("ai_berkshire_buy_block"))
+        scan_summary["ai_berkshire_needs_research_count"] = sum(
+            1 for i in items if i.get("ai_berkshire_research_status") != "ok")
         return {
             "items": items,
             "excluded": result["excluded"][:limit],
@@ -2942,8 +3436,192 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20) -> dict:
             "note": result["note"],
         }
 
-    return _cached(f"toss_buy_candidates:{range_}:{limit}", 120, _fetch)
+    return _cached(f"toss_buy_candidates:{range_}:{market_norm}:{limit}", 120, _fetch)
 
+
+# ─── /api/toss/ai-berkshire-research-queue — 재리서치 대상 (GET-only) ──────
+_RESEARCH_QUEUE_VERSION = "ai_berkshire_research_queue_v1"
+_RESEARCH_EXPIRY_WINDOW_DAYS = 30
+
+# 한 심볼에 사유가 여럿이면 급한 쪽을 남긴다 (숫자가 작을수록 우선).
+_RESEARCH_REASON_PRIORITY = {
+    "expired": 0,
+    "invalid": 1,
+    "unscored": 2,
+    "expiring_within_30d": 3,
+}
+_RESEARCH_STATUS_TO_REASON = {
+    "needs_research": "unscored",
+    "expired": "expired",
+    "invalid": "invalid",
+}
+
+
+def _research_queue_key(symbol) -> str:
+    """중복 merge용 정규화 키 — 6자리 코드는 .KS/.KQ 접미사를 제거한다."""
+    sym = str(symbol or "").upper().strip()
+    if sym.endswith((".KS", ".KQ")) and sym.split(".", 1)[0].isdigit():
+        return sym.split(".", 1)[0]
+    return sym
+
+
+def ai_berkshire_research_queue_data(limit: int = 100, as_of_date=None) -> dict:
+    """AI Berkshire 재리서치 큐 (read-only).
+
+    Hermes가 자동 리서치할 대상을 한 화면에 모은다. 대상은
+      - 현재 Toss holdings 중 unscored/expired/invalid
+      - 현재 buy candidates 중 unscored/expired/invalid
+      - score 파일 중 valid_until이 30일 이내로 임박한 종목
+    이며 심볼 기준으로 merge한다. 계좌번호/토큰/주문 식별자/브로커 원본 응답은
+    노출하지 않는다. 주문 생성/승인/전송/DB 기록 부작용이 없다.
+    """
+    def _fetch():
+        from core.ai_berkshire_toss import (
+            evaluate_ai_berkshire_buy_gate,
+            load_ai_berkshire_scores,
+            normalize_ai_berkshire_item,
+        )
+
+        try:
+            scores = load_ai_berkshire_scores() or {}
+        except Exception as e:
+            log.warning("research queue scores load failed: %s", e)
+            scores = {}
+        score_items = scores.get("items") if isinstance(scores, dict) else None
+        score_items = score_items if isinstance(score_items, dict) else {}
+
+        today = _coerce_research_date(as_of_date)
+        entries: dict[str, dict] = {}
+
+        def _touch(symbol: str, name: str, source: str) -> dict:
+            key = _research_queue_key(symbol)
+            entry = entries.setdefault(key, {
+                "symbol": str(symbol or "").upper().strip(),
+                "name": "", "sources": [], "reasons": set(),
+                "stored_classification": None, "classification": None,
+                "as_of": None, "valid_until": None, "freshness_issues": [],
+            })
+            # 표시 심볼은 접미사가 붙은 완전형을 선호한다 (005930 < 005930.KS).
+            sym = str(symbol or "").upper().strip()
+            if len(sym) > len(entry["symbol"]):
+                entry["symbol"] = sym
+            if name and not entry["name"]:
+                entry["name"] = str(name)
+            if source not in entry["sources"]:
+                entry["sources"].append(source)
+            return entry
+
+        def _absorb_gate(entry: dict, gate: dict) -> None:
+            entry["stored_classification"] = gate["stored_classification"]
+            entry["classification"] = gate["classification"]
+            entry["as_of"] = gate["as_of"]
+            entry["valid_until"] = gate["valid_until"]
+            entry["freshness_issues"] = list(gate["freshness_issues"])
+            if not entry["name"] and gate.get("name"):
+                entry["name"] = gate["name"]
+
+        def _scan(rows, source: str) -> None:
+            for row in rows or []:
+                symbol = str(row.get("symbol") or row.get("ticker") or "").upper().strip()
+                if not symbol:
+                    continue
+                entry = _touch(symbol, row.get("name") or "", source)
+                gate = evaluate_ai_berkshire_buy_gate(symbol, scores=scores,
+                                                      as_of_date=today)
+                _absorb_gate(entry, gate)
+                reason = _RESEARCH_STATUS_TO_REASON.get(gate["research_status"])
+                if reason:
+                    entry["reasons"].add(reason)
+
+        # 1) 현재 Toss holdings
+        try:
+            holdings = (toss_account_summary() or {}).get("holdings_items") or []
+        except Exception as e:
+            log.warning("research queue holdings unavailable: %s", e)
+            holdings = []
+        _scan(holdings, "holding")
+
+        # 2) 현재 buy candidates (기존 read-only 캐시 함수 재사용)
+        try:
+            candidates = (toss_buy_candidates_data(limit=limit, market="ALL")
+                          or {}).get("items") or []
+        except Exception as e:
+            log.warning("research queue candidates unavailable: %s", e)
+            candidates = []
+        _scan(candidates, "buy_candidate")
+
+        # 3) score 파일 중 만료 임박 (valid_until D+0 ~ D+30)
+        for key, raw in score_items.items():
+            try:
+                item = normalize_ai_berkshire_item(raw, as_of_date=today)
+            except Exception:
+                continue
+            valid_until = _parse_iso_date(item.get("valid_until"))
+            if valid_until is None:      # valid_until 누락/형식 오류는 만료임박이 아니다
+                continue
+            days_left = (valid_until - today).days
+            if not 0 <= days_left <= _RESEARCH_EXPIRY_WINDOW_DAYS:
+                continue
+            entry = _touch(key, item.get("name") or "", "score")
+            entry["stored_classification"] = item["stored_classification"]
+            entry["classification"] = item["classification"]
+            entry["as_of"] = item["as_of"]
+            entry["valid_until"] = item["valid_until"]
+            entry["freshness_issues"] = list(item["freshness_issues"])
+            entry["reasons"].add("expiring_within_30d")
+
+        items: list[dict] = []
+        for entry in entries.values():
+            if not entry["reasons"]:
+                continue
+            reason = min(entry["reasons"], key=lambda r: _RESEARCH_REASON_PRIORITY[r])
+            items.append({
+                "symbol": entry["symbol"],
+                "name": entry["name"],
+                "reason": reason,
+                "sources": entry["sources"],
+                "stored_classification": entry["stored_classification"],
+                "classification": entry["classification"],
+                "as_of": entry["as_of"],
+                "valid_until": entry["valid_until"],
+                "freshness_issues": entry["freshness_issues"],
+            })
+        items.sort(key=lambda i: (_RESEARCH_REASON_PRIORITY[i["reason"]], i["symbol"]))
+
+        counts = {reason: sum(1 for i in items if i["reason"] == reason)
+                  for reason in _RESEARCH_REASON_PRIORITY}
+        return {
+            "version": _RESEARCH_QUEUE_VERSION,
+            "read_only": True,
+            "generated_at": datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"),
+            "as_of": today.isoformat(),
+            "count": len(items),
+            "counts": counts,
+            "items": items[:limit],
+            "note": "GET-only 재리서치 대상 표시 · 주문 생성/승인/전송 없음",
+        }
+
+    cache_key = f"ai_berkshire_research_queue:{limit}:{as_of_date or ''}"
+    return _cached(cache_key, 120, _fetch)
+
+
+def _parse_iso_date(value):
+    """ISO 날짜 문자열/날짜 → date. 누락/형식 오류는 None."""
+    from datetime import date as _date
+
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, _date):
+        return value
+    try:
+        return _date.fromisoformat(str(value or "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_research_date(value):
+    """as_of 문자열/날짜 → date. 값이 없거나 형식이 틀리면 오늘(KST)."""
+    return _parse_iso_date(value) or datetime.now(KST).date()
 
 
 # ─── /api/stock-agent/activity — Hermes Stock-Agent 분석 활동 조회 (GET-only) ──
@@ -3203,6 +3881,20 @@ def _normalize_broker_symbol(symbol: object) -> str:
 def _recent_toss_broker_orders(limit: int = 20) -> dict:
     """Read-only broker order truth from Toss GET order lists."""
     global _toss_broker_orders_last_good, _toss_broker_orders_cooldown_until
+
+    if _dashboard_toss_broker_reads_isolated():
+        return {
+            "ok": False,
+            "error": "dashboard_broker_read_isolated",
+            "orders": [],
+            "open_count": 0,
+            "closed_count": 0,
+            "cache_status": "isolated",
+            "source": "local live-pilot ledger only",
+            "read_only_notice": (
+                "자율매매 중 OAuth 충돌 방지: dashboard 프로세스는 Toss 주문 API를 직접 조회하지 않음"
+            ),
+        }
 
     _set_toss_readonly_timeout()
     cache_key = f"toss_broker_orders:{int(limit or 20)}"

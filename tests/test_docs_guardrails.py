@@ -105,6 +105,13 @@ ALLOWED_TOSS_FILES = {
     "tests/test_toss_autonomous_pipeline.py",
     "core/toss_position_review.py",
     "tests/test_toss_position_review.py",
+    "core/toss_income_strategy.py",
+    "tests/test_toss_income_strategy.py",
+    "tests/test_toss_account_auth_root_fix.py",
+    "tests/test_toss_buy_candidates_us_feed.py",
+    "core/ai_berkshire_toss.py",
+    "tests/test_ai_berkshire_toss.py",
+    "tests/test_toss_dashboard_broker_token_isolation.py",
 }
 
 
