@@ -158,6 +158,16 @@ def _risk_reward(c: dict) -> tuple[float, float, float]:
     from_high = abs(float(c.get("pct_from_52w_high") or 0))
     ret_20 = max(float(c.get("ret_20d") or 0), 0.0)
     target_pct = min(0.30, from_high / 100 * 0.5 + ret_20 / 200 + _TARGET_BASE)
+    # US fallback quotes currently do not provide chart/52w-high metrics. Treat that
+    # as missing data, not as a genuine <1.0 RR failure; otherwise every US name is
+    # hard-rejected before the US session pipeline can even evaluate it.
+    if (
+        _market_of(c.get("ticker", ""), c.get("market", "")) == "US"
+        and from_high == 0
+        and ret_20 == 0
+        and str(c.get("source") or "").startswith("유니버스(fallback)")
+    ):
+        target_pct = max(target_pct, 0.10)
     stop = round(price * (1 - _STOP_PCT), 2)
     target = round(price * (1 + target_pct), 2)
     rr = round(target_pct / _STOP_PCT, 2) if _STOP_PCT else 0.0
@@ -859,7 +869,7 @@ def toss_eligible_new_candidates(
     sections: DiscoverySections,
     max_order_krw: int = 100_000,
 ) -> dict:
-    """신규 발굴 후보 중 토스 소액 조건(KR/1주 ≤ 한도/BUY)을 통과한 후보만 items.
+    """신규 발굴 후보 중 토스 조건(KR/US, 1주 ≤ 한도/BUY)을 통과한 후보만 items.
 
     기존 삼성/RIA 추천을 재사용하지 않는다. items 0이면 excluded에
     '기존 후보 제외' + '신규 스캔 탈락 이유'를 함께 담는다.
@@ -883,23 +893,37 @@ def toss_eligible_new_candidates(
             "scope": "scan_unavailable",
         })
 
+    def _usdkrw_rate() -> float:
+        try:
+            from core import toss_client as tc
+            fx = tc.get_exchange_rate("USD", "KRW") or {}
+            return float(fx.get("rate") or fx.get("midRate") or 1500.0)
+        except Exception:
+            return 1500.0
+
+    usdkrw = _usdkrw_rate()
     limit_exceeded_count = 0
     for c in sections.new_discovery:
-        if c.market != "KR":
+        if c.market not in ("KR", "US"):
             excluded.append({
                 "ticker": c.ticker, "name": c.name,
-                "reason": "토스 소액 조건 미충족: 해외 종목 (KRW 소액 대상 아님)",
-                "scope": "toss_soak",
+                "reason": "토스 조건 미충족: 지원하지 않는 시장",
+                "scope": "toss_market_unsupported",
             })
             continue
-        est = c.price  # 1주 기준
+        est = c.price if c.market == "KR" else c.price * usdkrw  # 1주 기준 KRW 환산
         over_limit = est > max_order_krw
         blocking_flags = _blocking_risk_flags(c.risk_flags)
         observation_flags = _soft_observation_flags(c.risk_flags)
         item = {
             "symbol": c.ticker, "name": c.name, "side": "buy", "quantity": 1,
             "price": c.price,
-            "limit_price": c.price, "estimated_amount_krw": round(c.price, 2),
+            "limit_price": c.price,
+            "currency": "KRW" if c.market == "KR" else "USD",
+            "asset_type": "KR_STOCK" if c.market == "KR" else "US_STOCK",
+            "estimated_amount_krw": round(est, 2),
+            "estimated_amount_usd": round(c.price, 2) if c.market == "US" else None,
+            "fx_usdkrw": round(usdkrw, 4) if c.market == "US" else None,
             "market": c.market, "idea": c.idea, "score": c.score,
             "target_price": c.target_price, "stop_loss": c.stop_loss,
             "risk_reward": c.risk_reward,
@@ -924,7 +948,7 @@ def toss_eligible_new_candidates(
             limit_exceeded_count += 1
             item["execution_status"] = "limit_exceeded"
             item["block_reason"] = (
-                f"1주 {est:,.0f}원 > 현재 1회 한도 {max_order_krw:,.0f}원"
+                f"1주 원화환산 {est:,.0f}원 > 현재 1회 한도 {max_order_krw:,.0f}원"
             )
             item["suggested_action"] = "한도 상향 또는 수동 승인 필요"
         elif observation_flags:
@@ -946,7 +970,10 @@ def toss_eligible_new_candidates(
     # 품질 게이트 점수화 (자동매매 PASS 품질 강화)
     try:
         from core.toss_quality_gate import score_candidates_batch
-        items = score_candidates_batch(items, market="KR")
+        score_market = getattr(sections, "market", "KR")
+        if score_market == "KR/US":
+            score_market = "ALL"
+        items = score_candidates_batch(items, market=score_market)
     except Exception as e:
         import logging
         logging.getLogger(__name__).warning("quality gate scoring failed: %s", e)

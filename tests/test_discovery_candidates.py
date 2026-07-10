@@ -223,14 +223,17 @@ class TestTossEligible(unittest.TestCase):
         self.assertNotIn("bbb.KS", {e.get("ticker") for e in result["excluded"]})
         self.assertGreaterEqual(result["scan_summary"]["limit_exceeded_count"], 1)
 
-    def test_toss_buy_only_us_excluded_for_krw_limit(self):
-        # US 종목은 토스 소액(KRW) 대상 아님 — 제외
+    def test_toss_buy_us_candidate_kept_with_usd_sizing(self):
+        # US 종목은 시장별 후보 API에서 쓰이므로 전역 제외하지 않는다.
         cands = [_cand("XYZ", "미국주", market="US", price=50.0, volume_value=5e10)]
         sections = build_discovery_sections(
             scan_candidates=cands, briefing_type="US_BEFORE", **_ctx(),
         )
         result = toss_eligible_new_candidates(sections, max_order_krw=100_000)
-        self.assertNotIn("XYZ", {i["symbol"] for i in result["items"]})
+        item = next(i for i in result["items"] if i["symbol"] == "XYZ")
+        self.assertEqual(item["market"], "US")
+        self.assertEqual(item["asset_type"], "US_STOCK")
+        self.assertEqual(item["estimated_amount_usd"], 50.0)
 
 
 # ─── 7. idea-first 출력 ───────────────────────────────────────────
