@@ -25,6 +25,7 @@ if str(_ROOT) not in sys.path:
 
 from core.toss_live_transport import LiveTossTransport
 # header 키 상수만 import (literal 노출 회피)
+from core import toss_live_order_http as _order_http
 from core.toss_live_order_http import _H_AUTH, _H_ACCOUNT
 
 _MOCK_TOKEN = "tok_mock_value"
@@ -46,10 +47,11 @@ def _payload(**kw) -> dict:
 
 
 class _Resp:
-    def __init__(self, status, payload=None, raise_json=False):
+    def __init__(self, status, payload=None, raise_json=False, text=None):
         self.status_code = status
         self._payload = payload or {}
         self._raise = raise_json
+        self.text = text if text is not None else str(self._payload)
 
     def json(self):
         if self._raise:
@@ -71,6 +73,7 @@ def _run_send(
         accounts = [{"accountSeq": "55501234"}]
     if holdings is None:
         holdings = {"items": [{"symbol": "SOFI", "sellableQuantity": "1", "quantity": "1"}]}
+    _order_http._clear_account_seq_cache()
     mock_post = MagicMock()
     if post_exc is not None:
         mock_post.side_effect = post_exc
@@ -204,6 +207,16 @@ class TestHttpError(unittest.TestCase):
         result, _ = _run_send(post_return=_Resp(500))
         self.assertFalse(result["live_order_sent"])
         self.assertIn("500", result["reason"])
+
+    def test_422_keeps_error_body_and_request_preview(self):
+        result, _ = _run_send(
+            post_return=_Resp(422, text='{"code":"INVALID_PRICE"}')
+        )
+        self.assertFalse(result["live_order_sent"])
+        self.assertEqual(result["reason"], "http_422")
+        self.assertIn("INVALID_PRICE", result["error_body"])
+        self.assertEqual(result["order_request_preview"]["symbol"], "SOFI")
+        self.assertNotIn(_MOCK_TOKEN, str(result))
 
 
 # ── 6. requests 예외 ─────────────────────────────────────

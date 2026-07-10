@@ -54,6 +54,12 @@ def _candidate(symbol="091180.KS", **kw) -> dict:
         "decision_bucket": "PASS_EXECUTE",
         "score": 75,
         "risk_reward": 2.0,
+        "income_strategy": {
+            "income_pass": True,
+            "income_grade": "INCOME_PASS",
+            "expected_pnl_krw": 12_000,
+            "income_edge_ratio": 0.02,
+        },
     }
     base.update(kw)
     return base
@@ -247,6 +253,23 @@ class TestRun(unittest.TestCase):
         with patch("core.market_hours.is_kr_market_open", return_value=False):
             r = tap.run_toss_autonomous_pipeline(now=_NOW)
             self.assertEqual(r.get("skipped"), "market_closed")
+
+    def test_us_tradeable_session_processes_us_candidate_when_kr_closed(self):
+        us_now = datetime(2026, 7, 3, 23, 0, tzinfo=KST)  # KST Friday, US regular session
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.json"
+            us_candidate = _candidate("NVDA", limit_price=190.0, estimated_amount_krw=287000)
+            with patch.object(tap, "_state_path", return_value=state_path),                  patch("core.market_hours.get_market_session", return_value={"kr": "CLOSED", "us": "US_REGULAR"}),                  patch("core.toss_live_pilot_policy.compute_toss_live_pilot_policy", return_value=dict(_POLICY_ON, allowed_asset_types=["US_STOCK", "KR_STOCK"])),                  patch.object(tap, "select_ready_candidates", return_value=([us_candidate], [])) as mock_select,                  patch.object(tap, "retry_retryable_orders", return_value={"retried": 0, "sent": 0, "exhausted": 0}),                  patch.object(tap, "process_candidate", return_value={"symbol": "NVDA", "stage": "verdict_recorded", "verdict": "PASS"}):
+                r = tap.run_toss_autonomous_pipeline(now=us_now)
+        self.assertEqual(r.get("attempted"), 1)
+        self.assertEqual(mock_select.call_args.kwargs.get("market"), "US")
+
+    def test_select_ready_candidates_passes_market_to_candidate_feed(self):
+        items = [_candidate("NVDA")]
+        with patch("core.dashboard_data.toss_buy_candidates_data", return_value={"items": items}) as mock_feed:
+            ready, _ = tap.select_ready_candidates(market="US")
+        self.assertEqual([r["symbol"] for r in ready], ["NVDA"])
+        self.assertEqual(mock_feed.call_args.kwargs.get("market"), "US")
 
 
 # ── 6. retry sweep ───────────────────────────────────────────────
@@ -491,6 +514,29 @@ class TestDailyReport(unittest.TestCase):
                 tmp, kpi={"ok": False, "reason": "toss_api_cooldown"})
             self.assertTrue(r["sent"])
             self.assertIn("조회 실패", msgs[0])
+
+
+
+
+def test_select_ready_candidates_requires_income_pass():
+    items = [
+        _candidate("A.KS", income_strategy={"income_pass": True, "expected_pnl_krw": 9000, "income_edge_ratio": 0.02}),
+        _candidate("B.KS", income_strategy={"income_pass": False, "income_block_reason": "expected_pnl_below_threshold"}),
+    ]
+    with patch("core.dashboard_data.toss_buy_candidates_data", return_value={"items": items}):
+        ready, not_ready = tap.select_ready_candidates()
+    assert [r["symbol"] for r in ready] == ["A.KS"]
+    assert not_ready == [{"symbol": "B.KS", "reason": "expected_pnl_below_threshold"}]
+
+
+def test_select_ready_candidates_sorts_by_expected_income():
+    items = [
+        _candidate("LOW.KS", income_strategy={"income_pass": True, "expected_pnl_krw": 8_000, "income_edge_ratio": 0.01}),
+        _candidate("HIGH.KS", income_strategy={"income_pass": True, "expected_pnl_krw": 18_000, "income_edge_ratio": 0.03}),
+    ]
+    with patch("core.dashboard_data.toss_buy_candidates_data", return_value={"items": items}):
+        ready, _ = tap.select_ready_candidates()
+    assert [r["symbol"] for r in ready] == ["HIGH.KS", "LOW.KS"]
 
 
 if __name__ == "__main__":

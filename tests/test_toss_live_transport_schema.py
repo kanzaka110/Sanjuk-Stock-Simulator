@@ -150,6 +150,53 @@ class TestPrice(unittest.TestCase):
         self.assertEqual(r["request"]["price"], "30.85")
 
 
+# ── 5-1. KR 호가단위 정규화 ───────────────────────────────
+
+class TestKrPriceTick(unittest.TestCase):
+    def test_kr_sell_off_tick_price_floored_to_valid_tick(self):
+        r = build_toss_order_create_request(
+            _payload(symbol="042660.KS", side="sell", limit_price=110050),
+            client_order_id="tlive_tick_sell",
+            asset_type="KR_STOCK",
+        )
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["request"]["symbol"], "042660")
+        self.assertEqual(r["request"]["side"], "SELL")
+        self.assertEqual(r["request"]["price"], "110000")
+        self.assertTrue(any("kr_tick_price_adjusted" in w for w in r["warnings"]))
+
+    def test_kr_buy_off_tick_price_floored_to_valid_tick(self):
+        r = build_toss_order_create_request(
+            _payload(symbol="024110.KS", side="buy", limit_price=110050),
+            client_order_id="tlive_tick_buy",
+            asset_type="KR_STOCK",
+        )
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["request"]["symbol"], "024110")
+        self.assertEqual(r["request"]["side"], "BUY")
+        self.assertEqual(r["request"]["price"], "110000")
+        self.assertTrue(any("tick=100" in w for w in r["warnings"]))
+
+    def test_kr_on_tick_price_unchanged(self):
+        r = build_toss_order_create_request(
+            _payload(symbol="042660.KS", side="sell", limit_price=110100),
+            client_order_id="tlive_tick_exact",
+            asset_type="KR_STOCK",
+        )
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["request"]["price"], "110100")
+        self.assertFalse(any("kr_tick_price_adjusted" in w for w in r["warnings"]))
+
+    def test_kr_44800_is_valid_50_tick(self):
+        r = build_toss_order_create_request(
+            _payload(symbol="403870.KS", side="sell", limit_price=44800),
+            client_order_id="tlive_tick_44800",
+            asset_type="KR_STOCK",
+        )
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["request"]["price"], "44800")
+
+
 # ── 6. clientOrderId ─────────────────────────────────────
 
 class TestClientOrderId(unittest.TestCase):

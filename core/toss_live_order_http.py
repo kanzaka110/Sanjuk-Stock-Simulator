@@ -25,6 +25,11 @@ from core import toss_client as tc
 
 log = logging.getLogger(__name__)
 
+# accountSeq cache: avoid calling /api/v1/accounts for every order.
+_ACCOUNT_SEQ_CACHE: str = ""
+_ACCOUNT_SEQ_CACHE_AT: float = 0.0
+_ACCOUNT_SEQ_CACHE_TTL_SEC = 60 * 30
+
 # 주문 생성 endpoint (공식 확인됨)
 _ORDER_PATH = "/api/v1/orders"
 
@@ -46,10 +51,27 @@ def _mask(value) -> str:
     return s
 
 
+def _clear_account_seq_cache() -> None:
+    """Clear cached accountSeq (test/explicit recovery helper)."""
+    global _ACCOUNT_SEQ_CACHE, _ACCOUNT_SEQ_CACHE_AT
+    _ACCOUNT_SEQ_CACHE = ""
+    _ACCOUNT_SEQ_CACHE_AT = 0.0
+
+
 def _resolve_account_seq(account_seq: str | None) -> str | None:
-    """accountSeq 결정 — 미지정 시 기존 toss_client 계좌 조회 재사용."""
+    """Resolve Toss accountSeq with env/cache before hitting /accounts."""
+    global _ACCOUNT_SEQ_CACHE, _ACCOUNT_SEQ_CACHE_AT
     if account_seq:
         return str(account_seq)
+
+    env_seq = os.environ.get("TOSS_ACCOUNT_SEQ", "").strip()
+    if env_seq:
+        return env_seq
+
+    now = time.time()
+    if _ACCOUNT_SEQ_CACHE and now - _ACCOUNT_SEQ_CACHE_AT < _ACCOUNT_SEQ_CACHE_TTL_SEC:
+        return _ACCOUNT_SEQ_CACHE
+
     try:
         accounts = tc.get_accounts()
     except Exception as e:
@@ -57,7 +79,10 @@ def _resolve_account_seq(account_seq: str | None) -> str | None:
         return None
     if not accounts:
         return None
-    seq = str(accounts[0].get("accountSeq", ""))
+    seq = str(accounts[0].get("accountSeq", "")).strip()
+    if seq:
+        _ACCOUNT_SEQ_CACHE = seq
+        _ACCOUNT_SEQ_CACHE_AT = now
     return seq or None
 
 
@@ -260,6 +285,110 @@ def confirm_order_state(order_id: str, *, account_seq: str | None = None) -> dic
     return {"ok": False, "reason": single.get("reason", "order_not_found"), "broker_confirmed": False}
 
 
+_RECONCILE_WINDOW_SEC = 600  # POST 401 대조 시 "우리 주문"으로 인정할 시각 범위
+
+
+def _parse_order_epoch(raw: str) -> float | None:
+    """broker ordered_at(ISO 추정) → epoch. 실패 시 None (보수적 미매칭)."""
+    from datetime import datetime, timezone, timedelta
+    s = str(raw or "").strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone(timedelta(hours=9)))  # Toss=KST 가정
+        return dt.timestamp()
+    except ValueError:
+        return None
+
+
+def _reconcile_post_401(
+    request_body: dict,
+    account_seq: str,
+    *,
+    used_token: str,
+    requested_at: float,
+) -> dict:
+    """POST 401 후 처리 — 재POST 금지, 주문 원장 1회 대조.
+
+    ① 이 POST가 쓴 토큰 세대만 invalidate (다른 스레드의 새 토큰 보호)
+    ② fresh token으로 OPEN/CLOSED 주문 GET 1회씩 대조
+    ③ symbol/side/quantity + 요청 시각 범위가 일치하는 주문이 있으면
+       "이미 도달한 주문"으로 처리 (재POST 없음)
+    ④ 못 찾아도 재POST하지 않고 auth_ambiguous terminal로 기록
+    반환값에 token/account/header 미포함.
+    """
+    log.warning("live order POST 401 — no re-POST, reconciling via order list")
+    try:
+        tc._invalidate_access_token(expected_token=used_token)
+    except TypeError:
+        tc._invalidate_access_token()
+
+    symbol = str(request_body.get("symbol", "")).strip().upper()
+    side = str(request_body.get("side", "")).strip().upper()
+    quantity = _as_float(request_body.get("quantity"))
+
+    matched: dict | None = None
+    reconcile_checked = 0
+    for status in ("OPEN", "CLOSED"):
+        listed = list_orders(status, account_seq=account_seq)
+        if not listed.get("ok"):
+            continue
+        for row in listed.get("orders") or []:
+            reconcile_checked += 1
+            if str(row.get("symbol") or "").strip().upper() != symbol:
+                continue
+            if str(row.get("side") or "").strip().upper() != side:
+                continue
+            if abs(_as_float(row.get("quantity")) - quantity) > 1e-9:
+                continue
+            epoch = _parse_order_epoch(row.get("ordered_at"))
+            if epoch is None:
+                continue  # 시각 미상 주문을 우리 것으로 단정하지 않는다
+            if abs(epoch - requested_at) <= _RECONCILE_WINDOW_SEC:
+                matched = row
+                break
+        if matched:
+            break
+
+    if matched:
+        log.info("POST 401 reconciliation: matching broker order found — treated as sent")
+        return {
+            "ok": True,
+            "live_order_sent": True,
+            "reason": "live_sent_confirmed_after_401",
+            "transport_status": "live_sent",
+            "auth_race_recovered": True,
+            "broker_order_id": matched.get("broker_order_id", ""),
+            "broker_confirmed": True,
+            "broker_order_status": matched.get("broker_order_status", ""),
+            "filled_quantity": matched.get("filled_quantity", 0.0),
+            "filled_price": matched.get("filled_price", 0.0),
+            "order_confirmation": {"broker_confirmed": True, "source": "post_401_reconciliation", **matched},
+            "message": (
+                "POST 401 후 원장 대조로 기존 주문 확인 — 재전송 없음\n"
+                f"broker_status={matched.get('broker_order_status', '')}\n"
+                "live_order_sent=true"
+            ),
+        }
+
+    log.warning("POST 401 reconciliation: no matching order — terminal auth_ambiguous (no re-POST)")
+    return {
+        "ok": False,
+        "failed": True,
+        "live_order_sent": False,
+        "reason": "auth_ambiguous",
+        "transport_status": "live_send_failed",
+        "reconcile_orders_checked": reconcile_checked,
+        "message": (
+            "주문 전송 실패: POST 401 (인증 경쟁 상태 의심)\n"
+            "원장 대조에서 동일 주문 미확인 — 중복 주문 방지를 위해 재전송하지 않음\n"
+            "live_order_sent=false"
+        ),
+    }
+
+
 def submit_order(
     request_body: dict,
     *,
@@ -278,20 +407,7 @@ def submit_order(
     """
     import requests
 
-    # 1. token (기존 toss_client 로더 재사용)
-    token = tc._get_access_token()
-    if not token:
-        log.info("live order blocked: token unavailable")
-        return {
-            "ok": False,
-            "blocked": True,
-            "live_order_sent": False,
-            "reason": "token_unavailable",
-            "transport_status": "live_send_blocked",
-            "message": "차단: 인증 토큰 없음 — 아직 주문 전송 안 함\nlive_order_sent=false",
-        }
-
-    # 2. accountSeq
+    # 1. accountSeq — 선행 GET(계좌/보유)을 토큰 획득보다 먼저 끝낸다
     seq = _resolve_account_seq(account_seq)
     if not seq:
         log.info("live order blocked: account unavailable")
@@ -304,7 +420,7 @@ def submit_order(
             "message": "차단: 계좌 정보 없음 — 아직 주문 전송 안 함\nlive_order_sent=false",
         }
 
-    # 3. SELL 전 보유/매도가능수량 반영 확인
+    # 2. side/symbol/quantity 검증 + SELL 매도가능수량 확인 (여기까지 GET)
     side = str(request_body.get("side", "")).upper()
     symbol = str(request_body.get("symbol", "")).strip().upper()
     required_qty = _as_float(request_body.get("quantity"))
@@ -326,6 +442,21 @@ def submit_order(
                     "live_order_sent=false"
                 ),
             }
+
+    # 3. token — 모든 선행 GET이 끝난 뒤 주문 직전에 획득.
+    #    선행 GET 중 401 갱신으로 토큰이 교체돼도 주문은 항상 최신 토큰을 쓴다
+    #    (Toss는 client당 유효 토큰 1개 — 과거 토큰 POST는 401로 튕긴다).
+    token = tc._get_access_token()
+    if not token:
+        log.info("live order blocked: token unavailable")
+        return {
+            "ok": False,
+            "blocked": True,
+            "live_order_sent": False,
+            "reason": "token_unavailable",
+            "transport_status": "live_send_blocked",
+            "message": "차단: 인증 토큰 없음 — 아직 주문 전송 안 함\nlive_order_sent=false",
+        }
 
     # 4. headers (값은 반환/로그에 미포함)
     headers = {
@@ -351,6 +482,13 @@ def submit_order(
             "transport_status": "live_send_failed",
             "message": "주문 전송 실패: network error\n주문 전송 비활성\nlive_order_sent=false",
         }
+
+    if resp.status_code == 401:
+        # POST 401은 절대 재POST하지 않는다 — 브로커에 일부 도달했을 가능성을
+        # 배제할 수 없어 맹목 재전송은 중복 주문 위험이다. fresh token으로
+        # OPEN/CLOSED 주문을 1회 대조(reconciliation)해서 판정한다.
+        return _reconcile_post_401(
+            request_body, seq, used_token=token, requested_at=time.time())
 
     if resp.status_code not in (200, 201):
         log.warning("live order http error: status=%d", resp.status_code)

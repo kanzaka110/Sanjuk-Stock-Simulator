@@ -94,6 +94,21 @@ class TestRecordEventBasic(unittest.TestCase):
         types = {e["event_type"] for e in events}
         self.assertIn("cancelled", types)
 
+    def test_error_diagnostics_persisted_in_list(self):
+        from core.toss_live_pilot_events import record_event, list_events
+        record_event(
+            "tlive_diag",
+            "autonomous_send_failed",
+            "live_send_failed",
+            reason="http_422",
+            error_body='{"code":"INVALID_PRICE"}',
+            order_request_preview={"symbol": "000270", "side": "BUY"},
+        )
+        found = [e for e in list_events(limit=10) if e["pilot_id"] == "tlive_diag"]
+        self.assertTrue(found)
+        self.assertIn("INVALID_PRICE", found[0]["error_body"])
+        self.assertIn('\"symbol\": \"000270\"', found[0]["order_request_preview"])
+
 
 # ── 2. symbol_name / symbol_label ────────────────────────
 
@@ -308,3 +323,15 @@ class TestNoDeleteInSource(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_autonomous_send_retryable_event_type_is_accepted(tmp_path, monkeypatch):
+    from core import toss_live_pilot_events as ev
+    monkeypatch.setattr(ev, "_db_path", lambda: tmp_path / "events.db")
+    ev._schema_created = False
+    r = ev.record_event(
+        pilot_id="p_retry", event_type="autonomous_send_retryable",
+        status="live_send_retryable", symbol="042660.KS", side="sell",
+        quantity=1, limit_price=1000, live_order_sent=False,
+    )
+    assert r["ok"] is True

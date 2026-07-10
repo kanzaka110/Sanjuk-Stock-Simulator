@@ -25,8 +25,10 @@ Hermes PASS → 자동 주문 실행 모듈.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone, timedelta
 
 log = logging.getLogger(__name__)
+KST = timezone(timedelta(hours=9))
 
 
 def try_autonomous_finalize(pilot_id: str, allow_retry: bool = False) -> dict:
@@ -153,6 +155,31 @@ def _finalize_impl(pilot_id: str, allow_retry: bool = False) -> dict:
             "reason": "live_pilot_conditions_not_met",
         }
 
+    prior_422 = _prior_http_422_failure_today(records, rec, pilot_id)
+    if prior_422:
+        try:
+            record_live_send_blocked(pilot_id, [prior_422])
+        except Exception as e:
+            log.warning("autonomous prior-422 block ledger failed: %s", e)
+        _record_event(
+            pilot_id=pilot_id,
+            event_type="autonomous_blocked_guard",
+            status="live_send_blocked",
+            verification_id=verification_id,
+            reason=prior_422,
+            rec=rec,
+            policy=policy,
+        )
+        _send_result_telegram("blocked", rec, guard_reasons=[prior_422])
+        return {
+            "ok": False,
+            "action": "autonomous_finalize",
+            "live_order_sent": False,
+            "reason": "prior_http_422_today",
+            "guard_reasons": [prior_422],
+            "skipped": True,
+        }
+
     # 5. can_send guards
     preview_stub = {
         "ok": rec.get("status") not in ("blocked", "cancelled"),
@@ -208,6 +235,8 @@ def _finalize_impl(pilot_id: str, allow_retry: bool = False) -> dict:
         "quantity": preview_stub["quantity"],
         "limit_price": preview_stub["limit_price"],
         "estimated_amount_krw": preview_stub["estimated_amount_krw"],
+        "client_order_id": pilot_id,
+        "pilot_id": pilot_id,
     }
     transport = resolve_live_transport_for_confirm(policy)
     dispatch_result = dispatch_toss_order_live(payload, policy, transport=transport)
@@ -250,12 +279,20 @@ def _finalize_impl(pilot_id: str, allow_retry: bool = False) -> dict:
     else:
         fail_reason = dispatch_result.get("reason", "dispatch_failed") or "dispatch_failed"
         error_body = dispatch_result.get("error_body", "")
+        order_request_preview = (
+            dispatch_result.get("order_request_preview")
+            or dispatch_result.get("request_preview")
+            or ""
+        )
         failure_reason = (
             dispatch_result.get("failure_reason")
             or fail_reason
             or "dispatch_failed"
         )
         fail_detail = f"{failure_reason}: {error_body}" if error_body else failure_reason
+        cash_shortage = _is_insufficient_buying_power_failure(failure_reason, error_body)
+        if cash_shortage:
+            fail_detail = f"cash_blocked_rebalance_needed: {fail_detail}"
         retryable = _is_retryable_dispatch_failure(failure_reason, error_body)
         try:
             recorder = record_live_send_retryable if retryable else record_live_send_failed
@@ -277,6 +314,8 @@ def _finalize_impl(pilot_id: str, allow_retry: bool = False) -> dict:
             reason=fail_detail[:500],
             rec=rec,
             policy=policy,
+            error_body=error_body,
+            order_request_preview=order_request_preview,
         )
 
         _send_result_telegram(
@@ -289,26 +328,83 @@ def _finalize_impl(pilot_id: str, allow_retry: bool = False) -> dict:
             "action": "autonomous_finalize",
             "live_order_sent": False,
             "reason": fail_reason,
+            "failure_class": "cash_blocked_rebalance_needed" if cash_shortage else fail_reason,
+            "rebalance_needed": cash_shortage,
+            "cash_blocked": cash_shortage,
             "error_body": error_body[:300] if error_body else "",
+            "order_request_preview": order_request_preview,
         }
 
 
-def _is_retryable_dispatch_failure(reason: str, error_body: str = "") -> bool:
-    """일시적 transport/account/API 실패는 terminal failed로 소비하지 않는다."""
+def _is_insufficient_buying_power_failure(reason: str, error_body: str = "") -> bool:
+    """True when broker says cash/buying power is insufficient.
+
+    This is not transient retry noise. A good candidate should move to
+    sizing/rebalance planning instead of blind retry.
+    """
     text = f"{reason} {error_body}".lower()
+    tokens = (
+        "insufficient-buying-power",
+        "매수가능금액이 부족",
+        "not enough buying power",
+        "insufficient buying power",
+    )
+    return any(tok in text for tok in tokens)
+
+
+def _is_retryable_dispatch_failure(reason: str, error_body: str = "") -> bool:
+    """일시적 transport/account/API 실패는 terminal failed로 소비하지 않는다.
+
+    단, 매수가능금액 부족은 네트워크/계좌 일시 장애가 아니다. 같은 주문을
+    재시도해도 반복 실패하므로 sizing/rebalance 대상으로 남긴다.
+
+    POST 401(auth_ambiguous 포함)도 맹목 재시도 금지: POST가 브로커에 일부
+    도달했을 가능성을 배제하지 못해 재전송은 중복 주문 위험이다. transport가
+    원장 대조까지 끝낸 terminal 판정이므로 여기서 되살리지 않는다.
+    token_unavailable/account_unavailable은 POST 자체가 안 나간 차단이라
+    bounded retry 후보로 유지한다.
+    """
+    text = f"{reason} {error_body}".lower()
+    if _is_insufficient_buying_power_failure(reason, error_body):
+        return False
+    if "auth_ambiguous" in text or "http_401" in text:
+        return False
     retryable_tokens = (
         "dispatch_failed",
         "transport_exception",
         "network_error",
         "account_unavailable",
         "token_unavailable",
-        "http_401",
         "http_429",
         "rate limit",
         "timeout",
         "temporarily",
     )
     return any(tok in text for tok in retryable_tokens)
+
+
+def _prior_http_422_failure_today(records: list[dict], rec: dict, current_pilot_id: str) -> str:
+    """Same symbol/side http_422 failed once today -> do not hammer Toss again."""
+    symbol = str(rec.get("symbol") or "").strip()
+    side = str(rec.get("side") or "buy").lower()
+    if not symbol:
+        return ""
+    today = datetime.now(KST).strftime("%Y-%m-%d")
+    for row in records:
+        if row.get("pilot_id") == current_pilot_id:
+            continue
+        if str(row.get("symbol") or "").strip() != symbol:
+            continue
+        if str(row.get("side") or "buy").lower() != side:
+            continue
+        if str(row.get("created_at") or "")[:10] != today:
+            continue
+        if str(row.get("status") or "") != "live_send_failed":
+            continue
+        text = " ".join(str(row.get(k) or "") for k in ("failure_reason", "reason", "message"))
+        if "http_422" in text.lower():
+            return f"prior_http_422_today: {symbol}/{side}"
+    return ""
 
 
 # ── 이벤트 기록 ──────────────────────────────────────────────────

@@ -123,6 +123,37 @@ def _classify_asset_type(symbol: str) -> str:
     return "US_STOCK"
 
 
+def _kr_price_tick_size(price: float) -> int:
+    """KR_STOCK limit price tick size used by Toss/KRX-compatible orders."""
+    if price < 2_000:
+        return 1
+    if price < 5_000:
+        return 5
+    if price < 20_000:
+        return 10
+    if price < 50_000:
+        return 50
+    if price < 200_000:
+        return 100
+    if price < 500_000:
+        return 500
+    return 1_000
+
+
+def _normalize_kr_limit_price(price: float) -> tuple[int, int, bool]:
+    """Return (normalized_price, tick_size, adjusted).
+
+    Toss rejects off-tick KR prices. Floor to the nearest valid tick so the
+    request is never invalid because of a midpoint/stale quote such as 110050
+    when tickSize=100.
+    """
+    tick = _kr_price_tick_size(float(price))
+    normalized = int(float(price) // tick * tick)
+    if normalized <= 0:
+        normalized = tick
+    return normalized, tick, normalized != int(float(price))
+
+
 def build_toss_order_create_request(
     payload: dict,
     *,
@@ -200,9 +231,14 @@ def build_toss_order_create_request(
     if blocks:
         return {"ok": False, "request": {}, "blocks": blocks, "warnings": warnings}
 
-    # KR_STOCK: 가격은 정수 KRW, symbol에서 .KS/.KQ suffix strip
+    # KR_STOCK: 가격은 호가단위에 맞춘 정수 KRW, symbol에서 .KS/.KQ suffix strip
     if asset_type == "KR_STOCK":
-        price_str = str(int(price_num))
+        normalized_price, tick_size, adjusted = _normalize_kr_limit_price(price_num)
+        if adjusted:
+            warnings.append(
+                f"kr_tick_price_adjusted: {price_num:g} -> {normalized_price} (tick={tick_size})"
+            )
+        price_str = str(normalized_price)
         # Toss API는 국내 종목코드를 숫자만 받음 (예: "316140", not "316140.KS")
         api_symbol = norm_symbol.replace(".KS", "").replace(".KQ", "")
     else:
@@ -323,11 +359,15 @@ class LiveTossTransport(TossLiveTransportBase):
 
         from core.toss_live_order_http import submit_order
 
-        return submit_order(
+        result = submit_order(
             built["request"],
             account_seq=self._account_seq,
             timeout=self._timeout,
         )
+        if not result.get("live_order_sent"):
+            # Safe request preview only: no token/account/header fields.
+            result.setdefault("order_request_preview", built["request"])
+        return result
 
 
 def _runtime_live_transport_armed() -> bool:

@@ -18,6 +18,7 @@ event_type:
   live_sent                | 진짜 live 전송 성공 (adapter enabled + live_order_allowed + sent)
   live_sent_artifact       | test/mock/리허설 전송 — production live_sent로 카운트 금지
   live_send_failed         | 전송 시도 후 실패
+  autonomous_send_retryable | 자율주문 전송 실패이나 재시도 가능
 
 [오염 방지 invariant]
   - adapter_status != enabled 또는 live_order_allowed=false인 live_sent는
@@ -66,6 +67,7 @@ _VALID_EVENT_TYPES = frozenset([
     "autonomous_blocked_guard",
     "autonomous_live_sent",
     "autonomous_send_failed",
+    "autonomous_send_retryable",
 ])
 
 
@@ -112,6 +114,8 @@ def _conn() -> sqlite3.Connection:
                 broker_order_status TEXT DEFAULT '',
                 filled_quantity     REAL DEFAULT 0,
                 filled_price        REAL DEFAULT 0,
+                error_body          TEXT DEFAULT '',
+                order_request_preview TEXT DEFAULT '',
                 created_at          TEXT NOT NULL,
                 delivered_to_hermes INTEGER DEFAULT 0
             )
@@ -121,6 +125,8 @@ def _conn() -> sqlite3.Connection:
             ("broker_order_status", "TEXT DEFAULT ''"),
             ("filled_quantity", "REAL DEFAULT 0"),
             ("filled_price", "REAL DEFAULT 0"),
+            ("error_body", "TEXT DEFAULT ''"),
+            ("order_request_preview", "TEXT DEFAULT ''"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE live_pilot_events ADD COLUMN {col} {defn}")
@@ -143,6 +149,17 @@ def _gen_event_id() -> str:
 
 # ─── 이벤트 기록 ─────────────────────────────────────────
 
+def _stringify_event_diagnostic(value, limit: int = 600) -> str:
+    """Store only short, sanitized diagnostic strings in event rows."""
+    if value in (None, ""):
+        return ""
+    if isinstance(value, (dict, list, tuple)):
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    else:
+        text = str(value)
+    return text[:limit]
+
+
 def record_event(
     pilot_id: str,
     event_type: str,
@@ -164,6 +181,8 @@ def record_event(
     broker_order_status: str = "",
     filled_quantity: float = 0.0,
     filled_price: float = 0.0,
+    error_body: str = "",
+    order_request_preview="",
 ) -> dict:
     """Live pilot 이벤트 기록.
 
@@ -184,9 +203,12 @@ def record_event(
         log.warning("invalid event_type: %s", event_type)
         return {"ok": False, "reason": f"invalid event_type: {event_type!r}"}
 
+    error_body_text = _stringify_event_diagnostic(error_body, limit=600)
+    order_request_preview_text = _stringify_event_diagnostic(order_request_preview, limit=600)
+
     # 민감정보 가드
-    for kw in ("accountNo", "Bearer", "APP_KEY", "APP_SECRET"):
-        for field in (reason, message, broker_order_id, broker_order_status):
+    for kw in ("accountNo", "Bearer", "APP_KEY", "APP_SECRET", "token", "secret"):
+        for field in (reason, message, broker_order_id, broker_order_status, error_body_text, order_request_preview_text):
             if kw in str(field):
                 log.warning("민감정보 감지 in event fields: %s", kw)
                 return {"ok": False, "reason": f"sensitive_field: {kw}"}
@@ -222,15 +244,17 @@ def record_event(
                     side, quantity, limit_price, estimated_amount_krw,
                     live_order_sent, adapter_status, live_order_allowed,
                     reason, message, broker_order_id, broker_order_status,
-                    filled_quantity, filled_price, created_at, delivered_to_hermes)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    filled_quantity, filled_price, error_body, order_request_preview,
+                     created_at, delivered_to_hermes)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     event_id, pilot_id, preview_id, verification_id,
                     event_type, status, symbol, symbol_name, symbol_label,
                     side, quantity, limit_price, estimated_amount_krw,
                     1 if live_order_sent else 0, adapter_status, stored_allowed,
                     reason, message, broker_order_id, broker_order_status,
-                    float(filled_quantity or 0), float(filled_price or 0), now, 0,
+                    float(filled_quantity or 0), float(filled_price or 0),
+                    error_body_text, order_request_preview_text, now, 0,
                 ),
             )
             conn.commit()
@@ -253,6 +277,8 @@ def record_event(
         "broker_order_status": broker_order_status,
         "filled_quantity": float(filled_quantity or 0),
         "filled_price": float(filled_price or 0),
+        "error_body": error_body_text,
+        "order_request_preview": order_request_preview_text,
         "created_at": now,
     }
 

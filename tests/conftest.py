@@ -1,10 +1,24 @@
 """Pytest configuration for Sanjuk-Stock-Simulator."""
 
 import importlib
+import os
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+# Pytest must never inherit production Toss broker credentials from the repo .env.
+# core.toss_client uses python-dotenv with override=False, so pre-declaring empty
+# values here keeps every unmocked test fail-closed while tests may still inject
+# explicit fake credentials with monkeypatch/patch for their own scope.
+for _name in (
+    "TOSS_APP_KEY",
+    "TOSS_APP_SECRET",
+    "TOSS_BASE_URL",
+    "TOSS_ACCOUNT_NO",
+    "TOSS_ACCOUNT_SEQ",
+):
+    os.environ[_name] = ""
 
 PROJECT_ROOT = Path(__file__).parent.parent
 

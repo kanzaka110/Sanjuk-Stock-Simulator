@@ -75,6 +75,16 @@ def _mock_transport_fail(payload, policy):
     }
 
 
+def _mock_transport_http_422(payload, policy):
+    return {
+        "ok": False,
+        "live_order_sent": False,
+        "reason": "http_422",
+        "error_body": '{"code":"INVALID_PRICE"}',
+        "order_request_preview": {"symbol": "000270", "side": "BUY"},
+    }
+
+
 class TestAutonomousDisabled:
     """autonomous_mode=false → no-op."""
 
@@ -217,3 +227,56 @@ class TestTelegramResultSent:
         text = mock_tg.call_args[0][0]
         assert "자율실행 체결" in text
         assert "NVDA" in text
+
+
+class TestHttp422Diagnostics:
+    """http_422 broker diagnostics must be persisted and not retried same day."""
+
+    @patch("core.toss_live_pilot_verification.is_verification_passed", _mock_verif_pass)
+    @patch("core.toss_live_pilot_ledger.list_live_pilot_records", _mock_ledger_records)
+    @patch("core.toss_live_pilot_ledger.record_live_send_failed")
+    @patch("core.toss_live_pilot_events.record_event")
+    @patch("core.toss_live_pilot_telegram.resolve_live_transport_for_confirm")
+    @patch("core.toss_live_pilot_telegram.send_autonomous_result_message", return_value=True)
+    def test_http_422_error_body_and_request_preview_recorded(
+        self, mock_tg, mock_transport, mock_event, mock_ledger
+    ):
+        mock_transport.return_value = _mock_transport_http_422
+        mock_event.return_value = {"ok": True, "event_id": "tle_mock"}
+        with patch.dict(os.environ, _AUTO_ENV, clear=False):
+            from core.toss_autonomous_finalizer import try_autonomous_finalize
+            result = try_autonomous_finalize("test_pilot_001")
+        assert result["ok"] is False
+        assert result["reason"] == "http_422"
+        assert "INVALID_PRICE" in result["error_body"]
+        assert result["order_request_preview"]["symbol"] == "000270"
+        kwargs = mock_event.call_args.kwargs
+        assert "INVALID_PRICE" in kwargs["error_body"]
+        assert kwargs["order_request_preview"]["side"] == "BUY"
+        mock_ledger.assert_called_once()
+
+    @patch("core.toss_live_pilot_verification.is_verification_passed", _mock_verif_pass)
+    @patch("core.toss_live_pilot_ledger.record_live_send_blocked")
+    @patch("core.toss_live_pilot_adapter.dispatch_toss_order_live")
+    @patch("core.toss_live_pilot_telegram.send_autonomous_result_message", return_value=True)
+    def test_prior_http_422_same_symbol_side_today_blocks_new_attempt(
+        self, mock_tg, mock_dispatch, mock_block
+    ):
+        today = datetime.now(KST).strftime("%Y-%m-%dT09:01:00+09:00")
+        current = {**_PILOT_REC, "pilot_id": "test_pilot_001", "symbol": "000270.KS"}
+        prior = {
+            **_PILOT_REC,
+            "pilot_id": "old_failed",
+            "symbol": "000270.KS",
+            "status": "live_send_failed",
+            "failure_reason": "http_422: INVALID_PRICE",
+            "created_at": today,
+        }
+        with patch("core.toss_live_pilot_ledger.list_live_pilot_records", return_value=[current, prior]):
+            with patch.dict(os.environ, _AUTO_ENV, clear=False):
+                from core.toss_autonomous_finalizer import try_autonomous_finalize
+                result = try_autonomous_finalize("test_pilot_001")
+        assert result["ok"] is False
+        assert result["reason"] == "prior_http_422_today"
+        mock_dispatch.assert_not_called()
+        mock_block.assert_called_once()

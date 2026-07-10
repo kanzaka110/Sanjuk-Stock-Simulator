@@ -435,6 +435,11 @@ def dispatch_toss_order_live(
     result = {
         "ok": sent,
         "blocked": False,
+        "reason": (
+            transport_result.get("reason")
+            or transport_result.get("failure_reason")
+            or ("live_sent" if sent else "unknown")
+        ),
         "live_order_sent": sent,
         "adapter_status": policy.get("adapter_status", "disabled"),
         "live_order_allowed": policy.get("live_order_allowed", False),
@@ -456,6 +461,14 @@ def dispatch_toss_order_live(
             or ""
         ) if not sent else "",
     }
+    if transport_result.get("error_body"):
+        result["error_body"] = transport_result.get("error_body")
+    order_request_preview = (
+        transport_result.get("order_request_preview")
+        or transport_result.get("request_preview")
+    )
+    if order_request_preview:
+        result["order_request_preview"] = order_request_preview
 
     if sent:
         result["message"] = (
