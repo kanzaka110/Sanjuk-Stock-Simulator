@@ -44,5 +44,7 @@ Thumbs.db
 reports/samsung_reconciliation_*.md
 
 # Runtime data (state files, personal financial data)
-db/data/
+# db/data/* 로 두는 이유: 디렉터리 무시(db/data/)면 내부 negation이 불가능
+db/data/*
+!db/data/ai_berkshire_scores.json
 logs/

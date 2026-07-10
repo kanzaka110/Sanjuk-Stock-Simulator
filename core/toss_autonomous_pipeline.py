@@ -17,7 +17,7 @@ verification DB에 남으므로 사후 검증 가능.
 - TOSS_AUTONOMOUS_MODE=false → no-op (finalizer도 이중 차단)
 - TOSS_AUTONOMOUS_KILL_SWITCH=true → no-op
 - TOSS_AUTO_PIPELINE_ENABLED=false → 이 파이프라인만 개별 비활성화
-- KR 정규장 시간에만 동작
+- KR/US 각 거래 가능 세션에만 동작
 - 자동 판정은 build_default_hermes_verdict 규칙 사용 (sell guard/
   blocked symbol/금액/가격 검증)
 - 실행 직전 can_send_live_pilot_order 가드 체인 + cross_check는
@@ -65,6 +65,26 @@ def _pipeline_enabled() -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
+def _active_execution_market(now: datetime | None = None) -> str:
+    """현재 자동 실행 가능한 시장 반환: KR / US / ALL / ''.
+
+    KR은 한국 정규장, US는 프리+정규+애프터를 주문 가능 세션으로 본다.
+    기존 KR-only 게이트 때문에 US 후보가 밤에 실행되지 않던 문제를 분리한다.
+    """
+    from core.market_hours import get_market_session, is_kr_market_open
+
+    kr_open = is_kr_market_open(now)
+    session = get_market_session(now)
+    us_tradeable = session.get("us") in {"US_PREMARKET", "US_REGULAR", "US_AFTERMARKET"}
+    if kr_open and us_tradeable:
+        return "ALL"
+    if us_tradeable:
+        return "US"
+    if kr_open:
+        return "KR"
+    return ""
+
+
 def _state_path() -> Path:
     root = Path(__file__).resolve().parent.parent
     return root / "db" / "data" / _STATE_FILE
@@ -91,32 +111,58 @@ def _save_state(state: dict) -> None:
 
 # ── 후보 선별 ────────────────────────────────────────────────────
 
-def select_ready_candidates(limit: int = 10) -> tuple[list[dict], list[dict]]:
+def select_ready_candidates(limit: int = 10, market: str = "KR") -> tuple[list[dict], list[dict]]:
     """stock_agent_ready 후보와 미달 후보(사유 포함)를 분리 반환.
+
+    market: "KR" | "US" | "ALL". 자동 파이프라인은 현재 거래 가능 세션의
+    시장만 후보로 가져와 KR 원화 소진이 US 달러 후보를 밀어내지 않게 한다.
 
     Returns:
         (ready, not_ready) — not_ready 항목은 진단용 {symbol, reason}
     """
     from core.dashboard_data import toss_buy_candidates_data
 
-    data = toss_buy_candidates_data(limit=limit) or {}
+    data = toss_buy_candidates_data(limit=limit, market=market) or {}
     items = data.get("items") or []
     ready: list[dict] = []
     not_ready: list[dict] = []
     for item in items:
-        if item.get("stock_agent_ready"):
+        income = item.get("income_strategy") or {}
+        side = str(item.get("side") or "buy").lower()
+        income_ok = side != "buy" or bool(income.get("income_pass"))
+        if item.get("stock_agent_ready") and income_ok:
             ready.append(item)
         else:
+            reason = str(
+                income.get("income_block_label")
+                or income.get("income_block_reason")
+                or ("income_strategy_missing" if side == "buy" and not income else "")
+                or item.get("block_reason")
+                or item.get("decision_reason")
+                or item.get("execution_status")
+                or ("missing: " + ",".join(item.get("missing_fields") or []) if item.get("missing_fields") else "")
+                or "unknown"
+            )
             not_ready.append({
                 "symbol": item.get("symbol") or item.get("ticker") or "",
-                "reason": str(
-                    item.get("block_reason")
-                    or item.get("decision_reason")
-                    or item.get("execution_status")
-                    or ("missing: " + ",".join(item.get("missing_fields") or []) if item.get("missing_fields") else "")
-                    or "unknown"
-                ),
+                "reason": reason,
             })
+
+    def _ready_sort_key(item: dict) -> tuple[float, float, float, float]:
+        income = item.get("income_strategy") or {}
+        def _f(v) -> float:
+            try:
+                return float(v or 0)
+            except (TypeError, ValueError):
+                return 0.0
+        return (
+            _f(income.get("expected_pnl_krw")),
+            _f(income.get("income_edge_ratio")),
+            _f(item.get("risk_reward")),
+            _f(item.get("score")),
+        )
+
+    ready.sort(key=_ready_sort_key, reverse=True)
     return ready, not_ready
 
 
@@ -157,6 +203,36 @@ def process_candidate(
     from core.toss_live_pilot_hermes_bridge import build_default_hermes_verdict
 
     symbol = str(candidate.get("symbol") or candidate.get("ticker") or "")
+    side = str(candidate.get("side") or "buy").lower()
+    income = candidate.get("income_strategy") or {}
+    if side == "buy" and not income.get("income_pass"):
+        return {
+            "symbol": symbol,
+            "stage": "income_gate_blocked",
+            "reason": str(
+                income.get("income_block_label")
+                or income.get("income_block_reason")
+                or "income_strategy_missing"
+            ),
+        }
+
+    # AI Berkshire avoid 게이트 — dashboard 후보 정규화와 독립 재검사.
+    # stale preview / API 우회로 avoid 종목이 들어와도 preview/finalizer/transport에
+    # 도달하지 못하게 한다. BUY에만 적용 (SELL/손절/익절 경로는 불변).
+    if side == "buy":
+        from core.ai_berkshire_toss import evaluate_ai_berkshire_buy_gate
+        try:
+            gate = evaluate_ai_berkshire_buy_gate(symbol)
+        except Exception as e:                       # 게이트 오류로 기존 경로를 끊지 않는다
+            log.warning("ai_berkshire buy gate recheck failed (%s): %s", symbol, e)
+            gate = {}
+        if gate.get("buy_block"):
+            log.info("auto pipeline: %s blocked by ai_berkshire avoid", symbol)
+            return {
+                "symbol": symbol,
+                "stage": "ai_berkshire_avoid_blocked",
+                "reason": str(gate.get("buy_reason") or "ai_berkshire_avoid"),
+            }
 
     preview_input = {
         "symbol": symbol,
@@ -231,6 +307,10 @@ def _quality_note(candidate: dict) -> str:
         parts.append(f"score={score}")
     if rr is not None:
         parts.append(f"rr={rr}")
+    income = candidate.get("income_strategy") or {}
+    if income:
+        parts.append(f"expected_pnl={income.get('expected_pnl_krw')}")
+        parts.append(f"income_grade={income.get('income_grade')}")
     return " ".join(parts) or "quality_gate_pass"
 
 
@@ -489,7 +569,7 @@ def run_toss_autonomous_pipeline(
 ) -> dict:
     """자동 파이프라인 1회 실행 (monitor 루프에서 호출).
 
-    - 스로틀(기본 10분, env TOSS_PIPELINE_INTERVAL_MIN) + KR 정규장 시간에만
+    - 스로틀(기본 10분, env TOSS_PIPELINE_INTERVAL_MIN) + KR/US 거래 가능 세션에만
     - autonomous mode ON + kill switch OFF일 때만
     - 심볼당 1일 1회 시도
     - 실행 결과와 no_action_diagnosis를 상태 파일에 기록
@@ -499,8 +579,10 @@ def run_toss_autonomous_pipeline(
     if not _pipeline_enabled():
         return {"skipped": "pipeline_disabled"}
 
-    from core.market_hours import is_kr_market_open
-    if not force and not is_kr_market_open(now):
+    active_market = _active_execution_market(now)
+    if force and not active_market:
+        active_market = "ALL"
+    if not active_market:
         return {"skipped": "market_closed"}
 
     from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
@@ -529,7 +611,7 @@ def run_toss_autonomous_pipeline(
 
     # 후보 선별
     try:
-        ready, not_ready = select_ready_candidates()
+        ready, not_ready = select_ready_candidates(market=active_market)
     except Exception as e:
         log.warning("auto pipeline candidate fetch failed: %s", e)
         ready, not_ready = [], [{"symbol": "", "reason": f"candidate_fetch_failed: {e}"}]
@@ -571,6 +653,7 @@ def run_toss_autonomous_pipeline(
         "last_run": now.strftime("%Y-%m-%dT%H:%M:%S+09:00"),
         "attempted_date": today,
         "attempted": attempted_map,
+        "active_market": active_market,
         "last_results": results,
         "no_action_diagnosis": diagnosis if diagnosis else None,
     })
@@ -587,6 +670,7 @@ def run_toss_autonomous_pipeline(
     return {
         "attempted": len(results),
         "pass_count": pass_count,
+        "active_market": active_market,
         "results": results,
         "retry": retry_summary,
         "no_action_diagnosis": diagnosis or None,
