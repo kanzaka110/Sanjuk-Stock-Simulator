@@ -124,21 +124,38 @@ class MarketMonitor:
         except Exception as e:
             log.warning(f"toss order watch 실패: {e}")
 
-        # Toss 자율 파이프라인 — PASS_EXECUTE 후보 자동 preview/검증/판정
-        # (내부 스로틀 기본 10분(env TOSS_PIPELINE_INTERVAL_MIN) + KR 장중 + autonomous mode 게이트)
-        try:
-            from core.toss_autonomous_pipeline import run_toss_autonomous_pipeline
-            run_toss_autonomous_pipeline(now=now)
-        except Exception as e:
-            log.warning(f"toss autonomous pipeline 실패: {e}")
-
-        # 보유 포지션 일일 재평가 — 손절/익절 기준 초과 시 자동 매도 후보
-        # (KST 10시 이후 1일 1회, 내부 dedup)
+        # 보유 포지션 재평가 — 신규 매수보다 먼저 실행한다.
+        # 원칙: 기존 보유 리스크/매도 후보가 있으면 그 루프에서는 신규 매수 금지.
+        # 이렇게 해야 계좌/보유/악재/손절 관리와 신규 매수가 따로 놀지 않는다.
+        position_review_result = None
+        position_risk_pending = False
         try:
             from core.toss_position_review import run_toss_position_review
-            run_toss_position_review(now=now)
+            position_review_result = run_toss_position_review(now=now)
+            if isinstance(position_review_result, dict):
+                position_risk_pending = int(position_review_result.get("candidate_count") or 0) > 0
         except Exception as e:
             log.warning(f"toss position review 실패: {e}")
+
+        # Toss 자율 파이프라인 — PASS_EXECUTE 후보 자동 preview/검증/판정.
+        # 보유 리스크가 있으면 신규 매수보다 매도/축소를 우선한다.
+        if position_risk_pending:
+            log.warning(
+                "toss autonomous pipeline 스킵: position_risk_pending candidates=%s",
+                position_review_result.get("candidate_count") if isinstance(position_review_result, dict) else "?",
+            )
+            # 신규 매수는 막되, 이미 생성된 retryable 매도/주문은 회복 기회를 준다.
+            try:
+                from core.toss_autonomous_pipeline import retry_retryable_orders
+                retry_retryable_orders(now=now)
+            except Exception as e:
+                log.warning(f"toss retry sweep 실패: {e}")
+        else:
+            try:
+                from core.toss_autonomous_pipeline import run_toss_autonomous_pipeline
+                run_toss_autonomous_pipeline(now=now)
+            except Exception as e:
+                log.warning(f"toss autonomous pipeline 실패: {e}")
 
         # 자율매매 일일 리포트 — 가동률 KPI + 파이프라인 결과 + 미거래 진단
         # (KST 16시 이후 1일 1회, 내부 dedup — 장외라도 16시 이후 첫 루프에서 발송)

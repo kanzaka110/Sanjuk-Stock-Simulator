@@ -15,7 +15,8 @@ import pytest
 
 from core.action_normalizer import (
     AI_NEW_BUY, AI_ADD_BUY, CONDITIONAL_NEW_BUY, AI_SELL_MANAGEMENT,
-    CANCEL_SELL, HOLD_REVIEW, BLOCKED_BUY, normalize_actions,
+    CONDITIONAL_SELL, CANCEL_SELL, HOLD_REVIEW, BLOCKED_BUY,
+    normalize_actions, apply_data_quality_limits,
 )
 
 
@@ -149,10 +150,64 @@ class TestNormalizeSell:
     def test_clean_sell_executable(self):
         raw = {"strategy_buy": [], "strategy_sell": [
             {"ticker": "LMT", "name": "록히드", "current_price": "$540",
-             "take_profit": "$560", "reason": "RSI 75 과열 부분 익절"}]}
+             "take_profit": "$520", "stop_loss": "$560", "reason": "RSI 75 과열 부분 익절"}]}
         n = normalize_actions(raw, "KR_BEFORE", {}, {})
         assert len(n["executable_actions"]) == 1
         assert n["executable_actions"][0]["action_type"] == AI_SELL_MANAGEMENT
+
+    def test_sell_warning_goes_conditional_not_executable(self):
+        raw = {"strategy_buy": [], "strategy_sell": [
+            {"ticker": "LMT", "name": "록히드", "current_price": "$540",
+             "take_profit": "$520", "stop_loss": "$560",
+             "reason": "손절선 임박, 종가 확인 후 50% 매도 검토"}]}
+        n = normalize_actions(raw, "KR_BEFORE", {"LMT": 540}, {"LMT": {"shares": 1}})
+        assert len(n["executable_actions"]) == 0
+        assert len(n["conditional_sell_candidates"]) == 1
+        assert n["conditional_sell_candidates"][0]["action_type"] == CONDITIONAL_SELL
+
+    def test_core_semiconductor_sell_is_hold_review(self):
+        raw = {"strategy_buy": [], "strategy_sell": [
+            {"ticker": "091160.KS", "name": "KODEX 반도체", "current_price": "₩153,510",
+             "stop_loss": "₩148,800", "reason": "MACD 매도, 손절 경계"}]}
+        n = normalize_actions(raw, "KR_BEFORE", {"091160.KS": 153510}, {"091160.KS": {"shares": 20}})
+        assert len(n["executable_actions"]) == 0
+        assert len(n["cancelled_sells"]) == 1
+        assert n["cancelled_sells"][0]["action_type"] == HOLD_REVIEW
+        assert n["cancelled_sells"][0].get("protected_hold") is True
+
+
+class TestDataQualityLimits:
+    def test_execution_limited_blocks_buy_and_holds_sell(self):
+        from types import SimpleNamespace
+        raw = {
+            "strategy_buy": [{"ticker": "035720.KS", "name": "카카오", "entry_price": "₩40,000", "reason": "즉시 진입"}],
+            "strategy_sell": [{"ticker": "LMT", "name": "록히드", "current_price": "$540", "take_profit": "$520", "reason": "부분 익절"}],
+        }
+        n = normalize_actions(raw, "KR_BEFORE", {}, {})
+        assert len(n["executable_actions"]) == 2
+        dq = SimpleNamespace(execution_limited=True, missing_price_tickers=(), source_mismatches=(), price_scale_anomalies=())
+        n = apply_data_quality_limits(n, dq)
+        assert len(n["executable_actions"]) == 0
+        assert len(n["blocked_buys"]) == 1
+        assert len(n["cancelled_sells"]) == 1
+        assert n["cancelled_sells"][0]["action_type"] == HOLD_REVIEW
+
+    def test_missing_price_blocks_only_affected_buy(self):
+        from types import SimpleNamespace
+        raw = {
+            "strategy_buy": [
+                {"ticker": "035720.KS", "name": "카카오", "entry_price": "₩40,000", "reason": "즉시 진입"},
+                {"ticker": "005930.KS", "name": "삼성전자", "entry_price": "₩55,000", "reason": "즉시 진입"},
+            ],
+            "strategy_sell": [],
+        }
+        n = normalize_actions(raw, "KR_BEFORE", {}, {})
+        dq = SimpleNamespace(execution_limited=False, missing_price_tickers=("035720.KS",), source_mismatches=(), price_scale_anomalies=())
+        n = apply_data_quality_limits(n, dq)
+        assert len(n["executable_actions"]) == 1
+        assert n["executable_actions"][0]["ticker"] == "005930.KS"
+        assert len(n["blocked_buys"]) == 1
+        assert n["blocked_buys"][0]["ticker"] == "035720.KS"
 
 
 class TestNoBuyReason:

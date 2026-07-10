@@ -26,6 +26,7 @@ import re as _re
 
 _BUY_CONTEXT_WORDS = ("매수", "진입", "주문", "실행", "검토", "추가 매수", "분할 매수",
                        "buy", "entry", "order")
+_SELL_CONTEXT_WORDS = ("매도", "팔", "청산", "익절", "손절", "축소", "비중 축소", "sell", "trim", "exit")
 
 # normalized 누락(None) 경로 안전망: 명백한 매수 CTA 문구만 제거 (적립/관망 등은 보존)
 # 주의: "매수"+"하기" 형태 리터럴 직접 표기 금지(금지 CTA 가드) → 런타임 조합으로 회피
@@ -58,16 +59,26 @@ def _filter_blocked_from_text(text: str, normalized: dict | None) -> str:
     if not normalized:
         return _strip_blocked_cta(text)
     blocked = normalized.get("blocked_buys") or []
-    if not blocked:
+    sell_limited = [
+        a for a in (normalized.get("cancelled_sells") or [])
+        if a.get("protected_hold") or a.get("data_quality_block") or a.get("action_type") == "HOLD_REVIEW"
+    ]
+    if not blocked and not sell_limited:
         return text
-    # blocked ticker/name 집합
-    names: set[str] = set()
+    # blocked/hold ticker/name 집합
+    buy_names: set[str] = set()
+    sell_names: set[str] = set()
     for blk in blocked:
         if blk.get("ticker"):
-            names.add(blk["ticker"])
+            buy_names.add(blk["ticker"])
         if blk.get("name"):
-            names.add(blk["name"])
-    if not names:
+            buy_names.add(blk["name"])
+    for item in sell_limited:
+        if item.get("ticker"):
+            sell_names.add(item["ticker"])
+        if item.get("name"):
+            sell_names.add(item["name"])
+    if not buy_names and not sell_names:
         return text
     # 문장 단위 분리 (줄바꿈, 마침표, ①②③ 번호, / 구분자)
     parts = _re.split(r'(\n|(?=①|②|③|④|⑤|⑥|⑦|⑧|⑨|⑩)|(?<=[.] )|\s*/\s*)', text)
@@ -75,10 +86,14 @@ def _filter_blocked_from_text(text: str, normalized: dict | None) -> str:
     result = []
     for part in parts:
         part_lower = part.lower()
-        has_blocked_name = any(n.lower() in part_lower or n in part for n in names)
+        has_blocked_buy_name = any(n.lower() in part_lower or n in part for n in buy_names)
         has_buy_context = any(w in part_lower for w in _BUY_CONTEXT_WORDS)
-        if has_blocked_name and has_buy_context:
-            continue  # 해당 문장 제거
+        has_limited_sell_name = any(n.lower() in part_lower or n in part for n in sell_names)
+        has_sell_context = any(w in part_lower for w in _SELL_CONTEXT_WORDS)
+        if has_blocked_buy_name and has_buy_context:
+            continue  # 해당 매수 CTA 문장 제거
+        if has_limited_sell_name and has_sell_context:
+            continue  # 보호/데이터제한 매도 CTA 문장 제거
         result.append(part)
     filtered = " ".join(result).strip()
     # 선행/후행 구분자 정리
@@ -194,12 +209,13 @@ def _append_fill_risk(lines: list, action: dict) -> None:
 def _render_normalized_sections(lines: list, normalized: dict, sep: str, next_action: str) -> None:
     """정규화 분류 결과를 4섹션으로 렌더 (결정론적).
 
-    ⚡ 오늘 실제 실행 / 🕐 조건부 매수 후보 / 🟡 매도 취소·홀딩 전환 / 🔍 매수 후보 없음 사유.
+    ⚡ 오늘 실제 실행 / 🕐 조건부 매수 후보 / 🕐🔴 조건부 매도 감시 / 🟡 매도 취소·홀딩 전환 / 🔍 매수 후보 없음 사유.
     actions 유무와 무관하게 각 섹션을 독립 표시 — 조건부/취소를 숨기지 않는다.
     """
     type_icon = {"매수·즉시": "🟢", "매도·즉시": "🔴", "예약매수": "🕐🟢", "예약매도": "🕐🔴"}
     executable = normalized.get("executable_actions", [])
     conditional = normalized.get("conditional_buy_candidates", [])
+    conditional_sells = normalized.get("conditional_sell_candidates", [])
     cancelled = normalized.get("cancelled_sells", [])
     blocked = normalized.get("blocked_buys", [])
     integrity_errors = normalized.get("integrity_errors", [])
@@ -281,6 +297,27 @@ def _render_normalized_sections(lines: list, normalized: dict, sep: str, next_ac
             rw = _format_execution_risk_warning(a)
             if rw:
                 lines.append(rw)
+        lines.append("")
+
+    # 🕐🔴 조건부 매도/손절 감시 — 실행 매도 아님
+    if conditional_sells:
+        lines.append(sep)
+        lines.append("🕐🔴 *조건부 매도·손절 감시* (조건 확인 전 실행 금지)")
+        for a in conditional_sells[:5]:
+            hz = f" 〔{a['horizon']}〕" if a.get("horizon") else ""
+            lines.append(f"🕐🔴 {a.get('account','')} *{a.get('name') or a.get('ticker','')}*{hz}")
+            if a.get("price"):
+                lines.append(f"  기준가: {a['price']}")
+            if a.get("target"):
+                lines.append(f"  🎯 {a['target']}")
+            if a.get("stop"):
+                lines.append(f"  🛑 {a['stop']}")
+            if a.get("hold_note"):
+                lines.append(f"  🔒 {a['hold_note']}")
+            why = a.get("reason", "") or a.get("cancel_reason", "")
+            if why:
+                lines.append(f"  💬 {str(why)[:100]}")
+            _append_hermes_verdict(lines, "HOLD", "조건부 감시 · 즉시 매도 아님")
         lines.append("")
 
     # 🚫 게이트 차단 매수 (즉시체결/무효화/대량주문 + 충돌) — 정보 부족과 분리
@@ -390,6 +427,15 @@ def _build_impact_message(
     if result.quality_warnings:
         lines.append(f"⚠️ 부분 분석: {', '.join(result.quality_warnings)}")
     lines.append("")
+    # 수입 계기판 — 결정론 payload (LLM verdict보다 먼저, 재계산 없음)
+    try:
+        from core.income_briefing import render_income_telegram
+        _income = raw.get("income_briefing") or {}
+        if _income:
+            lines.extend(render_income_telegram(_income))
+            lines.append("")
+    except Exception as e:
+        log.warning("income briefing 렌더 실패: %s", e)
     lines.append(f"🎯 *판단: {verdict}*")
     # oneliner에서 blocked ticker 매수 문맥 필터
     _norm_for_filter = raw.get("normalized")
@@ -757,6 +803,16 @@ def _build_briefing_message(
     lines.append(f"_{title}_")
     lines.append(f"{'━' * 24}")
     lines.append("")
+
+    # ── 수입 계기판 (결정론 payload — AI 판단보다 먼저) ──
+    try:
+        from core.income_briefing import render_income_telegram
+        _income = raw.get("income_briefing") or {}
+        if _income:
+            lines.extend(render_income_telegram(_income))
+            lines.append("")
+    except Exception as e:
+        log.warning("income briefing 렌더 실패(mail text): %s", e)
 
     # ── AI 핵심 판단 ──
     verdict_icon = {

@@ -691,12 +691,13 @@ def save_prediction(
     return cursor.lastrowid or 0
 
 
-# action_type → 저장 signal 매핑 (CANCEL/HOLD는 매도 실행으로 저장하지 않음)
+# action_type → 저장 signal 매핑 (CANCEL/HOLD/CONDITIONAL_SELL은 실행 매도로 저장하지 않음)
 _ACTION_TYPE_SIGNAL = {
     "AI_NEW_BUY": "매수",
     "AI_ADD_BUY": "매수",
     "CONDITIONAL_NEW_BUY": "매수",
     "AI_SELL_MANAGEMENT": "매도",
+    "CONDITIONAL_SELL": "관망",
     "CANCEL_SELL": "관망",
     "HOLD_REVIEW": "관망",
     "WATCH_ONLY": "관망",
@@ -744,6 +745,7 @@ def save_predictions_from_briefing(
     all_actions = (
         list(normalized.get("executable_actions", []))
         + list(normalized.get("conditional_buy_candidates", []))
+        + list(normalized.get("conditional_sell_candidates", []))
         + list(normalized.get("cancelled_sells", []))
     )
 
@@ -751,6 +753,7 @@ def save_predictions_from_briefing(
     # 조건부 매수는 IMMEDIATE 금지, 취소/홀딩은 실행 등급 금지
     _grade_override = {
         "CONDITIONAL_NEW_BUY": ACTION_CONDITIONAL,
+        "CONDITIONAL_SELL": ACTION_CONDITIONAL,
         "CANCEL_SELL": ACTION_WATCH,
         "HOLD_REVIEW": ACTION_WATCH,
         "WATCH_ONLY": ACTION_WATCH,

@@ -12,13 +12,15 @@ LLM 텍스트의 신호어를 규칙 기반으로 읽어 실행 가능 여부를
 분류 결과 (normalize_actions 반환):
   - executable_actions:          지금 실행할 매수/매도 (AI_NEW_BUY/AI_ADD_BUY/AI_SELL_MANAGEMENT)
   - conditional_buy_candidates:  조건 충족 시 매수 (CONDITIONAL_NEW_BUY — 눌림목/대기/FOMC 후)
+  - conditional_sell_candidates: 조건 충족 시 매도/손절 감시 (CONDITIONAL_SELL — 종가 확인/이탈 시)
   - watch_only:                  관찰만 (WATCH_ONLY)
-  - cancelled_sells:             매도 취소/홀딩 전환 (CANCEL_SELL/HOLD_REVIEW)
+  - cancelled_sells:             매도 취소/홀딩 전환/보유 보호 (CANCEL_SELL/HOLD_REVIEW)
+  - blocked_buys:                게이트 차단 매수 (BLOCKED_BUY)
   - no_buy_reason:               실행 매수가 0건일 때 그 사유
 
 action_type 7종 (predictions.action_type에 그대로 저장):
   AI_NEW_BUY / AI_ADD_BUY / CONDITIONAL_NEW_BUY /
-  AI_SELL_MANAGEMENT / CANCEL_SELL / HOLD_REVIEW / WATCH_ONLY
+  AI_SELL_MANAGEMENT / CONDITIONAL_SELL / CANCEL_SELL / HOLD_REVIEW / WATCH_ONLY / BLOCKED_BUY
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ AI_NEW_BUY = "AI_NEW_BUY"
 AI_ADD_BUY = "AI_ADD_BUY"
 CONDITIONAL_NEW_BUY = "CONDITIONAL_NEW_BUY"
 AI_SELL_MANAGEMENT = "AI_SELL_MANAGEMENT"
+CONDITIONAL_SELL = "CONDITIONAL_SELL"
 CANCEL_SELL = "CANCEL_SELL"
 HOLD_REVIEW = "HOLD_REVIEW"
 WATCH_ONLY = "WATCH_ONLY"
@@ -63,12 +66,28 @@ SELL_CANCEL_PHRASES: tuple[str, ...] = (
     "전량 매도 부적절", "전량매도 부적절", "잔여 보유", "잔여보유",
 )
 
+# 매도 reason에 있으면 실행 매도가 아니라 조건부 손절/익절 감시로 분류한다.
+# 핵심: "종가 확인", "이탈 시" 같은 경고성 문구를 오늘 실행 매도처럼 렌더하지 않는다.
+SELL_CONDITIONAL_PHRASES: tuple[str, ...] = (
+    "종가 확인", "종가확인", "종가 기준", "종가기준", "종가 이탈", "종가이탈",
+    "이탈 시", "이탈시", "하회 시", "하회시", "아래 종가", "아래로 밀리면",
+    "손절선 임박", "손절 검토", "손절 경계", "손절 경고", "매도 검토",
+    "부분 매도 검토", "50% 매도 검토", "재판단", "재평가", "감시", "경고",
+    "확인 후", "조건부", "장중 패닉 매도 금지", "패닉 매도 금지",
+)
+
 # HOLDING_STRATEGY thesis에 있으면 "실행 매도 절대 금지" 보유 보호 종목 → 매도 신호를 보유 관리로 강등.
-# 의도적으로 명시 문구만 매칭한다(예: '전량 매도 금지'는 부분 익절을 허용하므로 보호 대상 아님).
-# 다른 종목을 보호하려면 thesis에 아래 문구를 직접 넣어 opt-in.
+# 전량 매도 금지는 부분 익절을 허용할 수 있으므로 문구 단독으로는 보호하지 않는다.
 SELL_PROTECT_PHRASES: tuple[str, ...] = (
     "매도하지 않", "실행 매도 지시 금지", "실행 매도 금지",
+    "매도 비대상", "의무보유",
 )
+
+# 사용자 장기 보유 선호/계좌 제약상 실행 매도 기본값을 막는 코어 보유군.
+# 매도 경고는 HOLD_REVIEW로 낮추고, 실제 실행은 별도 승인/명확한 조건 충족 후만 허용한다.
+DEFAULT_SELL_PROTECTED_TICKERS: frozenset[str] = frozenset({
+    "MU", "091160", "091160.KS", "069500", "069500.KS", "133690", "133690.KS", "360750", "360750.KS",
+})
 
 # 보호 종목 매도 reason에 있으면 "무효화 조건 접근 경고"로 표시 (그래도 실행 매도 아님)
 INVALIDATION_PHRASES: tuple[str, ...] = (
@@ -185,14 +204,22 @@ def _infer_account(row: dict) -> str:
 
 
 def _is_sell_protected(ticker: str) -> bool:
-    """HOLDING_STRATEGY thesis에 '실행 매도 금지' 표현이 있는 보유 보호 종목 여부."""
+    """보유 보호 종목 여부.
+
+    HOLDING_STRATEGY thesis 문구 + 사용자 코어 보유군을 함께 본다.
+    브리핑 품질 원칙: 보호군은 LLM이 "매도"라고 써도 실행 매도가 아니라 보유 관리/조건 감시로 낮춘다.
+    """
     if not ticker:
         return False
+    t = str(ticker or "").strip()
+    aliases = {t, t.replace(".KS", ""), t.replace(".KQ", "")}
+    if aliases & DEFAULT_SELL_PROTECTED_TICKERS:
+        return True
     try:
         from config.settings import HOLDING_STRATEGY
     except Exception:
         return False
-    thesis = str(HOLDING_STRATEGY.get(ticker, {}).get("thesis", ""))
+    thesis = str(HOLDING_STRATEGY.get(t, {}).get("thesis", ""))
     return _has_phrase(thesis, SELL_PROTECT_PHRASES) != ""
 
 
@@ -392,6 +419,8 @@ def classify_row(signal: str, reason: str, strategy_type: str = "",
         canceller = _has_phrase(text, SELL_CANCEL_PHRASES)
         if canceller:
             return HOLD_REVIEW if ("홀딩" in canceller or "보유" in canceller) else CANCEL_SELL
+        if _has_phrase(text, SELL_CONDITIONAL_PHRASES):
+            return CONDITIONAL_SELL
         return AI_SELL_MANAGEMENT
     return WATCH_ONLY
 
@@ -454,6 +483,7 @@ def normalize_actions(
     executable: list[dict] = []
     conditional_buy: list[dict] = []
     watch_only: list[dict] = []
+    conditional_sell: list[dict] = []
     cancelled_sells: list[dict] = []
     blocked_buys: list[dict] = []
     integrity_errors: list[str] = []
@@ -464,8 +494,15 @@ def normalize_actions(
     def _cur_of(tk: str) -> float:
         if not current_prices:
             return 0.0
-        return current_prices.get(tk, current_prices.get(
-            tk.replace(".KS", "").replace(".KQ", ""), 0.0))
+        t = str(tk or "")
+        base = t.replace(".KS", "").replace(".KQ", "")
+        if t in current_prices:
+            return current_prices[t]
+        if base in current_prices:
+            return current_prices[base]
+        if base.isdigit() and len(base) == 6:
+            return current_prices.get(f"{base}.KS", current_prices.get(f"{base}.KQ", 0.0))
+        return 0.0
 
     # ── 매수 분류 ──
     for row in raw.get("strategy_buy", []) or []:
@@ -485,11 +522,24 @@ def normalize_actions(
         cur = _cur_of(ticker)
         inval = _num(row.get("invalidation_price", "")) or _num(row.get("stop_loss", ""))
         verdict, gate_note = _buy_price_gate(entry, cur, inval)
+        price_map_supplied = current_prices is not None and len(current_prices) > 0
 
         def _mk(atype):
             a = _build_action(row, atype, "buy", briefing_type, current_prices,
                               confidence=conf, is_held=held)
             return a
+
+        # 게이트 0: 시세 맵은 있는데 해당 종목 현재가가 없으면 실행 금지.
+        # 일부 테스트/마이그레이션처럼 current_prices={}인 호출은 기존 호환성을 위해 허용한다.
+        if verdict == "no_price" and price_map_supplied:
+            a = _mk(BLOCKED_BUY)
+            a["block_reason"] = "정보 부족으로 주문표 제외 — 누락: 현재가, 현재가대비"
+            a["blocked"] = True
+            a["incomplete_order"] = True
+            a["missing_fields"] = ["현재가", "현재가대비"]
+            blocked_buys.append(a)
+            integrity_errors.append(f"{name or ticker}: 현재가 없음 — 정보 부족 차단")
+            continue
 
         # 게이트 1: 무효화가(지지선) 이탈 → BLOCKED (지지선 이탈 후 눌림목 매수 방지)
         if verdict == "invalidated":
@@ -614,8 +664,9 @@ def normalize_actions(
     for row in raw.get("strategy_sell", []) or []:
         if not row.get("ticker") and not row.get("name"):
             continue
-        text = _row_text(row, "reason", "execution_condition", "timing")
+        text = _row_text(row, "reason", "execution_condition", "timing", "invalidation_condition")
         canceller = _has_phrase(text, SELL_CANCEL_PHRASES)
+        conditioner = _has_phrase(text, SELL_CONDITIONAL_PHRASES)
         ticker = row.get("ticker", "")
 
         if canceller:
@@ -625,17 +676,27 @@ def normalize_actions(
             act["cancel_reason"] = canceller
             cancelled_sells.append(act)
         elif _is_sell_protected(ticker):
-            # 보유 보호 종목(예: MU): 실행 매도 절대 금지 → 보유 관리(HOLD_REVIEW)로 강등.
+            # 보유 보호 종목(예: MU/KODEX 반도체/장기 ETF): 실행 매도 절대 금지 → 보유 관리(HOLD_REVIEW)로 강등.
             # 무효화 조건 접근 시에도 '경고'일 뿐, 사용자 승인 전 실행 매도 섹션에 넣지 않는다.
             act = _build_action(row, HOLD_REVIEW, "sell", briefing_type)
             act["protected_hold"] = True
             if _has_phrase(text, INVALIDATION_PHRASES):
                 act["hold_note"] = "무효화 조건 접근 경고 — 실행 매도 아님 (승인 전 매도 금지)"
                 act["invalidation_warning"] = True
+            elif conditioner:
+                act["hold_note"] = "보유 보호 종목 경고 — 실행 매도 아님 (조건 충족/승인 전 매도 금지)"
+                act["invalidation_warning"] = True
             else:
                 act["hold_note"] = "보유 관리 · 실행 매도 아님"
             act["cancel_reason"] = "보유 보호 종목 — 실행 매도 차단"
             cancelled_sells.append(act)
+        elif conditioner:
+            # 종가 확인/이탈 시/검토/경고성 매도는 실행 매도가 아니라 조건부 감시.
+            act = _build_action(row, CONDITIONAL_SELL, "sell", briefing_type)
+            act["conditional_sell"] = True
+            act["hold_note"] = f"조건부 매도 감시 — '{conditioner}' 확인 전 실행 금지"
+            act["cancel_reason"] = conditioner
+            conditional_sell.append(act)
         else:
             executable.append(_build_action(row, AI_SELL_MANAGEMENT, "sell", briefing_type))
 
@@ -664,6 +725,7 @@ def normalize_actions(
     return {
         "executable_actions": executable,
         "conditional_buy_candidates": conditional_buy,
+        "conditional_sell_candidates": conditional_sell,
         "watch_only": watch_only,
         "cancelled_sells": cancelled_sells,
         "blocked_buys": blocked_buys,
@@ -671,3 +733,105 @@ def normalize_actions(
         "integrity_errors": integrity_errors,
         "event_wait": event_wait,
     }
+
+
+def _normalize_ticker_aliases(ticker: str) -> set[str]:
+    t = str(ticker or "").strip()
+    if not t:
+        return set()
+    return {t, t.replace(".KS", ""), t.replace(".KQ", "")}
+
+
+def _extract_quality_tickers(labels) -> set[str]:
+    """DataQualityReport의 문자열 라벨에서 티커 prefix를 추출."""
+    out: set[str] = set()
+    for label in labels or ():
+        s = str(label or "").strip()
+        if not s:
+            continue
+        tk = s.split("(", 1)[0].strip()
+        out.update(_normalize_ticker_aliases(tk))
+    return out
+
+
+def apply_data_quality_limits(normalized: dict | None, data_quality) -> dict | None:
+    """데이터 품질 결과를 정규화 액션에 후적용.
+
+    analyzer는 기존 구조상 normalize_actions 후에 data_quality_gate를 계산한다.
+    이 함수가 최종 발송/저장 직전에 실행 액션을 BLOCK/HOLD로 낮춰
+    "데이터 품질 경고가 있는데 매수/매도 실행" 모순을 막는다.
+    """
+    if not normalized or not data_quality:
+        return normalized
+
+    execution_limited = bool(getattr(data_quality, "execution_limited", False))
+    affected: set[str] = set()
+    for tk in getattr(data_quality, "missing_price_tickers", ()) or ():
+        affected.update(_normalize_ticker_aliases(tk))
+    affected.update(_extract_quality_tickers(getattr(data_quality, "source_mismatches", ()) or ()))
+    affected.update(_extract_quality_tickers(getattr(data_quality, "price_scale_anomalies", ()) or ()))
+
+    if not execution_limited and not affected:
+        return normalized
+
+    reason = (
+        "데이터 품질 실행제한 — 매수/매도 실행 금지"
+        if execution_limited else
+        "해당 종목 시세 품질 낮음 — 실행 판단 보류"
+    )
+
+    def _is_affected(action: dict) -> bool:
+        if execution_limited:
+            return True
+        aliases = _normalize_ticker_aliases(action.get("ticker", ""))
+        return bool(aliases & affected)
+
+    def _block_buy(action: dict) -> dict:
+        a = dict(action)
+        a["action_type"] = BLOCKED_BUY
+        a["blocked"] = True
+        a["data_quality_block"] = True
+        a["block_reason"] = reason
+        return a
+
+    def _hold_sell(action: dict) -> dict:
+        a = dict(action)
+        a["action_type"] = HOLD_REVIEW
+        a["protected_hold"] = True
+        a["data_quality_block"] = True
+        a["hold_note"] = reason
+        a["cancel_reason"] = reason
+        return a
+
+    kept_exec: list[dict] = []
+    for action in normalized.get("executable_actions", []) or []:
+        if not _is_affected(action):
+            kept_exec.append(action)
+            continue
+        if action.get("side") == "buy":
+            normalized.setdefault("blocked_buys", []).append(_block_buy(action))
+            normalized.setdefault("integrity_errors", []).append(
+                f"{action.get('name') or action.get('ticker')}: {reason}")
+        else:
+            normalized.setdefault("cancelled_sells", []).append(_hold_sell(action))
+            normalized.setdefault("integrity_errors", []).append(
+                f"{action.get('name') or action.get('ticker')}: {reason}")
+    normalized["executable_actions"] = kept_exec
+
+    kept_cond_buy: list[dict] = []
+    for action in normalized.get("conditional_buy_candidates", []) or []:
+        if _is_affected(action):
+            normalized.setdefault("blocked_buys", []).append(_block_buy(action))
+        else:
+            kept_cond_buy.append(action)
+    normalized["conditional_buy_candidates"] = kept_cond_buy
+
+    kept_cond_sell: list[dict] = []
+    for action in normalized.get("conditional_sell_candidates", []) or []:
+        if _is_affected(action):
+            normalized.setdefault("cancelled_sells", []).append(_hold_sell(action))
+        else:
+            kept_cond_sell.append(action)
+    normalized["conditional_sell_candidates"] = kept_cond_sell
+
+    return normalized

@@ -203,6 +203,15 @@ def _build_briefing_html(
     parts.append(f"<h1>{_esc(label)}</h1>")
     parts.append(f'<p style="color:#666;">{_esc(title)}<br>분석: 멀티 에이전트 (가치/성장/기술/매크로) + CIO · 생성: {_esc(now_str)}</p>')
 
+    # 수입 계기판 — 결정론 payload (verdict보다 먼저, 텔레그램과 동일 수치)
+    try:
+        from core.income_briefing import render_income_html
+        income_html = render_income_html(raw.get("income_briefing") or {})
+        if income_html:
+            parts.append(income_html)
+    except Exception:
+        pass
+
     parts.append('<div class="verdict">')
     parts.append(f"<b>결론: {_esc(advisor_verdict)}</b><br>")
     if advisor_oneliner:
@@ -321,7 +330,10 @@ def _build_briefing_html(
     normalized = raw.get("normalized")
     if normalized:
         exec_buys = [a for a in (normalized.get("executable_actions") or []) if a.get("side") == "buy"]
+        exec_sells = [a for a in (normalized.get("executable_actions") or []) if a.get("side") == "sell"]
         cond_buys = normalized.get("conditional_buy_candidates") or []
+        cond_sells = normalized.get("conditional_sell_candidates") or []
+        cancelled_sells_norm = normalized.get("cancelled_sells") or []
         blocked = normalized.get("blocked_buys") or []
 
         if exec_buys:
@@ -334,6 +346,19 @@ def _build_briefing_html(
                 parts.append(f"<td>{_esc(a.get('qty', ''))}</td>")
                 parts.append(f"<td>{_esc(a.get('price', ''))}</td>")
                 parts.append(f"<td>{_esc(a.get('stop', ''))}</td>")
+                parts.append(f"<td>{_esc(a.get('reason', ''))}</td></tr>")
+            parts.append("</table>")
+
+        if exec_sells:
+            section += 1
+            parts.append(f"<h2>{section}. 🔴 실행 매도</h2>")
+            parts.append("<table><tr><th>종목</th><th>계좌</th><th>수량</th><th>기준가</th><th>손절/목표</th><th>근거</th></tr>")
+            for a in exec_sells:
+                parts.append(f"<tr><td><b>{_esc(a.get('name', '') or a.get('ticker', ''))}</b></td>")
+                parts.append(f"<td>{_esc(a.get('account', ''))}</td>")
+                parts.append(f"<td>{_esc(a.get('qty', ''))}</td>")
+                parts.append(f"<td>{_esc(a.get('price', ''))}</td>")
+                parts.append(f"<td>{_esc(a.get('stop', '') or a.get('target', ''))}</td>")
                 parts.append(f"<td>{_esc(a.get('reason', ''))}</td></tr>")
             parts.append("</table>")
 
@@ -363,6 +388,30 @@ def _build_briefing_html(
                 er = a.get("execution_risk") or {}
                 if er.get("has_warning"):
                     parts.append(f'<tr><td colspan="6" style="color:#f59e0b;font-size:11px;padding:2px 4px">⚠ {_esc(er.get("label","스프레드 주의"))} · 호가 기준 판단 보조 · 주문 지시 아님</td></tr>')
+            parts.append("</table>")
+
+        if cond_sells:
+            section += 1
+            parts.append(f"<h2>{section}. 🕐🔴 조건부 매도·손절 감시</h2>")
+            parts.append("<p style='color:#666;font-size:12px'>조건 확인 전 실행 매도 아님</p>")
+            parts.append("<table><tr><th>종목</th><th>계좌</th><th>기준가</th><th>손절/목표</th><th>조건/근거</th></tr>")
+            for a in cond_sells:
+                parts.append(f"<tr><td><b>{_esc(a.get('name', '') or a.get('ticker', ''))}</b></td>")
+                parts.append(f"<td>{_esc(a.get('account', ''))}</td>")
+                parts.append(f"<td>{_esc(a.get('price', ''))}</td>")
+                parts.append(f"<td>{_esc(a.get('stop', '') or a.get('target', ''))}</td>")
+                parts.append(f"<td>{_esc(a.get('hold_note', '') or a.get('reason', ''))}</td></tr>")
+            parts.append("</table>")
+
+        if cancelled_sells_norm:
+            section += 1
+            parts.append(f"<h2>{section}. 🟡 매도 취소·보유 관리</h2>")
+            parts.append("<table><tr><th>종목</th><th>계좌</th><th>판정</th><th>근거</th></tr>")
+            for a in cancelled_sells_norm:
+                parts.append(f"<tr><td><b>{_esc(a.get('name', '') or a.get('ticker', ''))}</b></td>")
+                parts.append(f"<td>{_esc(a.get('account', ''))}</td>")
+                parts.append(f"<td>{_esc(a.get('hold_note', '') or '실행 매도 아님')}</td>")
+                parts.append(f"<td>{_esc(a.get('cancel_reason', '') or a.get('reason', ''))}</td></tr>")
             parts.append("</table>")
 
         gate_blocked = [a for a in blocked if not a.get("incomplete_order")]
@@ -411,7 +460,7 @@ def _build_briefing_html(
             parts.append("</tr>")
         parts.append("</table>")
 
-    if sell_recs:
+    if sell_recs and not normalized:
         section += 1
         parts.append(f"<h2>{section}. 매도 추천</h2>")
         parts.append("<table><tr><th>종목</th><th>수량</th><th>익절가</th><th>손절가</th><th>타이밍</th><th>근거</th></tr>")

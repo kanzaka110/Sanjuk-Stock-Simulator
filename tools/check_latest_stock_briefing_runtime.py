@@ -1,15 +1,18 @@
 """브리핑 실제 반영 검증 도구 (read-only)
 
-최신 stock briefing에 Toss Paper 가드와 삼성증권 정합성이 반영됐는지 확인한다.
+최신 stock briefing에 수입 중심(income-first) 구조가 반영됐는지 확인한다.
 
 실행:
     python tools/check_latest_stock_briefing_runtime.py
 
 판정 기준:
-- forbidden_cta_found 가 있으면 → fail
-- required markers 없음 + 최신 브리핑 없음 → awaiting_next_briefing
-- required markers 없음 + 브리핑 있지만 마커 불일치 → warn (AI가 verbatim 미출력)
-- forbidden 없음 + code_path 정상 → pass
+- forbidden marker(삼성 자동화/Toss 수동 주문표 지시)가 있으면 → fail
+- 최신 브리핑 없음 → awaiting_next_briefing
+- income 통합 이후 브리핑인데 수입 계기판 없음 → awaiting_next_briefing
+- forbidden 없음 + 수입 계기판 존재 + code_path 정상 → pass
+
+주의: Toss는 제한형 완전자율 실계좌 — "Toss 자동운영: 활성",
+"live_order_allowed=true"는 정상 상태이며 금지 대상이 아니다.
 """
 
 from __future__ import annotations
@@ -26,30 +29,26 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 # ──────────────────────────────────────────────────────────────────
-# Toss Paper 브리핑 통합 커밋 기준 시각 (KST)
-# commit 11e63fd: "feat: inject Toss paper performance summary into briefing context"
+# income-first 브리핑 통합 기준 시각 (KST) — 이후 브리핑만 마커 검증
 # ──────────────────────────────────────────────────────────────────
 KST = timezone(timedelta(hours=9))
-TOSS_INTEGRATION_CUTOFF_KST = datetime(2026, 6, 24, 0, 30, 0, tzinfo=KST)
+INCOME_INTEGRATION_CUTOFF_KST = datetime(2026, 7, 10, 18, 0, 0, tzinfo=KST)
 
 REQUIRED_MARKERS = [
-    "Toss Paper",
-    "실제 주문 아님",
-    "실주문: 비활성",
-    "표본부족",
-    "SOFI",
-    "진행 중",
-    "기존 포트폴리오",
+    "오늘 수입 계기판",
+    "실현수입",
+    "오늘 평가변동",
+    "Toss: 자동운영",
+    "삼성: 수동",
+    "예상수입",
 ]
 
+# 삼성 자동화·LLM의 Toss 수동 주문표 지시만 금지 (Toss 자동운영 활성은 정상)
 FORBIDDEN_MARKERS = [
-    "실주문: 활성",
-    "자동매매 시작",
-    "자동거래 시작",
-    "주문 실행",
-    "매수하기",
-    "매도하기",
-    "MU 매도 실행",
+    "삼성 자동주문",
+    "삼성 자동실행",
+    "삼성 주문 전송",
+    "Toss 수동 주문표를 지금 입력",
 ]
 
 # ──────────────────────────────────────────────────────────────────
@@ -96,50 +95,42 @@ def _check_markers(body: str, markers: list[str]) -> list[str]:
 
 
 def _check_code_path() -> dict:
-    """analyzer.py + toss_decision_context.py에 Toss Paper 가드 코드 패스 확인."""
+    """income briefing 통합 코드 패스 정적 확인."""
     root = Path(__file__).resolve().parent.parent
     analyzer = root / "core" / "analyzer.py"
-    ctx = root / "core" / "toss_decision_context.py"
+    telegram = root / "core" / "telegram.py"
+    email_mod = root / "core" / "email.py"
     if not analyzer.exists():
         return {"ok": False, "reason": "analyzer.py not found"}
     src_a = analyzer.read_text(encoding="utf-8")
-    src_c = ctx.read_text(encoding="utf-8") if ctx.exists() else ""
-    has_import = "format_toss_paper_performance_briefing" in src_a
-    # live_orders_allowed guard lives in toss_decision_context.py
-    has_live_guard = "live_orders_allowed" in src_c or "live_order_allowed" in src_c
+    src_t = telegram.read_text(encoding="utf-8") if telegram.exists() else ""
+    src_e = email_mod.read_text(encoding="utf-8") if email_mod.exists() else ""
+    has_context = "build_income_briefing_context" in src_a
+    has_finalize = "finalize_income_briefing" in src_a
+    has_strip = "strip_toss_from_manual_normalized" in src_a
+    has_tg_render = "render_income_telegram" in src_t
+    has_html_render = "render_income_html" in src_e
     return {
-        "ok": has_import and has_live_guard,
-        "toss_paper_injected": has_import,
-        "live_order_guard_present": has_live_guard,
+        "ok": all((has_context, has_finalize, has_strip, has_tg_render, has_html_render)),
+        "income_context_injected": has_context,
+        "income_finalized": has_finalize,
+        "toss_actions_stripped": has_strip,
+        "telegram_render_present": has_tg_render,
+        "html_render_present": has_html_render,
     }
 
 
-def _check_paper_policy_db() -> dict:
-    """toss_paper_ledger DB에서 현재 상태 직접 확인 (API 없이)."""
+def _check_live_policy_code() -> dict:
+    """현재 Toss live pilot 정책 스키마 확인 (paper 전제 폐기 — live가 정본)."""
     try:
-        from core.toss_paper_performance import get_paper_performance_summary
-        summary = get_paper_performance_summary()
-        s = summary.get("summary", {})
+        from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
+        policy = compute_toss_live_pilot_policy()
         return {
-            "open": s.get("open", 0),
-            "evaluated_count": s.get("evaluated_count", 0),
-            "win_rate": s.get("win_rate", 0.0),
-            "duplicate_open_symbols": s.get("duplicate_open_symbols", []),
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-
-def _check_paper_policy_code() -> dict:
-    """toss_paper_policy.py에서 live_order_allowed 정책 확인."""
-    try:
-        from core.toss_paper_policy import compute_toss_paper_policy
-        policy = compute_toss_paper_policy()
-        return {
-            "mode": policy.get("mode"),
+            "autonomous_mode": policy.get("autonomous_mode"),
+            "autonomous_kill_switch": policy.get("autonomous_kill_switch"),
             "live_order_allowed": policy.get("live_order_allowed"),
-            "max_budget_krw": policy.get("max_budget_krw"),
-            "sample_status": policy.get("sample_status"),
+            "adapter_status": policy.get("adapter_status"),
+            "live_transport_status": policy.get("live_transport_status"),
         }
     except Exception as e:
         return {"error": str(e)}
@@ -166,9 +157,8 @@ def run_check() -> dict:
     # 1. code path 정적 확인
     result["code_path"] = _check_code_path()
 
-    # 2. paper 현재 상태 (DB 직접)
-    result["paper_performance"] = _check_paper_policy_db()
-    result["paper_policy"] = _check_paper_policy_code()
+    # 2. Toss live 정책 스키마 (paper 전제 폐기)
+    result["live_policy"] = _check_live_policy_code()
 
     # 3. write routes 확인
     result["write_routes"] = _check_write_routes()
@@ -188,7 +178,7 @@ def run_check() -> dict:
 
     briefing_dt = _parse_briefing_dt(briefing.get("created_at", ""))
     result["briefing_post_integration"] = (
-        briefing_dt is not None and briefing_dt >= TOSS_INTEGRATION_CUTOFF_KST
+        briefing_dt is not None and briefing_dt >= INCOME_INTEGRATION_CUTOFF_KST
     )
 
     # 5. body 합치기 (text + html 모두 검색)
@@ -196,7 +186,7 @@ def run_check() -> dict:
     body_html = briefing.get("body_html") or ""
     combined = body_text + "\n" + body_html
 
-    # 6. forbidden marker 탐지 (hard check)
+    # 6. forbidden marker 탐지 (hard check — 통합 이전 브리핑에도 적용)
     forbidden_found = _check_markers(combined, FORBIDDEN_MARKERS)
     result["forbidden_cta_found"] = forbidden_found
 
@@ -205,28 +195,24 @@ def run_check() -> dict:
     required_missing = [m for m in REQUIRED_MARKERS if m not in required_found]
     result["required_markers_found"] = required_found
     result["required_markers_missing"] = required_missing
-    result["toss_paper_present"] = "Toss Paper" in combined
-    result["paper_only_guard"] = "실제 주문 아님" in combined and "실주문: 비활성" in combined
-    result["samsung_portfolio_present"] = (
-        "삼성증권" in combined or "현금성 자산" in combined or "총 평가액" in combined
-    )
-    # SOFI + 진행 중 = paper open order 표시
-    result["sofi_open_displayed"] = "SOFI" in combined and "진행 중" in combined
-    result["mu_protection"] = "MU 매도 실행" not in combined
+    result["income_dashboard_present"] = "오늘 수입 계기판" in combined
+    result["realized_income_separated"] = "실현수입" in combined and "오늘 평가변동" in combined
+    result["toss_autonomous_present"] = "Toss: 자동운영" in combined or "Toss 자동운영" in combined
+    result["samsung_manual_only_present"] = "삼성: 수동" in combined
 
     # 8. verdict 결정
     if forbidden_found:
         result["verdict"] = "fail"
-        result["reason"] = f"forbidden CTA 발견: {forbidden_found}"
+        result["reason"] = f"forbidden marker 발견: {forbidden_found}"
     elif not result["briefing_post_integration"]:
         result["verdict"] = "awaiting_next_briefing"
-        result["reason"] = "Toss Paper 통합 이전 브리핑 (다음 브리핑 대기)"
-    elif not result["toss_paper_present"]:
+        result["reason"] = "income 통합 이전 브리핑 (다음 브리핑 대기)"
+    elif not result["income_dashboard_present"]:
         result["verdict"] = "awaiting_next_briefing"
-        result["reason"] = "Toss Paper 통합 이후 브리핑이지만 마커 미확인 (AI verbatim 미출력 또는 다음 브리핑 대기)"
+        result["reason"] = "income 통합 이후 브리핑이지만 수입 계기판 미확인 (다음 브리핑 대기)"
     else:
         result["verdict"] = "pass"
-        result["reason"] = "Toss Paper 가드 정상 확인"
+        result["reason"] = "수입 중심 브리핑 구조 정상 확인"
 
     return result
 
@@ -243,29 +229,26 @@ def _print_report(r: dict) -> None:
     print(f"briefing_created_at:       {r.get('briefing_created_at', '-')}")
     print(f"post integration:          {r.get('briefing_post_integration', '-')}")
     print()
-    print(f"toss_paper_present:        {r.get('toss_paper_present', '-')}")
-    print(f"paper_only_guard:          {r.get('paper_only_guard', '-')}")
-    print(f"SOFI open 표시:            {r.get('sofi_open_displayed', '-')}")
-    print(f"삼성증권 portfolio 표시:   {r.get('samsung_portfolio_present', '-')}")
-    print(f"MU 보호 문구:              {r.get('mu_protection', '-')}")
-    print(f"forbidden CTA:             {r.get('forbidden_cta_found', [])}")
+    print(f"수입 계기판 표시:          {r.get('income_dashboard_present', '-')}")
+    print(f"실현/평가 분리 표기:       {r.get('realized_income_separated', '-')}")
+    print(f"Toss 자동운영 표시:        {r.get('toss_autonomous_present', '-')}")
+    print(f"삼성 수동 전용 표시:       {r.get('samsung_manual_only_present', '-')}")
+    print(f"required missing:          {r.get('required_markers_missing', [])}")
+    print(f"forbidden:                 {r.get('forbidden_cta_found', [])}")
     print()
 
     cp = r.get("code_path", {})
     print(f"code_path ok:              {cp.get('ok', '-')}")
-    print(f"  toss_paper_injected:     {cp.get('toss_paper_injected', '-')}")
-    print(f"  live_order_guard:        {cp.get('live_order_guard_present', '-')}")
+    print(f"  income_context_injected: {cp.get('income_context_injected', '-')}")
+    print(f"  income_finalized:        {cp.get('income_finalized', '-')}")
+    print(f"  toss_actions_stripped:   {cp.get('toss_actions_stripped', '-')}")
+    print(f"  telegram/html render:    {cp.get('telegram_render_present', '-')}/{cp.get('html_render_present', '-')}")
     print()
 
-    pp = r.get("paper_performance", {})
-    print(f"paper open:                {pp.get('open', '-')}")
-    print(f"paper evaluated_count:     {pp.get('evaluated_count', '-')}")
-    print(f"duplicate_open_symbols:    {pp.get('duplicate_open_symbols', [])}")
-
-    pol = r.get("paper_policy", {})
+    pol = r.get("live_policy", {})
+    print(f"autonomous_mode:           {pol.get('autonomous_mode', '-')}")
     print(f"live_order_allowed:        {pol.get('live_order_allowed', '-')}")
-    print(f"sample_status:             {pol.get('sample_status', '-')}")
-    print(f"max_budget_krw:            {pol.get('max_budget_krw', '-')}")
+    print(f"adapter/transport:         {pol.get('adapter_status', '-')}/{pol.get('live_transport_status', '-')}")
     print()
 
     wr = r.get("write_routes", [])

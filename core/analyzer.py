@@ -889,6 +889,17 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
         log.warning(f"Watchlist 수집 실패: {e}")
         watchlist_text = ""
 
+    # 수입 중심 결정론 payload — LLM 성공/실패와 무관하게 브리핑의 단일 진실원천
+    income_payload: dict = {}
+    try:
+        from core.income_briefing import (
+            build_income_briefing_context, render_income_context_for_prompt,
+        )
+        income_payload = build_income_briefing_context(briefing_type)
+        extra_context += "\n\n" + render_income_context_for_prompt(income_payload)
+    except Exception as e:
+        log.warning("income briefing context 수집 실패: %s", e)
+
     market_context = _build_full_context(
         snapshot, gathered_news,
         indicators_text, sentiment_text,
@@ -980,7 +991,7 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
     else:
         # 결정론적 정규화: LLM의 raw strategy_buy/sell를 신호어 기반으로 분류.
         # raw actions는 신뢰하지 않고 normalize 결과의 executable_actions만 실행 섹션으로.
-        from core.action_normalizer import normalize_actions
+        from core.action_normalizer import normalize_actions, apply_data_quality_limits
         from config.settings import (
             HOLDINGS_GENERAL, HOLDINGS_ISA, HOLDINGS_RIA, HOLDINGS_IRP, HOLDINGS_PENSION,
             DEFAULT_CASH, RIA_CASH, ISA_CASH, IRP_CASH, IRP_DEFAULT_OPTION, PENSION_MMF,
@@ -1000,6 +1011,12 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
                 _total_assets += _p * _sh
         normalized = normalize_actions(data, briefing_type, current_prices, _holdings_all,
                                        total_assets=_total_assets)
+        # Toss 계좌 action 제거 — Toss 주문은 자동 파이프라인 전담 (이중 주문 방지)
+        try:
+            from core.income_briefing import strip_toss_from_manual_normalized
+            normalized = strip_toss_from_manual_normalized(normalized)
+        except Exception as e:
+            log.warning("Toss action strip 실패: %s", e)
         # 텔레그램이 쓰도록 raw에 주입 + 실행 actions를 normalize 결과로 덮어씀
         data["normalized"] = normalized
         data["actions"] = normalized["executable_actions"]
@@ -1054,6 +1071,19 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
     if dq_report.warnings:
         _quality_warnings.extend(dq_report.warnings)
     _data_failures += len(dq_report.failed_sources)
+    if normalized is not None:
+        normalized = apply_data_quality_limits(normalized, dq_report)
+        data["normalized"] = normalized
+        data["actions"] = normalized.get("executable_actions", [])
+
+    # income briefing 확정 — LLM/fallback 무관하게 항상 raw_json에 포함
+    try:
+        from core.income_briefing import finalize_income_briefing
+        data["income_briefing"] = finalize_income_briefing(
+            income_payload, normalized, briefing_type)
+    except Exception as e:
+        log.warning("income briefing finalize 실패: %s", e)
+        data["income_briefing"] = income_payload
 
     result = _build_briefing_result(data)
     # 품질 경고를 BriefingResult에 주입
