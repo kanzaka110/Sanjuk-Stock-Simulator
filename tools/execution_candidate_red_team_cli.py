@@ -171,7 +171,7 @@ def main(argv: list[str] | None = None) -> int:
         records.append({
             "symbol": record["symbol"],
             "review_id": record["review_id"],
-            "verdict": record["verdict"],
+            "review_signal": record["review_signal"],
             "output": str(output_path),
             "decision_ref": record.get("decision_ref"),
         })

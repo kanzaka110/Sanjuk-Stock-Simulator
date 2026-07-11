@@ -982,6 +982,8 @@ def execution_red_team_staging_data(limit: int = 50, symbol: str | None = None) 
     return {
         "version": VERSION,
         "read_only": True,
+        "review_only": True,
+        "operational_decision_unchanged": True,
         "advisory_only": True,
         "order_side_effects": False,
         "order_signal": False,

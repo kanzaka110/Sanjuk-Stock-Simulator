@@ -78,7 +78,7 @@ def _ai(verdict="PASS", confidence=80, sources=1, breached=False):
         for i in range(sources)
     ]
     return {
-        "verdict": verdict,
+        "review_signal": verdict,
         "confidence": confidence,
         "summary": "반증을 검토했으나 현재 논지를 즉시 무효화할 증거는 제한적",
         "strongest_bear_case": "HBM 인증 지연과 공급 증가가 가격 회복을 꺾을 수 있음",
@@ -136,7 +136,7 @@ def test_deterministic_berkshire_block_cannot_be_overridden():
         ai_runner=_runner(_ai("PASS")),
         as_of=AS_OF,
     )
-    assert record["verdict"] == "BLOCK"
+    assert record["review_signal"] == "BLOCK"
     assert record["verdict_reason"] == "deterministic_block"
     assert "ai_berkshire_buy_block" in record["deterministic_checks"]["blocks"]
 
@@ -145,7 +145,7 @@ def test_ai_pass_with_counterevidence_passes():
     record = evaluate_execution_candidate(
         _candidate(), _context(), ai_runner=_runner(_ai("PASS")), as_of=AS_OF,
     )
-    assert record["verdict"] == "PASS"
+    assert record["review_signal"] == "PASS"
     assert record["verdict_reason"] == "ai_pass_with_counterevidence"
     assert record["source_evidence"][0]["url"].startswith("https://")
     assert record["decision_ref"] == "pred:123"
@@ -156,7 +156,7 @@ def test_ai_pass_cannot_override_deterministic_review():
     record = evaluate_execution_candidate(
         _candidate(risk_reward=1.5), _context(), ai_runner=_runner(_ai("PASS")), as_of=AS_OF,
     )
-    assert record["verdict"] == "REVIEW"
+    assert record["review_signal"] == "REVIEW"
     assert record["verdict_reason"] == "deterministic_review_not_overridden"
 
 
@@ -164,13 +164,13 @@ def test_ai_block_requires_confidence_two_sources_and_evidence():
     accepted = evaluate_execution_candidate(
         _candidate(), _context(), ai_runner=_runner(_ai("BLOCK", 80, 2, True)), as_of=AS_OF,
     )
-    assert accepted["verdict"] == "BLOCK"
+    assert accepted["review_signal"] == "BLOCK"
     assert accepted["verdict_reason"] == "ai_block_evidence_threshold_met"
 
     downgraded = evaluate_execution_candidate(
         _candidate(), _context(), ai_runner=_runner(_ai("BLOCK", 69, 1, True)), as_of=AS_OF,
     )
-    assert downgraded["verdict"] == "REVIEW"
+    assert downgraded["review_signal"] == "REVIEW"
     assert downgraded["verdict_reason"] == "ai_block_downgraded_insufficient_evidence"
 
 
@@ -181,7 +181,7 @@ def test_invalid_source_is_removed_and_pass_downgraded():
         _candidate(), _context(), ai_runner=_runner(payload), as_of=AS_OF,
     )
     assert record["source_evidence"] == []
-    assert record["verdict"] == "REVIEW"
+    assert record["review_signal"] == "REVIEW"
     assert record["verdict_reason"] == "ai_pass_downgraded_missing_counterevidence"
 
 
@@ -189,11 +189,11 @@ def test_ai_error_and_disabled_fail_to_review():
     empty = evaluate_execution_candidate(
         _candidate(), _context(), ai_runner=lambda *_args, **_kwargs: "", as_of=AS_OF,
     )
-    assert empty["verdict"] == "REVIEW"
+    assert empty["review_signal"] == "REVIEW"
     assert empty["ai"]["error"] == "ai_empty_response"
 
     disabled = evaluate_execution_candidate(_candidate(), _context(), run_ai=False, as_of=AS_OF)
-    assert disabled["verdict"] == "REVIEW"
+    assert disabled["review_signal"] == "REVIEW"
     assert disabled["verdict_reason"] == "ai_disabled"
 
 
@@ -204,7 +204,7 @@ def test_high_portfolio_cluster_risk_forces_review_not_auto_block():
         ai_runner=_runner(_ai("PASS")),
         as_of=AS_OF,
     )
-    assert record["verdict"] == "REVIEW"
+    assert record["review_signal"] == "REVIEW"
     assert "portfolio_cluster_risk:high" in record["deterministic_checks"]["reviews"]
     assert "cluster_weight_at_or_above_50pct" in record["deterministic_checks"]["reviews"]
 
@@ -229,16 +229,40 @@ def test_prompt_contains_snapshot_but_no_order_execution_instruction():
 def test_staging_safety_contract_and_validator():
     record = evaluate_execution_candidate(_candidate(), _context(), run_ai=False, as_of=AS_OF)
     assert validate_staging_record(record) == []
+    assert record["review_signal"] == "REVIEW"
+    assert "verdict" not in record
+    assert record["review_only"] is True
+    assert record["operational_decision_unchanged"] is True
     assert record["advisory_only"] is True
     assert record["order_signal"] is False
     assert record["order_side_effects"] is False
     assert record["can_approve_order"] is False
     assert record["can_cancel_order"] is False
     assert record["can_send_order"] is False
+    assert record["data_quality"]["ai_result_available"] is False
 
     unsafe = dict(record)
     unsafe["can_send_order"] = True
     assert "unsafe_contract:can_send_order" in validate_staging_record(unsafe)
+
+
+def test_sensitive_unknown_fields_are_not_exposed_and_forbidden_modules_are_absent():
+    candidate = _candidate(accountNo="sensitive-account", bearer="secret-token")
+    context = _context(api_key="secret-key")
+    record = evaluate_execution_candidate(candidate, context, run_ai=False, as_of=AS_OF)
+    encoded = json.dumps(record, ensure_ascii=False)
+    assert "sensitive-account" not in encoded
+    assert "secret-token" not in encoded
+    assert "secret-key" not in encoded
+
+    source = (ROOT / "core" / "execution_candidate_red_team.py").read_text(encoding="utf-8")
+    forbidden_imports = (
+        "toss_autonomous_pipeline", "toss_autonomous_finalizer",
+        "toss_live_pilot_verification", "toss_live_pilot_ledger",
+        "toss_live_pilot_adapter", "toss_live_transport",
+        "toss_live_order_http", "toss_order_watch",
+    )
+    assert all(f"from core.{name} import" not in source for name in forbidden_imports)
 
 
 def test_review_id_is_deterministic_for_same_snapshot_and_time():
@@ -291,6 +315,8 @@ def test_dashboard_reads_only_valid_staging_and_filters_symbol(tmp_path, monkeyp
     result = execution_red_team_staging_data(limit=10, symbol="MU")
     assert result["version"] == VERSION
     assert result["read_only"] is True
+    assert result["review_only"] is True
+    assert result["operational_decision_unchanged"] is True
     assert result["order_side_effects"] is False
     assert result["count"] == 1
     assert result["items"][0]["symbol"] == "MU"

@@ -18,14 +18,14 @@ from urllib.parse import urlparse
 KST = timezone(timedelta(hours=9))
 log = logging.getLogger(__name__)
 
-VERSION = "execution_candidate_red_team_v1"
+VERSION = "execution_candidate_red_team_v2"
 VERDICTS = frozenset({"PASS", "REVIEW", "BLOCK"})
 EXECUTABLE_BUCKETS = frozenset({"PASS_EXECUTE", "SMALL_PASS"})
 
 _RED_TEAM_SCHEMA = {
     "type": "object",
     "properties": {
-        "verdict": {"type": "string", "enum": ["PASS", "REVIEW", "BLOCK"]},
+        "review_signal": {"type": "string", "enum": ["PASS", "REVIEW", "BLOCK"]},
         "confidence": {"type": "integer", "minimum": 0, "maximum": 100},
         "summary": {"type": "string"},
         "strongest_bear_case": {"type": "string"},
@@ -69,7 +69,7 @@ _RED_TEAM_SCHEMA = {
         "next_checks": {"type": "array", "items": {"type": "string"}},
     },
     "required": [
-        "verdict", "confidence", "summary", "strongest_bear_case",
+        "review_signal", "confidence", "summary", "strongest_bear_case",
         "thesis_assumptions", "disconfirming_evidence", "missing_evidence",
         "red_lines", "scenarios", "source_evidence", "next_checks",
     ],
@@ -367,7 +367,7 @@ def _parse_ai_result(raw: object) -> tuple[dict, str | None]:
                 return {}, "ai_invalid_json"
     if not isinstance(data, dict):
         return {}, "ai_result_not_object"
-    verdict = str(data.get("verdict") or "").upper()
+    verdict = str(data.get("review_signal") or "").upper()
     if verdict not in VERDICTS:
         return {}, "ai_verdict_invalid"
     return data, None
@@ -377,7 +377,7 @@ def _normalize_ai_result(data: Mapping) -> dict:
     scenarios_raw = data.get("scenarios")
     scenarios: Mapping = scenarios_raw if isinstance(scenarios_raw, Mapping) else {}
     return {
-        "verdict": str(data.get("verdict") or "REVIEW").upper(),
+        "review_signal": str(data.get("review_signal") or "REVIEW").upper(),
         "confidence": max(0, min(100, _int(data.get("confidence"), 0))),
         "summary": str(data.get("summary") or "").strip()[:1500],
         "strongest_bear_case": str(data.get("strongest_bear_case") or "").strip()[:2000],
@@ -436,7 +436,7 @@ def evaluate_execution_candidate(
         final_verdict = "REVIEW"
         verdict_reason = ai_error or "ai_unavailable"
     else:
-        requested = ai_data["verdict"]
+        requested = ai_data["review_signal"]
         sources = ai_data["source_evidence"]
         breached = [r for r in ai_data["red_lines"] if r["status"] == "breached"]
         if requested == "BLOCK":
@@ -469,7 +469,7 @@ def evaluate_execution_candidate(
         "name": c["name"],
         "side": c["side"],
         "generated_at": as_of_text,
-        "verdict": final_verdict,
+        "review_signal": final_verdict,
         "verdict_reason": verdict_reason,
         "confidence": ai_data.get("confidence", 0),
         "summary": ai_data.get("summary", "AI 분석 미실행 또는 실패 — 수동 검토 필요"),
@@ -494,6 +494,14 @@ def evaluate_execution_candidate(
             "error": ai_error,
             "web_search_allowed": bool(run_ai),
         },
+        "data_quality": {
+            "ai_result_available": bool(ai_data),
+            "valid_source_count": len(ai_data.get("source_evidence", [])),
+            "missing_evidence_count": len(ai_data.get("missing_evidence", [])),
+            "deterministic_warning_count": len(checks["warnings"]),
+        },
+        "review_only": True,
+        "operational_decision_unchanged": True,
         "advisory_only": True,
         "order_signal": False,
         "order_side_effects": False,
@@ -509,17 +517,18 @@ def validate_staging_record(record: Mapping) -> list[str]:
     errors: list[str] = []
     if record.get("version") != VERSION:
         errors.append("version_invalid")
-    if record.get("verdict") not in VERDICTS:
+    if record.get("review_signal") not in VERDICTS:
         errors.append("verdict_invalid")
     if not record.get("review_id"):
         errors.append("review_id_missing")
     if not record.get("symbol"):
         errors.append("symbol_missing")
     for key in (
-        "advisory_only", "order_side_effects", "order_signal",
+        "review_only", "operational_decision_unchanged", "advisory_only",
+        "order_side_effects", "order_signal",
         "can_approve_order", "can_cancel_order", "can_send_order",
     ):
-        expected = key == "advisory_only"
+        expected = key in {"review_only", "operational_decision_unchanged", "advisory_only"}
         if record.get(key) is not expected:
             errors.append(f"unsafe_contract:{key}")
     sources = record.get("source_evidence") or []
