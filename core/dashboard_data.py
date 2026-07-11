@@ -936,6 +936,62 @@ def trade_outcome_attribution_data(days: int = 90) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+# ─── /api/toss/execution-red-team — staging 조회 전용 ─────
+def execution_red_team_staging_data(limit: int = 50, symbol: str | None = None) -> dict:
+    """실행 후보 Red Team staging을 읽기만 한다.
+
+    이 GET 경로는 Claude/WebSearch/주문 preview/ledger/finalizer/transport를 호출하지
+    않는다. CLI가 별도로 생성한 advisory JSON만 검증해 최신순으로 반환한다.
+    """
+    import json
+    from pathlib import Path
+
+    from core.execution_candidate_red_team import VERSION, validate_staging_record
+
+    capped_limit = min(max(int(limit or 50), 1), 200)
+    wanted = str(symbol or "").upper().strip()
+    configured = os.environ.get("EXECUTION_RED_TEAM_STAGING_DIR", "").strip()
+    root = Path(configured).expanduser() if configured else _db_path().parent / "execution-red-team-staging"
+
+    items: list[dict] = []
+    invalid_count = 0
+    if root.exists() and root.is_dir():
+        try:
+            paths = sorted(
+                root.glob("*/*.json"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )[:500]
+        except OSError:
+            paths = []
+        for path in paths:
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                invalid_count += 1
+                continue
+            if not isinstance(record, dict) or validate_staging_record(record):
+                invalid_count += 1
+                continue
+            if wanted and str(record.get("symbol") or "").upper().strip() != wanted:
+                continue
+            items.append(record)
+            if len(items) >= capped_limit:
+                break
+
+    return {
+        "version": VERSION,
+        "read_only": True,
+        "advisory_only": True,
+        "order_side_effects": False,
+        "order_signal": False,
+        "source": "execution_red_team_staging_json",
+        "count": len(items),
+        "invalid_count": invalid_count,
+        "items": items,
+    }
+
+
 # ─── /api/performance ────────────────────────────────────
 def performance_data(days: int = 30) -> dict:
     """action_type / briefing_type / ticker 별 성과 집계."""

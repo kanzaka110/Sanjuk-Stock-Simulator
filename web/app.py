@@ -237,6 +237,12 @@ def api_toss_buy_candidates(range: str = "today", limit: int = 20, market: str =
     return JSONResponse(dd.toss_buy_candidates_data(range_=range, limit=min(limit, 100), market=market))
 
 
+@app.get("/api/toss/execution-red-team")
+def api_toss_execution_red_team(limit: int = 50, symbol: str | None = None):
+    """Red Team staging 조회 전용. AI 실행·주문 부작용 없음."""
+    return JSONResponse(dd.execution_red_team_staging_data(limit=min(limit, 200), symbol=symbol))
+
+
 @app.get("/api/toss/ai-berkshire-research-queue")
 def api_toss_ai_berkshire_research_queue(limit: int = 100):
     """AI Berkshire 재리서치 대상 (read-only). 주문/판정 부작용 없음."""
