@@ -714,7 +714,11 @@ def test_toss_buy_candidates_no_fixed_cap_uses_account_risk_sizing(monkeypatch):
         }
     )
     _patch_sections(monkeypatch, _sections(new=[expensive]))
+    from core import ai_berkshire_toss as abt
     from core import toss_live_pilot_policy as tlp
+    # 이 테스트는 수량 산정 계약만 검증한다. 실제 repo score의 종목별 BUY
+    # 판정과 분리해 신규 score 추가가 sizing 결과를 바꾸지 않게 한다.
+    monkeypatch.setattr(abt, "load_ai_berkshire_scores", lambda *a, **k: {})
     monkeypatch.setattr(tlp, "compute_toss_live_pilot_policy", lambda *a, **k: {"max_order_krw": None})
     monkeypatch.setattr(dd, "_toss_holding_price_map", lambda: {})
     monkeypatch.setattr(dd, "_recent_toss_risk_sell_symbols", lambda *a, **k: {})

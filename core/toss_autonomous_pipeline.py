@@ -216,9 +216,10 @@ def process_candidate(
             ),
         }
 
-    # AI Berkshire avoid 게이트 — dashboard 후보 정규화와 독립 재검사.
-    # stale preview / API 우회로 avoid 종목이 들어와도 preview/finalizer/transport에
-    # 도달하지 못하게 한다. BUY에만 적용 (SELL/손절/익절 경로는 불변).
+    # AI Berkshire BUY 게이트 — dashboard 후보 정규화와 독립 재검사.
+    # stale preview / API 우회로 avoid 또는 checklist fail/gray_zone 종목이
+    # 들어와도 preview/finalizer/transport에 도달하지 못하게 한다.
+    # BUY에만 적용하며 SELL/손절/익절 경로는 불변이다.
     if side == "buy":
         from core.ai_berkshire_toss import evaluate_ai_berkshire_buy_gate
         try:
@@ -227,11 +228,17 @@ def process_candidate(
             log.warning("ai_berkshire buy gate recheck failed (%s): %s", symbol, e)
             gate = {}
         if gate.get("buy_block"):
-            log.info("auto pipeline: %s blocked by ai_berkshire avoid", symbol)
+            reason = str(gate.get("buy_reason") or "ai_berkshire_buy_blocked")
+            stage = (
+                "ai_berkshire_avoid_blocked"
+                if reason == "ai_berkshire_avoid"
+                else "ai_berkshire_buy_blocked"
+            )
+            log.info("auto pipeline: %s blocked by ai_berkshire (%s)", symbol, reason)
             return {
                 "symbol": symbol,
-                "stage": "ai_berkshire_avoid_blocked",
-                "reason": str(gate.get("buy_reason") or "ai_berkshire_avoid"),
+                "stage": stage,
+                "reason": reason,
             }
 
     preview_input = {

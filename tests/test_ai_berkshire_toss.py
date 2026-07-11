@@ -226,6 +226,40 @@ class TestThesisFreshness(unittest.TestCase):
             scores=_SCORES, as_of_date="2026-07-15")
         self.assertTrue(all(r["auto_sell_eligible"] for r in out))
 
+    def test_explicit_false_blocks_trim_auto_sell(self):
+        scores = {"items": {
+            "096770.KS": _item(
+                "trim", 1.0, auto_sell_eligible=False,
+                buy_checklist_status="fail",
+            )
+        }}
+        out = abt.apply_berkshire_to_sell_to_fund(
+            [_row("096770.KS")], scores=scores, as_of_date="2026-07-15")
+        self.assertFalse(out[0]["auto_sell_eligible"])
+        self.assertEqual(
+            out[0]["auto_sell_block_reason"],
+            "ai_berkshire_auto_sell_disabled",
+        )
+        self.assertIs(out[0]["ai_berkshire"]["score_auto_sell_eligible"], False)
+
+    def test_explicit_true_does_not_override_hold_classification(self):
+        scores = {"items": {
+            "AAA": _item("hold", auto_sell_eligible=True)
+        }}
+        out = abt.apply_berkshire_to_sell_to_fund(
+            [_row("AAA")], scores=scores, as_of_date="2026-07-15")
+        self.assertFalse(out[0]["auto_sell_eligible"])
+        self.assertEqual(out[0]["auto_sell_block_reason"], "ai_berkshire_hold")
+
+    def test_string_false_is_not_an_authoritative_override(self):
+        scores = {"items": {
+            "AAA": _item("trim", auto_sell_eligible="false")
+        }}
+        out = abt.apply_berkshire_to_sell_to_fund(
+            [_row("AAA")], scores=scores, as_of_date="2026-07-15")
+        self.assertTrue(out[0]["auto_sell_eligible"])
+        self.assertIsNone(out[0]["ai_berkshire"]["score_auto_sell_eligible"])
+
     def test_fresh_hold_and_protect_still_blocked(self):
         out = abt.apply_berkshire_to_sell_to_fund(
             [_row("ABBV"), _row("069500.KS")],
@@ -241,7 +275,8 @@ class TestThesisFreshness(unittest.TestCase):
         for key in ("stored_classification", "classification", "thesis_expired",
                     "freshness_valid", "freshness_issues",
                     "as_of", "valid_until", "thesis", "red_lines",
-                    "confidence", "source_urls"):
+                    "confidence", "source_urls", "buy_checklist_status",
+                    "score_auto_sell_eligible"):
             self.assertIn(key, ab)
         self.assertEqual(ab["source_urls"], ["https://example.com/ir"])
 
@@ -312,13 +347,37 @@ class TestThesisFreshness(unittest.TestCase):
         self.assertEqual(item["stored_classification"], "trim")
         self.assertEqual(item["classification"], "gray_zone")
 
-    def test_repo_scores_json_all_eight_symbols_freshness_valid(self):
+    def test_repo_scores_json_all_eleven_symbols_freshness_valid(self):
         data = abt.load_ai_berkshire_scores()
-        self.assertEqual(len(data.get("items") or {}), 8)
+        self.assertEqual(len(data.get("items") or {}), 11)
         for sym in data["items"]:
-            item = abt.score_for_symbol(sym, data, as_of_date="2026-07-10")
+            item = abt.score_for_symbol(sym, data, as_of_date="2026-07-11")
             self.assertTrue(item["freshness_valid"],
                             f"{sym}: {item['freshness_issues']}")
+
+    def test_repo_new_staging_items_keep_buy_and_sell_authority_separate(self):
+        data = abt.load_ai_berkshire_scores()
+        expected = {
+            "000270.KS": ("hold", "gray_zone"),
+            "096770.KS": ("trim", "fail"),
+            "207940.KS": ("hold", "fail"),
+        }
+        for symbol, (classification, checklist) in expected.items():
+            item = abt.score_for_symbol(symbol, data, as_of_date="2026-07-11")
+            self.assertIsNotNone(item)
+            assert item is not None
+            self.assertEqual(item["classification"], classification)
+            self.assertEqual(item["buy_checklist_status"], checklist)
+            self.assertIs(item["auto_sell_eligible"], False)
+            raw = data["items"][symbol]
+            for key in (
+                "research_status", "proposed_classification",
+                "classification_change_reason", "evidence_urls", "checked_at",
+            ):
+                self.assertIn(key, raw)
+            self.assertEqual(raw["research_status"], "complete")
+            self.assertEqual(raw["proposed_classification"], classification)
+            self.assertEqual(raw["evidence_urls"], raw["source_urls"])
 
 
 # ── 3. 정렬 ──────────────────────────────────────────────────────

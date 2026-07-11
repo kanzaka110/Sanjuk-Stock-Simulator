@@ -2823,15 +2823,16 @@ def toss_rebalance_plan_data(limit: int = 80, market: str = "ALL") -> dict:
     return plan
 
 # ─── /api/toss/buy-candidates — 토스 전용 매수 후보 (신규 발굴 기반) ─────────────
-_AI_BERKSHIRE_BUY_GATE_VERSION = "ai_berkshire_buy_gate_avoid_only_v1"
+_AI_BERKSHIRE_BUY_GATE_VERSION = "ai_berkshire_buy_gate_checklist_v2"
 
 
 def _apply_ai_berkshire_buy_gate(out: dict, scores: dict | None) -> dict:
-    """신규 BUY 후보에 AI Berkshire avoid 게이트를 적용 (in-place).
+    """신규 BUY 후보에 AI Berkshire 질적 게이트를 적용 (in-place).
 
-    근거가 살아있는 avoid만 stock_agent_ready에서 하드 차단한다. unscored /
-    expired / invalid / gray_zone은 진단 필드만 남기고 기존 판정을 유지한다.
-    SELL 후보와 게이트 계산 실패는 기존 결과를 바꾸지 않는다.
+    근거가 살아있는 avoid 또는 buy_checklist_status=fail/gray_zone을
+    stock_agent_ready에서 하드 차단한다. 기존 score에 checklist가 없으면
+    avoid_only 동작을 유지한다. unscored / expired / invalid는 진단 필드만
+    남기고 기존 판정을 유지한다. SELL 후보와 게이트 오류는 영향을 받지 않는다.
     """
     from core.ai_berkshire_toss import evaluate_ai_berkshire_buy_gate
 
@@ -2861,14 +2862,25 @@ def _apply_ai_berkshire_buy_gate(out: dict, scores: dict | None) -> dict:
         "valid_until": gate["valid_until"],
         "confidence": gate["confidence"],
         "source_urls": gate["source_urls"],
+        "buy_checklist_status": gate["buy_checklist_status"],
     }
     if not gate["buy_block"]:
         return out
 
-    block_reason = "AI Berkshire avoid 판정 — 신규 BUY 차단 (기존 보유/매도 판단은 불변)"
+    reason = str(gate.get("buy_reason") or "ai_berkshire_buy_blocked")
+    if reason == "ai_berkshire_avoid":
+        block_reason = "AI Berkshire avoid 판정 — 신규 BUY 차단 (기존 보유/매도 판단은 불변)"
+        execution_status = "hold_ai_berkshire_avoid"
+    else:
+        checklist = str(gate.get("buy_checklist_status") or "blocked")
+        block_reason = (
+            f"AI Berkshire BUY 체크리스트 {checklist} — 신규 BUY 차단 "
+            "(기존 보유/리스크 매도 판단은 불변)"
+        )
+        execution_status = "hold_ai_berkshire_buy_checklist"
     out["stock_agent_ready"] = False
     out["executable_now"] = False
-    out["execution_status"] = "hold_ai_berkshire_avoid"
+    out["execution_status"] = execution_status
     out["block_reason"] = block_reason
     out.setdefault("risk_notes", []).append(block_reason)
     return out

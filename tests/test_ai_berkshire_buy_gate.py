@@ -98,7 +98,7 @@ def test_gate_does_not_mutate_input_rows():
 
 
 def test_non_avoid_classes_are_reviewed_non_avoid_not_blocked():
-    """4. hold/protect/trim/sell_to_fund는 avoid_only 단계에서 하드 차단 안 함."""
+    """4. checklist가 없는 기존 hold/protect/trim/sell_to_fund는 호환 유지."""
     for cls in ("hold", "protect", "trim", "sell_to_fund"):
         scores = _scores(**{_AVOID_SYM: _item(cls)})
         gate = abt.evaluate_ai_berkshire_buy_gate(_AVOID_SYM, scores=scores,
@@ -106,6 +106,44 @@ def test_non_avoid_classes_are_reviewed_non_avoid_not_blocked():
         assert gate["buy_block"] is False, cls
         assert gate["buy_reason"] == "reviewed_non_avoid", cls
         assert gate["research_status"] == "ok", cls
+        assert gate["buy_checklist_status"] is None
+
+
+def test_explicit_fail_and_gray_zone_checklists_block_buy():
+    """신규 staging의 fail/gray_zone은 classification과 독립적으로 BUY 차단."""
+    cases = (("hold", "gray_zone"), ("trim", "fail"))
+    for classification, checklist in cases:
+        scores = _scores(**{
+            _AVOID_SYM: _item(classification, buy_checklist_status=checklist)
+        })
+        gate = abt.evaluate_ai_berkshire_buy_gate(
+            _AVOID_SYM, scores=scores, as_of_date="2026-07-15")
+        assert gate["buy_block"] is True
+        assert gate["buy_reason"] == f"ai_berkshire_buy_checklist_{checklist}"
+        assert gate["buy_checklist_status"] == checklist
+        assert gate["classification"] == classification
+
+
+def test_explicit_pass_checklist_does_not_grant_or_block_by_itself():
+    scores = _scores(**{
+        _AVOID_SYM: _item("hold", buy_checklist_status="pass")
+    })
+    gate = abt.evaluate_ai_berkshire_buy_gate(
+        _AVOID_SYM, scores=scores, as_of_date="2026-07-15")
+    assert gate["buy_block"] is False
+    assert gate["buy_reason"] == "reviewed_non_avoid"
+    assert gate["buy_checklist_status"] == "pass"
+
+
+def test_expired_checklist_does_not_retain_order_authority():
+    scores = _scores(**{
+        _AVOID_SYM: _item(
+            "hold", valid_until="2026-07-01", buy_checklist_status="fail")
+    })
+    gate = abt.evaluate_ai_berkshire_buy_gate(
+        _AVOID_SYM, scores=scores, as_of_date="2026-07-15")
+    assert gate["buy_block"] is False
+    assert gate["research_status"] == "expired"
 
 
 def test_unscored_symbol_is_needs_research_without_block():
@@ -234,7 +272,7 @@ def test_dashboard_avoid_candidate_is_hard_blocked(monkeypatch):
 
 
 def test_dashboard_hold_candidate_keeps_existing_ready_result(monkeypatch):
-    """4. hold는 기존 ready 결과 유지."""
+    """4. checklist 없는 기존 hold는 ready 결과 유지."""
     sections = _sections(new=[_new_cand("000777.KS", "강한수입후보")])
     _patch_dashboard(monkeypatch, sections, _scores(**{"000777.KS": _item("hold")}))
 
@@ -245,6 +283,24 @@ def test_dashboard_hold_candidate_keeps_existing_ready_result(monkeypatch):
     assert item["ai_berkshire_buy_reason"] == "reviewed_non_avoid"
     assert item["stock_agent_ready"] is True
     assert item["execution_status"] != "hold_ai_berkshire_avoid"
+
+
+def test_dashboard_checklist_fail_candidate_is_hard_blocked(monkeypatch):
+    sections = _sections(new=[_new_cand("000777.KS", "체크리스트실패후보")])
+    scores = _scores(**{
+        "000777.KS": _item("hold", buy_checklist_status="fail")
+    })
+    _patch_dashboard(monkeypatch, sections, scores)
+
+    item = next(i for i in dd.toss_buy_candidates_data(range_="today")["items"]
+                if i["symbol"] == "000777.KS")
+
+    assert item["ai_berkshire_buy_block"] is True
+    assert item["ai_berkshire_buy_reason"] == "ai_berkshire_buy_checklist_fail"
+    assert item["ai_berkshire_buy_gate"]["buy_checklist_status"] == "fail"
+    assert item["stock_agent_ready"] is False
+    assert item["executable_now"] is False
+    assert item["execution_status"] == "hold_ai_berkshire_buy_checklist"
 
 
 def test_dashboard_unscored_candidate_keeps_ready_and_marks_needs_research(monkeypatch):
@@ -346,6 +402,25 @@ def test_pipeline_avoid_buy_never_reaches_preview_or_finalizer():
 
     assert r["stage"] == "ai_berkshire_avoid_blocked"
     assert r["reason"] == "ai_berkshire_avoid"
+    preview.assert_not_called()
+    ledger.assert_not_called()
+    req.assert_not_called()
+    rec.assert_not_called()
+    verdict.assert_not_called()
+    final.assert_not_called()
+
+
+def test_pipeline_checklist_gray_zone_never_reaches_preview_or_finalizer():
+    scores = _scores(**{
+        _AVOID_SYM: _item("hold", buy_checklist_status="gray_zone")
+    })
+    (m_scores, m_prev, m_ledger, m_req, m_rec, m_verdict, m_final) = _pipeline_mocks(scores)
+    with m_scores, m_prev as preview, m_ledger as ledger, m_req as req, \
+            m_rec as rec, m_verdict as verdict, m_final as final:
+        r = tap.process_candidate(_candidate(), dict(_POLICY_ON))
+
+    assert r["stage"] == "ai_berkshire_buy_blocked"
+    assert r["reason"] == "ai_berkshire_buy_checklist_gray_zone"
     preview.assert_not_called()
     ledger.assert_not_called()
     req.assert_not_called()
