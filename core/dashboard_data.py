@@ -818,6 +818,32 @@ def portfolio_data() -> dict:
     return _cached("portfolio", 60, _fetch_portfolio_raw)
 
 
+def _fetch_portfolio_cluster_risk_raw() -> dict:
+    """삼성 수동 포트폴리오의 결정론 군집 위험 (read-only).
+
+    dashboard GET 요청에서 가격 이력 네트워크 호출을 하지 않는다. 따라서 기본
+    응답의 correlation_status는 not_requested이며, 상관행렬은 별도 주기 작업이
+    core.portfolio_cluster_risk 계산 함수에 명시적으로 주입한다.
+    """
+    from core.portfolio_cluster_risk import (
+        calculate_portfolio_cluster_risk,
+        hermes_interpretation_payload,
+    )
+
+    report = calculate_portfolio_cluster_risk(portfolio_data())
+    report["generated_at"] = datetime.now(KST).isoformat()
+    report["source"] = "dashboard_portfolio_read_only"
+    report["scope"] = "samsung_manual_portfolio_only"
+    report["interpretation_payload"] = hermes_interpretation_payload(report)
+    return report
+
+
+def portfolio_cluster_risk_data() -> dict:
+    """포트폴리오 군집 위험 (5분 캐시, GET/read-only)."""
+    value = _cached("portfolio_cluster_risk", 300, _fetch_portfolio_cluster_risk_raw)
+    return value if isinstance(value, dict) else {}
+
+
 # ─── /api/performance ────────────────────────────────────
 def performance_data(days: int = 30) -> dict:
     """action_type / briefing_type / ticker 별 성과 집계."""

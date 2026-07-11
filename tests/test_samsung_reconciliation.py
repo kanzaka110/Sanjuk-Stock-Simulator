@@ -249,7 +249,9 @@ class TestSourceAgreement:
 class TestSnapshotSource:
     def test_no_access_returns_not_found(self):
         """Hermes 파일 접근 불가 → found=False, note=원본 미확인."""
-        with patch("builtins.open", side_effect=PermissionError("Permission denied")):
+        # pathlib.Path.read_text는 io.open을 사용하므로 builtins.open 패치는
+        # 실제 파일이 존재하는 실행환경에서 격리되지 않는다.
+        with patch.object(Path, "read_text", side_effect=PermissionError("Permission denied")):
             snap = rec._check_snapshot_sources()
         assert snap["found"] is False
         assert "원본 미확인" in snap.get("note", "")

@@ -100,6 +100,12 @@ def api_portfolio():
     return JSONResponse(dd.portfolio_data())
 
 
+@app.get("/api/portfolio/cluster-risk")
+def api_portfolio_cluster_risk():
+    """결정론 군집 위험. 삼성 수동 포트폴리오 전용, 주문 부작용 없음."""
+    return JSONResponse(dd.portfolio_cluster_risk_data())
+
+
 @app.get("/api/performance")
 def api_performance():
     return JSONResponse(dd.performance_data(30))
