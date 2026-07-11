@@ -106,6 +106,12 @@ def api_portfolio_cluster_risk():
     return JSONResponse(dd.portfolio_cluster_risk_data())
 
 
+@app.get("/api/trade-outcome-attribution")
+def api_trade_outcome_attribution(days: int = 90):
+    """추천·체결 사후 귀속. GET/read-only, 주문 부작용 없음."""
+    return JSONResponse(dd.trade_outcome_attribution_data(days))
+
+
 @app.get("/api/performance")
 def api_performance():
     return JSONResponse(dd.performance_data(30))
@@ -229,6 +235,12 @@ def api_market_discovery(range: str = "today", limit: int = 50):
 @app.get("/api/toss/buy-candidates")
 def api_toss_buy_candidates(range: str = "today", limit: int = 20, market: str = "KR"):
     return JSONResponse(dd.toss_buy_candidates_data(range_=range, limit=min(limit, 100), market=market))
+
+
+@app.get("/api/toss/execution-red-team")
+def api_toss_execution_red_team(limit: int = 50, symbol: str | None = None):
+    """Red Team staging 조회 전용. AI 실행·주문 부작용 없음."""
+    return JSONResponse(dd.execution_red_team_staging_data(limit=min(limit, 200), symbol=symbol))
 
 
 @app.get("/api/toss/ai-berkshire-research-queue")

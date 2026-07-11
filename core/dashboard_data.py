@@ -844,6 +844,165 @@ def portfolio_cluster_risk_data() -> dict:
     return value if isinstance(value, dict) else {}
 
 
+# ─── /api/trade-outcome-attribution ─────────────────────
+def _read_trade_outcome_inputs(days: int) -> tuple[list[dict], list[dict], list[dict]]:
+    """추천·수동 매매·production live event를 SQLite mode=ro로 읽는다."""
+    cutoff = (datetime.now(KST) - timedelta(days=days)).isoformat()
+    predictions: list[dict] = []
+    manual_trades: list[dict] = []
+    live_events: list[dict] = []
+
+    conn = _conn()
+    if conn is not None:
+        predictions = _rows(
+            conn,
+            """SELECT id, created_at, closed_at, ticker, name, signal,
+                      original_signal, action_type, action_grade, account_type,
+                      briefing_type, entry_price, closed_price, pnl_pct, outcome,
+                      status, persona, strategy_type, strategy_tags,
+                      agreement_count, confidence, benchmark_ticker, data_quality,
+                      normalizer_version
+               FROM predictions
+               WHERE created_at >= ?
+               ORDER BY created_at DESC LIMIT 2000""",
+            (cutoff,),
+        )
+        manual_trades = _rows(
+            conn,
+            """SELECT id, created_at, ticker, name, side, shares, price,
+                      account, applied
+               FROM trades WHERE created_at >= ?
+               ORDER BY created_at DESC LIMIT 1000""",
+            (cutoff,),
+        )
+        conn.close()
+
+    event_path = _db_path().parent / "toss_live_pilot_events.db"
+    if event_path.exists():
+        event_conn = None
+        try:
+            event_conn = sqlite3.connect(f"file:{event_path}?mode=ro", uri=True)
+            event_conn.row_factory = sqlite3.Row
+            live_events = _rows(
+                event_conn,
+                """SELECT event_id, event_type, symbol, side, filled_price,
+                          filled_quantity, broker_order_status,
+                          live_order_sent, adapter_status,
+                          live_order_allowed, created_at
+                   FROM live_pilot_events
+                   WHERE created_at >= ? AND event_type='live_sent'
+                   ORDER BY created_at DESC LIMIT 1000""",
+                (cutoff,),
+            )
+        except Exception:
+            live_events = []
+        finally:
+            if event_conn is not None:
+                event_conn.close()
+    return predictions, manual_trades, live_events
+
+
+def _fetch_trade_outcome_attribution_raw(days: int) -> dict:
+    from core.trade_outcome_attribution import (
+        calculate_trade_outcome_attribution,
+        hermes_interpretation_payload,
+        normalize_execution_records,
+    )
+
+    predictions, manual_trades, live_events = _read_trade_outcome_inputs(days)
+    executions = normalize_execution_records(
+        manual_trades=manual_trades,
+        live_events=live_events,
+    )
+    report = calculate_trade_outcome_attribution(
+        predictions,
+        executions=executions,
+    )
+    report["generated_at"] = datetime.now(KST).isoformat()
+    report["source"] = "memory_db_and_local_execution_logs_read_only"
+    report["scope"] = f"recent_{days}_days"
+    window_end = datetime.now(KST)
+    report["window"] = {
+        "mode": "rolling_days",
+        "days": days,
+        "as_of": window_end.isoformat(),
+        "cutoff": (window_end - timedelta(days=days)).isoformat(),
+        "rule": "dashboard SQL: prediction created_at; execution created_at",
+        "filter_applied": True,
+    }
+    report["benchmark_attribution"]["status"] = "not_requested"
+    report["interpretation_payload"] = hermes_interpretation_payload(report)
+    return report
+
+
+def trade_outcome_attribution_data(days: int = 90) -> dict:
+    """추천·체결 사후 귀속 보고서 (5분 캐시, GET/read-only)."""
+    days = max(1, min(int(days or 90), 365))
+    value = _cached(
+        f"trade_outcome_attribution:{days}", 300,
+        lambda: _fetch_trade_outcome_attribution_raw(days),
+    )
+    return value if isinstance(value, dict) else {}
+
+
+# ─── /api/toss/execution-red-team — staging 조회 전용 ─────
+def execution_red_team_staging_data(limit: int = 50, symbol: str | None = None) -> dict:
+    """실행 후보 Red Team staging을 읽기만 한다.
+
+    이 GET 경로는 Claude/WebSearch/주문 preview/ledger/finalizer/transport를 호출하지
+    않는다. CLI가 별도로 생성한 advisory JSON만 검증해 최신순으로 반환한다.
+    """
+    import json
+    from pathlib import Path
+
+    from core.execution_candidate_red_team import VERSION, validate_staging_record
+
+    capped_limit = min(max(int(limit or 50), 1), 200)
+    wanted = str(symbol or "").upper().strip()
+    configured = os.environ.get("EXECUTION_RED_TEAM_STAGING_DIR", "").strip()
+    root = Path(configured).expanduser() if configured else _db_path().parent / "execution-red-team-staging"
+
+    items: list[dict] = []
+    invalid_count = 0
+    if root.exists() and root.is_dir():
+        try:
+            paths = sorted(
+                root.glob("*/*.json"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )[:500]
+        except OSError:
+            paths = []
+        for path in paths:
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                invalid_count += 1
+                continue
+            if not isinstance(record, dict) or validate_staging_record(record):
+                invalid_count += 1
+                continue
+            if wanted and str(record.get("symbol") or "").upper().strip() != wanted:
+                continue
+            items.append(record)
+            if len(items) >= capped_limit:
+                break
+
+    return {
+        "version": VERSION,
+        "read_only": True,
+        "review_only": True,
+        "operational_decision_unchanged": True,
+        "advisory_only": True,
+        "order_side_effects": False,
+        "order_signal": False,
+        "source": "execution_red_team_staging_json",
+        "count": len(items),
+        "invalid_count": invalid_count,
+        "items": items,
+    }
+
+
 # ─── /api/performance ────────────────────────────────────
 def performance_data(days: int = 30) -> dict:
     """action_type / briefing_type / ticker 별 성과 집계."""
