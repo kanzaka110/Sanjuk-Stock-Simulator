@@ -106,6 +106,12 @@ def api_portfolio_cluster_risk():
     return JSONResponse(dd.portfolio_cluster_risk_data())
 
 
+@app.get("/api/trade-outcome-attribution")
+def api_trade_outcome_attribution(days: int = 90):
+    """추천·체결 사후 귀속. GET/read-only, 주문 부작용 없음."""
+    return JSONResponse(dd.trade_outcome_attribution_data(days))
+
+
 @app.get("/api/performance")
 def api_performance():
     return JSONResponse(dd.performance_data(30))

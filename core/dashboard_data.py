@@ -844,6 +844,98 @@ def portfolio_cluster_risk_data() -> dict:
     return value if isinstance(value, dict) else {}
 
 
+# ─── /api/trade-outcome-attribution ─────────────────────
+def _read_trade_outcome_inputs(days: int) -> tuple[list[dict], list[dict], list[dict]]:
+    """추천·수동 매매·production live event를 SQLite mode=ro로 읽는다."""
+    cutoff = (datetime.now(KST) - timedelta(days=days)).isoformat()
+    predictions: list[dict] = []
+    manual_trades: list[dict] = []
+    live_events: list[dict] = []
+
+    conn = _conn()
+    if conn is not None:
+        predictions = _rows(
+            conn,
+            """SELECT id, created_at, closed_at, ticker, name, signal,
+                      original_signal, action_type, action_grade, account_type,
+                      briefing_type, entry_price, closed_price, pnl_pct, outcome,
+                      status, persona, strategy_type, strategy_tags,
+                      agreement_count, confidence, benchmark_ticker, data_quality,
+                      normalizer_version
+               FROM predictions
+               WHERE created_at >= ? OR COALESCE(closed_at, '') >= ?
+               ORDER BY created_at DESC LIMIT 2000""",
+            (cutoff, cutoff),
+        )
+        manual_trades = _rows(
+            conn,
+            """SELECT id, created_at, ticker, name, side, shares, price,
+                      account, applied
+               FROM trades WHERE created_at >= ?
+               ORDER BY created_at DESC LIMIT 1000""",
+            (cutoff,),
+        )
+        conn.close()
+
+    event_path = _db_path().parent / "toss_live_pilot_events.db"
+    if event_path.exists():
+        event_conn = None
+        try:
+            event_conn = sqlite3.connect(f"file:{event_path}?mode=ro", uri=True)
+            event_conn.row_factory = sqlite3.Row
+            live_events = _rows(
+                event_conn,
+                """SELECT event_id, event_type, symbol, side, filled_price,
+                          filled_quantity, broker_order_status,
+                          live_order_sent, adapter_status,
+                          live_order_allowed, created_at
+                   FROM live_pilot_events
+                   WHERE created_at >= ? AND event_type='live_sent'
+                   ORDER BY created_at DESC LIMIT 1000""",
+                (cutoff,),
+            )
+        except Exception:
+            live_events = []
+        finally:
+            if event_conn is not None:
+                event_conn.close()
+    return predictions, manual_trades, live_events
+
+
+def _fetch_trade_outcome_attribution_raw(days: int) -> dict:
+    from core.trade_outcome_attribution import (
+        calculate_trade_outcome_attribution,
+        hermes_interpretation_payload,
+        normalize_execution_records,
+    )
+
+    predictions, manual_trades, live_events = _read_trade_outcome_inputs(days)
+    executions = normalize_execution_records(
+        manual_trades=manual_trades,
+        live_events=live_events,
+    )
+    report = calculate_trade_outcome_attribution(
+        predictions,
+        executions=executions,
+    )
+    report["generated_at"] = datetime.now(KST).isoformat()
+    report["source"] = "memory_db_and_local_execution_logs_read_only"
+    report["scope"] = f"recent_{days}_days"
+    report["benchmark_attribution"]["status"] = "not_requested"
+    report["interpretation_payload"] = hermes_interpretation_payload(report)
+    return report
+
+
+def trade_outcome_attribution_data(days: int = 90) -> dict:
+    """추천·체결 사후 귀속 보고서 (5분 캐시, GET/read-only)."""
+    days = max(1, min(int(days or 90), 365))
+    value = _cached(
+        f"trade_outcome_attribution:{days}", 300,
+        lambda: _fetch_trade_outcome_attribution_raw(days),
+    )
+    return value if isinstance(value, dict) else {}
+
+
 # ─── /api/performance ────────────────────────────────────
 def performance_data(days: int = 30) -> dict:
     """action_type / briefing_type / ticker 별 성과 집계."""
