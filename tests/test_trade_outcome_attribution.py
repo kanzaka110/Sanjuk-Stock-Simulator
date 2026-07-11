@@ -398,7 +398,11 @@ def test_dashboard_contract_is_cached_and_read_only(monkeypatch):
     assert first["order_side_effects"] is False
     assert first["benchmark_attribution"]["status"] == "not_requested"
     assert first["source"] == "memory_db_and_local_execution_logs_read_only"
+    assert first["window"]["mode"] == "rolling_days"
+    assert first["window"]["days"] == 90
+    assert first["window"]["filter_applied"] is True
     assert first["interpretation_payload"]["read_only"] is True
+    assert first["interpretation_payload"]["window"]["days"] == 90
 
 
 def test_dashboard_route_is_get_only():
@@ -455,6 +459,97 @@ def test_cli_benchmark_batch_uses_prediction_window(monkeypatch):
     assert meta["status"] == "ok"
     assert meta["available_predictions"] == 1
     assert returns[1] == 7.0
+
+
+def test_cli_recent_scope_enforces_created_at_cohort_window():
+    from tools import trade_outcome_attribution_cli as cli
+
+    as_of = datetime(2026, 7, 11, 12, 0, tzinfo=KST)
+    old = _prediction(
+        id=10,
+        created_at="2026-03-01T09:00:00+09:00",
+        closed_at="2026-03-10T09:00:00+09:00",
+    )
+    closed_recently = _prediction(
+        id=11,
+        created_at="2026-03-01T09:00:00+09:00",
+        closed_at="2026-07-01T09:00:00+09:00",
+    )
+    recent = _prediction(
+        id=12,
+        created_at="2026-07-02T09:00:00+09:00",
+        closed_at="2026-07-08T09:00:00+09:00",
+    )
+    report = cli.build_report({
+        "scope": "recent_90_days",
+        "predictions": [old, closed_recently, recent],
+        "manual_trades": [
+            _manual(id=1, created_at="2026-03-01T10:00:00+09:00"),
+            _manual(id=2, created_at="2026-07-01T10:00:00+09:00"),
+        ],
+        "live_events": [
+            {
+                "event_id": "old", "event_type": "live_sent",
+                "live_order_sent": True, "adapter_status": "enabled",
+                "live_order_allowed": True, "symbol": "MU", "side": "buy",
+                "filled_price": 100, "filled_quantity": 1,
+                "created_at": "2026-03-01T10:00:00+09:00",
+            },
+            {
+                "event_id": "recent", "event_type": "live_sent",
+                "live_order_sent": True, "adapter_status": "enabled",
+                "live_order_allowed": True, "symbol": "MU", "side": "buy",
+                "filled_price": 100, "filled_quantity": 1,
+                "created_at": "2026-07-01T10:00:00+09:00",
+            },
+        ],
+    }, as_of=as_of)
+
+    assert report["scope"] == "recent_90_days"
+    assert report["window"]["mode"] == "rolling_days"
+    assert report["window"]["days"] == 90
+    assert report["window"]["cutoff"].startswith("2026-04-12T12:00:00")
+    assert report["window"]["input_counts"]["predictions"] == 3
+    assert report["window"]["output_counts"]["predictions"] == 1
+    assert report["summary"]["total_predictions"] == 1
+    assert report["summary"]["observed_real_executions"] == 2
+    assert report["interpretation_payload"]["window"]["days"] == 90
+
+
+def test_cli_window_is_optional_and_explicit_days_override_scope():
+    from tools import trade_outcome_attribution_cli as cli
+
+    as_of = datetime(2026, 7, 11, 12, 0, tzinfo=KST)
+    payload = {
+        "scope": "test_snapshot",
+        "predictions": [
+            _prediction(id=10, created_at="2026-07-01T09:00:00+09:00"),
+            _prediction(
+                id=11,
+                created_at="2026-05-01T09:00:00+09:00",
+                closed_at="2026-05-08T09:00:00+09:00",
+            ),
+        ],
+    }
+    unfiltered = cli.build_report(payload, as_of=as_of)
+    filtered = cli.build_report(payload, days=30, as_of=as_of)
+    assert unfiltered["summary"]["total_predictions"] == 2
+    assert unfiltered["window"]["mode"] == "provided_snapshot"
+    assert filtered["scope"] == "recent_30_days"
+    assert filtered["summary"]["total_predictions"] == 1
+    assert filtered["window"]["days"] == 30
+
+
+def test_cli_window_rejects_invalid_days():
+    from tools import trade_outcome_attribution_cli as cli
+
+    for invalid in (0, -1, 3651, "bad"):
+        try:
+            cli.build_report({"predictions": []}, days=invalid)  # type: ignore[arg-type]
+        except ValueError as exc:
+            assert str(exc) in {"window_days_must_be_integer", "window_days_out_of_range"}
+        else:
+            raise AssertionError(f"invalid days accepted: {invalid!r}")
 
 
 def test_cli_summary_repeats_no_order_contract():

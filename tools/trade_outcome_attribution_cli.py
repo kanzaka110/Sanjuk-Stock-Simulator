@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -41,6 +42,76 @@ def _parse_time(value: Any) -> datetime | None:
         return parsed.replace(tzinfo=KST) if parsed.tzinfo is None else parsed
     except ValueError:
         return None
+
+
+_RECENT_SCOPE_RE = re.compile(r"^recent_(\d+)_days$")
+
+
+def _resolve_window_days(payload: dict[str, Any], explicit_days: int | None) -> int | None:
+    """명시 옵션 또는 scope에서 실제 rolling window를 결정한다."""
+    raw: Any = explicit_days
+    if raw is None:
+        raw = payload.get("window_days")
+    if raw is None:
+        match = _RECENT_SCOPE_RE.fullmatch(str(payload.get("scope") or "").strip())
+        raw = match.group(1) if match else None
+    if raw in (None, ""):
+        return None
+    try:
+        days = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("window_days_must_be_integer") from exc
+    if not 1 <= days <= 3650:
+        raise ValueError("window_days_out_of_range")
+    return days
+
+
+def _row_in_window(row: dict[str, Any], keys: tuple[str, ...], cutoff: datetime) -> bool:
+    parsed = [_parse_time(row.get(key)) for key in keys]
+    return any(value is not None and value >= cutoff for value in parsed)
+
+
+def filter_payload_to_window(
+    payload: dict[str, Any],
+    *,
+    days: int,
+    as_of: datetime | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """CLI snapshot을 dashboard SQL과 같은 rolling-day 규칙으로 필터링한다."""
+    end = as_of or datetime.now(KST)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=KST)
+    end = end.astimezone(KST)
+    cutoff = end - timedelta(days=days)
+
+    specs: dict[str, tuple[str, ...]] = {
+        "predictions": ("created_at",),
+        "manual_trades": ("created_at", "filled_at"),
+        "live_events": ("created_at", "filled_at"),
+        "broker_orders": ("filled_at", "ordered_at", "created_at"),
+    }
+    filtered = dict(payload)
+    input_counts: dict[str, int] = {}
+    output_counts: dict[str, int] = {}
+    for name, keys in specs.items():
+        rows = [dict(row) for row in (payload.get(name) or []) if isinstance(row, dict)]
+        kept = [row for row in rows if _row_in_window(row, keys, cutoff)]
+        filtered[name] = kept
+        input_counts[name] = len(rows)
+        output_counts[name] = len(kept)
+
+    window = {
+        "mode": "rolling_days",
+        "days": days,
+        "as_of": end.isoformat(),
+        "cutoff": cutoff.isoformat(),
+        "rule": "prediction created_at; execution event timestamps",
+        "input_counts": input_counts,
+        "output_counts": output_counts,
+    }
+    filtered["scope"] = f"recent_{days}_days"
+    filtered["window_days"] = days
+    return filtered, window
 
 
 def _default_benchmark(symbol: str) -> str:
@@ -130,12 +201,35 @@ def fetch_benchmark_returns(
         return {}, metadata
 
 
-def build_report(payload: dict[str, Any], *, with_benchmark: bool = False) -> dict[str, Any]:
-    predictions = [dict(row) for row in (payload.get("predictions") or []) if isinstance(row, dict)]
+def build_report(
+    payload: dict[str, Any],
+    *,
+    with_benchmark: bool = False,
+    days: int | None = None,
+    as_of: datetime | None = None,
+) -> dict[str, Any]:
+    effective_days = _resolve_window_days(payload, days)
+    working_payload = payload
+    window: dict[str, Any] = {
+        "mode": "provided_snapshot",
+        "days": None,
+        "as_of": None,
+        "cutoff": None,
+        "rule": "no rolling window requested",
+    }
+    if effective_days is not None:
+        working_payload, window = filter_payload_to_window(
+            payload, days=effective_days, as_of=as_of,
+        )
+
+    predictions = [
+        dict(row) for row in (working_payload.get("predictions") or [])
+        if isinstance(row, dict)
+    ]
     executions = normalize_execution_records(
-        manual_trades=payload.get("manual_trades") or [],
-        live_events=payload.get("live_events") or [],
-        broker_orders=payload.get("broker_orders") or [],
+        manual_trades=working_payload.get("manual_trades") or [],
+        live_events=working_payload.get("live_events") or [],
+        broker_orders=working_payload.get("broker_orders") or [],
     )
     benchmark_returns: dict[Any, float] = {}
     benchmark_meta = {
@@ -155,7 +249,10 @@ def build_report(payload: dict[str, Any], *, with_benchmark: bool = False) -> di
     )
     report["generated_at"] = datetime.now(KST).isoformat()
     report["source"] = "trade_outcome_attribution_cli"
-    report["scope"] = str(payload.get("scope") or "provided_read_only_snapshot")
+    report["scope"] = str(
+        working_payload.get("scope") or "provided_read_only_snapshot"
+    )
+    report["window"] = window
     report["benchmark_attribution"]["source_metadata"] = benchmark_meta
     report["interpretation_payload"] = hermes_interpretation_payload(report)
     return report
@@ -198,9 +295,19 @@ def main() -> int:
     parser.add_argument("input", help="input JSON path or - for stdin")
     parser.add_argument("--output", help="optional report JSON path")
     parser.add_argument("--with-benchmark", action="store_true")
+    parser.add_argument("--days", type=int, help="rolling window days; scope=recent_N_days also enforces filtering")
+    parser.add_argument("--as-of", help="ISO timestamp used as rolling-window end")
     args = parser.parse_args()
     payload = load_payload(args.input)
-    report = build_report(payload, with_benchmark=args.with_benchmark)
+    as_of = _parse_time(args.as_of) if args.as_of else None
+    if args.as_of and as_of is None:
+        raise ValueError("as_of_invalid_iso_timestamp")
+    report = build_report(
+        payload,
+        with_benchmark=args.with_benchmark,
+        days=args.days,
+        as_of=as_of,
+    )
     if args.output:
         output = Path(args.output)
         output.parent.mkdir(parents=True, exist_ok=True)

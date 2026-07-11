@@ -863,9 +863,9 @@ def _read_trade_outcome_inputs(days: int) -> tuple[list[dict], list[dict], list[
                       agreement_count, confidence, benchmark_ticker, data_quality,
                       normalizer_version
                FROM predictions
-               WHERE created_at >= ? OR COALESCE(closed_at, '') >= ?
+               WHERE created_at >= ?
                ORDER BY created_at DESC LIMIT 2000""",
-            (cutoff, cutoff),
+            (cutoff,),
         )
         manual_trades = _rows(
             conn,
@@ -921,6 +921,15 @@ def _fetch_trade_outcome_attribution_raw(days: int) -> dict:
     report["generated_at"] = datetime.now(KST).isoformat()
     report["source"] = "memory_db_and_local_execution_logs_read_only"
     report["scope"] = f"recent_{days}_days"
+    window_end = datetime.now(KST)
+    report["window"] = {
+        "mode": "rolling_days",
+        "days": days,
+        "as_of": window_end.isoformat(),
+        "cutoff": (window_end - timedelta(days=days)).isoformat(),
+        "rule": "dashboard SQL: prediction created_at; execution created_at",
+        "filter_applied": True,
+    }
     report["benchmark_attribution"]["status"] = "not_requested"
     report["interpretation_payload"] = hermes_interpretation_payload(report)
     return report
