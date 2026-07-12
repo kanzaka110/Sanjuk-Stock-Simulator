@@ -83,16 +83,18 @@ def _env_truthy(name: str, default: bool = False) -> bool:
 
 
 def _dashboard_toss_broker_reads_isolated() -> bool:
-    """Keep autonomous Toss OAuth ownership in the stock-bot process.
+    """Return True when this process must consume the stock-bot snapshot.
 
-    The read-only dashboard is a separate long-running Python process. If it
-    issues or refreshes the same client-credentials token as stock-bot, an
-    in-flight live order can retain the previous token and fail with HTTP 401.
-    During autonomous mode the dashboard therefore serves local policy/ledger
-    data but never calls Toss account/order broker GET endpoints directly.
+    In autonomous mode the long-running bot/monitor process is the sole Toss GET
+    owner. Dashboard and scheduled briefing processes read a sanitized atomic
+    snapshot so they cannot rotate the broker token under an in-flight order.
     """
-    args = [str(arg).strip().lower() for arg in sys.argv[1:]]
-    return "dashboard" in args and _env_truthy("TOSS_AUTONOMOUS_MODE")
+    try:
+        from core.toss_readonly_snapshot import should_consume_snapshot
+        return should_consume_snapshot()
+    except Exception:
+        args = [str(arg).strip().lower() for arg in sys.argv[1:]]
+        return "dashboard" in args and _env_truthy("TOSS_AUTONOMOUS_MODE")
 
 
 def _csv_env(name: str) -> list[str]:
@@ -2216,17 +2218,28 @@ def ticker_chart_data(ticker: str, range_: str, interval: str) -> dict:
 
 
 # ─── /api/toss/account-summary (읽기 전용, 기존 포트폴리오 미합산) ──
-def _fetch_toss_account_summary_raw() -> dict:
+def _fetch_toss_account_summary_raw(*, bound_dashboard_timeout: bool = True) -> dict:
     """Toss 실전 AI 자동거래 계좌 요약. 기존 포트폴리오에 절대 합산하지 않음."""
     if _dashboard_toss_broker_reads_isolated():
-        data = _toss_account_summary_unavailable("dashboard_broker_read_isolated")
+        try:
+            from core.toss_readonly_snapshot import account_summary_for_consumer
+            snapshot = account_summary_for_consumer()
+        except Exception:
+            snapshot = None
+        if isinstance(snapshot, dict) and snapshot:
+            snapshot["read_only_notice"] = (
+                "OAuth 충돌 방지: stock-bot이 생성한 sanitized snapshot을 표시"
+            )
+            return snapshot
+        data = _toss_account_summary_unavailable("stock_bot_snapshot_unavailable")
         data["read_only_notice"] = (
-            "자율매매 중 OAuth 충돌 방지: dashboard 프로세스는 Toss 계좌 API를 직접 조회하지 않음"
+            "OAuth 충돌 방지: 이 프로세스는 Toss 계좌 API를 직접 조회하지 않음"
         )
         return data
 
     from core import toss_client as tc
-    _set_toss_readonly_timeout()
+    if bound_dashboard_timeout:
+        _set_toss_readonly_timeout()
 
     now_str = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
     live_policy = _toss_live_policy_fast(timeout=0.2)
@@ -3077,7 +3090,35 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
             account_for_cash_gate = toss_account_summary() or {}
         except Exception:
             account_for_cash_gate = {}
-        cash_for_candidate = account_for_cash_gate.get("cash") or {}
+        snapshot_status = str(account_for_cash_gate.get("snapshot_status") or "")
+        snapshot_blocks_candidates = False
+        if _dashboard_toss_broker_reads_isolated():
+            # Read freshness from the canonical file again instead of trusting
+            # dashboard's short-lived account-summary cache. Missing, corrupt,
+            # expired, or stale snapshots all fail closed for candidate use.
+            try:
+                from core.toss_readonly_snapshot import load_snapshot
+                snapshot_state = load_snapshot()
+            except Exception as exc:
+                snapshot_state = {
+                    "ok": False,
+                    "status": "invalid",
+                    "reason": f"snapshot_load_failed:{type(exc).__name__}",
+                }
+            snapshot_status = str(snapshot_state.get("status") or "invalid")
+            snapshot_blocks_candidates = not bool(
+                snapshot_state.get("ok")
+                and snapshot_state.get("usable_for_decisions")
+            )
+        elif snapshot_status:
+            snapshot_blocks_candidates = not bool(
+                account_for_cash_gate.get("snapshot_usable_for_decisions", False)
+            )
+        if snapshot_blocks_candidates:
+            # Do not let stale totals, cash, holdings, or FX participate in
+            # sizing/income/rebalance calculations. Items are hard-blocked below.
+            account_for_cash_gate = {}
+        cash_for_candidate = {} if snapshot_blocks_candidates else (account_for_cash_gate.get("cash") or {})
         try:
             available_native_krw = int(float(
                 cash_for_candidate.get("krw_native", cash_for_candidate.get("krw")) or 0
@@ -3555,6 +3596,25 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
             return out
 
         items = [_enrich_for_stock_agent(i) for i in result["items"][:limit]]
+
+        # A stale snapshot may be shown for reference, but must never size or
+        # ready a candidate. The broker-owner pipeline re-fetches live account
+        # state; consumer processes fail closed here.
+        snapshot_block_count = 0
+        if snapshot_blocks_candidates:
+            for item in items:
+                item["stock_agent_ready"] = False
+                item["executable_now"] = False
+                item["execution_status"] = "toss_snapshot_stale"
+                item["block_reason"] = "Toss 계좌 snapshot 만료/비정상 — 신규 BUY 판단 차단"
+                item.setdefault("risk_notes", []).append(item["block_reason"])
+                snapshot_block_count += 1
+            scan_summary["snapshot_candidate_blocked"] = True
+            scan_summary["snapshot_status"] = snapshot_status
+            scan_summary["snapshot_block_count"] = snapshot_block_count
+        else:
+            scan_summary["snapshot_candidate_blocked"] = False
+            scan_summary["snapshot_block_count"] = 0
 
         def _income_expected(item: dict) -> float:
             try:

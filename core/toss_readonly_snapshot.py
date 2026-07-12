@@ -1,0 +1,559 @@
+"""Cross-process read-only Toss account snapshot.
+
+During autonomous mode, only the long-running stock-bot/monitor process owns
+Toss OAuth and broker GET calls. Dashboard and scheduled briefing processes
+consume a sanitized atomic snapshot. The snapshot is decision context only: it
+is never an order authorization and ``usable_for_orders`` is always false.
+"""
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+import re
+import sys
+import tempfile
+import threading
+import time
+from pathlib import Path
+from typing import Any
+
+from config.settings import DB_DIR
+
+VERSION = "toss_readonly_snapshot_v2"
+REFRESH_INTERVAL_SEC = 300
+FRESH_TTL_SEC = 900
+DISPLAY_STALE_TTL_SEC = 3600
+MAX_FUTURE_SKEW_SEC = 120
+
+ROLE_OWNER = "broker_owner"
+ROLE_CONSUMER = "snapshot_consumer"
+ROLE_ENV = "TOSS_PROCESS_ROLE"
+
+_REFRESH_LOCK = threading.Lock()
+_LAST_REFRESH_MONOTONIC = 0.0
+_LONG_NUMBER_RE = re.compile(r"\b\d{8,}\b")
+_BEARER_RE = re.compile(r"(?i)bearer\s+(?!\[REDACTED\])[A-Za-z0-9._~+\-/]+=*")
+_SENSITIVE_KEYS = {
+    "access_token", "refresh_token", "token", "authorization",
+    "account", "accountno", "accountnumber", "account_number", "account_id",
+    "accountid", "account_seq", "accountseq", "appkey", "appsecret",
+    "client_secret", "clientsecret", "credential", "credentials",
+    "unknowncredential", "secret", "key", "password",
+}
+_HOLDING_TEXT_FIELDS = ("symbol", "stockCode", "name", "currency", "marketCountry")
+_HOLDING_NUMBER_FIELDS = (
+    "quantity", "sellableQuantity", "lastPrice", "currentPrice", "averagePrice",
+)
+_HOLDING_MONEY_FIELDS = ("marketValue", "profitLoss", "dailyProfitLoss")
+_MONEY_NUMBER_FIELDS = (
+    "amount", "amountAfterCost", "rate", "purchaseAmount", "krw", "krw_native",
+    "usd", "usd_krw", "profitable_count", "loss_count",
+)
+_MONEY_TEXT_FIELDS = ("currency",)
+_MONEY_BOOL_FIELDS = ("usd_included",)
+_CALENDAR_TEXT_FIELDS = (
+    "market", "date", "status", "openTime", "closeTime", "nextOpenDate", "nextOpenTime",
+)
+_CALENDAR_BOOL_FIELDS = ("open", "isOpen", "holiday")
+
+
+def _truthy(name: str) -> bool:
+    return str(os.environ.get(name, "")).strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
+def _commands() -> set[str]:
+    return {str(arg).strip().lower() for arg in sys.argv[1:]}
+
+
+def process_role() -> str:
+    """Resolve an explicit process role, with fail-closed command fallbacks."""
+    configured = str(os.environ.get(ROLE_ENV, "")).strip().lower()
+    if configured in {ROLE_OWNER, ROLE_CONSUMER}:
+        return configured
+    commands = _commands()
+    if commands & {"bot", "monitor"}:
+        return ROLE_OWNER
+    return ROLE_CONSUMER
+
+
+def is_broker_owner_process() -> bool:
+    return process_role() == ROLE_OWNER
+
+
+def should_consume_snapshot() -> bool:
+    return _truthy("TOSS_AUTONOMOUS_MODE") and process_role() != ROLE_OWNER
+
+
+def _snapshot_path() -> Path:
+    override = os.environ.get("TOSS_READONLY_SNAPSHOT_PATH", "").strip()
+    return Path(override) if override else Path(DB_DIR) / "toss_readonly_snapshot.json"
+
+
+def _lock_path(path: Path) -> Path:
+    return path.with_name(f".{path.name}.lock")
+
+
+def _normalized_key(key: object) -> str:
+    return str(key).lower().replace("-", "_")
+
+
+def _number(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _text(value: object, max_len: int = 200) -> str:
+    raw = str(value or "")[:max_len]
+    raw = _BEARER_RE.sub("Bearer [REDACTED]", raw)
+    return _LONG_NUMBER_RE.sub("[NUM_REDACTED]", raw)
+
+
+def _project_money(value: object) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key in _MONEY_NUMBER_FIELDS:
+        if key in value and value.get(key) not in (None, ""):
+            out[key] = _number(value.get(key))
+    for key in _MONEY_TEXT_FIELDS:
+        if key in value and value.get(key) not in (None, ""):
+            out[key] = _text(value.get(key), 16)
+    for key in _MONEY_BOOL_FIELDS:
+        if key in value:
+            out[key] = bool(value.get(key))
+    return out
+
+
+def _project_holding(value: object) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key in _HOLDING_TEXT_FIELDS:
+        if key in value and value.get(key) not in (None, ""):
+            out[key] = _text(value.get(key), 120)
+    for key in _HOLDING_NUMBER_FIELDS:
+        if key in value and value.get(key) not in (None, ""):
+            out[key] = _number(value.get(key))
+    for key in _HOLDING_MONEY_FIELDS:
+        projected = _project_money(value.get(key))
+        if projected:
+            out[key] = projected
+    return out
+
+
+def _project_calendar(value: object) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key in _CALENDAR_TEXT_FIELDS:
+        if key in value and value.get(key) not in (None, ""):
+            out[key] = _text(value.get(key), 64)
+    for key in _CALENDAR_BOOL_FIELDS:
+        if key in value:
+            out[key] = bool(value.get(key))
+    today = value.get("today")
+    if isinstance(today, dict):
+        out["today"] = _project_calendar(today)
+    return out
+
+
+def _project_account_summary(value: object) -> dict:
+    """Allowlist projection: unknown broker fields are dropped, never persisted."""
+    if not isinstance(value, dict):
+        return {}
+    if value.get("error"):
+        return {}
+    account_count = int(_number(value.get("account_count"), 0))
+    holdings = [row for row in (_project_holding(item) for item in value.get("holdings_items") or []) if row]
+    accounts: list[dict] = []
+    for account in value.get("accounts") or []:
+        if isinstance(account, dict) and account.get("account_type"):
+            accounts.append({"account_type": _text(account.get("account_type"), 40)})
+    summary = {
+        "enabled": bool(value.get("enabled", True)),
+        "label": "Toss 실전 AI 자동거래 계좌",
+        "separate_from_portfolio": True,
+        "included_in_total_portfolio": False,
+        "trading_enabled": False,
+        "automation_status": "snapshot_read_only",
+        "account_count": account_count,
+        "accounts": accounts,
+        "holdings_count": len(holdings),
+        "holdings_items": holdings,
+        "market_value": _project_money(value.get("market_value")),
+        "cash": _project_money(value.get("cash")),
+        "total_account_value": _project_money(value.get("total_account_value")),
+        "exchange_rate": _project_money(value.get("exchange_rate")),
+        "profit_loss": _project_money(value.get("profit_loss")),
+        "today_profit_loss": _project_money(value.get("today_profit_loss")),
+        "realized_profit_loss": {
+            "krw": None,
+            "source": "not_available_from_current_readonly_summary",
+        },
+        "warnings": [
+            "기존 삼성증권/수동 포트폴리오에 합산하지 않음",
+            "stock-bot snapshot: 주문 직접 사용 금지",
+        ],
+        "error": "",
+    }
+    return summary if account_count > 0 else {}
+
+
+def _decision_context_from_summary(summary: dict, calendars: dict | None = None) -> dict:
+    cash = summary.get("cash") or {}
+    market_value = summary.get("market_value") or {}
+    total = summary.get("total_account_value") or {}
+    fx = summary.get("exchange_rate") or {}
+    holdings = summary.get("holdings_items") or []
+    calendars = calendars or {}
+    cash_krw = _number(cash.get("krw"))
+    market_value_krw = _number(market_value.get("krw"))
+    total_krw = _number(total.get("krw"), cash_krw + market_value_krw)
+    fx_rate = _number(fx.get("rate"))
+    projected_calendars = {
+        "KR": _project_calendar(calendars.get("KR")),
+        "US": _project_calendar(calendars.get("US")),
+    }
+    return {
+        "enabled": bool(summary.get("enabled", True)),
+        "account_label": "Toss 실전 AI 자동거래 계좌",
+        "included_in_total_portfolio": False,
+        "cash_krw": cash_krw,
+        "cash_usd": cash.get("usd"),
+        "market_value_krw": market_value_krw,
+        "total_account_value_krw": total_krw,
+        "holdings_count": int(summary.get("holdings_count") or len(holdings)),
+        "holdings": holdings,
+        "usdkrw": fx_rate,
+        "market_calendar": projected_calendars,
+        "automation": {
+            "enabled": False,
+            "mode": "snapshot_read_only",
+            "dry_run": True,
+            "live_orders_allowed": False,
+            "kill_switch": True,
+        },
+        "data_quality": {
+            "toss_available": True,
+            "cash_available": bool(cash),
+            "fx_available": bool(fx_rate),
+            "calendar_available": bool(projected_calendars["KR"] or projected_calendars["US"]),
+            "stale": False,
+            "warnings": [],
+            "source": "stock_bot_snapshot",
+        },
+    }
+
+
+def _contains_sensitive(value: Any) -> bool:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if _normalized_key(key) in _SENSITIVE_KEYS:
+                return True
+            if _contains_sensitive(item):
+                return True
+        return False
+    if isinstance(value, list):
+        return any(_contains_sensitive(item) for item in value)
+    if isinstance(value, str):
+        return bool(_BEARER_RE.search(value) or _LONG_NUMBER_RE.search(value))
+    return False
+
+
+def _read_existing_generated_at(path: Path) -> float:
+    try:
+        current = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(current, dict) and current.get("version") == VERSION:
+            return float(current.get("generated_at") or 0)
+    except Exception:
+        pass
+    return 0.0
+
+
+def _fsync_directory(path: Path) -> None:
+    fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def write_snapshot(account_summary: dict, calendars: dict | None = None, *, now: float | None = None) -> dict:
+    """Project safe fields and atomically publish a mode-0600 snapshot."""
+    summary = _project_account_summary(account_summary)
+    if not summary:
+        return {"ok": False, "reason": "account_summary_unavailable"}
+    generated_at = float(time.time() if now is None else now)
+    decision_context = _decision_context_from_summary(summary, calendars)
+    envelope = {
+        "version": VERSION,
+        "generated_at": generated_at,
+        "producer": "stock_bot",
+        "read_only": True,
+        "order_side_effects": False,
+        "usable_for_orders": False,
+        "account_summary": summary,
+        "decision_context": decision_context,
+    }
+    if _contains_sensitive(envelope):
+        return {"ok": False, "reason": "sensitive_data_detected"}
+
+    path = _snapshot_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = _lock_path(path)
+    lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        os.fchmod(lock_fd, 0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        existing_generated_at = _read_existing_generated_at(path)
+        if existing_generated_at > generated_at:
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": "newer_snapshot_exists",
+                "generated_at": existing_generated_at,
+            }
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(envelope, handle, ensure_ascii=False, separators=(",", ":"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_name, path)
+            os.chmod(path, 0o600)
+            _fsync_directory(path.parent)
+        finally:
+            try:
+                if os.path.exists(tmp_name):
+                    os.unlink(tmp_name)
+            except OSError:
+                pass
+    finally:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
+    return {"ok": True, "path": str(path), "generated_at": generated_at}
+
+
+def load_snapshot(*, now: float | None = None) -> dict:
+    """Validate freshness and contracts; expired or sensitive payloads are withheld."""
+    path = _snapshot_path()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"ok": False, "status": "missing", "reason": "snapshot_missing"}
+    except Exception as exc:
+        return {"ok": False, "status": "invalid", "reason": f"snapshot_invalid:{type(exc).__name__}"}
+    if not isinstance(raw, dict) or raw.get("version") != VERSION:
+        return {"ok": False, "status": "invalid", "reason": "snapshot_schema_mismatch"}
+    if raw.get("read_only") is not True or raw.get("order_side_effects") is not False:
+        return {"ok": False, "status": "invalid", "reason": "snapshot_contract_violation"}
+    if raw.get("usable_for_orders") is not False:
+        return {"ok": False, "status": "invalid", "reason": "snapshot_order_contract_violation"}
+    if _contains_sensitive(raw):
+        return {"ok": False, "status": "invalid", "reason": "snapshot_sensitive_data"}
+    try:
+        generated_at = float(raw.get("generated_at") or 0)
+    except (TypeError, ValueError):
+        return {"ok": False, "status": "invalid", "reason": "snapshot_timestamp_invalid"}
+    current = float(time.time() if now is None else now)
+    if generated_at > current + MAX_FUTURE_SKEW_SEC:
+        return {"ok": False, "status": "invalid", "reason": "snapshot_from_future"}
+    age_sec = max(0.0, current - generated_at)
+    if age_sec > DISPLAY_STALE_TTL_SEC:
+        return {"ok": False, "status": "expired", "reason": "snapshot_expired", "age_sec": round(age_sec, 1)}
+    status = "fresh" if age_sec <= FRESH_TTL_SEC else "stale"
+    return {
+        "ok": True,
+        "status": status,
+        "age_sec": round(age_sec, 1),
+        "usable_for_decisions": status == "fresh",
+        "usable_for_orders": False,
+        "account_summary": raw.get("account_summary") or {},
+        "decision_context": raw.get("decision_context") or {},
+        "generated_at": generated_at,
+    }
+
+
+def _copy_payload(payload: dict) -> dict:
+    return json.loads(json.dumps(payload, ensure_ascii=False))
+
+
+def _mark_snapshot_quality(payload: dict, snapshot: dict) -> dict:
+    out = _copy_payload(payload)
+    status = str(snapshot.get("status") or "invalid")
+    age_sec = float(snapshot.get("age_sec") or 0)
+    out["snapshot_status"] = status
+    out["snapshot_age_sec"] = age_sec
+    out["snapshot_usable_for_decisions"] = bool(snapshot.get("usable_for_decisions"))
+    out["snapshot_usable_for_orders"] = False
+    out["stale"] = status != "fresh"
+    warnings = list(out.get("warnings") or [])
+    if status == "stale":
+        warnings.append("Toss snapshot이 15분을 초과해 화면 참고용으로만 사용")
+    out["warnings"] = warnings
+    dq = dict(out.get("data_quality") or {})
+    dq.update({
+        "source": "stock_bot_snapshot",
+        "snapshot_status": status,
+        "snapshot_age_sec": age_sec,
+        "usable_for_decisions": status == "fresh",
+        "usable_for_orders": False,
+        "stale": status != "fresh",
+    })
+    out["data_quality"] = dq
+    return out
+
+
+def account_summary_for_consumer() -> dict | None:
+    snapshot = load_snapshot()
+    if not snapshot.get("ok"):
+        return None
+    return _mark_snapshot_quality(snapshot.get("account_summary") or {}, snapshot)
+
+
+def decision_context_for_consumer() -> dict | None:
+    snapshot = load_snapshot()
+    if not snapshot.get("ok"):
+        return None
+    out = _mark_snapshot_quality(snapshot.get("decision_context") or {}, snapshot)
+    dq = dict(out.get("data_quality") or {})
+    if snapshot.get("status") != "fresh":
+        dq.update({
+            "toss_available": False,
+            "cash_available": False,
+            "fx_available": False,
+            "calendar_available": False,
+            "usable_for_decisions": False,
+            "usable_for_orders": False,
+        })
+        warnings = list(dq.get("warnings") or [])
+        warnings.append("오래된 Toss snapshot은 후보 sizing/readiness와 주문 판단에 사용 금지")
+        dq["warnings"] = warnings
+    out["data_quality"] = dq
+    return out
+
+
+def _raw_account_summary_from_broker() -> tuple[dict, dict]:
+    """Broker-owner GET projection source. No order/write endpoint is called."""
+    from core import toss_client as tc
+
+    accounts = tc.get_accounts()
+    if not accounts:
+        return {}, {}
+    first = accounts[0] if isinstance(accounts[0], dict) else {}
+    seq = str(first.get("accountSeq") or "")
+    if not seq:
+        return {}, {}
+    holdings = tc.get_holdings(seq)
+    items = holdings.get("items") or [] if isinstance(holdings, dict) else []
+    market_value = holdings.get("marketValue") or {} if isinstance(holdings, dict) else {}
+    market_amount = market_value.get("amount") or {} if isinstance(market_value, dict) else {}
+    bp_krw = tc.get_buying_power(seq, "KRW") or {}
+    bp_usd = tc.get_buying_power(seq, "USD") or {}
+    fx = tc.get_exchange_rate("USD", "KRW") or {}
+    fx_rate = _number(fx.get("rate"))
+    mv_krw = _number(market_amount.get("krw"))
+    mv_usd = _number(market_amount.get("usd"))
+    cash_krw = _number(bp_krw.get("cashBuyingPower"))
+    cash_usd = _number(bp_usd.get("cashBuyingPower"))
+    mv_usd_krw = mv_usd * fx_rate if fx_rate else 0.0
+    cash_usd_krw = cash_usd * fx_rate if fx_rate else 0.0
+
+    def _row_krw(amount: Any, currency: Any) -> float:
+        value = _number(amount)
+        return value * fx_rate if str(currency or "KRW").upper() == "USD" and fx_rate else value
+
+    unrealized_krw = 0.0
+    unrealized_before_cost_krw = 0.0
+    daily_krw = 0.0
+    cost_basis_krw = 0.0
+    daily_basis_krw = 0.0
+    profitable_count = 0
+    loss_count = 0
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        currency = item.get("currency") or "KRW"
+        profit = item.get("profitLoss") or {}
+        daily = item.get("dailyProfitLoss") or {}
+        row_market = item.get("marketValue") or {}
+        amount_after_cost = _number(profit.get("amountAfterCost", profit.get("amount")))
+        unrealized_krw += _row_krw(amount_after_cost, currency)
+        unrealized_before_cost_krw += _row_krw(profit.get("amount"), currency)
+        daily_krw += _row_krw(daily.get("amount"), currency)
+        cost_basis_krw += _row_krw(row_market.get("purchaseAmount"), currency)
+        daily_basis_krw += _row_krw(row_market.get("amount"), currency)
+        if amount_after_cost > 0:
+            profitable_count += 1
+        elif amount_after_cost < 0:
+            loss_count += 1
+
+    summary = {
+        "enabled": tc.is_configured(),
+        "account_count": len(accounts),
+        "accounts": [{"account_type": first.get("accountType", "")}],
+        "holdings_items": items,
+        "market_value": {
+            "krw": mv_krw + mv_usd_krw,
+            "krw_native": mv_krw,
+            "usd": mv_usd,
+            "usd_krw": mv_usd_krw,
+        },
+        "cash": {
+            "krw": cash_krw + cash_usd_krw,
+            "krw_native": cash_krw,
+            "usd": cash_usd,
+            "usd_krw": cash_usd_krw,
+        },
+        "total_account_value": {
+            "krw": mv_krw + cash_krw + mv_usd_krw + cash_usd_krw,
+            "krw_native": mv_krw + cash_krw,
+            "usd": mv_usd + cash_usd,
+            "usd_krw": mv_usd_krw + cash_usd_krw,
+            "usd_included": bool(fx_rate and (mv_usd or cash_usd)),
+        },
+        "exchange_rate": {"rate": fx_rate},
+        "profit_loss": {
+            "krw": unrealized_krw,
+            "amount": unrealized_before_cost_krw,
+            "rate": (unrealized_krw / cost_basis_krw) if cost_basis_krw else 0.0,
+            "profitable_count": profitable_count,
+            "loss_count": loss_count,
+        },
+        "today_profit_loss": {
+            "krw": daily_krw,
+            "rate": (daily_krw / daily_basis_krw) if daily_basis_krw else 0.0,
+        },
+        "error": "",
+    }
+    calendars = {"KR": tc.get_market_calendar("KR"), "US": tc.get_market_calendar("US")}
+    return summary, calendars
+
+
+def refresh_snapshot_if_due(*, force: bool = False) -> dict:
+    """Refresh from the explicit broker-owner process; never call order endpoints."""
+    global _LAST_REFRESH_MONOTONIC
+    if not is_broker_owner_process():
+        return {"ok": False, "skipped": True, "reason": "not_broker_owner_process"}
+    now_mono = time.monotonic()
+    with _REFRESH_LOCK:
+        if not force and now_mono - _LAST_REFRESH_MONOTONIC < REFRESH_INTERVAL_SEC:
+            return {"ok": True, "skipped": True, "reason": "refresh_throttled"}
+        _LAST_REFRESH_MONOTONIC = now_mono
+    try:
+        summary, calendars = _raw_account_summary_from_broker()
+        if not summary:
+            return {"ok": False, "reason": "account_summary_unavailable", "order_side_effects": False}
+        result = write_snapshot(summary, calendars)
+        result["order_side_effects"] = False
+        return result
+    except Exception as exc:
+        return {"ok": False, "reason": f"snapshot_refresh_failed:{type(exc).__name__}", "order_side_effects": False}

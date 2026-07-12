@@ -16,9 +16,9 @@ def test_dashboard_autonomous_mode_isolates_account_broker_gets(monkeypatch):
     ):
         result = dd._fetch_toss_account_summary_raw()
 
-    assert result["error"] == "dashboard_broker_read_isolated"
+    assert result["error"] == "stock_bot_snapshot_unavailable"
     assert result["cache_status"] == "cooldown"
-    assert "OAuth 충돌 방지" in result["read_only_notice"]
+    assert "직접 조회하지 않음" in result["read_only_notice"]
 
 
 def test_dashboard_autonomous_mode_isolates_order_broker_gets(monkeypatch):

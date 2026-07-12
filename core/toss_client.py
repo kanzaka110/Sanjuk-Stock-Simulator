@@ -67,21 +67,24 @@ def is_configured() -> bool:
 
 
 def _broker_access_isolated_for_process() -> bool:
-    """자율운영 중 dashboard 프로세스의 Toss OAuth/Broker 접근 전역 차단 판별.
+    """자율운영 중 비소유 프로세스의 Toss OAuth/Broker 접근을 전역 차단한다.
 
-    Toss는 client당 유효 토큰이 1개다 — dashboard가 어떤 누락 경로(예:
-    매수후보 API → get_exchange_rate)로든 토큰을 발급하면 stock-bot 토큰이
-    즉시 무효화돼 진행 중 주문이 401로 죽는다. endpoint별 격리에 의존하지
-    않고 toss_client 경계에서 프로세스 단위로 막는다 (fail-closed).
-
-    core.dashboard_data._dashboard_toss_broker_reads_isolated()와 동일 의미.
-    자격증명 설정 여부(is_configured)와는 별개의 프로세스 사용 허가 판별이다.
+    Toss client_credentials는 새 토큰 발급이 이전 토큰을 무효화할 수 있다.
+    따라서 자율운영 중에는 장기 실행되는 ``main.py bot``/``monitor``만 GET
+    소유자로 두고 dashboard·briefing·도구 프로세스는 sanitized snapshot을
+    소비한다. endpoint별 격리에 의존하지 않고 toss_client 경계에서
+    fail-closed한다. 주문 전송·재전송 정책은 이 함수가 변경하지 않는다.
     """
-    args = {str(arg).strip().lower() for arg in sys.argv[1:]}
-    autonomous = str(os.environ.get("TOSS_AUTONOMOUS_MODE", "")).strip().lower() in {
-        "1", "true", "yes", "on", "y",
-    }
-    return "dashboard" in args and autonomous
+    try:
+        from core.toss_readonly_snapshot import should_consume_snapshot
+        return should_consume_snapshot()
+    except Exception:
+        # Snapshot 정책 import가 깨지면 기존 dashboard 격리는 최소한 유지한다.
+        args = {str(arg).strip().lower() for arg in sys.argv[1:]}
+        autonomous = str(os.environ.get("TOSS_AUTONOMOUS_MODE", "")).strip().lower() in {
+            "1", "true", "yes", "on", "y",
+        }
+        return "dashboard" in args and autonomous
 
 
 # ─── 민감정보 마스킹 ────────────────────────────────

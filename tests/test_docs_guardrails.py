@@ -18,6 +18,7 @@ DOC = ROOT / "docs" / "toss_auto_invest_future_plan.md"
 # ─── 허용된 Toss 파일 목록 ─────────────────────────
 ALLOWED_TOSS_FILES = {
     "core/toss_client.py",
+    "core/toss_readonly_snapshot.py",
     "core/toss_automation_guard.py",
     "core/toss_paper_trading.py",
     "core/toss_candidate_builder.py",
@@ -32,6 +33,7 @@ ALLOWED_TOSS_FILES = {
     "tests/test_toss_automation_guard.py",
     "tests/test_toss_paper_trading.py",
     "tests/test_toss_decision_context.py",
+    "tests/test_toss_readonly_snapshot.py",
     "tests/test_toss_cross_check.py",
     "core/toss_order_preview.py",
     "core/toss_paper_ledger.py",

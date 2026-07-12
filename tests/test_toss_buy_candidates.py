@@ -551,6 +551,70 @@ def test_toss_buy_candidates_income_strategy_fields_and_ready_gate(monkeypatch):
     assert item["stock_agent_ready"] is True
 
 
+def test_toss_buy_candidates_stale_snapshot_blocks_ready_and_sizing(monkeypatch):
+    strong = _new_cand("000779.KS", "snapshot차단후보", price=50_000, score=88)
+    strong = strong.__class__(
+        **{**strong.__dict__, "target_price": 56_000.0, "stop_loss": 48_000.0, "risk_reward": 3.0}
+    )
+    _patch_sections(monkeypatch, _sections(new=[strong]))
+    monkeypatch.setattr(dd, "_dashboard_toss_broker_reads_isolated", lambda: True)
+    monkeypatch.setattr(dd, "toss_account_summary", lambda: {
+        "snapshot_status": "fresh",
+        "snapshot_usable_for_decisions": True,
+        "cash": {"krw": 10_000_000, "krw_native": 10_000_000},
+        "total_account_value": {"krw": 20_000_000},
+        "holdings_count": 0,
+    })
+    monkeypatch.setattr(
+        "core.toss_readonly_snapshot.load_snapshot",
+        lambda: {"ok": True, "status": "stale", "usable_for_decisions": False},
+    )
+    monkeypatch.setattr(dd, "_toss_holding_price_map", lambda: {})
+    monkeypatch.setattr(dd, "_recent_toss_risk_sell_symbols", lambda *a, **k: {})
+    monkeypatch.setattr(dd, "_pending_toss_order_symbols", lambda *a, **k: {})
+
+    result = dd.toss_buy_candidates_data(range_="today")
+    item = next(i for i in result["items"] if i["symbol"] == "000779.KS")
+
+    assert item["income_strategy"]["income_pass"] is True
+    assert item["stock_agent_ready"] is False
+    assert item["executable_now"] is False
+    assert item["execution_status"] == "toss_snapshot_stale"
+    assert item["cash_check"]["checked"] is False
+    assert result["scan_summary"]["snapshot_candidate_blocked"] is True
+    assert result["scan_summary"]["snapshot_status"] == "stale"
+    assert result["scan_summary"]["income_ready_count"] == 0
+
+
+def test_toss_buy_candidates_missing_snapshot_also_fails_closed(monkeypatch):
+    strong = _new_cand("000780.KS", "snapshot누락후보", price=50_000, score=88)
+    strong = strong.__class__(
+        **{**strong.__dict__, "target_price": 56_000.0, "stop_loss": 48_000.0, "risk_reward": 3.0}
+    )
+    _patch_sections(monkeypatch, _sections(new=[strong]))
+    monkeypatch.setattr(dd, "_dashboard_toss_broker_reads_isolated", lambda: True)
+    monkeypatch.setattr(dd, "toss_account_summary", lambda: {
+        "error": "stock_bot_snapshot_unavailable",
+        "cash": {"krw": 0},
+    })
+    monkeypatch.setattr(
+        "core.toss_readonly_snapshot.load_snapshot",
+        lambda: {"ok": False, "status": "missing", "reason": "snapshot_missing"},
+    )
+    monkeypatch.setattr(dd, "_toss_holding_price_map", lambda: {})
+    monkeypatch.setattr(dd, "_recent_toss_risk_sell_symbols", lambda *a, **k: {})
+    monkeypatch.setattr(dd, "_pending_toss_order_symbols", lambda *a, **k: {})
+
+    result = dd.toss_buy_candidates_data(range_="today")
+    item = next(i for i in result["items"] if i["symbol"] == "000780.KS")
+
+    assert item["stock_agent_ready"] is False
+    assert item["executable_now"] is False
+    assert item["execution_status"] == "toss_snapshot_stale"
+    assert result["scan_summary"]["snapshot_candidate_blocked"] is True
+    assert result["scan_summary"]["snapshot_status"] == "missing"
+
+
 def test_toss_buy_candidates_income_block_disables_stock_agent_ready(monkeypatch):
     weak = _new_cand("000112.KS", "수입약한후보", price=50_000, score=70)
     weak = weak.__class__(

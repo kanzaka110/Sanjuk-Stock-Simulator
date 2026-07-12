@@ -117,6 +117,16 @@ class MarketMonitor:
         아래 태스크는 각자 내부 스로틀/dedup/장중 조건을 갖고 있으므로
         gate 밖에서 호출한다. 개별 실패는 루프를 중단시키지 않는다.
         """
+        # Toss 계좌 read-only snapshot — stock-bot/monitor만 broker GET 소유.
+        # 내부 5분 스로틀, sanitized atomic JSON, 주문 부작용 없음.
+        try:
+            from core.toss_readonly_snapshot import refresh_snapshot_if_due
+            snapshot_result = refresh_snapshot_if_due()
+            if isinstance(snapshot_result, dict) and not snapshot_result.get("ok") and not snapshot_result.get("skipped"):
+                log.warning("toss readonly snapshot 갱신 실패: %s", snapshot_result.get("reason", "unknown"))
+        except Exception as e:
+            log.warning(f"toss readonly snapshot 실패: {e}")
+
         # Toss 미체결/exit 감시 (read-only, 내부 30분 스로틀)
         try:
             from core.toss_order_watch import run_toss_order_watch

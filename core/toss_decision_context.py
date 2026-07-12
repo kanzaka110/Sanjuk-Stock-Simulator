@@ -69,6 +69,30 @@ def _fetch_context() -> dict:
 
     try:
         from core import toss_client as tc
+
+        # In autonomous mode only main.py bot/monitor may touch Toss OAuth.
+        # Dashboard and scheduled briefing processes consume the sanitized
+        # stock-bot snapshot; missing/expired data fails closed without GET.
+        try:
+            from core.toss_readonly_snapshot import decision_context_for_consumer, should_consume_snapshot
+            if should_consume_snapshot():
+                snapshot_ctx = decision_context_for_consumer()
+                if isinstance(snapshot_ctx, dict) and snapshot_ctx:
+                    return snapshot_ctx
+                base["enabled"] = True
+                base["data_quality"]["warnings"].append("stock-bot Toss snapshot 없음 또는 만료")
+                base["data_quality"]["source"] = "stock_bot_snapshot"
+                base["data_quality"]["stale"] = True
+                return base
+        except Exception as exc:
+            base["enabled"] = True
+            base["data_quality"]["warnings"].append(
+                f"stock-bot Toss snapshot 로드 실패: {type(exc).__name__}"
+            )
+            base["data_quality"]["source"] = "stock_bot_snapshot"
+            base["data_quality"]["stale"] = True
+            return base
+
         if not tc.is_configured():
             base["data_quality"]["warnings"].append("Toss API 미설정")
             return base
