@@ -23,7 +23,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-import core.ai_berkshire_toss as abt
+import core.ai_berkshire_toss as abt  # noqa: E402
 
 
 # 테스트 결정성: valid_until은 먼 미래, 만료 검증은 as_of_date 주입으로만
@@ -289,7 +289,8 @@ class TestThesisFreshness(unittest.TestCase):
         self.assertEqual(item["classification"], "trim")
 
     def test_missing_as_of_downgrades(self):
-        raw = _item("trim", 1.0); raw.pop("as_of")
+        raw = _item("trim", 1.0)
+        raw.pop("as_of")
         item = abt.normalize_ai_berkshire_item(raw, as_of_date="2026-07-15")
         self.assertEqual(item["classification"], "gray_zone")
         self.assertIn("missing_as_of", item["freshness_issues"])
@@ -408,6 +409,71 @@ class TestPrioritySort(unittest.TestCase):
 
 
 # ── 4. hard stop 후보는 AI Berkshire와 무관 ──────────────────────
+
+class TestAuditMetadataPreserved(unittest.TestCase):
+    """감사 필드(classification_change_reason/evidence_urls/checked_at) 보존 회귀."""
+
+    def test_audit_fields_survive_normalizer_buy_and_sell_paths(self):
+        raw = _item(
+            "trim", 1.0, name="Exxon Mobil",
+            buy_checklist_status="fail",
+            auto_sell_eligible=False,
+            classification_change_reason="  2026-07 10-K 재검토로 trim 유지  ",
+            evidence_urls=[
+                "https://www.sec.gov/Archives/edgar/data/xom-10k.htm",
+                "  http://investor.exxonmobil.com/filing  ",
+                "javascript:alert(1)",
+                12345,
+                "ftp://not-allowed.example.com",
+            ],
+            checked_at="  2026-07-12T04:00:00+09:00  ",
+        )
+        scores = {"version": "ai_berkshire_toss_v2", "read_only": True,
+                  "items": {"XOM": raw}}
+        source_snapshot = json.loads(json.dumps(raw))
+
+        # 1) normalizer: 공백 정리 + HTTP(S) URL만 유지
+        item = abt.normalize_ai_berkshire_item(raw, as_of_date="2026-07-12")
+        self.assertEqual(item["classification_change_reason"],
+                         "2026-07 10-K 재검토로 trim 유지")
+        self.assertEqual(item["evidence_urls"], [
+            "https://www.sec.gov/Archives/edgar/data/xom-10k.htm",
+            "http://investor.exxonmobil.com/filing",
+        ])
+        self.assertEqual(item["checked_at"], "2026-07-12T04:00:00+09:00")
+
+        # 2) BUY 결과: 세 필드 유지 + checklist fail 차단 불변
+        buy = abt.evaluate_ai_berkshire_buy_gate(
+            "XOM", scores, as_of_date="2026-07-12")
+        self.assertTrue(buy["buy_block"])
+        self.assertEqual(buy["buy_reason"], "ai_berkshire_buy_checklist_fail")
+        self.assertEqual(buy["classification_change_reason"],
+                         item["classification_change_reason"])
+        self.assertEqual(buy["evidence_urls"], item["evidence_urls"])
+        self.assertEqual(buy["checked_at"], item["checked_at"])
+
+        # 3) SELL 결과: 세 필드 유지 + auto_sell false면 trim이어도 차단 불변
+        out = abt.apply_berkshire_to_sell_to_fund(
+            [_row("XOM")], scores=scores, as_of_date="2026-07-12")
+        ai = out[0]["ai_berkshire"]
+        self.assertFalse(out[0]["auto_sell_eligible"])
+        self.assertEqual(out[0]["auto_sell_block_reason"],
+                         "ai_berkshire_auto_sell_disabled")
+        self.assertEqual(ai["classification_change_reason"],
+                         item["classification_change_reason"])
+        self.assertEqual(ai["evidence_urls"], item["evidence_urls"])
+        self.assertEqual(ai["checked_at"], item["checked_at"])
+
+        # 4) source object 불변
+        self.assertEqual(raw, source_snapshot)
+
+        # 5) 필드 부재 시 기본값 (None / [] / None)
+        plain = abt.normalize_ai_berkshire_item(
+            _item("hold"), as_of_date="2026-07-12")
+        self.assertIsNone(plain["classification_change_reason"])
+        self.assertEqual(plain["evidence_urls"], [])
+        self.assertIsNone(plain["checked_at"])
+
 
 class TestHardStopUnaffected(unittest.TestCase):
     def test_stop_loss_candidate_survives_hold_classification(self):

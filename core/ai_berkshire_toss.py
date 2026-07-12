@@ -202,6 +202,20 @@ def normalize_ai_berkshire_item(raw, as_of_date=None) -> dict:
     raw_red_lines = raw.get("red_lines")
     red_lines = ([str(r) for r in raw_red_lines]
                  if isinstance(raw_red_lines, (list, tuple)) else [])
+    # 감사 필드: 갱신 근거 URL은 HTTP(S) 문자열만, reason/checked_at은 공백 정리.
+    raw_evidence_urls = raw.get("evidence_urls")
+    evidence_urls = (
+        [
+            str(url).strip()
+            for url in raw_evidence_urls
+            if isinstance(url, str)
+            and url.strip().startswith(("http://", "https://"))
+        ]
+        if isinstance(raw_evidence_urls, (list, tuple))
+        else []
+    )
+    classification_change_reason = raw.get("classification_change_reason")
+    checked_at = raw.get("checked_at")
 
     item = {
         "name": str(raw.get("name") or ""),
@@ -224,6 +238,18 @@ def normalize_ai_berkshire_item(raw, as_of_date=None) -> dict:
         "auto_sell_eligible": (
             raw.get("auto_sell_eligible")
             if isinstance(raw.get("auto_sell_eligible"), bool)
+            else None
+        ),
+        "classification_change_reason": (
+            classification_change_reason.strip()
+            if isinstance(classification_change_reason, str)
+            and classification_change_reason.strip()
+            else None
+        ),
+        "evidence_urls": evidence_urls,
+        "checked_at": (
+            checked_at.strip()
+            if isinstance(checked_at, str) and checked_at.strip()
             else None
         ),
     }
@@ -277,6 +303,11 @@ def _buy_gate_result(symbol: str, item: dict | None, buy_block: bool,
         "confidence": item["confidence"] if item else None,
         "source_urls": item["source_urls"] if item else [],
         "buy_checklist_status": item["buy_checklist_status"] if item else None,
+        "classification_change_reason": (
+            item["classification_change_reason"] if item else None
+        ),
+        "evidence_urls": item["evidence_urls"] if item else [],
+        "checked_at": item["checked_at"] if item else None,
     }
 
 
@@ -396,6 +427,11 @@ def apply_berkshire_to_sell_to_fund(
             "source_urls": item["source_urls"] if item else [],
             "buy_checklist_status": item["buy_checklist_status"] if item else None,
             "score_auto_sell_eligible": item["auto_sell_eligible"] if item else None,
+            "classification_change_reason": (
+                item["classification_change_reason"] if item else None
+            ),
+            "evidence_urls": item["evidence_urls"] if item else [],
+            "checked_at": item["checked_at"] if item else None,
         }
         merged["sell_to_fund_adjustment"] = adjustment
         merged["adjusted_sell_priority"] = round(weakness + adjustment, 4)
