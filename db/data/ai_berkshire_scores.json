@@ -1,7 +1,7 @@
 {
   "version": "ai_berkshire_toss_v2",
   "read_only": true,
-  "note": "thesis/red_lines는 2026-07-10 Hermes AI Berkshire 리서치 결론. valid_until 경과 시 gray_zone 강등(fail-closed). source_urls는 실제 조회 확인된 URL만.",
+  "note": "기존 운영 8종목 의미 보존 + 2026-07-11 staging 3종목 안전 병합 후보. 운영 score가 아니며 별도 승인 전 사용 금지.",
   "items": {
     "035720.KS": {
       "name": "카카오",
@@ -15,7 +15,9 @@
         "거버넌스 이슈로 핵심 자회사 지배력 상실 또는 대규모 자산 매각 강제"
       ],
       "confidence": "medium",
-      "source_urls": ["https://finance.naver.com/item/main.naver?code=035720"]
+      "source_urls": [
+        "https://finance.naver.com/item/main.naver?code=035720"
+      ]
     },
     "015760.KS": {
       "name": "한국전력",
@@ -28,7 +30,9 @@
         "전기요금 정상화로 구조적 흑자 전환과 부채 감축이 공시로 확인되면 재평가"
       ],
       "confidence": "medium",
-      "source_urls": ["https://finance.naver.com/item/main.naver?code=015760"]
+      "source_urls": [
+        "https://finance.naver.com/item/main.naver?code=015760"
+      ]
     },
     "XOM": {
       "name": "Exxon Mobil",
@@ -41,7 +45,9 @@
         "저유가 구간에서도 FCF와 주주환원이 구조적으로 유지되면 축소 판단 재평가"
       ],
       "confidence": "medium",
-      "source_urls": ["https://investor.exxonmobil.com/"]
+      "source_urls": [
+        "https://investor.exxonmobil.com/"
+      ]
     },
     "035420.KS": {
       "name": "NAVER",
@@ -55,7 +61,9 @@
         "커머스/광고 매출의 2개 분기 연속 역성장"
       ],
       "confidence": "medium",
-      "source_urls": ["https://finance.naver.com/item/main.naver?code=035420"]
+      "source_urls": [
+        "https://finance.naver.com/item/main.naver?code=035420"
+      ]
     },
     "068270.KS": {
       "name": "셀트리온",
@@ -69,7 +77,9 @@
         "핵심 신규 파이프라인 승인 실패 누적"
       ],
       "confidence": "medium",
-      "source_urls": ["https://finance.naver.com/item/main.naver?code=068270"]
+      "source_urls": [
+        "https://finance.naver.com/item/main.naver?code=068270"
+      ]
     },
     "ABBV": {
       "name": "AbbVie",
@@ -83,7 +93,9 @@
         "자유현금흐름 마진이 20% 아래로 하락하고 회복 근거가 없음"
       ],
       "confidence": "medium-high",
-      "source_urls": ["https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001551152&type=10-Q"]
+      "source_urls": [
+        "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001551152&type=10-Q"
+      ]
     },
     "024110.KS": {
       "name": "기업은행",
@@ -97,7 +109,9 @@
         "NPL 등 건전성 지표의 급격한 악화"
       ],
       "confidence": "medium",
-      "source_urls": ["https://finance.naver.com/item/main.naver?code=024110"]
+      "source_urls": [
+        "https://finance.naver.com/item/main.naver?code=024110"
+      ]
     },
     "316140.KS": {
       "name": "우리금융지주",
@@ -111,7 +125,127 @@
         "그룹 건전성 지표의 급격한 악화"
       ],
       "confidence": "medium",
-      "source_urls": ["https://finance.naver.com/item/main.naver?code=316140"]
+      "source_urls": [
+        "https://finance.naver.com/item/main.naver?code=316140"
+      ]
+    },
+    "000270.KS": {
+      "name": "기아",
+      "classification": "hold",
+      "sell_to_fund_adjustment": -1.5,
+      "as_of": "2026-07-11",
+      "valid_until": "2026-07-23",
+      "thesis": "기아는 글로벌 SUV·HEV·EV 제품군, 23조원대 현금성 유동성 및 35% 이상 주주환원 목표를 갖춘 현금창출 자동차 업체로서 보유 논리는 유효하지만, 미국 관세로 훼손된 수익성이 회복되는지는 2026년 2분기 실적으로 확인해야 한다.",
+      "red_lines": [
+        "연결 기준 영업이익률이 2개 연속 분기 6.0% 미만으로 공시될 경우 보유 논지를 재검토한다.",
+        "2026년 연간 연결 영업이익률 가이던스가 7.0% 미만으로 하향되거나 연간 영업이익 가이던스가 8.5조원 미만으로 낮아질 경우 trim 또는 sell_to_fund를 재평가한다.",
+        "분기말 연결 현금및현금성자산과 단기금융상품 합계가 15조원 미만으로 감소하거나 부채총계/자본총계가 1.0배를 초과하면 재무 안전마진 훼손으로 재평가한다.",
+        "분기말 연결 재고자산이 20조원을 초과하면서 같은 분기 매출액이 전년 동기 대비 감소하면 수요·생산 불일치로 간주해 재평가한다.",
+        "회사가 2026~2028년 총주주환원율 목표를 35% 미만으로 공식 하향하거나 자사주 매입분의 소각 원칙을 철회하면 management 점수와 분류를 재검토한다.",
+        "글로벌 전동화차 판매 비중이 2개 연속 분기 25% 미만으로 공시되면 전동화 믹스 개선 논지를 재검토한다."
+      ],
+      "confidence": "medium",
+      "source_urls": [
+        "https://englishdart.fss.or.kr/dsbh001/main.do?rcpNo=20260515002675",
+        "https://www.hyundaimotorgroup.com/en/news/kia-announces-2026-first-quarter--business-results",
+        "https://www.hyundaimotorgroup.com/en/news/kia-ceo-investor-day-electrified-vehicle-growth-2026",
+        "https://worldwide.kia.com/en/newsroom/view/?id=161092",
+        "https://worldwide.kia.com/en/newsroom/view/?id=161896",
+        "https://en.yna.co.kr/view/AEN20260424006751320",
+        "https://query1.finance.yahoo.com/v8/finance/chart/000270.KS?period1=1783296000&period2=1783900800&interval=1d&events=history"
+      ],
+      "research_status": "complete",
+      "proposed_classification": "hold",
+      "classification_change_reason": "최초 평가다. 2026년 1분기 매출은 전년 동기 대비 5.3% 증가하고 글로벌 판매·전동화 판매가 성장했으며, 3월 말 현금및현금성자산과 단기금융상품 합계가 23.23조원이고 2026~2028년 TSR 35% 초과 목표도 확인된다. 반면 미국 관세 0.755조원 등의 영향으로 1분기 영업이익이 26.7% 감소하고 영업이익률이 10.74%에서 7.47%로 하락했으므로, 저평가만으로 protect 또는 신규매수 pass를 부여하지 않고 기존 보유는 hold로 제안한다.",
+      "evidence_urls": [
+        "https://englishdart.fss.or.kr/dsbh001/main.do?rcpNo=20260515002675",
+        "https://www.hyundaimotorgroup.com/en/news/kia-announces-2026-first-quarter--business-results",
+        "https://www.hyundaimotorgroup.com/en/news/kia-ceo-investor-day-electrified-vehicle-growth-2026",
+        "https://worldwide.kia.com/en/newsroom/view/?id=161092",
+        "https://worldwide.kia.com/en/newsroom/view/?id=161896",
+        "https://en.yna.co.kr/view/AEN20260424006751320",
+        "https://query1.finance.yahoo.com/v8/finance/chart/000270.KS?period1=1783296000&period2=1783900800&interval=1d&events=history"
+      ],
+      "checked_at": "2026-07-11",
+      "buy_checklist_status": "gray_zone",
+      "auto_sell_eligible": false
+    },
+    "096770.KS": {
+      "name": "SK이노베이션",
+      "classification": "trim",
+      "sell_to_fund_adjustment": 1.0,
+      "as_of": "2026-07-11",
+      "valid_until": "2026-08-31",
+      "thesis": "정유·LNG 자산의 현금창출 잠재력과 장부가 할인은 있으나, 배터리의 구조적 적자와 24.6조원 순차입금, 음의 영업현금흐름 및 반복된 자본조달이 주당가치의 예측 가능성을 훼손하므로 현재 보유분은 축소가 합리적이다.",
+      "red_lines": [
+        "연결 순차입금이 분기 말 25조원을 초과한 상태에서 영업활동현금흐름까지 2개 분기 연속 음수를 기록하면 추가 축소 또는 sell_to_fund 재평가",
+        "배터리·소재 부문 분기 영업손실이 2026년 3분기까지 3,000억원 이상 지속되거나 미국 첨단제조 생산세액공제 효과를 제외한 손익 개선이 확인되지 않으면 투자 논지 철회",
+        "2026년 말 연결 순차입금이 20조원 이하로 낮아지지 않거나 순차입금/정상화 EBITDA가 4배를 초과하면 재무구조 개선 논지 철회",
+        "기존 2025년 유상증자와 미상환 전환사채 외에 보통주 기준 5% 이상의 추가 잠재 희석을 수반하는 증자·전환증권이 발표되면 즉시 재평가",
+        "Moody's 장기신용등급이 Ba1 아래로 하락하거나 국내 회사채 신용등급이 AA- 아래로 하락하면 sell_to_fund 재평가"
+      ],
+      "confidence": "medium",
+      "source_urls": [
+        "https://www.skinnovation.com/ir/earning/275?fileType=callFile",
+        "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260515001455",
+        "https://www.skinnovation.com/ir/earning/268?fileType=callFile",
+        "https://www.skinnovation.com/ir/credit_rating",
+        "https://www.yna.co.kr/view/AKR20260513127352527",
+        "https://query1.finance.yahoo.com/v8/finance/chart/096770.KS?period1=1783468800&period2=1783814400&interval=1d&events=div%2Csplits"
+      ],
+      "research_status": "complete",
+      "proposed_classification": "trim",
+      "classification_change_reason": "최초 평가다. 2026년 1분기 연결 영업이익은 2.162조원이었지만 에너지·화학 부문 영업이익 2.369조원과 1.025조원의 재고 관련 이익에 크게 의존했고, 배터리·소재 부문은 0.422조원 영업손실을 기록했다. 같은 분기 영업현금흐름은 -0.438조원, 유형자산 취득은 1.076조원이었으며 순차입금은 2025년 말 22.6조원에서 24.6조원으로 증가했다. 2025년 11.93% 제3자배정 유상증자에 이어 미상환 전환사채의 잠재 희석도 약 2.87% 존재한다. 2026-07-10 종가 102,900원과 1분기 말 지배주주지분을 단순 비교한 약 0.73배 P/B 할인은 인정하지만, 일회성 정유 이익·배터리 적자·현금소진·재차입 및 희석 위험을 상쇄할 만큼 확실한 안전마진으로 보기 어려워 보유 비중 축소를 제안한다.",
+      "evidence_urls": [
+        "https://www.skinnovation.com/ir/earning/275?fileType=callFile",
+        "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260515001455",
+        "https://www.skinnovation.com/ir/earning/268?fileType=callFile",
+        "https://www.skinnovation.com/ir/credit_rating",
+        "https://www.yna.co.kr/view/AKR20260513127352527",
+        "https://query1.finance.yahoo.com/v8/finance/chart/096770.KS?period1=1783468800&period2=1783814400&interval=1d&events=div%2Csplits"
+      ],
+      "checked_at": "2026-07-11",
+      "buy_checklist_status": "fail",
+      "auto_sell_eligible": false
+    },
+    "207940.KS": {
+      "name": "삼성바이오로직스",
+      "classification": "hold",
+      "sell_to_fund_adjustment": -1.0,
+      "as_of": "2026-07-11",
+      "valid_until": "2026-07-21",
+      "thesis": "대규모 검증 생산설비, 누적 규제승인 440건 이상, 장기 수주와 높은 전환비용을 갖춘 고품질 순수 CDMO이지만, 현재 고평가와 고객집중·규제·Plant 5 및 미국 거점 램프업 위험 때문에 기존 보유는 유지하되 신규 매수는 보류한다.",
+      "red_lines": [
+        "DART 기준 분기 CDMO 영업이익률이 2개 분기 연속 30% 미만으로 하락한다.",
+        "DART 최소구매물량 기준 수주잔고가 매출 인식에 따른 정상 감소를 제외하고 70억달러 미만으로 축소되거나, 대형 계약의 해지·미갱신으로 연간 매출 가이던스가 10% 이상 하향된다.",
+        "DART 공시 총 가동률이 Plant 5 램프업 이후에도 2개 분기 연속 60% 미만이거나 Plant 1~4의 완전가동 상태가 구조적으로 종료된다.",
+        "FDA·EMA·MFDS 등 핵심 규제기관이 핵심 생산시설에 Warning Letter, 수입경보, 동의명령, 제조허가 정지·취소 등 중대한 품질 제재를 부과하거나 품질 문제로 중요 고객 계약이 해지된다.",
+        "익명 포함 단일 고객 매출 비중이 30%를 초과한 상태에서 해당 고객의 핵심 계약 종료·대폭 감산이 확인된다.",
+        "진행 중인 2차 증선위 행정소송 패소나 추가 회계·지배구조 사건이 현재·미래 현금흐름 또는 감사의견에 중대한 영향을 준다."
+      ],
+      "confidence": "medium",
+      "source_urls": [
+        "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260515002129",
+        "https://samsungbiologics.com/media/company-news/samsung-biologics-reports-first-quarter-2026-financial-results",
+        "https://samsungbiologics.com/media/company-news/samsung-biologics-reports-fourth-quarter-and-fiscal-year-2025-financial-results",
+        "https://stockanalysis.com/quote/krx/207940/statistics/",
+        "https://www.reuters.com/markets/emerging/south-koreas-samsung-biologics-says-it-plans-split-company-2025-05-21/",
+        "https://www.reuters.com/business/healthcare-pharmaceuticals/samsung-biologics-buy-us-drug-production-facility-gsk-280-mln-2025-12-21/"
+      ],
+      "research_status": "complete",
+      "proposed_classification": "hold",
+      "classification_change_reason": "최초 평가다. 2025년 순수 CDMO 기준 매출은 4조5570억원(+30.3%), 영업이익은 2조692억원(+56.6%)이었고, 2026년 1분기에도 매출 1조2571억원(+25.8%), 영업이익 5808억원(+35.0%), 영업이익률 46.2%를 기록했다. 최소구매물량 기준 수주잔고 102.72억달러, 1~4공장 완전가동, 5공장 램프업, 미국 6만L 거점 확보는 장기 경쟁력을 지지한다. 반면 2026년 7월 10일 기준 독립 데이터의 TTM PER 53.34배·선행 PER 32.54배·EV/EBITDA 22.85배는 안전마진이 낮고, 2026년 1분기 익명 상위 3개 고객 매출 비중이 약 49.7%이며 규제·품질 및 신규 설비 램프업 위험이 있어 신규 매수보다 보유가 타당하다.",
+      "evidence_urls": [
+        "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260515002129",
+        "https://samsungbiologics.com/media/company-news/samsung-biologics-reports-first-quarter-2026-financial-results",
+        "https://samsungbiologics.com/media/company-news/samsung-biologics-reports-fourth-quarter-and-fiscal-year-2025-financial-results",
+        "https://stockanalysis.com/quote/krx/207940/statistics/",
+        "https://www.reuters.com/markets/emerging/south-koreas-samsung-biologics-says-it-plans-split-company-2025-05-21/",
+        "https://www.reuters.com/business/healthcare-pharmaceuticals/samsung-biologics-buy-us-drug-production-facility-gsk-280-mln-2025-12-21/"
+      ],
+      "checked_at": "2026-07-11",
+      "buy_checklist_status": "fail",
+      "auto_sell_eligible": false
     }
   }
 }
