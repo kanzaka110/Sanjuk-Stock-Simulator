@@ -280,6 +280,7 @@ def _handle_confirm(preview_id: str) -> dict:
         sym = r.get("symbol", "")
         return dict(
             symbol=sym,
+            decision_ref=r.get("decision_ref", ""),
             side=r.get("side", "buy"),
             quantity=int(r.get("quantity") or 0),
             limit_price=float(r.get("limit_price") or 0),

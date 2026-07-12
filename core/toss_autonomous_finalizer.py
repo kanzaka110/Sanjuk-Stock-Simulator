@@ -429,6 +429,7 @@ def _record_event(
             status=status,
             preview_id=pilot_id,
             verification_id=verification_id,
+            decision_ref=rec.get("decision_ref", ""),
             reason=reason,
             message=f"autonomous {event_type}",
             symbol=rec.get("symbol", ""),
@@ -437,6 +438,7 @@ def _record_event(
             limit_price=float(rec.get("limit_price") or 0),
             estimated_amount_krw=float(rec.get("estimated_amount_krw") or 0),
             adapter_status=policy.get("adapter_status", "disabled"),
+            live_order_allowed=bool(policy.get("live_order_allowed")),
             **extra,
         )
     except Exception as e:

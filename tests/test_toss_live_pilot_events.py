@@ -14,6 +14,7 @@ Live pilot callback 이벤트 로그 테스트.
 
 import tempfile
 import unittest
+import sqlite3
 from pathlib import Path
 from unittest.mock import patch
 import sys
@@ -93,6 +94,25 @@ class TestRecordEventBasic(unittest.TestCase):
         events = list_events(limit=10)
         types = {e["event_type"] for e in events}
         self.assertIn("cancelled", types)
+
+    def test_decision_ref_persisted_in_event(self):
+        from core.toss_live_pilot_events import record_event, list_events
+        ref = "execution_decision:tlive_trace"
+        result = record_event(
+            "tlive_trace", "reviewed", "reviewed", decision_ref=ref
+        )
+        self.assertEqual(result["decision_ref"], ref)
+        found = [e for e in list_events(limit=10) if e["pilot_id"] == "tlive_trace"]
+        self.assertEqual(found[0]["decision_ref"], ref)
+
+    def test_invalid_decision_ref_rejected(self):
+        from core.toss_live_pilot_events import record_event
+        result = record_event(
+            "tlive_bad_ref", "reviewed", "reviewed",
+            decision_ref="Bearer forbidden secret",
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "invalid_decision_ref")
 
     def test_error_diagnostics_persisted_in_list(self):
         from core.toss_live_pilot_events import record_event, list_events
@@ -260,6 +280,31 @@ class TestEventSummary(unittest.TestCase):
         self.assertEqual(summ["live_sent_real"], 1)
         self.assertEqual(summ["live_order_sent_total"], 1)
 
+    def test_autonomous_live_sent_uses_same_production_invariants(self):
+        from core.toss_live_pilot_events import record_event, event_summary
+        ref = "execution_decision:tlive_auto"
+        r = record_event(
+            "tlive_auto", "autonomous_live_sent", "live_sent",
+            decision_ref=ref, live_order_sent=True,
+            adapter_status="enabled", live_order_allowed=True,
+        )
+        self.assertEqual(r["event_type"], "autonomous_live_sent")
+        self.assertTrue(r["is_real_live_sent"])
+        self.assertEqual(r["decision_ref"], ref)
+        summ = event_summary()
+        self.assertEqual(summ["live_sent_real"], 1)
+        self.assertEqual(summ["live_order_sent_total"], 1)
+
+    def test_ungated_autonomous_live_sent_is_artifact(self):
+        from core.toss_live_pilot_events import record_event, event_summary
+        r = record_event(
+            "tlive_auto_bad", "autonomous_live_sent", "live_sent",
+            live_order_sent=True, adapter_status="enabled", live_order_allowed=False,
+        )
+        self.assertEqual(r["event_type"], "live_sent_artifact")
+        self.assertFalse(r["is_real_live_sent"])
+        self.assertEqual(event_summary()["live_sent_real"], 0)
+
 
 # ── 6. 각 이벤트 타입 커버 ────────────────────────────────
 
@@ -335,3 +380,58 @@ def test_autonomous_send_retryable_event_type_is_accepted(tmp_path, monkeypatch)
         quantity=1, limit_price=1000, live_order_sent=False,
     )
     assert r["ok"] is True
+
+
+def test_existing_sqlite_ledgers_gain_decision_ref_column(tmp_path, monkeypatch):
+    from core import toss_live_pilot_events as events
+    from core import toss_live_pilot_ledger as ledger
+    from core import toss_live_pilot_verification as verification
+
+    cases = (
+        (events, "live_pilot_events", "events.db"),
+        (ledger, "live_pilot_ledger", "ledger.db"),
+        (verification, "live_pilot_verification", "verification.db"),
+    )
+    for module, table, filename in cases:
+        path = tmp_path / filename
+        conn = sqlite3.connect(path)
+        conn.execute(f"CREATE TABLE {table} (id TEXT)")
+        conn.commit()
+        conn.close()
+        monkeypatch.setattr(module, "_db_path", lambda p=path: p)
+        setattr(module, "_schema_created", False)
+        migrated = getattr(module, "_conn")()
+        columns = {
+            str(row[1]) for row in migrated.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        migrated.close()
+        assert "decision_ref" in columns
+
+
+def test_live_pilot_ledger_persists_immutable_decision_ref(tmp_path, monkeypatch):
+    from core import toss_live_pilot_ledger as ledger
+
+    monkeypatch.setattr(ledger, "_db_path", lambda: tmp_path / "ledger_trace.db")
+    ledger._schema_created = False
+    preview = {
+        "ok": True,
+        "preview_id": "tlive_trace",
+        "decision_ref": "execution_decision:tlive_trace",
+        "symbol": "MU",
+        "side": "buy",
+        "quantity": 1,
+        "limit_price": 100.0,
+        "estimated_amount_krw": 150_000.0,
+        "blocks": [],
+        "warnings": [],
+    }
+    result = ledger.record_live_pilot_preview(preview)
+    assert result["ok"] is True
+    stored = ledger.list_live_pilot_records(limit=1)[0]
+    assert stored["decision_ref"] == "execution_decision:tlive_trace"
+
+    preview["decision_ref"] = "Bearer forbidden secret"
+    assert ledger.record_live_pilot_preview(preview) == {
+        "ok": False,
+        "reason": "invalid_decision_ref",
+    }

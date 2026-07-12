@@ -4,10 +4,11 @@ import sys
 from unittest.mock import patch
 
 
-def test_dashboard_autonomous_mode_isolates_account_broker_gets(monkeypatch):
+def test_dashboard_autonomous_mode_isolates_account_broker_gets(monkeypatch, tmp_path):
     import core.dashboard_data as dd
 
     monkeypatch.setenv("TOSS_AUTONOMOUS_MODE", "true")
+    monkeypatch.setenv("TOSS_READONLY_SNAPSHOT_PATH", str(tmp_path / "missing.json"))
     monkeypatch.setattr(sys, "argv", ["main.py", "dashboard"])
 
     with patch(
@@ -21,10 +22,11 @@ def test_dashboard_autonomous_mode_isolates_account_broker_gets(monkeypatch):
     assert "직접 조회하지 않음" in result["read_only_notice"]
 
 
-def test_dashboard_autonomous_mode_isolates_order_broker_gets(monkeypatch):
+def test_dashboard_autonomous_mode_isolates_order_broker_gets(monkeypatch, tmp_path):
     import core.dashboard_data as dd
 
     monkeypatch.setenv("TOSS_AUTONOMOUS_MODE", "true")
+    monkeypatch.setenv("TOSS_READONLY_SNAPSHOT_PATH", str(tmp_path / "missing.json"))
     monkeypatch.setattr(sys, "argv", ["main.py", "dashboard"])
 
     with patch(
@@ -34,9 +36,42 @@ def test_dashboard_autonomous_mode_isolates_order_broker_gets(monkeypatch):
         result = dd._recent_toss_broker_orders(limit=20)
 
     assert result["ok"] is False
-    assert result["error"] == "dashboard_broker_read_isolated"
-    assert result["cache_status"] == "isolated"
+    assert result["error"] == "snapshot_missing"
+    assert result["source"] == "stock_bot_snapshot"
+    assert result["usable_for_orders"] is False
+    assert result["cache_status"] == "unavailable"
     assert result["orders"] == []
+
+
+def test_dashboard_reads_broker_orders_only_from_snapshot(monkeypatch):
+    import core.dashboard_data as dd
+
+    monkeypatch.setenv("TOSS_AUTONOMOUS_MODE", "true")
+    monkeypatch.setattr(sys, "argv", ["main.py", "dashboard"])
+    snapshot = {
+        "ok": True,
+        "orders": [{
+            "client_order_id": "tlive_20260712_025100_1234",
+            "symbol": "005930",
+            "side": "BUY",
+            "broker_order_status": "FILLED",
+            "filled_quantity": 1,
+            "filled_price": 61000,
+            "filled_at": "2026-07-12T02:51:01+09:00",
+        }],
+        "snapshot_status": "fresh",
+        "snapshot_age_sec": 10,
+        "source": "stock_bot_snapshot",
+        "usable_for_orders": False,
+    }
+    with patch("core.toss_readonly_snapshot.broker_orders_for_consumer", return_value=snapshot), \
+         patch("core.toss_live_order_http.list_orders", side_effect=AssertionError("no broker GET")):
+        result = dd._recent_toss_broker_orders(limit=20)
+    assert result["ok"] is True
+    assert result["source"] == "stock_bot_snapshot"
+    assert result["usable_for_orders"] is False
+    assert result["orders"][0]["symbol"] == "005930.KS"
+    assert result["orders"][0]["client_order_id"] == "tlive_20260712_025100_1234"
 
 
 def test_bot_process_keeps_broker_read_ownership(monkeypatch):

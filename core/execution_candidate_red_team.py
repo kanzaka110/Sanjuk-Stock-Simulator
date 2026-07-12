@@ -174,6 +174,10 @@ def _normalize_candidate(candidate: Mapping) -> dict:
     symbol = str(candidate.get("symbol") or candidate.get("ticker") or "").upper().strip()
     side = str(candidate.get("side") or "buy").lower().strip()
     limit_price = _float(candidate.get("limit_price") or candidate.get("entry_price") or candidate.get("price"))
+    decision_ref = str(candidate.get("decision_ref") or "").strip()[:160]
+    source_prediction_id = str(candidate.get("source_prediction_id") or "").strip()
+    if not decision_ref and source_prediction_id.isdigit():
+        decision_ref = f"prediction:{source_prediction_id}"
     return {
         "symbol": symbol,
         "name": str(candidate.get("name") or symbol).strip()[:120],
@@ -195,7 +199,7 @@ def _normalize_candidate(candidate: Mapping) -> dict:
         "ai_berkshire_buy_block": bool(candidate.get("ai_berkshire_buy_block", False)),
         "ai_berkshire_buy_reason": str(candidate.get("ai_berkshire_buy_reason") or "").strip()[:500],
         "quote_age_sec": _int(candidate.get("quote_age_sec"), -1),
-        "decision_ref": str(candidate.get("decision_ref") or candidate.get("source_prediction_id") or "").strip()[:160],
+        "decision_ref": decision_ref,
         "source_signal": str(candidate.get("source_signal") or "").strip()[:120],
         "risk_notes": _strings(candidate.get("risk_notes")),
     }

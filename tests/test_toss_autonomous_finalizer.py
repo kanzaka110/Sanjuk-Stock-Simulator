@@ -25,6 +25,7 @@ _AUTO_ENV = {
 
 _PILOT_REC = {
     "pilot_id": "test_pilot_001",
+    "decision_ref": "execution_decision:tlive_test_001",
     "symbol": "NVDA",
     "side": "buy",
     "quantity": 1,
@@ -280,3 +281,25 @@ class TestHttp422Diagnostics:
         assert result["reason"] == "prior_http_422_today"
         mock_dispatch.assert_not_called()
         mock_block.assert_called_once()
+
+
+def test_autonomous_event_receives_decision_ref_and_live_policy_flag():
+    from core.toss_autonomous_finalizer import _record_event
+
+    policy = {"adapter_status": "enabled", "live_order_allowed": True}
+    with patch("core.toss_live_pilot_events.record_event") as record:
+        _record_event(
+            pilot_id="test_pilot_001",
+            event_type="autonomous_live_sent",
+            status="live_sent",
+            verification_id="hv_mock",
+            reason="autonomous_execution",
+            rec=_PILOT_REC,
+            policy=policy,
+            live_order_sent=True,
+        )
+    kwargs = record.call_args.kwargs
+    assert kwargs["decision_ref"] == "execution_decision:tlive_test_001"
+    assert kwargs["live_order_allowed"] is True
+    assert kwargs["adapter_status"] == "enabled"
+    assert kwargs["live_order_sent"] is True

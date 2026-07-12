@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import re
 import sqlite3
 import threading
 from datetime import datetime, timezone, timedelta
@@ -37,6 +38,8 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 KST = timezone(timedelta(hours=9))
+_DECISION_REF_RE = re.compile(r"^[A-Za-z0-9._:-]{1,160}$")
+_DECISION_REF_PREFIXES = ("prediction:", "execution_decision:")
 
 _VALID_STATUSES = frozenset(["PENDING", "PASS", "HOLD", "BLOCK", "ERROR", "EXPIRED"])
 _PASS_STATUS = "PASS"
@@ -70,6 +73,7 @@ def _conn() -> sqlite3.Connection:
                 verification_id     TEXT PRIMARY KEY,
                 pilot_id            TEXT NOT NULL,
                 preview_id          TEXT NOT NULL,
+                decision_ref        TEXT DEFAULT '',
                 symbol              TEXT NOT NULL,
                 side                TEXT NOT NULL DEFAULT 'buy',
                 quantity            INTEGER DEFAULT 0,
@@ -87,6 +91,10 @@ def _conn() -> sqlite3.Connection:
                 live_order_allowed  INTEGER DEFAULT 0
             )
         """)
+        try:
+            conn.execute("ALTER TABLE live_pilot_verification ADD COLUMN decision_ref TEXT DEFAULT ''")
+        except Exception:
+            pass
         conn.commit()
         _schema_created = True
     return conn
@@ -124,6 +132,11 @@ def create_verification_request(
     limit_price = float(preview_record.get("limit_price") or 0)
     estimated = float(preview_record.get("estimated_amount_krw") or 0)
     preview_id = preview_record.get("preview_id", preview_record.get("pilot_id", ""))
+    decision_ref = str(preview_record.get("decision_ref") or "")[:160]
+    if not decision_ref:
+        decision_ref = f"execution_decision:{preview_id}"
+    if not decision_ref.startswith(_DECISION_REF_PREFIXES) or not _DECISION_REF_RE.fullmatch(decision_ref):
+        return {"ok": False, "reason": "invalid_decision_ref"}
 
     now = _now_kst()
 
@@ -132,13 +145,13 @@ def create_verification_request(
         try:
             conn.execute(
                 """INSERT INTO live_pilot_verification
-                   (verification_id, pilot_id, preview_id, symbol, side, quantity,
+                   (verification_id, pilot_id, preview_id, decision_ref, symbol, side, quantity,
                     limit_price, estimated_amount_krw, status, reasons, checks,
                     hermes_message, requested_at, verified_at, expires_at,
                     source, reviewer, live_order_allowed)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    verification_id, pilot_id, preview_id, symbol, side, quantity,
+                    verification_id, pilot_id, preview_id, decision_ref, symbol, side, quantity,
                     limit_price, estimated, "PENDING", "[]", "{}",
                     "", now, None, None,
                     "hermes", "Hermes", 0,
@@ -152,6 +165,7 @@ def create_verification_request(
         "ok": True,
         "verification_id": verification_id,
         "pilot_id": pilot_id,
+        "decision_ref": decision_ref,
         "status": "PENDING",
         "requested_at": now,
     }

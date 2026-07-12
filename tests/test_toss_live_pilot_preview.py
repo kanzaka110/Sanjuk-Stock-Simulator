@@ -57,6 +57,29 @@ class TestPreviewBasic(unittest.TestCase):
         self.assertIn("아직 주문 전송 안 함", combined)
         self.assertIn("최종 2단계 승인 필요", combined)
 
+    def test_new_discovery_gets_own_execution_decision_ref(self):
+        p = build_live_pilot_preview(_candidate())
+        self.assertEqual(p["decision_ref"], f"execution_decision:{p['preview_id']}")
+
+    def test_explicit_prediction_ref_is_preserved(self):
+        candidate = _candidate()
+        candidate["source_prediction_id"] = 123
+        p = build_live_pilot_preview(candidate)
+        self.assertEqual(p["decision_ref"], "prediction:123")
+
+    def test_explicit_direct_ref_is_preserved(self):
+        candidate = _candidate()
+        candidate["decision_ref"] = "prediction:456"
+        p = build_live_pilot_preview(candidate)
+        self.assertEqual(p["decision_ref"], "prediction:456")
+
+    def test_invalid_direct_ref_is_not_persisted_or_used(self):
+        candidate = _candidate()
+        candidate["decision_ref"] = "Bearer forbidden secret"
+        p = build_live_pilot_preview(candidate)
+        self.assertEqual(p["decision_ref"], f"execution_decision:{p['preview_id']}")
+        self.assertNotIn("Bearer", p["decision_ref"])
+
 
 class TestPreview069500(unittest.TestCase):
     """069500.KS — 고신뢰 ETF, 한도 내 수량."""

@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import re
 import sqlite3
 import threading
 from datetime import datetime, timezone, timedelta
@@ -47,6 +48,9 @@ from core.toss_live_pilot_hermes_bridge import SYMBOL_NAMES, get_symbol_display
 log = logging.getLogger(__name__)
 
 KST = timezone(timedelta(hours=9))
+_DECISION_REF_RE = re.compile(r"^[A-Za-z0-9._:-]{1,160}$")
+_DECISION_REF_PREFIXES = ("prediction:", "execution_decision:")
+_REAL_LIVE_EVENT_TYPES = frozenset({"live_sent", "autonomous_live_sent"})
 
 _VALID_EVENT_TYPES = frozenset([
     "preview_created",
@@ -96,6 +100,7 @@ def _conn() -> sqlite3.Connection:
                 pilot_id            TEXT NOT NULL,
                 preview_id          TEXT DEFAULT '',
                 verification_id     TEXT DEFAULT '',
+                decision_ref        TEXT DEFAULT '',
                 event_type          TEXT NOT NULL,
                 status              TEXT NOT NULL,
                 symbol              TEXT DEFAULT '',
@@ -121,6 +126,7 @@ def _conn() -> sqlite3.Connection:
             )
         """)
         for col, defn in [
+            ("decision_ref", "TEXT DEFAULT ''"),
             ("broker_order_id", "TEXT DEFAULT ''"),
             ("broker_order_status", "TEXT DEFAULT ''"),
             ("filled_quantity", "REAL DEFAULT 0"),
@@ -167,6 +173,7 @@ def record_event(
     *,
     preview_id: str = "",
     verification_id: str = "",
+    decision_ref: str = "",
     symbol: str = "",
     side: str = "buy",
     quantity: int = 0,
@@ -203,24 +210,31 @@ def record_event(
         log.warning("invalid event_type: %s", event_type)
         return {"ok": False, "reason": f"invalid event_type: {event_type!r}"}
 
+    decision_ref = str(decision_ref or "")[:160]
+    if decision_ref and (
+        not decision_ref.startswith(_DECISION_REF_PREFIXES)
+        or not _DECISION_REF_RE.fullmatch(decision_ref)
+    ):
+        return {"ok": False, "reason": "invalid_decision_ref"}
+
     error_body_text = _stringify_event_diagnostic(error_body, limit=600)
     order_request_preview_text = _stringify_event_diagnostic(order_request_preview, limit=600)
 
     # 민감정보 가드
     for kw in ("accountNo", "Bearer", "APP_KEY", "APP_SECRET", "token", "secret"):
-        for field in (reason, message, broker_order_id, broker_order_status, error_body_text, order_request_preview_text):
+        for field in (decision_ref, reason, message, broker_order_id, broker_order_status, error_body_text, order_request_preview_text):
             if kw in str(field):
                 log.warning("민감정보 감지 in event fields: %s", kw)
                 return {"ok": False, "reason": f"sensitive_field: {kw}"}
 
     # 안전 invariant: 진짜 live_sent 판별 + artifact 강등
     is_real_live_sent = (
-        event_type == "live_sent"
+        event_type in _REAL_LIVE_EVENT_TYPES
         and bool(live_order_sent)
         and adapter_status == "enabled"
         and bool(live_order_allowed)
     )
-    if event_type == "live_sent" and not is_real_live_sent:
+    if event_type in _REAL_LIVE_EVENT_TYPES and not is_real_live_sent:
         event_type = "live_sent_artifact"
         log.info(
             "live_sent 강등 → live_sent_artifact: adapter=%s allowed=%s "
@@ -239,16 +253,16 @@ def record_event(
             conn = _conn()
             conn.execute(
                 """INSERT INTO live_pilot_events
-                   (event_id, pilot_id, preview_id, verification_id,
+                   (event_id, pilot_id, preview_id, verification_id, decision_ref,
                     event_type, status, symbol, symbol_name, symbol_label,
                     side, quantity, limit_price, estimated_amount_krw,
                     live_order_sent, adapter_status, live_order_allowed,
                     reason, message, broker_order_id, broker_order_status,
                     filled_quantity, filled_price, error_body, order_request_preview,
                      created_at, delivered_to_hermes)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    event_id, pilot_id, preview_id, verification_id,
+                    event_id, pilot_id, preview_id, verification_id, str(decision_ref or "")[:160],
                     event_type, status, symbol, symbol_name, symbol_label,
                     side, quantity, limit_price, estimated_amount_krw,
                     1 if live_order_sent else 0, adapter_status, stored_allowed,
@@ -269,6 +283,7 @@ def record_event(
         "event_type": event_type,
         "status": status,
         "pilot_id": pilot_id,
+        "decision_ref": str(decision_ref or "")[:160],
         "symbol_label": symbol_label,
         "live_order_sent": live_order_sent,
         "live_order_allowed": bool(is_real_live_sent),
@@ -302,14 +317,14 @@ def list_events(limit: int = 50) -> list[dict]:
             d["live_order_sent"] = sent
             et = d.get("event_type")
             real = (
-                et == "live_sent"
+                et in _REAL_LIVE_EVENT_TYPES
                 and sent
                 and d.get("adapter_status") == "enabled"
                 and bool(d.get("live_order_allowed"))
             )
             # Hermes 필터 기준과 일치: real일 때만 true
             d["live_order_allowed"] = real
-            if et in ("live_sent", "live_sent_artifact") and sent:
+            if et in (*_REAL_LIVE_EVENT_TYPES, "live_sent_artifact") and sent:
                 d["live_sent_classification"] = "real" if real else "mock_or_artifact"
             else:
                 d["live_sent_classification"] = "n/a"
@@ -368,13 +383,13 @@ def event_summary() -> dict:
             ).fetchall()
             real_count = conn.execute(
                 "SELECT COUNT(*) FROM live_pilot_events "
-                "WHERE event_type='live_sent' AND live_order_sent=1 "
+                "WHERE event_type IN ('live_sent','autonomous_live_sent') AND live_order_sent=1 "
                 "AND adapter_status='enabled' AND live_order_allowed=1"
             ).fetchone()[0]
             artifact_count = conn.execute(
                 "SELECT COUNT(*) FROM live_pilot_events "
                 "WHERE live_order_sent=1 AND NOT ("
-                "event_type='live_sent' AND adapter_status='enabled' "
+                "event_type IN ('live_sent','autonomous_live_sent') AND adapter_status='enabled' "
                 "AND live_order_allowed=1)"
             ).fetchone()[0]
             conn.close()

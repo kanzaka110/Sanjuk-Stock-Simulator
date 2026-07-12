@@ -80,6 +80,26 @@ class TestCreateVerificationRequest(unittest.TestCase):
         self.assertIn("requested_at", r)
         self.assertTrue(r["requested_at"])
 
+    def test_decision_ref_is_derived_and_persisted(self):
+        from core.toss_live_pilot_verification import (
+            create_verification_request,
+            get_verification_for_pilot,
+        )
+        r = create_verification_request(_make_preview("pilot_trace"), pilot_id="pilot_trace")
+        self.assertEqual(r["decision_ref"], "execution_decision:pilot_trace")
+        stored = get_verification_for_pilot("pilot_trace")
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertEqual(stored["decision_ref"], "execution_decision:pilot_trace")
+
+    def test_invalid_decision_ref_is_rejected(self):
+        from core.toss_live_pilot_verification import create_verification_request
+        preview = _make_preview("pilot_bad")
+        preview["decision_ref"] = "Bearer forbidden secret"
+        r = create_verification_request(preview, pilot_id="pilot_bad")
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["reason"], "invalid_decision_ref")
+
 
 # ── 2. record_hermes_verification ────────────────────────
 

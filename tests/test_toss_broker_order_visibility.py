@@ -53,3 +53,42 @@ def test_live_pilot_events_include_broker_truth_when_event_ledger_empty(monkeypa
     assert data["broker_order_count"] == 1
     assert data["broker_orders"][0]["symbol_label"] == "우리금융 (316140.KS)"
     assert data["warnings"]
+
+
+def test_live_pilot_events_do_not_double_count_autonomous_real_rows(monkeypatch):
+    import core.toss_live_pilot_events as events
+    import core.toss_live_pilot_policy as policy
+
+    monkeypatch.setattr(events, "list_events", lambda limit=50: [{
+        "event_type": "autonomous_live_sent",
+        "live_order_sent": True,
+        "adapter_status": "enabled",
+        "live_order_allowed": True,
+        "symbol": "MU",
+    }])
+    monkeypatch.setattr(events, "event_summary", lambda: {
+        "summary": {"autonomous_live_sent": 1, "live_sent": 1},
+        "live_sent_real": 2,
+        "live_sent_mock_or_artifact": 0,
+        "blocked_policy": 0,
+        "blocked_transport": 0,
+        "blocked_guard": 0,
+        "live_order_sent_total": 2,
+    })
+    monkeypatch.setattr(policy, "compute_toss_live_pilot_policy", lambda: {
+        "live_order_allowed": True,
+        "adapter_status": "enabled",
+        "live_transport_status": "configured",
+    })
+    monkeypatch.setattr(dd, "_recent_toss_broker_orders", lambda limit=20: {
+        "ok": True,
+        "orders": [],
+        "open_count": 0,
+        "closed_count": 0,
+        "source": "test",
+    })
+
+    data = dd.toss_live_pilot_events_data(limit=10)
+
+    assert data["live_sent_real"] == 2
+    assert data["live_order_sent_total"] == 2

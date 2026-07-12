@@ -29,6 +29,7 @@ ALLOWED_TOSS_FILES = {
     "tests/test_toss_probe.py",
     "tests/test_toss_client.py",
     "tests/test_toss_dashboard.py",
+    "tests/test_toss_broker_order_visibility.py",
     "tests/test_toss_automation_config.py",
     "tests/test_toss_automation_guard.py",
     "tests/test_toss_paper_trading.py",

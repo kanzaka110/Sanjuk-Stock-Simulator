@@ -187,6 +187,14 @@ def _sanitize_order_row(row) -> dict:
         return {}
     status = row.get("status") or row.get("orderStatus") or row.get("state") or ""
     order_id = row.get("orderId") or row.get("orderNo") or row.get("id") or ""
+    raw_client_order_id = str(
+        row.get("clientOrderId") or row.get("client_order_id") or ""
+    )
+    client_order_id = (
+        raw_client_order_id
+        if tc._SAFE_CLIENT_ORDER_ID_RE.fullmatch(raw_client_order_id)
+        else ""
+    )
     execution = row.get("execution") if isinstance(row.get("execution"), dict) else {}
     filled_qty = (
         row.get("filledQuantity") or row.get("executedQuantity") or row.get("filledQty") or row.get("executedQty")
@@ -198,6 +206,7 @@ def _sanitize_order_row(row) -> dict:
     )
     return {
         "broker_order_id": _mask(order_id),
+        "client_order_id": client_order_id,
         "broker_order_status": str(status or ""),
         "filled_quantity": _as_float(filled_qty),
         "filled_price": _as_float(avg_price),

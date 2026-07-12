@@ -847,12 +847,78 @@ def portfolio_cluster_risk_data() -> dict:
 
 
 # ─── /api/trade-outcome-attribution ─────────────────────
-def _read_trade_outcome_inputs(days: int) -> tuple[list[dict], list[dict], list[dict]]:
-    """추천·수동 매매·production live event를 SQLite mode=ro로 읽는다."""
+def _mark_hermes_verified_live_events(
+    live_events: list[dict], verification_rows: list[dict]
+) -> list[dict]:
+    """Mark only exact verification_id + decision_ref PASS joins as direct."""
+    by_verification_id = {
+        str(row.get("verification_id") or ""): row
+        for row in verification_rows
+        if row.get("verification_id")
+    }
+    for event in live_events:
+        event_ref = str(event.get("decision_ref") or "")
+        verification = by_verification_id.get(
+            str(event.get("verification_id") or "")
+        ) or {}
+        same_symbol = (
+            str(event.get("symbol") or "").upper().strip()
+            == str(verification.get("symbol") or "").upper().strip()
+        )
+        same_side = (
+            str(event.get("side") or "").lower().strip()
+            == str(verification.get("side") or "").lower().strip()
+        )
+        event["hermes_decision_verified"] = bool(
+            event_ref
+            and str(verification.get("decision_ref") or "") == event_ref
+            and str(verification.get("status") or "") == "PASS"
+            and same_symbol
+            and same_side
+        )
+    return live_events
+
+
+def _attach_direct_refs_to_broker_orders(
+    broker_orders: list[dict], live_events: list[dict]
+) -> list[dict]:
+    """Join broker GET truth only by exact clientOrderId == pilot_id."""
+    by_pilot_id: dict[str, dict] = {}
+    for event in live_events:
+        pilot_id = str(event.get("pilot_id") or "")
+        if pilot_id and event.get("hermes_decision_verified"):
+            by_pilot_id.setdefault(pilot_id, event)
+    for order in broker_orders:
+        client_order_id = str(order.get("client_order_id") or "")
+        event = by_pilot_id.get(client_order_id) or {}
+        same_symbol = (
+            str(order.get("symbol") or "").upper().split(".", 1)[0]
+            == str(event.get("symbol") or "").upper().split(".", 1)[0]
+        )
+        same_side = (
+            str(order.get("side") or "").lower().strip()
+            == str(event.get("side") or "").lower().strip()
+        )
+        if event and same_symbol and same_side:
+            order["decision_ref"] = str(event.get("decision_ref") or "")
+            order["verification_id"] = str(event.get("verification_id") or "")
+            order["hermes_decision_verified"] = True
+        else:
+            order["decision_ref"] = ""
+            order["verification_id"] = ""
+            order["hermes_decision_verified"] = False
+    return broker_orders
+
+
+def _read_trade_outcome_inputs(
+    days: int,
+) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
+    """추천·수동 매매·production live event·broker GET을 read-only로 읽는다."""
     cutoff = (datetime.now(KST) - timedelta(days=days)).isoformat()
     predictions: list[dict] = []
     manual_trades: list[dict] = []
     live_events: list[dict] = []
+    broker_orders: list[dict] = []
 
     conn = _conn()
     if conn is not None:
@@ -885,14 +951,23 @@ def _read_trade_outcome_inputs(days: int) -> tuple[list[dict], list[dict], list[
         try:
             event_conn = sqlite3.connect(f"file:{event_path}?mode=ro", uri=True)
             event_conn.row_factory = sqlite3.Row
+            event_columns = {
+                str(row[1]) for row in event_conn.execute(
+                    "PRAGMA table_info(live_pilot_events)"
+                ).fetchall()
+            }
+            decision_expr = "decision_ref" if "decision_ref" in event_columns else "'' AS decision_ref"
+            verification_expr = (
+                "verification_id" if "verification_id" in event_columns else "'' AS verification_id"
+            )
             live_events = _rows(
                 event_conn,
-                """SELECT event_id, event_type, symbol, side, filled_price,
-                          filled_quantity, broker_order_status,
+                f"""SELECT event_id, pilot_id, event_type, {verification_expr}, {decision_expr},
+                          symbol, side, filled_price, filled_quantity, broker_order_status,
                           live_order_sent, adapter_status,
                           live_order_allowed, created_at
                    FROM live_pilot_events
-                   WHERE created_at >= ? AND event_type='live_sent'
+                   WHERE created_at >= ? AND event_type IN ('live_sent', 'autonomous_live_sent')
                    ORDER BY created_at DESC LIMIT 1000""",
                 (cutoff,),
             )
@@ -901,7 +976,48 @@ def _read_trade_outcome_inputs(days: int) -> tuple[list[dict], list[dict], list[
         finally:
             if event_conn is not None:
                 event_conn.close()
-    return predictions, manual_trades, live_events
+
+    # A Hermes link is direct only when both immutable keys agree: the event's
+    # verification_id resolves to PASS and its decision_ref equals the stored
+    # verification decision_ref. No symbol/time proximity inference is allowed.
+    verification_path = _db_path().parent / "toss_live_pilot_verification.db"
+    if live_events and verification_path.exists():
+        verification_conn = None
+        try:
+            verification_conn = sqlite3.connect(
+                f"file:{verification_path}?mode=ro", uri=True
+            )
+            verification_conn.row_factory = sqlite3.Row
+            verification_columns = {
+                str(row[1]) for row in verification_conn.execute(
+                    "PRAGMA table_info(live_pilot_verification)"
+                ).fetchall()
+            }
+            if "decision_ref" in verification_columns:
+                verification_rows = _rows(
+                    verification_conn,
+                    """SELECT verification_id, decision_ref, status, symbol, side
+                       FROM live_pilot_verification
+                       ORDER BY requested_at DESC LIMIT 2000""",
+                )
+                _mark_hermes_verified_live_events(live_events, verification_rows)
+        except Exception:
+            pass
+        finally:
+            if verification_conn is not None:
+                verification_conn.close()
+
+    try:
+        from core.toss_readonly_snapshot import broker_orders_for_consumer
+        broker_snapshot = broker_orders_for_consumer()
+        broker_orders = [
+            dict(row) for row in broker_snapshot.get("orders") or []
+            if isinstance(row, dict)
+        ]
+        _attach_direct_refs_to_broker_orders(broker_orders, live_events)
+    except Exception:
+        broker_orders = []
+    return predictions, manual_trades, live_events, broker_orders
 
 
 def _fetch_trade_outcome_attribution_raw(days: int) -> dict:
@@ -911,10 +1027,11 @@ def _fetch_trade_outcome_attribution_raw(days: int) -> dict:
         normalize_execution_records,
     )
 
-    predictions, manual_trades, live_events = _read_trade_outcome_inputs(days)
+    predictions, manual_trades, live_events, broker_orders = _read_trade_outcome_inputs(days)
     executions = normalize_execution_records(
         manual_trades=manual_trades,
         live_events=live_events,
+        broker_orders=broker_orders,
     )
     report = calculate_trade_outcome_attribution(
         predictions,
@@ -4140,16 +4257,42 @@ def _recent_toss_broker_orders(limit: int = 20) -> dict:
     global _toss_broker_orders_last_good, _toss_broker_orders_cooldown_until
 
     if _dashboard_toss_broker_reads_isolated():
+        try:
+            from core.toss_readonly_snapshot import broker_orders_for_consumer
+            snapshot = broker_orders_for_consumer()
+        except Exception as exc:
+            snapshot = {"ok": False, "orders": [], "error": type(exc).__name__}
+        orders: list[dict] = []
+        for row in snapshot.get("orders") or []:
+            if not isinstance(row, dict):
+                continue
+            out = dict(row)
+            broker_symbol = str(out.get("symbol") or "")
+            out["broker_symbol"] = broker_symbol
+            out["symbol"] = _normalize_broker_symbol(broker_symbol) or broker_symbol
+            out["ticker"] = out["symbol"]
+            out["event_type"] = "broker_order_truth"
+            out["status"] = out.get("broker_order_status") or ""
+            out["created_at"] = out.get("filled_at") or out.get("ordered_at") or ""
+            out["read_only_source"] = "stock_bot_snapshot"
+            orders.append(_decorate_stock_display(out))
+        orders.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+        open_count = sum(
+            1 for row in orders
+            if str(row.get("broker_order_status") or "").upper() in {"OPEN", "PENDING", "ACCEPTED"}
+        )
         return {
-            "ok": False,
-            "error": "dashboard_broker_read_isolated",
-            "orders": [],
-            "open_count": 0,
-            "closed_count": 0,
-            "cache_status": "isolated",
-            "source": "local live-pilot ledger only",
+            "ok": bool(snapshot.get("ok")),
+            "error": str(snapshot.get("error") or ""),
+            "orders": orders[:limit],
+            "open_count": open_count,
+            "closed_count": max(0, len(orders) - open_count),
+            "cache_status": snapshot.get("snapshot_status") or "unavailable",
+            "source": "stock_bot_snapshot",
+            "snapshot_age_sec": snapshot.get("snapshot_age_sec"),
+            "usable_for_orders": False,
             "read_only_notice": (
-                "자율매매 중 OAuth 충돌 방지: dashboard 프로세스는 Toss 주문 API를 직접 조회하지 않음"
+                "자율매매 중 OAuth 충돌 방지: dashboard는 stock-bot broker-order snapshot만 소비"
             ),
         }
 
@@ -4314,13 +4457,7 @@ def toss_live_pilot_events_data(limit: int = 50) -> dict:
         records = [_decorate_stock_display(r) for r in list_events(limit=limit)]
         broker_truth = _recent_toss_broker_orders(limit=min(limit, 50))
         broker_orders = broker_truth.get("orders") or []
-        autonomous_real_records = [
-            r for r in records
-            if r.get("event_type") == "autonomous_live_sent"
-            and r.get("live_order_sent")
-            and r.get("adapter_status") == "enabled"
-        ]
-        live_sent_real = int(summ.get("live_sent_real", 0)) + len(autonomous_real_records)
+        live_sent_real = int(summ.get("live_sent_real", 0))
         warnings = []
         if not broker_truth.get("ok", False):
             warnings.append("브로커 주문 조회 실패/제한: " + str(broker_truth.get("error") or "unknown"))

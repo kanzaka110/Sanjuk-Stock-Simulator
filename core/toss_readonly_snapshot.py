@@ -56,6 +56,13 @@ _CALENDAR_TEXT_FIELDS = (
     "market", "date", "status", "openTime", "closeTime", "nextOpenDate", "nextOpenTime",
 )
 _CALENDAR_BOOL_FIELDS = ("open", "isOpen", "holiday")
+_SAFE_CLIENT_ORDER_ID_RE = re.compile(r"^tlive_[A-Za-z0-9_-]{1,30}$")
+_BROKER_ORDER_TEXT_FIELDS = (
+    "broker_order_status", "symbol", "side", "ordered_at", "filled_at",
+)
+_BROKER_ORDER_NUMBER_FIELDS = (
+    "quantity", "filled_quantity", "filled_price",
+)
 
 
 def _truthy(name: str) -> bool:
@@ -162,6 +169,29 @@ def _project_calendar(value: object) -> dict:
     return out
 
 
+def _project_broker_order(value: object) -> dict:
+    """Allowlist one read-only broker order; preserve only safe local client ID."""
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, Any] = {}
+    client_order_id = str(value.get("client_order_id") or "")
+    if _SAFE_CLIENT_ORDER_ID_RE.fullmatch(client_order_id):
+        out["client_order_id"] = client_order_id
+    for key in _BROKER_ORDER_TEXT_FIELDS:
+        if value.get(key) not in (None, ""):
+            out[key] = _text(value.get(key), 80)
+    for key in _BROKER_ORDER_NUMBER_FIELDS:
+        if value.get(key) not in (None, ""):
+            out[key] = _number(value.get(key))
+    return out if out.get("symbol") else {}
+
+
+def _project_broker_orders(values: object) -> list[dict]:
+    if not isinstance(values, list):
+        return []
+    return [row for row in (_project_broker_order(item) for item in values[:200]) if row]
+
+
 def _project_account_summary(value: object) -> dict:
     """Allowlist projection: unknown broker fields are dropped, never persisted."""
     if not isinstance(value, dict):
@@ -253,8 +283,14 @@ def _decision_context_from_summary(summary: dict, calendars: dict | None = None)
 def _contains_sensitive(value: Any) -> bool:
     if isinstance(value, dict):
         for key, item in value.items():
-            if _normalized_key(key) in _SENSITIVE_KEYS:
+            normalized = _normalized_key(key)
+            if normalized in _SENSITIVE_KEYS:
                 return True
+            if (
+                normalized == "client_order_id"
+                and _SAFE_CLIENT_ORDER_ID_RE.fullmatch(str(item or ""))
+            ):
+                continue
             if _contains_sensitive(item):
                 return True
         return False
@@ -283,7 +319,13 @@ def _fsync_directory(path: Path) -> None:
         os.close(fd)
 
 
-def write_snapshot(account_summary: dict, calendars: dict | None = None, *, now: float | None = None) -> dict:
+def write_snapshot(
+    account_summary: dict,
+    calendars: dict | None = None,
+    broker_orders: list[dict] | None = None,
+    *,
+    now: float | None = None,
+) -> dict:
     """Project safe fields and atomically publish a mode-0600 snapshot."""
     summary = _project_account_summary(account_summary)
     if not summary:
@@ -299,6 +341,7 @@ def write_snapshot(account_summary: dict, calendars: dict | None = None, *, now:
         "usable_for_orders": False,
         "account_summary": summary,
         "decision_context": decision_context,
+        "broker_orders": _project_broker_orders(broker_orders),
     }
     if _contains_sensitive(envelope):
         return {"ok": False, "reason": "sensitive_data_detected"}
@@ -378,11 +421,12 @@ def load_snapshot(*, now: float | None = None) -> dict:
         "usable_for_orders": False,
         "account_summary": raw.get("account_summary") or {},
         "decision_context": raw.get("decision_context") or {},
+        "broker_orders": _project_broker_orders(raw.get("broker_orders") or []),
         "generated_at": generated_at,
     }
 
 
-def _copy_payload(payload: dict) -> dict:
+def _copy_payload(payload: Any) -> Any:
     return json.loads(json.dumps(payload, ensure_ascii=False))
 
 
@@ -419,6 +463,27 @@ def account_summary_for_consumer() -> dict | None:
     return _mark_snapshot_quality(snapshot.get("account_summary") or {}, snapshot)
 
 
+def broker_orders_for_consumer() -> dict:
+    """Return sanitized broker GET truth from snapshot; never authorize orders."""
+    snapshot = load_snapshot()
+    if not snapshot.get("ok"):
+        return {
+            "ok": False,
+            "orders": [],
+            "error": snapshot.get("reason") or "snapshot_unavailable",
+            "source": "stock_bot_snapshot",
+            "usable_for_orders": False,
+        }
+    return {
+        "ok": True,
+        "orders": _copy_payload(snapshot.get("broker_orders") or []),
+        "snapshot_status": snapshot.get("status"),
+        "snapshot_age_sec": snapshot.get("age_sec"),
+        "source": "stock_bot_snapshot",
+        "usable_for_orders": False,
+    }
+
+
 def decision_context_for_consumer() -> dict | None:
     snapshot = load_snapshot()
     if not snapshot.get("ok"):
@@ -441,17 +506,17 @@ def decision_context_for_consumer() -> dict | None:
     return out
 
 
-def _raw_account_summary_from_broker() -> tuple[dict, dict]:
+def _raw_account_summary_from_broker() -> tuple[dict, dict, list[dict]]:
     """Broker-owner GET projection source. No order/write endpoint is called."""
     from core import toss_client as tc
 
     accounts = tc.get_accounts()
     if not accounts:
-        return {}, {}
+        return {}, {}, []
     first = accounts[0] if isinstance(accounts[0], dict) else {}
     seq = str(first.get("accountSeq") or "")
     if not seq:
-        return {}, {}
+        return {}, {}, []
     holdings = tc.get_holdings(seq)
     items = holdings.get("items") or [] if isinstance(holdings, dict) else []
     market_value = holdings.get("marketValue") or {} if isinstance(holdings, dict) else {}
@@ -535,7 +600,18 @@ def _raw_account_summary_from_broker() -> tuple[dict, dict]:
         "error": "",
     }
     calendars = {"KR": tc.get_market_calendar("KR"), "US": tc.get_market_calendar("US")}
-    return summary, calendars
+    broker_orders: list[dict] = []
+    try:
+        from core.toss_live_order_http import list_orders
+        for status in ("OPEN", "CLOSED"):
+            result = list_orders(status, account_seq=seq)
+            if result.get("ok"):
+                broker_orders.extend(
+                    row for row in result.get("orders") or [] if isinstance(row, dict)
+                )
+    except Exception:
+        broker_orders = []
+    return summary, calendars, broker_orders
 
 
 def refresh_snapshot_if_due(*, force: bool = False) -> dict:
@@ -549,10 +625,10 @@ def refresh_snapshot_if_due(*, force: bool = False) -> dict:
             return {"ok": True, "skipped": True, "reason": "refresh_throttled"}
         _LAST_REFRESH_MONOTONIC = now_mono
     try:
-        summary, calendars = _raw_account_summary_from_broker()
+        summary, calendars, broker_orders = _raw_account_summary_from_broker()
         if not summary:
             return {"ok": False, "reason": "account_summary_unavailable", "order_side_effects": False}
-        result = write_snapshot(summary, calendars)
+        result = write_snapshot(summary, calendars, broker_orders)
         result["order_side_effects"] = False
         return result
     except Exception as exc:

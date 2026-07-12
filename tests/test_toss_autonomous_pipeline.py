@@ -114,6 +114,23 @@ class TestProcessCandidate(unittest.TestCase):
         self.assertIn("auto_verifier", recorded["hermes_message"])
         self.assertIn("bucket=PASS_EXECUTE", recorded["hermes_message"])
 
+    def test_prediction_ref_flows_preview_ledger_and_verification(self):
+        candidate = _candidate()
+        candidate["source_prediction_id"] = 42
+        with patch("core.toss_live_pilot_ledger.record_live_pilot_preview",
+                   return_value={"ok": True, "pilot_id": "tlive_trace"}) as ledger, \
+             patch("core.toss_live_pilot_verification.create_verification_request",
+                   return_value={"verification_id": "hv_trace", "status": "PENDING"}) as verification, \
+             patch("core.toss_live_pilot_verification.record_hermes_verification",
+                   return_value={"ok": True}), \
+             patch("core.toss_live_pilot_hermes_bridge.build_default_hermes_verdict",
+                   return_value={"status": "HOLD", "reasons": [], "checks": {}}):
+            tap.process_candidate(candidate, dict(_POLICY_ON))
+        ledger_preview = ledger.call_args.args[0]
+        verification_preview = verification.call_args.args[0]
+        self.assertEqual(ledger_preview["decision_ref"], "prediction:42")
+        self.assertEqual(verification_preview["decision_ref"], "prediction:42")
+
     def test_verdict_context_includes_unlimited_and_sides(self):
         _, _, mock_verdict = self._run(_candidate())
         ctx = mock_verdict.call_args[0][0]

@@ -64,6 +64,30 @@ def _summary() -> dict:
     }
 
 
+def _broker_orders() -> list[dict]:
+    return [
+        {
+            "client_order_id": "tlive_20260712_025100_1234",
+            "broker_order_id": "123456789012",
+            "broker_order_status": "FILLED",
+            "symbol": "005930",
+            "side": "BUY",
+            "quantity": 1,
+            "filled_quantity": 1,
+            "filled_price": 61000,
+            "ordered_at": "2026-07-12T02:51:00+09:00",
+            "filled_at": "2026-07-12T02:51:01+09:00",
+            "access_token": "must-drop",
+        },
+        {
+            "client_order_id": "external-secret-value",
+            "broker_order_status": "OPEN",
+            "symbol": "MU",
+            "side": "BUY",
+        },
+    ]
+
+
 @pytest.fixture
 def snapshot_path(tmp_path, monkeypatch):
     path = tmp_path / "toss_readonly_snapshot.json"
@@ -75,6 +99,7 @@ def test_snapshot_allowlist_roundtrip_atomic_private_and_read_only(snapshot_path
     result = snap.write_snapshot(
         _summary(),
         {"KR": {"today": {"date": "2026-07-12", "isOpen": False}, "credential": "drop"}},
+        _broker_orders(),
         now=1_000.0,
     )
     assert result["ok"] is True
@@ -96,6 +121,14 @@ def test_snapshot_allowlist_roundtrip_atomic_private_and_read_only(snapshot_path
     assert raw["account_summary"]["cash"]["krw_native"] == 400_000
     assert raw["account_summary"]["cash"]["usd_krw"] == 100_000
     assert raw["account_summary"]["total_account_value"]["usd_included"] is True
+    assert raw["broker_orders"][0]["client_order_id"] == "tlive_20260712_025100_1234"
+    assert "broker_order_id" not in raw["broker_orders"][0]
+    assert "access_token" not in raw["broker_orders"][0]
+    assert "client_order_id" not in raw["broker_orders"][1]
+    assert set(raw["broker_orders"][0]) <= {
+        "client_order_id", "broker_order_status", "symbol", "side",
+        "quantity", "filled_quantity", "filled_price", "ordered_at", "filled_at",
+    }
     assert set(raw["account_summary"]["holdings_items"][0]) <= {
         "symbol", "stockCode", "name", "quantity", "sellableQuantity",
         "lastPrice", "currentPrice", "averagePrice", "currency",
@@ -108,6 +141,27 @@ def test_snapshot_allowlist_roundtrip_atomic_private_and_read_only(snapshot_path
     assert loaded["usable_for_orders"] is False
     assert loaded["decision_context"]["cash_krw"] == 500_000
     assert loaded["decision_context"]["market_calendar"]["KR"]["today"]["date"] == "2026-07-12"
+    assert loaded["broker_orders"][0]["client_order_id"] == "tlive_20260712_025100_1234"
+
+
+def test_snapshot_v2_without_broker_orders_remains_compatible(snapshot_path):
+    assert snap.write_snapshot(_summary(), now=1_000.0)["ok"] is True
+    raw = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    raw.pop("broker_orders", None)
+    snapshot_path.write_text(json.dumps(raw), encoding="utf-8")
+    loaded = snap.load_snapshot(now=1_100.0)
+    assert loaded["ok"] is True
+    assert loaded["broker_orders"] == []
+
+
+def test_broker_order_consumer_is_read_only_and_snapshot_only(snapshot_path):
+    assert snap.write_snapshot(_summary(), broker_orders=_broker_orders(), now=1_000.0)["ok"] is True
+    with patch("core.toss_readonly_snapshot.time.time", return_value=1_100.0):
+        result = snap.broker_orders_for_consumer()
+    assert result["ok"] is True
+    assert result["source"] == "stock_bot_snapshot"
+    assert result["usable_for_orders"] is False
+    assert result["orders"][0]["client_order_id"] == "tlive_20260712_025100_1234"
 
 
 def test_fresh_snapshot_is_decision_only_never_order_authorization(snapshot_path):
@@ -285,7 +339,7 @@ def test_owner_refresh_uses_direct_projection_without_dashboard_import(snapshot_
     monkeypatch.setenv("TOSS_AUTONOMOUS_MODE", "true")
     monkeypatch.setattr(sys, "argv", ["main.py", "bot"])
     monkeypatch.setattr(snap, "_LAST_REFRESH_MONOTONIC", 0.0)
-    with patch("core.toss_readonly_snapshot._raw_account_summary_from_broker", return_value=(_summary(), {})) as fetch:
+    with patch("core.toss_readonly_snapshot._raw_account_summary_from_broker", return_value=(_summary(), {}, [])) as fetch:
         result = snap.refresh_snapshot_if_due(force=True)
     fetch.assert_called_once_with()
     assert result["ok"] is True
@@ -299,7 +353,7 @@ def test_failed_refresh_preserves_last_known_good(snapshot_path, monkeypatch):
     before = snapshot_path.read_text(encoding="utf-8")
     monkeypatch.setenv(snap.ROLE_ENV, snap.ROLE_OWNER)
     monkeypatch.setattr(snap, "_LAST_REFRESH_MONOTONIC", 0.0)
-    with patch("core.toss_readonly_snapshot._raw_account_summary_from_broker", return_value=({}, {})):
+    with patch("core.toss_readonly_snapshot._raw_account_summary_from_broker", return_value=({}, {}, [])):
         result = snap.refresh_snapshot_if_due(force=True)
     assert result["ok"] is False
     assert snapshot_path.read_text(encoding="utf-8") == before

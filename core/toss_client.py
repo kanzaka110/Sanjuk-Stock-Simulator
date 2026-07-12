@@ -95,6 +95,8 @@ _SENSITIVE_KEYS: set[str] = {
     "appkey", "appsecret", "clientsecret", "secret", "key", "password",
 }
 _LONG_NUM_RE = re.compile(r"\b\d{8,}\b")
+_SAFE_CLIENT_ORDER_ID_RE = re.compile(r"^tlive_[A-Za-z0-9_-]{1,30}$")
+_CLIENT_ORDER_ID_KEYS = {"clientorderid", "client_order_id"}
 
 
 def _is_sensitive_key(k: str) -> bool:
@@ -102,12 +104,19 @@ def _is_sensitive_key(k: str) -> bool:
 
 
 def sanitize_dict(data: object) -> object:
-    """재귀적 민감정보 마스킹."""
+    """재귀적 민감정보 마스킹. 안전한 local clientOrderId만 보존."""
     if isinstance(data, dict):
-        return {
-            k: "[REDACTED]" if _is_sensitive_key(k) else sanitize_dict(v)
-            for k, v in data.items()
-        }
+        out = {}
+        for key, value in data.items():
+            normalized = str(key).lower().replace("-", "_")
+            if _is_sensitive_key(str(key)):
+                out[key] = "[REDACTED]"
+            elif normalized in _CLIENT_ORDER_ID_KEYS:
+                text = str(value or "")
+                out[key] = text if _SAFE_CLIENT_ORDER_ID_RE.fullmatch(text) else "[REDACTED]"
+            else:
+                out[key] = sanitize_dict(value)
+        return out
     if isinstance(data, list):
         return [sanitize_dict(item) for item in data]
     if isinstance(data, str):

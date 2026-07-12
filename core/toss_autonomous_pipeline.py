@@ -249,6 +249,8 @@ def process_candidate(
         "stop_loss": candidate.get("stop_loss"),
         "invalidation": candidate.get("invalidation"),
         "target_price": candidate.get("target_price"),
+        "decision_ref": candidate.get("decision_ref"),
+        "source_prediction_id": candidate.get("source_prediction_id"),
     }
 
     # 1. preview
@@ -299,6 +301,7 @@ def process_candidate(
         "verdict": status,
         "pilot_id": pilot_id,
         "verification_id": verification_id,
+        "decision_ref": preview.get("decision_ref", ""),
         "reason": "; ".join(verdict.get("reasons") or []),
     }
 

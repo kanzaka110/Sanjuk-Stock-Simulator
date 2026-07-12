@@ -118,6 +118,14 @@ def test_deterministic_missing_decision_ref_is_trace_warning_only():
     assert result["warnings"] == ["decision_ref_missing"]
 
 
+def test_source_prediction_id_uses_prediction_namespace():
+    result = deterministic_checks(
+        _candidate(decision_ref="", source_prediction_id=42), _context()
+    )
+    assert result["normalized_candidate"]["decision_ref"] == "prediction:42"
+    assert "decision_ref_missing" not in result["warnings"]
+
+
 def test_deterministic_not_ready_and_bad_prices_block():
     result = deterministic_checks(
         _candidate(stock_agent_ready=False, decision_bucket="WATCH", stop_loss=91000, target_price=89000),

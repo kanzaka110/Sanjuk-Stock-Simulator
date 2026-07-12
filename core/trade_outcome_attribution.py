@@ -11,11 +11,11 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-VERSION = "trade_outcome_attribution_v1"
+VERSION = "trade_outcome_attribution_v2"
 KST = timezone(timedelta(hours=9))
 _EVALUATED_OUTCOMES = {"win", "loss", "neutral"}
 _EXCLUDED_ACTION_TYPES = {"CANCEL_SELL", "HOLD_REVIEW", "WATCH_ONLY", "BLOCKED_BUY"}
-_REAL_LIVE_EVENT_TYPES = {"live_sent"}
+_REAL_LIVE_EVENT_TYPES = {"live_sent", "autonomous_live_sent"}
 _FULLY_FILLED_STATUSES = {"FILLED", "COMPLETED", "EXECUTED", "체결"}
 
 
@@ -148,6 +148,8 @@ def normalize_execution_records(
             records.append({
                 "execution_id": f"live:{row.get('event_id', created_at)}",
                 "decision_ref": _decision_ref(row),
+                "verification_id": str(row.get("verification_id") or ""),
+                "hermes_decision_verified": bool(row.get("hermes_decision_verified")),
                 "symbol": symbol,
                 "side": side,
                 "state": "filled" if broker_status in _FULLY_FILLED_STATUSES else "partial",
@@ -173,6 +175,8 @@ def normalize_execution_records(
             records.append({
                 "execution_id": f"broker:{row.get('broker_order_id_masked') or row.get('id') or created_at}",
                 "decision_ref": _decision_ref(row),
+                "verification_id": str(row.get("verification_id") or ""),
+                "hermes_decision_verified": bool(row.get("hermes_decision_verified")),
                 "symbol": symbol,
                 "side": side,
                 "state": "filled" if status in _FULLY_FILLED_STATUSES else "partial",
@@ -190,7 +194,36 @@ def normalize_execution_records(
     unique: dict[str, dict[str, Any]] = {}
     for row in records:
         unique.setdefault(row["execution_id"], row)
-    return sorted(unique.values(), key=lambda row: row["executed_at"])
+
+    # One immutable decision_ref represents one execution decision. When both
+    # local event and broker GET describe it, keep the broker's latest cumulative
+    # truth; never sum duplicate fill rows or use time proximity.
+    source_priority = {
+        "toss_broker_orders_get": 3,
+        "toss_live_event": 2,
+        "manual_trade_log": 1,
+    }
+    deduped: dict[str, dict[str, Any]] = {}
+    for row in unique.values():
+        decision_ref = str(row.get("decision_ref") or "")
+        key = (
+            f"direct:{decision_ref}:{row.get('symbol')}:{row.get('side')}"
+            if decision_ref else f"execution:{row['execution_id']}"
+        )
+        current = deduped.get(key)
+        candidate_rank = (
+            source_priority.get(str(row.get("source") or ""), 0),
+            str(row.get("executed_at") or ""),
+            _num(row.get("filled_quantity")),
+        )
+        current_rank = (
+            source_priority.get(str(current.get("source") or ""), 0),
+            str(current.get("executed_at") or ""),
+            _num(current.get("filled_quantity")),
+        ) if current else (-1, "", 0.0)
+        if current is None or candidate_rank > current_rank:
+            deduped[key] = row
+    return sorted(deduped.values(), key=lambda row: row["executed_at"])
 
 
 def _quality_status(
@@ -478,6 +511,15 @@ def calculate_trade_outcome_attribution(
     for execution in execution_rows:
         source_counts[str(execution.get("source") or "unknown")] += 1
         state_counts[str(execution.get("state") or "unknown")] += 1
+    executions_with_decision_ref = [
+        execution for execution in execution_rows
+        if str(execution.get("decision_ref") or "")
+    ]
+    hermes_verified_executions = [
+        execution for execution in execution_rows
+        if execution.get("hermes_decision_verified") is True
+        and str(execution.get("decision_ref") or "")
+    ]
 
     return {
         "version": VERSION,
@@ -485,6 +527,8 @@ def calculate_trade_outcome_attribution(
         "order_side_effects": False,
         "matching_rule": {
             "method": "direct_decision_ref_only",
+            "recommendation_link_requires_prediction_ref": True,
+            "hermes_link_requires_verification_id_decision_ref_symbol_side": True,
             "ticker_and_side_must_also_match": True,
             "broker_get_preferred": True,
             "multiple_fill_rows_are_not_summed": True,
@@ -507,6 +551,11 @@ def calculate_trade_outcome_attribution(
             "execution_linkage_rate_pct": round(
                 len(linked) / len(execution_rows) * 100, 1
             ) if execution_rows else 0.0,
+            "executions_with_decision_ref": len(executions_with_decision_ref),
+            "hermes_verified_executions": len(hermes_verified_executions),
+            "hermes_decision_traceability_rate_pct": round(
+                len(hermes_verified_executions) / len(execution_rows) * 100, 1
+            ) if execution_rows else 0.0,
             "avg_linked_slippage_pct": round(
                 sum(slippages) / len(slippages), 2
             ) if slippages else None,
@@ -519,6 +568,11 @@ def calculate_trade_outcome_attribution(
             "observed_real_executions": len(execution_rows),
             "directly_linked_executions": len(linked),
             "unlinked_executions": len(unlinked_executions),
+            "executions_with_decision_ref": len(executions_with_decision_ref),
+            "hermes_verified_executions": len(hermes_verified_executions),
+            "hermes_decision_traceability_rate_pct": round(
+                len(hermes_verified_executions) / len(execution_rows) * 100, 1
+            ) if execution_rows else 0.0,
             "source_counts": dict(sorted(source_counts.items())),
             "state_counts": dict(sorted(state_counts.items())),
             "unlinked_rows": unlinked_executions,
@@ -543,6 +597,7 @@ def calculate_trade_outcome_attribution(
             "benchmark_coverage_pct": round(len(alpha_rows) / len(resolved) * 100, 1) if resolved else 0.0,
             "execution_link_is_inferred": False,
             "direct_prediction_execution_id_available": bool(linked),
+            "direct_hermes_decision_id_available": bool(hermes_verified_executions),
             "unlinked_execution_count": len(unlinked_executions),
         },
         "by_ticker": _group_summary(rows, "ticker"),
@@ -559,7 +614,7 @@ def hermes_interpretation_payload(report: Mapping[str, Any] | None) -> dict[str,
     """Hermes가 재계산 없이 사후검증을 설명할 최소 사실 묶음."""
     source = report if isinstance(report, Mapping) else {}
     return {
-        "version": "trade_outcome_attribution_interpretation_v1",
+        "version": "trade_outcome_attribution_interpretation_v2",
         "read_only": True,
         "summary": dict(source.get("summary") or {}),
         "window": dict(source.get("window") or {}),

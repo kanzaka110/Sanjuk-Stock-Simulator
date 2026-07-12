@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 import threading
 from datetime import datetime, timezone, timedelta
@@ -24,6 +25,8 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 KST = timezone(timedelta(hours=9))
+_DECISION_REF_RE = re.compile(r"^[A-Za-z0-9._:-]{1,160}$")
+_DECISION_REF_PREFIXES = ("prediction:", "execution_decision:")
 
 # 허용 status 값
 _VALID_STATUSES = frozenset([
@@ -55,6 +58,7 @@ def _conn() -> sqlite3.Connection:
             CREATE TABLE IF NOT EXISTS live_pilot_ledger (
                 pilot_id    TEXT PRIMARY KEY,
                 preview_id  TEXT NOT NULL,
+                decision_ref TEXT DEFAULT '',
                 symbol      TEXT NOT NULL,
                 side        TEXT NOT NULL DEFAULT 'buy',
                 quantity    INTEGER DEFAULT 0,
@@ -78,6 +82,7 @@ def _conn() -> sqlite3.Connection:
         """)
         # 기존 DB에 새 컬럼 추가 (이미 있으면 무시)
         for col, defn in [
+            ("decision_ref", "TEXT DEFAULT ''"),
             ("broker_order_id", "TEXT DEFAULT ''"),
             ("failure_reason",  "TEXT DEFAULT ''"),
             ("payload_hash",    "TEXT DEFAULT ''"),
@@ -126,6 +131,11 @@ def record_live_pilot_preview(
     warnings = preview.get("warnings", [])
     status = "blocked" if not preview.get("ok", False) or blocks else "previewed"
     preview_id = preview.get("preview_id", _gen_pilot_id())
+    decision_ref = str(preview.get("decision_ref") or "")[:160]
+    if not decision_ref:
+        decision_ref = f"execution_decision:{preview_id}"
+    if not decision_ref.startswith(_DECISION_REF_PREFIXES) or not _DECISION_REF_RE.fullmatch(decision_ref):
+        return {"ok": False, "reason": "invalid_decision_ref"}
     pilot_id = _gen_pilot_id()
 
     stop_loss = preview.get("stop_loss") or ""
@@ -138,7 +148,7 @@ def record_live_pilot_preview(
         target_price = str(target_price)
 
     row = (
-        pilot_id, preview_id, symbol, side, quantity,
+        pilot_id, preview_id, decision_ref, symbol, side, quantity,
         limit_price, estimated, status,
         json.dumps(blocks, ensure_ascii=False),
         json.dumps(warnings, ensure_ascii=False),
@@ -151,13 +161,13 @@ def record_live_pilot_preview(
         try:
             conn.execute(
                 """INSERT INTO live_pilot_ledger
-                   (pilot_id, preview_id, symbol, side, quantity,
+                   (pilot_id, preview_id, decision_ref, symbol, side, quantity,
                     limit_price, estimated_amount_krw, status,
                     blocks, warnings, live_order_allowed, live_order_sent,
                     adapter_status, broker_order_id, failure_reason, payload_hash,
                     created_at, confirmed_at, cancelled_at, reason,
                     stop_loss, invalidation, target_price)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 row,
             )
             conn.commit()

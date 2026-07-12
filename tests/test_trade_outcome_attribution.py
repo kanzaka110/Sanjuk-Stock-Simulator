@@ -122,14 +122,110 @@ def test_filled_and_partial_broker_get_rows_are_included():
     assert all(row["source"] == "toss_broker_orders_get" for row in rows)
 
 
-def test_autonomous_sent_without_canonical_live_sent_is_not_fill_truth():
+def test_autonomous_live_sent_with_all_production_invariants_is_fill_truth():
     event = {
+        "event_id": "auto_1", "event_type": "autonomous_live_sent",
+        "decision_ref": "execution_decision:tlive_1",
+        "verification_id": "hv_1", "hermes_decision_verified": True,
+        "live_order_sent": True, "adapter_status": "enabled", "live_order_allowed": True,
+        "symbol": "MU", "side": "buy", "filled_price": 500, "filled_quantity": 1,
+        "created_at": "2026-07-01T10:00:00+09:00",
+    }
+    rows = normalize_execution_records(live_events=[event])
+    assert len(rows) == 1
+    assert rows[0]["decision_ref"] == "execution_decision:tlive_1"
+    assert rows[0]["verification_id"] == "hv_1"
+    assert rows[0]["hermes_decision_verified"] is True
+
+
+def test_autonomous_live_sent_missing_any_production_invariant_is_excluded():
+    base = {
         "event_id": "auto_1", "event_type": "autonomous_live_sent",
         "live_order_sent": True, "adapter_status": "enabled", "live_order_allowed": True,
         "symbol": "MU", "side": "buy", "filled_price": 500, "filled_quantity": 1,
         "created_at": "2026-07-01T10:00:00+09:00",
     }
-    assert normalize_execution_records(live_events=[event]) == []
+    for field, invalid in (
+        ("live_order_sent", False),
+        ("adapter_status", "disabled"),
+        ("live_order_allowed", False),
+    ):
+        assert normalize_execution_records(live_events=[{**base, field: invalid}]) == []
+
+
+def test_hermes_traceability_is_separate_from_recommendation_linkage():
+    execution = normalize_execution_records(live_events=[{
+        "event_id": "auto_2", "event_type": "autonomous_live_sent",
+        "decision_ref": "execution_decision:tlive_2",
+        "verification_id": "hv_2", "hermes_decision_verified": True,
+        "live_order_sent": True, "adapter_status": "enabled", "live_order_allowed": True,
+        "symbol": "MU", "side": "buy", "filled_price": 500, "filled_quantity": 1,
+        "created_at": "2026-07-01T10:00:00+09:00",
+    }])
+    report = calculate_trade_outcome_attribution([_prediction()], executions=execution)
+    assert report["summary"]["observed_real_executions"] == 1
+    assert report["summary"]["directly_linked_executions"] == 0
+    assert report["summary"]["hermes_verified_executions"] == 1
+    assert report["summary"]["hermes_decision_traceability_rate_pct"] == 100.0
+    assert report["data_quality"]["direct_prediction_execution_id_available"] is False
+    assert report["data_quality"]["direct_hermes_decision_id_available"] is True
+
+
+def test_hermes_verification_join_requires_both_exact_keys_and_pass():
+    from core.dashboard_data import _mark_hermes_verified_live_events
+
+    verification = [{
+        "verification_id": "hv_1",
+        "decision_ref": "execution_decision:tlive_1",
+        "status": "PASS",
+        "symbol": "005930.KS",
+        "side": "buy",
+    }]
+    events = [
+        {"event_id": "ok", "verification_id": "hv_1", "decision_ref": "execution_decision:tlive_1", "symbol": "005930.KS", "side": "buy"},
+        {"event_id": "wrong_ref", "verification_id": "hv_1", "decision_ref": "execution_decision:other", "symbol": "005930.KS", "side": "buy"},
+        {"event_id": "wrong_id", "verification_id": "hv_other", "decision_ref": "execution_decision:tlive_1", "symbol": "005930.KS", "side": "buy"},
+        {"event_id": "wrong_symbol", "verification_id": "hv_1", "decision_ref": "execution_decision:tlive_1", "symbol": "MU", "side": "buy"},
+        {"event_id": "wrong_side", "verification_id": "hv_1", "decision_ref": "execution_decision:tlive_1", "symbol": "005930.KS", "side": "sell"},
+        {"event_id": "missing", "verification_id": "", "decision_ref": "", "symbol": "", "side": ""},
+    ]
+    marked = _mark_hermes_verified_live_events(events, verification)
+    assert [row["hermes_decision_verified"] for row in marked] == [
+        True, False, False, False, False, False,
+    ]
+
+    hold = [{**verification[0], "status": "HOLD"}]
+    assert _mark_hermes_verified_live_events([{
+        "verification_id": "hv_1",
+        "decision_ref": "execution_decision:tlive_1",
+        "symbol": "005930.KS",
+        "side": "buy",
+    }], hold)[0]["hermes_decision_verified"] is False
+
+
+def test_broker_client_order_id_join_requires_exact_pilot_symbol_side():
+    from core.dashboard_data import _attach_direct_refs_to_broker_orders
+
+    event = {
+        "pilot_id": "tlive_20260712_025100_1234",
+        "decision_ref": "prediction:42",
+        "verification_id": "hv_42",
+        "hermes_decision_verified": True,
+        "symbol": "005930.KS",
+        "side": "buy",
+    }
+    orders = [
+        {"client_order_id": event["pilot_id"], "symbol": "005930", "side": "BUY"},
+        {"client_order_id": "tlive_wrong", "symbol": "005930", "side": "BUY"},
+        {"client_order_id": event["pilot_id"], "symbol": "MU", "side": "BUY"},
+        {"client_order_id": event["pilot_id"], "symbol": "005930", "side": "SELL"},
+        {"client_order_id": "", "symbol": "005930", "side": "BUY"},
+    ]
+    marked = _attach_direct_refs_to_broker_orders(orders, [event])
+    assert marked[0]["decision_ref"] == "prediction:42"
+    assert marked[0]["hermes_decision_verified"] is True
+    assert [row["decision_ref"] for row in marked[1:]] == ["", "", "", ""]
+    assert all(row["hermes_decision_verified"] is False for row in marked[1:])
 
 
 def test_broker_get_truth_wins_over_live_event_for_same_decision_ref():
@@ -148,7 +244,11 @@ def test_broker_get_truth_wins_over_live_event_for_same_decision_ref():
         "filled_at": "2026-07-01T10:01:00+09:00",
     }
     executions = normalize_execution_records(live_events=[live], broker_orders=[broker])
-    row = calculate_trade_outcome_attribution([_prediction()], executions=executions)["rows"][0]
+    assert len(executions) == 1
+    assert executions[0]["source"] == "toss_broker_orders_get"
+    report = calculate_trade_outcome_attribution([_prediction()], executions=executions)
+    assert report["summary"]["observed_real_executions"] == 1
+    row = report["rows"][0]
     assert row["execution_source"] == "toss_broker_orders_get"
     assert row["filled_price"] == 103
 
@@ -388,7 +488,7 @@ def test_dashboard_contract_is_cached_and_read_only(monkeypatch):
     monkeypatch.setattr(
         dd,
         "_read_trade_outcome_inputs",
-        lambda days: ([_prediction()], [_manual()], []),
+        lambda days: ([_prediction()], [_manual()], [], []),
     )
     monkeypatch.setattr(dd, "_cache", {}, raising=False)
     first = dd.trade_outcome_attribution_data(90)

@@ -15,16 +15,37 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone, timedelta
 
 log = logging.getLogger(__name__)
 
 KST = timezone(timedelta(hours=9))
+_DECISION_REF_RE = re.compile(r"^[A-Za-z0-9._:-]{1,160}$")
+_DECISION_REF_PREFIXES = ("prediction:", "execution_decision:")
 
 
 def _gen_preview_id() -> str:
     ts = datetime.now(KST).strftime("%Y%m%d_%H%M%S_%f")[:20]
     return f"tlive_{ts}"
+
+
+def _decision_ref_for_candidate(candidate: dict, preview_id: str) -> str:
+    """Return an immutable direct key without guessing a recommendation id."""
+    direct = str(candidate.get("decision_ref") or "").strip()
+    if (
+        direct
+        and direct.startswith(_DECISION_REF_PREFIXES)
+        and _DECISION_REF_RE.fullmatch(direct)
+    ):
+        return direct
+    prediction_id = candidate.get("source_prediction_id")
+    prediction_id_text = str(prediction_id or "").strip()
+    if prediction_id_text.isdigit() and len(prediction_id_text) <= 20:
+        prediction_ref = f"prediction:{prediction_id_text}"
+        if _DECISION_REF_RE.fullmatch(prediction_ref):
+            return prediction_ref
+    return f"execution_decision:{preview_id}"
 
 
 # ── 통화 판별 / 환율 ─────────────────────────────────────
@@ -164,6 +185,7 @@ def build_live_pilot_preview(candidate: dict, policy: dict | None = None) -> dic
     preview: dict = {
         "ok": ok,
         "preview_id": preview_id,
+        "decision_ref": _decision_ref_for_candidate(candidate, preview_id),
         "symbol": symbol,
         "side": side,
         "quantity": quantity,

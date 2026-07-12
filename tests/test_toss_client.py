@@ -92,8 +92,36 @@ class TestSanitizer:
         result = tc.sanitize_dict(data)
         assert result == {"status": "ok", "count": 5}
 
+    def test_preserves_only_safe_local_client_order_id(self):
+        safe = "tlive_20260712_025100_1234"
+        safe_result = tc.sanitize_dict({"clientOrderId": safe})
+        numeric_result = tc.sanitize_dict({"clientOrderId": "1234567890123456"})
+        external_result = tc.sanitize_dict({"clientOrderId": "external-secret-value"})
+        assert isinstance(safe_result, dict) and safe_result["clientOrderId"] == safe
+        assert isinstance(numeric_result, dict) and numeric_result["clientOrderId"] == "[REDACTED]"
+        assert isinstance(external_result, dict) and external_result["clientOrderId"] == "[REDACTED]"
+
 
 class TestIsConfigured:
+    def test_broker_order_projection_preserves_safe_client_order_id(self):
+        from core.toss_live_order_http import _sanitize_order_row
+
+        row = _sanitize_order_row({
+            "clientOrderId": "tlive_20260712_025100_1234",
+            "orderId": "123456789012",
+            "symbol": "005930",
+            "side": "BUY",
+            "status": "FILLED",
+        })
+        assert row["client_order_id"] == "tlive_20260712_025100_1234"
+        assert "123456789012" not in row["broker_order_id"]
+
+    def test_broker_order_projection_drops_external_client_order_id(self):
+        from core.toss_live_order_http import _sanitize_order_row
+
+        row = _sanitize_order_row({"clientOrderId": "external-secret-value", "symbol": "MU"})
+        assert row["client_order_id"] == ""
+
     def test_not_configured_without_env(self):
         with patch.object(tc, "TOSS_APP_KEY", ""), \
              patch.object(tc, "TOSS_APP_SECRET", ""), \
