@@ -37,9 +37,30 @@ _FRESH = {
 
 
 def _item(classification, valid_until="2099-12-31", **overrides):
-    base = {"classification": classification, "valid_until": valid_until, **_FRESH}
+    base = {
+        "classification": classification,
+        "valid_until": valid_until,
+        **_FRESH,
+        "research_status": "complete",
+        "proposed_classification": classification,
+        "classification_change_reason": "test evidence",
+        "evidence_urls": ["https://example.com/ir"],
+        "checked_at": "2026-07-10T00:00:00+09:00",
+        "buy_checklist_status": "pass",
+        "auto_sell_eligible": False,
+    }
     base.update(overrides)
     return base
+
+
+def _legacy_item(classification, valid_until="2099-12-31", **overrides):
+    item = _item(classification, valid_until=valid_until, **overrides)
+    for key in (
+        "research_status", "proposed_classification", "classification_change_reason",
+        "evidence_urls", "checked_at", "buy_checklist_status", "auto_sell_eligible",
+    ):
+        item.pop(key, None)
+    return item
 
 
 # 005930: 미채점 (score 없음)          → unscored
@@ -56,7 +77,7 @@ _SCORES = {
         "035420.KS": _item("hold", source_urls=[], name="NAVER"),
         "XOM": _item("hold", valid_until="2026-08-01", name="Exxon Mobil"),
         "015760.KS": _item("sell_to_fund", valid_until="2026-08-10", name="한국전력"),
-        "068270.KS": _item("hold", name="셀트리온"),
+        "068270.KS": _legacy_item("hold", name="셀트리온"),
     },
 }
 
@@ -118,6 +139,7 @@ def test_queue_counts_are_exact(monkeypatch):
     assert counts["expired"] == 1
     assert counts["invalid"] == 1
     assert counts["expiring_within_30d"] == 2
+    assert counts["legacy_checklist_missing"] == 1
 
 
 def test_queue_merges_duplicate_symbol_across_sources(monkeypatch):
@@ -159,10 +181,21 @@ def test_queue_reason_and_classification_fields(monkeypatch):
     assert items["015760"]["sources"] == ["score"]
 
 
-def test_queue_excludes_fresh_and_far_dated_scores(monkeypatch):
+def test_queue_exposes_fresh_far_dated_legacy_checklist_gap(monkeypatch):
     _patch_sources(monkeypatch)
-    symbols = {i["symbol"] for i in dd.ai_berkshire_research_queue_data(as_of_date=_AS_OF)["items"]}
-    assert not any(s.startswith("068270") for s in symbols)
+    items = _by_symbol(dd.ai_berkshire_research_queue_data(as_of_date=_AS_OF))
+    assert items["068270"]["reason"] == "legacy_checklist_missing"
+    assert items["068270"]["coverage_gaps"] == [
+        "research_status", "proposed_classification", "classification_change_reason",
+        "evidence_urls", "checked_at", "buy_checklist_status", "auto_sell_eligible",
+    ]
+
+
+def test_queue_excludes_fresh_far_dated_strict_score(monkeypatch):
+    scores = {"items": {"MSFT": _item("hold", name="Microsoft")}}
+    _patch_sources(monkeypatch, scores=scores, holdings=[], candidates={"items": []})
+    payload = dd.ai_berkshire_research_queue_data(as_of_date=_AS_OF)
+    assert payload["items"] == []
 
 
 def test_queue_expiring_boundary_is_inclusive_at_30_days(monkeypatch):
@@ -211,7 +244,7 @@ _FORBIDDEN = (
 
 _ALLOWED_ITEM_KEYS = {
     "symbol", "name", "reason", "sources", "stored_classification",
-    "classification", "as_of", "valid_until", "freshness_issues",
+    "classification", "as_of", "valid_until", "freshness_issues", "coverage_gaps",
 }
 
 

@@ -3853,10 +3853,20 @@ _RESEARCH_EXPIRY_WINDOW_DAYS = 30
 # 한 심볼에 사유가 여럿이면 급한 쪽을 남긴다 (숫자가 작을수록 우선).
 _RESEARCH_REASON_PRIORITY = {
     "expired": 0,
-    "invalid": 1,
-    "unscored": 2,
-    "expiring_within_30d": 3,
+    "expiring_within_30d": 1,
+    "legacy_checklist_missing": 2,
+    "invalid": 3,
+    "unscored": 4,
 }
+_RESEARCH_STRICT_COVERAGE_FIELDS = (
+    "research_status",
+    "proposed_classification",
+    "classification_change_reason",
+    "evidence_urls",
+    "checked_at",
+    "buy_checklist_status",
+    "auto_sell_eligible",
+)
 _RESEARCH_STATUS_TO_REASON = {
     "needs_research": "unscored",
     "expired": "expired",
@@ -3907,6 +3917,7 @@ def ai_berkshire_research_queue_data(limit: int = 100, as_of_date=None) -> dict:
                 "name": "", "sources": [], "reasons": set(),
                 "stored_classification": None, "classification": None,
                 "as_of": None, "valid_until": None, "freshness_issues": [],
+                "coverage_gaps": [],
             })
             # 표시 심볼은 접미사가 붙은 완전형을 선호한다 (005930 < 005930.KS).
             sym = str(symbol or "").upper().strip()
@@ -3957,17 +3968,21 @@ def ai_berkshire_research_queue_data(limit: int = 100, as_of_date=None) -> dict:
             candidates = []
         _scan(candidates, "buy_candidate")
 
-        # 3) score 파일 중 만료 임박 (valid_until D+0 ~ D+30)
+        # 3) score 파일 중 만료 임박 또는 strict checklist migration 누락
         for key, raw in score_items.items():
             try:
                 item = normalize_ai_berkshire_item(raw, as_of_date=today)
             except Exception:
                 continue
+            raw_item = raw if isinstance(raw, dict) else {}
+            coverage_gaps = [
+                field for field in _RESEARCH_STRICT_COVERAGE_FIELDS
+                if field not in raw_item or raw_item.get(field) in (None, "", [])
+            ]
             valid_until = _parse_iso_date(item.get("valid_until"))
-            if valid_until is None:      # valid_until 누락/형식 오류는 만료임박이 아니다
-                continue
-            days_left = (valid_until - today).days
-            if not 0 <= days_left <= _RESEARCH_EXPIRY_WINDOW_DAYS:
+            days_left = (valid_until - today).days if valid_until else None
+            expiring = days_left is not None and 0 <= days_left <= _RESEARCH_EXPIRY_WINDOW_DAYS
+            if not expiring and not coverage_gaps:
                 continue
             entry = _touch(key, item.get("name") or "", "score")
             entry["stored_classification"] = item["stored_classification"]
@@ -3975,7 +3990,11 @@ def ai_berkshire_research_queue_data(limit: int = 100, as_of_date=None) -> dict:
             entry["as_of"] = item["as_of"]
             entry["valid_until"] = item["valid_until"]
             entry["freshness_issues"] = list(item["freshness_issues"])
-            entry["reasons"].add("expiring_within_30d")
+            if expiring:
+                entry["reasons"].add("expiring_within_30d")
+            if coverage_gaps:
+                entry["reasons"].add("legacy_checklist_missing")
+                entry["coverage_gaps"] = coverage_gaps
 
         items: list[dict] = []
         for entry in entries.values():
@@ -3992,6 +4011,7 @@ def ai_berkshire_research_queue_data(limit: int = 100, as_of_date=None) -> dict:
                 "as_of": entry["as_of"],
                 "valid_until": entry["valid_until"],
                 "freshness_issues": entry["freshness_issues"],
+                "coverage_gaps": entry["coverage_gaps"],
             })
         items.sort(key=lambda i: (_RESEARCH_REASON_PRIORITY[i["reason"]], i["symbol"]))
 
