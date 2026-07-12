@@ -90,6 +90,52 @@ def test_toss_buy_candidates_uses_new_discovery_only(monkeypatch):
     assert item["read_only"] is True
 
 
+def test_toss_buy_candidate_contract_is_autonomous_and_account_scoped(monkeypatch):
+    sections = _sections(new=[_new_cand("000111.KS", "신규소액주", price=30_000)])
+    _patch_sections(monkeypatch, sections)
+
+    item = dd.toss_buy_candidates_data(range_="today")["items"][0]
+
+    assert item["execution_gate"] == "Hermes PASS + deterministic safety gates"
+    assert "승호 최종 승인" not in item["condition"]
+    assert "승호 최종 승인" not in item["execution_gate"]
+    assert item["broker_execution"] == "Toss AI autonomous live pilot"
+
+
+def test_toss_buy_candidate_cache_is_shared_across_requested_limits(monkeypatch):
+    sections = _sections(new=[
+        _new_cand("000111.KS", "후보1", price=30_000),
+        _new_cand("000112.KS", "후보2", price=31_000),
+    ])
+    _patch_sections(monkeypatch, sections)
+    calls = {"count": 0}
+
+    def counted_sections(*args, **kwargs):
+        calls["count"] += 1
+        return sections
+
+    monkeypatch.setattr(disc, "build_discovery_sections", counted_sections)
+
+    first = dd.toss_buy_candidates_data(range_="today", limit=1, market="ALL")
+    second = dd.toss_buy_candidates_data(range_="today", limit=80, market="ALL")
+
+    assert calls["count"] == 1
+    assert len(first["items"]) == 1
+    assert len(second["items"]) == 2
+
+
+def test_fast_fallback_candidates_do_not_repeat_same_kis_cross_check(monkeypatch):
+    sections = _sections(new=[_new_cand("000111.KS", "신규소액주", price=30_000)])
+    _patch_sections(monkeypatch, sections)
+
+    def forbidden_cross_check(*args, **kwargs):
+        raise AssertionError("same-source KIS recheck must not run on fast fallback")
+
+    monkeypatch.setattr(dd, "_cross_check_price_quality", forbidden_cross_check)
+    item = dd.toss_buy_candidates_data(range_="today", market="ALL")["items"][0]
+
+    assert item["data_quality"]["same_source_only"] is True
+    assert item["data_quality"]["quality"] == "unknown"
 
 
 def test_toss_buy_candidates_excludes_user_blocked_krafton(monkeypatch):
@@ -290,7 +336,8 @@ def test_toss_buy_candidates_stock_agent_review_fields(monkeypatch):
     assert item["current_vs_limit_gap_pct"] == 0.0
     assert "즉시체결" in item["fill_risk_note"]
     assert item["condition"]
-    assert item["execution_gate"] == "Hermes PASS + 승호 최종 승인 필요"
+    assert item["execution_gate"] == "Hermes PASS + deterministic safety gates"
+    assert item["broker_execution"] == "Toss AI autonomous live pilot"
     assert item["read_only_notice"].startswith("GET-only")
     assert item["missing_fields"] == []
     assert item["income_strategy"]["income_pass"] is False

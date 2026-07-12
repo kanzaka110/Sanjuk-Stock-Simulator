@@ -3113,6 +3113,7 @@ def toss_rebalance_plan_data(limit: int = 80, market: str = "ALL") -> dict:
 
 # ─── /api/toss/buy-candidates — 토스 전용 매수 후보 (신규 발굴 기반) ─────────────
 _AI_BERKSHIRE_BUY_GATE_VERSION = "ai_berkshire_buy_gate_checklist_v2"
+_TOSS_BUY_CANDIDATE_CACHE_LIMIT = 100
 
 
 def _apply_ai_berkshire_buy_gate(out: dict, scores: dict | None) -> dict:
@@ -3622,9 +3623,9 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
                     or income_strategy.get("income_block_reason")
                     or "income_pass=false"
                 )
-            out.setdefault("condition", "지정가 이하에서만 검토 · 승호 최종 승인 전 실주문 없음")
-            out.setdefault("execution_gate", "Hermes PASS + 승호 최종 승인 필요")
-            out.setdefault("broker_execution", "Toss live pilot autonomous gate")
+            out.setdefault("condition", "지정가 이하에서만 검토 · Hermes PASS 후 결정론 안전 게이트")
+            out.setdefault("execution_gate", "Hermes PASS + deterministic safety gates")
+            out.setdefault("broker_execution", "Toss AI autonomous live pilot")
             out.setdefault("read_only_notice", "GET-only 후보 표시 · 이 응답은 주문 생성/승인/전송을 하지 않음")
 
             buy_limit_above_current = False
@@ -3649,7 +3650,28 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
                 out.setdefault("current_vs_limit_gap_pct", None)
                 out.setdefault("fill_risk_note", "현재가 또는 지정가 부족 — 체결 가능성 판단 불가")
 
-            data_quality = _cross_check_price_quality(out.get("symbol") or "", out.get("current_price"))
+            # This endpoint deliberately builds candidates from
+            # `_fallback_universe_candidates`, whose price is already sourced from
+            # KIS. Calling KIS again for every item only compares KIS with itself and
+            # made a cold GET take ~55 seconds. Preserve honest provenance instead;
+            # independent Toss↔KIS checks remain in the holdings/cross-check and
+            # final execution gates.
+            data_quality = {
+                "schema": "toss_kis_price_cross_check.v1",
+                "symbol": str(out.get("symbol") or "").upper().strip(),
+                "quality": "unknown",
+                "action_hint": "SAME_SOURCE_ONLY",
+                "has_toss_holding_price": False,
+                "has_kis_price": bool(out.get("current_price")),
+                "same_source_only": True,
+                "checks": [{
+                    "name": "후보 현재가 원본",
+                    "tone": "unknown",
+                    "source_a": "candidate.current_price",
+                    "source_b": "KIS fallback quote",
+                    "reason": "same_source_recheck_skipped",
+                }],
+            }
             out["data_quality"] = data_quality
             if data_quality.get("quality") == "low":
                 out["execution_status"] = "data_quality_block"
@@ -3712,7 +3734,10 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
             _apply_ai_berkshire_buy_gate(out, berkshire_scores)
             return out
 
-        items = [_enrich_for_stock_agent(i) for i in result["items"][:limit]]
+        items = [
+            _enrich_for_stock_agent(i)
+            for i in result["items"][:_TOSS_BUY_CANDIDATE_CACHE_LIMIT]
+        ]
 
         # A stale snapshot may be shown for reference, but must never size or
         # ready a candidate. The broker-owner pipeline re-fetches live account
@@ -3800,7 +3825,7 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
             1 for i in items if i.get("ai_berkshire_research_status") != "ok")
         return {
             "items": items,
-            "excluded": result["excluded"][:limit],
+            "excluded": result["excluded"][:_TOSS_BUY_CANDIDATE_CACHE_LIMIT],
             "count": result["count"],
             "excluded_count": result["excluded_count"],
             "scan_summary": result.get("scan_summary", {}),
@@ -3810,7 +3835,15 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
             "note": result["note"],
         }
 
-    return _cached(f"toss_buy_candidates:{range_}:{market_norm}:{limit}", 120, _fetch)
+    cached = _cached(f"toss_buy_candidates:{range_}:{market_norm}", 120, _fetch)
+    if not isinstance(cached, dict):
+        return cached
+    requested_limit = max(0, int(limit))
+    out = copy.deepcopy(cached)
+    out["items"] = list(out.get("items") or [])[:requested_limit]
+    out["excluded"] = list(out.get("excluded") or [])[:requested_limit]
+    out["requested_limit"] = requested_limit
+    return out
 
 
 # ─── /api/toss/ai-berkshire-research-queue — 재리서치 대상 (GET-only) ──────
