@@ -24,6 +24,8 @@ Toss 자동매매 품질 게이트 — 다차원 점수화 + decision_bucket 결
 from __future__ import annotations
 
 import logging
+import math
+import re
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -33,6 +35,8 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 KST = timezone(timedelta(hours=9))
+_CLIENT_ORDER_ID_RE = re.compile(r"^tlive_[A-Za-z0-9_-]{1,30}$")
+_DECISION_REF_RE = re.compile(r"^(?:prediction|execution_decision):[A-Za-z0-9._:-]{1,140}$")
 
 # ── decision buckets ─────────────────────────────────────────────
 PASS_EXECUTE = "PASS_EXECUTE"
@@ -144,8 +148,8 @@ def get_score_weights() -> dict[str, float]:
         _weights_cache["mtime"] = mtime
         _weights_cache["weights"] = dict(weights)
         return weights
-    except Exception as e:
-        log.debug("weights load failed: %s", e)
+    except Exception as exc:
+        log.debug("weights load failed: error_type=%s", type(exc).__name__)
         return dict(_DEFAULT_WEIGHTS)
 
 
@@ -211,8 +215,11 @@ def suggest_weight_calibration(min_outcomes: int = 30) -> dict:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(result, ensure_ascii=False, indent=2),
                      encoding="utf-8")
-    except Exception as e:
-        log.debug("weight suggestion save failed: %s", e)
+    except Exception as exc:
+        log.debug(
+            "weight suggestion save failed: error_type=%s",
+            type(exc).__name__,
+        )
     return result
 
 
@@ -241,8 +248,8 @@ def _score_momentum(candidate: dict) -> float:
         if result:
             # confluence_score: -4 ~ +4 → 0 ~ 25
             return max(0.0, min(25.0, (result.confluence_score + 4) / 8 * 25))
-    except Exception as e:
-        log.debug("momentum score fallback for %s: %s", ticker, e)
+    except Exception as exc:
+        log.debug("momentum score fallback: error_type=%s", type(exc).__name__)
     return 0.0
 
 
@@ -347,8 +354,8 @@ def _penalty_event_risk(ticker: str, pre_score: float) -> tuple[float, int]:
         if 4 <= days <= 7:
             return -5.0, days
         return 0.0, days
-    except Exception as e:
-        log.debug("event risk check failed for %s: %s", ticker, e)
+    except Exception as exc:
+        log.debug("event risk check failed: error_type=%s", type(exc).__name__)
         return 0.0, -1
 
 
@@ -393,8 +400,8 @@ def _score_supply_demand(
             fetch_budget["remaining"] -= 1
 
         rows = _fetch_naver_frgn(code)
-    except Exception as e:
-        log.debug("supply/demand check failed for %s: %s", ticker, e)
+    except Exception as exc:
+        log.debug("supply/demand check failed: error_type=%s", type(exc).__name__)
         return 0.0
 
     if not rows:
@@ -584,16 +591,16 @@ def score_candidates_batch(
     try:
         from core.regime import detect_regime
         regime_obj = detect_regime(market="KR" if market == "KR" else "US")
-    except Exception as e:
-        log.warning("regime detection failed: %s", e)
+    except Exception as exc:
+        log.warning("regime detection failed: error_type=%s", type(exc).__name__)
 
     # accuracy_stats: 1회 로드
     accuracy_stats = None
     try:
         from core.memory import get_accuracy_summary
         accuracy_stats = get_accuracy_summary()
-    except Exception as e:
-        log.debug("accuracy stats load failed: %s", e)
+    except Exception as exc:
+        log.debug("accuracy stats load failed: error_type=%s", type(exc).__name__)
 
     # 수급 조회 예산: expensive_checks=False(GET 배치)는 미캐시 심볼 최대 3건만
     # 네트워크 조회 (캐시된 심볼은 예산 소모 없이 항상 반영)
@@ -622,15 +629,21 @@ def score_candidates_batch(
                         stop_loss=float(item.get("stop_loss") or 0),
                         target_price=float(item.get("target_price") or 0),
                     )
-                except Exception as e:
-                    log.debug("quality decision record failed: %s", e)
+                except Exception as exc:
+                    log.debug(
+                        "quality decision record failed: error_type=%s",
+                        type(exc).__name__,
+                    )
 
-        except Exception as e:
-            log.warning("quality gate scoring failed for %s: %s", item.get("symbol"), e)
+        except Exception as exc:
+            log.warning(
+                "quality gate scoring failed: error_type=%s",
+                type(exc).__name__,
+            )
             item["quality_score"] = 0.0
             item["quality_breakdown"] = {}
             item["decision_bucket"] = WATCH
-            item["decision_reason"] = f"scoring_error: {e}"
+            item["decision_reason"] = "scoring_error"
 
     # score 내림차순 정렬
     items.sort(key=lambda x: x.get("quality_score", 0), reverse=True)
@@ -655,9 +668,12 @@ def _outcomes_conn() -> sqlite3.Connection:
     global _outcomes_schema_created
     p = _outcomes_db_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(p))
+    conn = sqlite3.connect(str(p), timeout=5.0)
     conn.row_factory = sqlite3.Row
-    if not _outcomes_schema_created:
+    conn.execute("PRAGMA busy_timeout=5000")
+    if _outcomes_schema_created:
+        return conn
+    try:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS quality_gate_decisions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -679,7 +695,8 @@ def _outcomes_conn() -> sqlite3.Connection:
                 entry_price REAL,
                 stop_loss REAL,
                 target_price REAL,
-                pilot_id TEXT,
+                pilot_id TEXT DEFAULT '',
+                decision_ref TEXT DEFAULT '',
                 broker_order_id TEXT,
                 outcome TEXT,
                 return_1d REAL,
@@ -688,11 +705,88 @@ def _outcomes_conn() -> sqlite3.Connection:
                 outcome_evaluated_at TEXT
             )
         """)
+        existing_columns = {
+            str(row[1]) for row in conn.execute(
+                "PRAGMA table_info(quality_gate_decisions)"
+            ).fetchall()
+        }
+        migrations = {
+            "ticker": "TEXT NOT NULL DEFAULT ''",
+            "decided_at": "TEXT NOT NULL DEFAULT ''",
+            "decision_bucket": "TEXT NOT NULL DEFAULT ''",
+            "decision_reason": "TEXT DEFAULT ''",
+            "score_total": "REAL DEFAULT 0",
+            "score_momentum": "REAL DEFAULT 0",
+            "score_liquidity": "REAL DEFAULT 0",
+            "score_risk_reward": "REAL DEFAULT 0",
+            "score_reliability": "REAL DEFAULT 0",
+            "score_market_regime": "REAL DEFAULT 0",
+            "penalty_overheat": "REAL DEFAULT 0",
+            "penalty_duplicate": "REAL DEFAULT 0",
+            "penalty_event_risk": "REAL DEFAULT 0",
+            "rr_ratio": "REAL DEFAULT 0",
+            "regime": "TEXT DEFAULT ''",
+            "entry_price": "REAL DEFAULT 0",
+            "stop_loss": "REAL DEFAULT 0",
+            "target_price": "REAL DEFAULT 0",
+            "pilot_id": "TEXT DEFAULT ''",
+            "decision_ref": "TEXT DEFAULT ''",
+            "broker_order_id": "TEXT DEFAULT ''",
+            "outcome": "TEXT DEFAULT ''",
+            "return_1d": "REAL",
+            "return_3d": "REAL",
+            "return_5d": "REAL",
+            "outcome_evaluated_at": "TEXT DEFAULT ''",
+        }
+        for column, ddl in migrations.items():
+            if column in existing_columns:
+                continue
+            try:
+                conn.execute(
+                    f"ALTER TABLE quality_gate_decisions ADD COLUMN {column} {ddl}"
+                )
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+
         conn.execute("CREATE INDEX IF NOT EXISTS idx_qg_ticker ON quality_gate_decisions(ticker)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_qg_bucket ON quality_gate_decisions(decision_bucket)")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_qg_decision_ref_exact "
+            "ON quality_gate_decisions(decision_ref) WHERE decision_ref <> ''"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_qg_pilot_id_exact "
+            "ON quality_gate_decisions(pilot_id) WHERE pilot_id <> ''"
+        )
         conn.commit()
+
+        actual_columns = {
+            str(row[1]) for row in conn.execute(
+                "PRAGMA table_info(quality_gate_decisions)"
+            ).fetchall()
+        }
+        actual_indexes = {
+            str(row[1]) for row in conn.execute(
+                "PRAGMA index_list(quality_gate_decisions)"
+            ).fetchall()
+        }
+        missing_columns = ({"id"} | set(migrations)) - actual_columns
+        missing_indexes = {
+            "idx_qg_decision_ref_exact", "idx_qg_pilot_id_exact",
+        } - actual_indexes
+        if missing_columns or missing_indexes:
+            raise RuntimeError(
+                "quality_schema_incomplete:"
+                f"columns={sorted(missing_columns)},indexes={sorted(missing_indexes)}"
+            )
         _outcomes_schema_created = True
-    return conn
+        return conn
+    except Exception:
+        conn.rollback()
+        conn.close()
+        _outcomes_schema_created = False
+        raise
 
 
 def record_quality_decision(
@@ -724,6 +818,189 @@ def record_quality_decision(
             )
             conn.commit()
             return cur.lastrowid or 0
+        finally:
+            conn.close()
+
+
+def _finite_number(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def quality_decision_for_ref(decision_ref: str) -> dict:
+    ref = str(decision_ref or "")
+    if not _DECISION_REF_RE.fullmatch(ref):
+        return {}
+    with _outcomes_lock:
+        conn = _outcomes_conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM quality_gate_decisions WHERE decision_ref=?",
+                (ref,),
+            ).fetchone()
+            return dict(row) if row else {}
+        finally:
+            conn.close()
+
+
+def record_execution_quality_decision(
+    candidate: dict,
+    *,
+    pilot_id: str,
+    decision_ref: str,
+) -> dict:
+    """실행 직전 BUY 품질 결정을 exact pilot/ref에 1회 기록."""
+    if not isinstance(candidate, dict):
+        return {"ok": False, "reason": "candidate_invalid"}
+    pid = str(pilot_id or "")
+    ref = str(decision_ref or "")
+    symbol = str(candidate.get("symbol") or candidate.get("ticker") or "").upper().strip()
+    side = str(candidate.get("side") or "buy").lower().strip()
+    bucket = str(candidate.get("decision_bucket") or "")
+    breakdown = candidate.get("quality_breakdown")
+    if (
+        not _CLIENT_ORDER_ID_RE.fullmatch(pid)
+        or not _DECISION_REF_RE.fullmatch(ref)
+        or not symbol
+        or side != "buy"
+        or bucket not in EXECUTABLE_BUCKETS
+        or not isinstance(breakdown, dict)
+    ):
+        return {"ok": False, "reason": "quality_execution_contract_invalid"}
+
+    entry = _finite_number(candidate.get("limit_price") or candidate.get("price"))
+    stop = _finite_number(candidate.get("stop_loss"))
+    target = _finite_number(candidate.get("target_price"))
+    rr = _finite_number(breakdown.get("rr_ratio") or candidate.get("risk_reward"))
+    score_total = _finite_number(
+        breakdown.get("score_total") if "score_total" in breakdown
+        else candidate.get("quality_score")
+    )
+    if (
+        entry is None or entry <= 0
+        or stop is None or stop <= 0
+        or target is None or target <= 0
+        or rr is None or rr < 1.2
+        or score_total is None
+    ):
+        return {"ok": False, "reason": "quality_execution_values_invalid"}
+
+    def metric(name: str) -> float:
+        value = _finite_number(breakdown.get(name))
+        return float(value) if value is not None else 0.0
+
+    immutable_payload = {
+        "ticker": symbol,
+        "decision_bucket": bucket,
+        "decision_reason": str(
+            candidate.get("decision_reason")
+            or breakdown.get("decision_reason")
+            or ""
+        )[:500],
+        "score_total": float(score_total),
+        "score_momentum": metric("score_momentum"),
+        "score_liquidity": metric("score_liquidity"),
+        "score_risk_reward": metric("score_risk_reward"),
+        "score_reliability": metric("score_reliability"),
+        "score_market_regime": metric("score_market_regime"),
+        "penalty_overheat": metric("penalty_overheat"),
+        "penalty_duplicate": metric("penalty_duplicate"),
+        "penalty_event_risk": metric("penalty_event_risk"),
+        "rr_ratio": float(rr),
+        "regime": str(breakdown.get("regime") or "")[:80],
+        "entry_price": float(entry),
+        "stop_loss": float(stop),
+        "target_price": float(target),
+    }
+
+    def payload_matches(row: sqlite3.Row) -> bool:
+        for key, expected in immutable_payload.items():
+            actual = row[key]
+            if isinstance(expected, float):
+                actual_number = _finite_number(actual)
+                if actual_number is None or float(actual_number) != expected:
+                    return False
+            elif str(actual or "") != expected:
+                return False
+        return True
+
+    with _outcomes_lock:
+        conn = _outcomes_conn()
+        try:
+            select_columns = (
+                "id, ticker, pilot_id, decision_ref, decision_bucket, decision_reason, "
+                "score_total, score_momentum, score_liquidity, score_risk_reward, "
+                "score_reliability, score_market_regime, penalty_overheat, "
+                "penalty_duplicate, penalty_event_risk, rr_ratio, regime, "
+                "entry_price, stop_loss, target_price"
+            )
+            existing_ref = conn.execute(
+                f"SELECT {select_columns} FROM quality_gate_decisions WHERE decision_ref=?",
+                (ref,),
+            ).fetchone()
+            existing_pilot = conn.execute(
+                f"SELECT {select_columns} FROM quality_gate_decisions WHERE pilot_id=?",
+                (pid,),
+            ).fetchone()
+            if existing_pilot and str(existing_pilot["decision_ref"] or "") != ref:
+                return {"ok": False, "reason": "quality_pilot_id_conflict"}
+            if existing_ref and str(existing_ref["pilot_id"] or "") != pid:
+                return {"ok": False, "reason": "quality_decision_ref_conflict"}
+            existing = existing_ref or existing_pilot
+            if existing:
+                if not payload_matches(existing):
+                    return {
+                        "ok": False,
+                        "reason": "quality_decision_payload_conflict",
+                    }
+                return {"ok": True, "id": int(existing["id"]), "created": False}
+            cur = conn.execute(
+                """INSERT INTO quality_gate_decisions
+                   (ticker, decided_at, decision_bucket, decision_reason,
+                    score_total, score_momentum, score_liquidity, score_risk_reward,
+                    score_reliability, score_market_regime,
+                    penalty_overheat, penalty_duplicate, penalty_event_risk,
+                    rr_ratio, regime, entry_price, stop_loss, target_price,
+                    pilot_id, decision_ref)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    symbol,
+                    datetime.now(KST).strftime("%Y-%m-%dT%H:%M:%S+09:00"),
+                    bucket,
+                    immutable_payload["decision_reason"],
+                    immutable_payload["score_total"],
+                    immutable_payload["score_momentum"],
+                    immutable_payload["score_liquidity"],
+                    immutable_payload["score_risk_reward"],
+                    immutable_payload["score_reliability"],
+                    immutable_payload["score_market_regime"],
+                    immutable_payload["penalty_overheat"],
+                    immutable_payload["penalty_duplicate"],
+                    immutable_payload["penalty_event_risk"],
+                    immutable_payload["rr_ratio"],
+                    immutable_payload["regime"],
+                    immutable_payload["entry_price"],
+                    immutable_payload["stop_loss"],
+                    immutable_payload["target_price"],
+                    pid,
+                    ref,
+                ),
+            )
+            conn.commit()
+            return {"ok": True, "id": int(cur.lastrowid or 0), "created": True}
+        except sqlite3.IntegrityError as exc:
+            conn.rollback()
+            reason = (
+                "quality_pilot_id_conflict"
+                if "pilot_id" in str(exc).lower()
+                else "quality_decision_ref_conflict"
+            )
+            return {"ok": False, "reason": reason}
         finally:
             conn.close()
 
@@ -768,8 +1045,11 @@ def evaluate_outcomes() -> dict:
                          datetime.now(KST).strftime("%Y-%m-%dT%H:%M:%S+09:00"), rid),
                     )
                     evaluated += 1
-                except Exception as e:
-                    log.debug("outcome eval failed for %s: %s", ticker, e)
+                except Exception as exc:
+                    log.debug(
+                        "outcome eval failed: error_type=%s",
+                        type(exc).__name__,
+                    )
                     errors += 1
 
             conn.commit()

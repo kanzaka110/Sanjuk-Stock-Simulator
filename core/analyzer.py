@@ -482,6 +482,40 @@ def _attach_execution_risk(normalized: dict) -> None:
         item["execution_risk"] = cache.get(tk, {"has_warning": False, "label": "", "summary": "", "tone": "unknown"})
 
 
+def _samsung_snapshot_is_stale(income_payload: object) -> bool:
+    """삼성 수동계좌 원본 상태. 명시적 live만 통과하고 누락/오류는 fail-closed."""
+    if not isinstance(income_payload, dict):
+        return True
+    income_kpi = income_payload.get("income_kpi")
+    if not isinstance(income_kpi, dict):
+        return True
+    samsung = income_kpi.get("samsung")
+    if not isinstance(samsung, dict):
+        return True
+    return samsung.get("data_status") != "live"
+
+
+def _assess_analysis_data_quality(
+    snapshot,
+    current_prices: dict[str, float],
+    requested_tickers,
+    holdings: dict[str, dict],
+    price_cross_check: dict,
+    income_payload: object,
+):
+    """Analyzer production 품질게이트에 삼성 원본 freshness를 연결."""
+    from core.data_quality_gate import assess_data_quality
+
+    return assess_data_quality(
+        snapshot,
+        current_prices,
+        requested_tickers,
+        holdings,
+        broker_snapshot_stale=_samsung_snapshot_is_stale(income_payload),
+        price_cross_check=price_cross_check,
+    )
+
+
 def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> BriefingResult:
     """멀티 에이전트 파이프라인으로 시장 분석.
 
@@ -1047,7 +1081,6 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
 
     # 데이터 품질 게이트: 시세 결측(401/상장폐지)·가격 스케일 이상·FX 결측 판정.
     # 실행제한이면 렌더링 계층이 매수/매도 실행 표현을 HOLD/BLOCK로 낮춘다.
-    from core.data_quality_gate import assess_data_quality
     from config.settings import (
         HOLDINGS_GENERAL as _HG, HOLDINGS_ISA as _HI, HOLDINGS_RIA as _HR,
         HOLDINGS_IRP as _HIRP, HOLDINGS_PENSION as _HP,
@@ -1064,9 +1097,13 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
     except Exception as e:
         log.debug("시세 교차검증 스킵: %s", e)
         _cross_check = {}
-    dq_report = assess_data_quality(
-        snapshot, current_prices, portfolio, _gate_holdings,
-        price_cross_check=_cross_check,
+    dq_report = _assess_analysis_data_quality(
+        snapshot,
+        current_prices,
+        portfolio,
+        _gate_holdings,
+        _cross_check,
+        income_payload,
     )
     if dq_report.warnings:
         _quality_warnings.extend(dq_report.warnings)

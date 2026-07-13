@@ -174,10 +174,12 @@ def _build_briefing_html(
 
     persona_summary = raw.get("persona_summary", {}) or {}
     persona_details = raw.get("persona_details", []) or []
-    account_strategy = raw.get("account_strategy", {}) or {}
+    account_strategy_raw = raw.get("account_strategy", {}) or {}
+    account_strategy = account_strategy_raw if isinstance(account_strategy_raw, dict) else {}
     risks = raw.get("advisor_risks", []) or []
     opportunities = raw.get("advisor_opportunities", []) or []
-    scenarios = raw.get("advisor_scenarios", []) or []
+    scenarios_raw = raw.get("advisor_scenarios", []) or []
+    scenarios = scenarios_raw if isinstance(scenarios_raw, list) else []
     checklist = raw.get("advisor_checklist", []) or []
     buy_recs = raw.get("buy_recommendations", []) or []
     sell_recs = raw.get("sell_recommendations", []) or []
@@ -186,6 +188,32 @@ def _build_briefing_html(
     risk_level = raw.get("risk_level", "") or ""
     regime = raw.get("regime", "") or ""
     regime_adj = raw.get("regime_adjustment", "") or ""
+
+    from core.telegram import _filter_blocked_from_text, _normalized_from_raw
+
+    normalized = _normalized_from_raw(raw)
+    # raw action-like 필드는 normalized 유무와 무관하게 안전 필터를 통과한다.
+    # normalized=None legacy 경로도 명백한 매수 CTA 조각은 제거한다.
+    advisor_oneliner = _filter_blocked_from_text(advisor_oneliner, normalized)
+    advisor_conclusion = _filter_blocked_from_text(advisor_conclusion, normalized)
+    next_action = _filter_blocked_from_text(next_action, normalized)
+    strategy_summary = _filter_blocked_from_text(strategy_summary, normalized)
+    account_strategy = {
+        account: filtered
+        for account, text in account_strategy.items()
+        if (filtered := _filter_blocked_from_text(str(text or ""), normalized))
+    }
+    sanitized_scenarios = []
+    for scenario in scenarios:
+        if not isinstance(scenario, dict):
+            continue
+        item = dict(scenario)
+        item["action"] = _filter_blocked_from_text(
+            str(item.get("action") or ""), normalized
+        )
+        if item["action"]:
+            sanitized_scenarios.append(item)
+    scenarios = sanitized_scenarios
 
     # BriefingResult.buy_signals/sell_signals (raw_json에 buy_recommendations 없을 때 fallback)
     buy_signals = getattr(result, "buy_signals", ()) or ()
@@ -327,8 +355,7 @@ def _build_briefing_html(
             parts.append(f"<p>{_esc(p)}</p>")
 
     # ── normalizer 결과 우선 표시 (raw buy_recommendations 직접 노출 금지) ──
-    normalized = raw.get("normalized")
-    if normalized:
+    if normalized is not None:
         exec_buys = [a for a in (normalized.get("executable_actions") or []) if a.get("side") == "buy"]
         exec_sells = [a for a in (normalized.get("executable_actions") or []) if a.get("side") == "sell"]
         cond_buys = normalized.get("conditional_buy_candidates") or []
@@ -460,7 +487,7 @@ def _build_briefing_html(
             parts.append("</tr>")
         parts.append("</table>")
 
-    if sell_recs and not normalized:
+    if sell_recs and normalized is None:
         section += 1
         parts.append(f"<h2>{section}. 매도 추천</h2>")
         parts.append("<table><tr><th>종목</th><th>수량</th><th>익절가</th><th>손절가</th><th>타이밍</th><th>근거</th></tr>")

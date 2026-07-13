@@ -1,12 +1,12 @@
 """core/toss_live_pilot_verification.py
 
-Hermes 교차검증 게이트 — Live Pilot 최종 승인 전 2차 검증 ledger.
+Hermes 교차검증 게이트 — Live Pilot 실행 전 검증 ledger.
 
 구조:
   1차: GCP stock-bot → 후보 생성 + verification request (PENDING)
   2차: Hermes → 검증 결과 기록 (PASS / HOLD / BLOCK / ERROR)
-  3차: 사용자 → Telegram 최종 승인 버튼
-  4차: callback → Hermes PASS + 미만료 + guard 통과 시에만 전송 가능
+  3차: autonomous → Hermes PASS + 미만료 + 결정론 guard 통과 시 자동 진행
+       manual → 사용자 승인 후 동일 guard 통과 시 진행
 
 상태:
   PENDING  : 검증 요청됨, Hermes 판정 대기
@@ -330,6 +330,14 @@ def build_hermes_verification_context(
         paper_count = paper_summary.get("summary", {}).get("evaluated_count", 0)
         paper_status = "insufficient" if paper_count < 5 else "stable"
 
+    requires_user_confirmation = policy.get("requires_user_confirmation") is True
+    requires_second_confirmation = policy.get("requires_second_confirmation") is True
+    autonomous_policy = bool(
+        policy.get("autonomous_mode") is True
+        and not requires_user_confirmation
+        and not requires_second_confirmation
+    )
+    manual_confirmation = not autonomous_policy
     checks: dict = {
         "amount_guard": "ok" if (not max_krw or estimated <= max_krw) else f"FAIL: {estimated:,.0f} > {max_krw:,.0f}",
         "blocked_symbol": "ok" if symbol not in blocked_symbols else f"FAIL: {symbol}",
@@ -340,7 +348,12 @@ def build_hermes_verification_context(
         "transport_status": "not_injected",
         "paper_sample_status": paper_status,
         "paper_evaluated_count": paper_count,
-        "user_final_approval_required": "true",
+        "user_final_approval_required": str(manual_confirmation).lower(),
+        "execution_policy": (
+            "manual_user_confirmation"
+            if manual_confirmation
+            else "autonomous_after_hermes_pass_and_deterministic_gates"
+        ),
         "duplicate_live_order": "check_required",
         "duplicate_paper_open": "check_required",
         "price_staleness": "check_required",

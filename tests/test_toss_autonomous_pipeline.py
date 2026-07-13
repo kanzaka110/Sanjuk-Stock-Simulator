@@ -20,6 +20,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 KST = timezone(timedelta(hours=9))
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -27,6 +29,16 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 import core.toss_autonomous_pipeline as tap
+
+
+@pytest.fixture(autouse=True)
+def _isolated_quality_db(tmp_path, monkeypatch):
+    from core import toss_quality_gate as qg
+
+    monkeypatch.setattr(qg, "_outcomes_db_path", lambda: tmp_path / "quality.db")
+    qg._outcomes_schema_created = False
+    yield
+    qg._outcomes_schema_created = False
 
 
 _NOW = datetime(2026, 7, 3, 10, 0, tzinfo=KST)  # 목요일 장중
@@ -52,6 +64,21 @@ def _candidate(symbol="091180.KS", **kw) -> dict:
         "target_price": 34000,
         "stock_agent_ready": True,
         "decision_bucket": "PASS_EXECUTE",
+        "decision_reason": "quality pass",
+        "quality_score": 75,
+        "quality_breakdown": {
+            "score_total": 75,
+            "score_momentum": 18,
+            "score_liquidity": 17,
+            "score_risk_reward": 16,
+            "score_reliability": 12,
+            "score_market_regime": 12,
+            "penalty_overheat": 0,
+            "penalty_duplicate": 0,
+            "penalty_event_risk": 0,
+            "rr_ratio": 2.0,
+            "regime": "강세장",
+        },
         "score": 75,
         "risk_reward": 2.0,
         "income_strategy": {
@@ -101,7 +128,9 @@ class TestProcessCandidate(unittest.TestCase):
              patch("core.toss_live_pilot_verification.record_hermes_verification",
                    side_effect=fake_record_verif), \
              patch("core.toss_live_pilot_hermes_bridge.build_default_hermes_verdict",
-                   return_value={"status": verdict_status, "reasons": ["ok"], "checks": {}}) as mock_verdict:
+                   return_value={"status": verdict_status, "reasons": ["ok"], "checks": {}}) as mock_verdict, \
+             patch("core.toss_quality_gate.record_execution_quality_decision",
+                   return_value={"ok": True, "id": 1, "created": True}):
             r = tap.process_candidate(candidate, policy)
         return r, recorded, mock_verdict
 
@@ -124,12 +153,68 @@ class TestProcessCandidate(unittest.TestCase):
              patch("core.toss_live_pilot_verification.record_hermes_verification",
                    return_value={"ok": True}), \
              patch("core.toss_live_pilot_hermes_bridge.build_default_hermes_verdict",
-                   return_value={"status": "HOLD", "reasons": [], "checks": {}}):
+                   return_value={"status": "HOLD", "reasons": [], "checks": {}}), \
+             patch("core.toss_quality_gate.record_execution_quality_decision",
+                   return_value={"ok": True, "id": 2, "created": True}):
             tap.process_candidate(candidate, dict(_POLICY_ON))
         ledger_preview = ledger.call_args.args[0]
         verification_preview = verification.call_args.args[0]
         self.assertEqual(ledger_preview["decision_ref"], "prediction:42")
         self.assertEqual(verification_preview["decision_ref"], "prediction:42")
+
+    def test_buy_records_exact_quality_decision_before_verification(self):
+        candidate = _candidate()
+        with patch("core.toss_live_pilot_ledger.record_live_pilot_preview",
+                   return_value={"ok": True, "pilot_id": "tlive_quality_1"}), \
+             patch("core.toss_quality_gate.record_execution_quality_decision",
+                   return_value={"ok": True, "id": 7, "created": True}) as quality, \
+             patch("core.toss_live_pilot_verification.create_verification_request",
+                   return_value={"verification_id": "hv_quality_1", "status": "PENDING"}), \
+             patch("core.toss_live_pilot_verification.record_hermes_verification",
+                   return_value={"ok": True}), \
+             patch("core.toss_live_pilot_hermes_bridge.build_default_hermes_verdict",
+                   return_value={"status": "HOLD", "reasons": [], "checks": {}}):
+            result = tap.process_candidate(candidate, dict(_POLICY_ON))
+        assert result["stage"] == "verdict_recorded"
+        quality.assert_called_once()
+        assert quality.call_args.kwargs["pilot_id"] == "tlive_quality_1"
+        assert quality.call_args.kwargs["decision_ref"].startswith("execution_decision:")
+
+    def test_quality_attribution_failure_stops_before_verification(self):
+        with patch("core.toss_live_pilot_ledger.record_live_pilot_preview",
+                   return_value={"ok": True, "pilot_id": "tlive_quality_2"}), \
+             patch("core.toss_quality_gate.record_execution_quality_decision",
+                   return_value={"ok": False, "reason": "synthetic"}), \
+             patch("core.toss_live_pilot_verification.create_verification_request") as verification:
+            result = tap.process_candidate(_candidate(), dict(_POLICY_ON))
+        assert result["stage"] == "quality_attribution_failed"
+        verification.assert_not_called()
+
+    def test_quality_db_exception_stops_before_verification(self):
+        with patch("core.toss_live_pilot_ledger.record_live_pilot_preview",
+                   return_value={"ok": True, "pilot_id": "tlive_quality_db_error"}), \
+             patch("core.toss_quality_gate.record_execution_quality_decision",
+                   side_effect=RuntimeError("quality schema unavailable")), \
+             patch("core.toss_live_pilot_verification.create_verification_request") as verification:
+            result = tap.process_candidate(_candidate(), dict(_POLICY_ON))
+
+        assert result["stage"] == "quality_attribution_failed"
+        assert result["reason"] == "quality_record_exception"
+        verification.assert_not_called()
+
+    def test_buy_without_executable_bucket_stops_before_quality_and_verification(self):
+        candidate = _candidate()
+        candidate.pop("decision_bucket", None)
+        with patch("core.toss_live_pilot_ledger.record_live_pilot_preview",
+                   return_value={"ok": True, "pilot_id": "tlive_quality_missing"}), \
+             patch("core.toss_quality_gate.record_execution_quality_decision") as quality, \
+             patch("core.toss_live_pilot_verification.create_verification_request") as verification:
+            result = tap.process_candidate(candidate, dict(_POLICY_ON))
+
+        assert result["stage"] == "quality_attribution_failed"
+        assert result["reason"] == "non_executable_decision_bucket"
+        quality.assert_not_called()
+        verification.assert_not_called()
 
     def test_verdict_context_includes_unlimited_and_sides(self):
         _, _, mock_verdict = self._run(_candidate())
@@ -153,7 +238,9 @@ class TestProcessCandidate(unittest.TestCase):
              patch("core.toss_live_pilot_verification.record_hermes_verification",
                    return_value={"ok": True}) as mock_rec, \
              patch("core.toss_live_pilot_hermes_bridge.build_default_hermes_verdict",
-                   return_value={"status": "PASS", "reasons": [], "checks": {}}):
+                   return_value={"status": "PASS", "reasons": [], "checks": {}}), \
+             patch("core.toss_quality_gate.record_execution_quality_decision",
+                   return_value={"ok": True, "id": 3, "created": True}):
             tap.process_candidate(
                 _candidate(), dict(_POLICY_ON),
                 reason="auto_exit_sell", note="exit_type=stop_loss_hit",
@@ -301,6 +388,8 @@ class TestRetrySweep(unittest.TestCase):
         "quantity": 10,
         "limit_price": 30000,
         "estimated_amount_krw": 300000,
+        "decision_ref": "execution_decision:tlive_origin_1",
+        "preview_id": "tlive_origin_1",
         "failure_reason": "network_error",
     }
 
@@ -313,6 +402,12 @@ class TestRetrySweep(unittest.TestCase):
             return {"ok": True, "live_order_sent": True}
 
         failed_calls = []
+        self.retry_preview = None
+
+        def fake_create_verification(preview, pilot_id=""):
+            self.retry_preview = dict(preview)
+            return {"verification_id": "hv_retry_1"}
+
         with patch("core.toss_live_pilot_ledger.list_live_pilot_records",
                    return_value=records), \
              patch("core.toss_live_pilot_ledger.record_live_send_failed",
@@ -320,7 +415,7 @@ class TestRetrySweep(unittest.TestCase):
              patch("core.toss_live_pilot_policy.compute_toss_live_pilot_policy",
                    return_value=dict(_POLICY_ON)), \
              patch("core.toss_live_pilot_verification.create_verification_request",
-                   return_value={"verification_id": "hv_retry_1"}), \
+                   side_effect=fake_create_verification), \
              patch("core.toss_live_pilot_verification.record_hermes_verification",
                    return_value={"ok": True}), \
              patch("core.toss_live_pilot_hermes_bridge.build_default_hermes_verdict",
@@ -337,6 +432,19 @@ class TestRetrySweep(unittest.TestCase):
         self.assertEqual(r["sent"], 1)
         self.assertEqual(finalize_calls, [("tlive_retry_1", True)])
         self.assertEqual(state["retry_counts"]["tlive_retry_1"], 1)
+
+    def test_retry_preserves_original_direct_attribution_keys(self):
+        self._sweep({})
+        preview = self.retry_preview
+        self.assertIsNotNone(preview)
+        assert preview is not None
+        self.assertEqual(
+            preview.get("decision_ref"),
+            "execution_decision:tlive_origin_1",
+        )
+        self.assertEqual(preview.get("preview_id"), "tlive_origin_1")
+        self.assertEqual(preview.get("symbol"), "091180.KS")
+        self.assertEqual(preview.get("side"), "buy")
 
     def test_retry_exhausted_becomes_failed(self):
         state = {"retry_date": _NOW.strftime("%Y-%m-%d"),
@@ -447,7 +555,7 @@ _AFTER_CLOSE = datetime(2026, 7, 3, 16, 5, tzinfo=KST)  # 금요일 아님, 목 
 
 class TestDailyReport(unittest.TestCase):
     def _send(self, tmp, now=_AFTER_CLOSE, force=False, kpi=None,
-              state=None, sent_return=True):
+              state=None, sent_return=True, outcome_error=None):
         kpi = kpi or {
             "ok": True, "deployment_rate": 0.7, "market_value_krw": 7_000_000,
             "cash_krw": 3_000_000, "total_krw": 10_000_000,
@@ -464,8 +572,12 @@ class TestDailyReport(unittest.TestCase):
 
         with patch.object(tap, "_state_path", return_value=state_path), \
              patch.object(tap, "compute_deployment_kpi", return_value=kpi), \
+             patch("core.toss_quality_gate.evaluate_outcomes",
+                   return_value={"evaluated": 2, "errors": 0},
+                   side_effect=outcome_error) as outcomes, \
              patch("core.telegram.send_simple_message", side_effect=_fake_send):
             result = tap.send_daily_pipeline_report(now=now, force=force)
+        result["_outcome_calls"] = outcomes.call_count
         return result, sent_messages, state_path
 
     def test_sends_after_close(self):
@@ -474,6 +586,17 @@ class TestDailyReport(unittest.TestCase):
             self.assertTrue(r["sent"])
             self.assertEqual(len(msgs), 1)
             self.assertIn("자본 가동률: 70.0%", msgs[0])
+            self.assertEqual(r["_outcome_calls"], 1)
+            self.assertEqual(r["outcomes"], {"evaluated": 2, "errors": 0})
+            self.assertIn("5일 outcome 평가: 2건", msgs[0])
+
+    def test_outcome_evaluation_failure_still_sends_visible_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            r, msgs, _ = self._send(tmp, outcome_error=RuntimeError("synthetic"))
+            self.assertTrue(r["sent"])
+            self.assertEqual(r["outcomes"]["evaluated"], 0)
+            self.assertEqual(r["outcomes"]["errors"], 1)
+            self.assertIn("5일 outcome 평가: 0건 / 오류 1건", msgs[0])
 
     def test_before_report_hour_skips(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -92,3 +92,18 @@ def test_live_pilot_events_do_not_double_count_autonomous_real_rows(monkeypatch)
 
     assert data["live_sent_real"] == 2
     assert data["live_order_sent_total"] == 2
+
+
+def test_live_pilot_events_outer_exception_is_generic(monkeypatch):
+    import core.toss_live_pilot_events as events
+
+    synthetic_marker = "authorization=events-api-private"
+
+    def fail_summary():
+        raise RuntimeError(synthetic_marker)
+
+    monkeypatch.setattr(events, "event_summary", fail_summary)
+    data = dd.toss_live_pilot_events_data(limit=10)
+
+    assert data["error"] == "events_data_unavailable"
+    assert synthetic_marker not in str(data)

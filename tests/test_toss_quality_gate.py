@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -567,3 +569,221 @@ class TestFillPriceIntegration:
         from core import toss_quality_gate as qg
         with patch("core.market._get_quote_realtime", return_value=None):
             assert qg._get_current_price("091180.KS") == 0.0
+
+
+class TestScoringErrorHygiene:
+    def test_scoring_exception_uses_fixed_reason_and_type_only_log(self, caplog):
+        from core import toss_quality_gate as qg
+
+        synthetic_marker = "authorization=quality-private-value"
+        item = {"symbol": "316140.KS"}
+        with patch.object(
+            qg, "score_candidate", side_effect=RuntimeError(synthetic_marker)
+        ):
+            result = qg.score_candidates_batch([item], market="KR")
+
+        assert result[0]["decision_bucket"] == WATCH
+        assert result[0]["decision_reason"] == "scoring_error"
+        assert synthetic_marker not in str(result)
+        assert synthetic_marker not in caplog.text
+
+
+
+class TestExactExecutionQualityDecision:
+    def _candidate(self):
+        return {
+            "symbol": "316140.KS",
+            "side": "buy",
+            "decision_bucket": PASS_EXECUTE,
+            "decision_reason": "quality pass",
+            "quality_score": 82.0,
+            "quality_breakdown": {
+                "score_total": 82.0,
+                "score_momentum": 20.0,
+                "score_liquidity": 18.0,
+                "score_risk_reward": 17.0,
+                "score_reliability": 13.0,
+                "score_market_regime": 14.0,
+                "penalty_overheat": 0.0,
+                "penalty_duplicate": 0.0,
+                "penalty_event_risk": 0.0,
+                "rr_ratio": 2.0,
+                "regime": "강세장",
+            },
+            "limit_price": 28_750,
+            "stop_loss": 27_025,
+            "target_price": 34_000,
+        }
+
+    def test_records_exact_ref_and_is_idempotent(self, tmp_path, monkeypatch):
+        from core import toss_quality_gate as qg
+
+        monkeypatch.setattr(qg, "_outcomes_db_path", lambda: tmp_path / "quality.db")
+        qg._outcomes_schema_created = False
+        ref = "execution_decision:tlive_origin_1234"
+        pilot_id = "tlive_20260713_120000_1234"
+        first = qg.record_execution_quality_decision(
+            self._candidate(), pilot_id=pilot_id, decision_ref=ref
+        )
+        second = qg.record_execution_quality_decision(
+            self._candidate(), pilot_id=pilot_id, decision_ref=ref
+        )
+        assert first["ok"] is True
+        assert second == {"ok": True, "id": first["id"], "created": False}
+        row = qg.quality_decision_for_ref(ref)
+        assert row["pilot_id"] == pilot_id
+        assert row["decision_ref"] == ref
+        assert row["ticker"] == "316140.KS"
+
+    def test_rejects_non_executable_or_invalid_exact_keys(self, tmp_path, monkeypatch):
+        from core import toss_quality_gate as qg
+
+        monkeypatch.setattr(qg, "_outcomes_db_path", lambda: tmp_path / "quality_bad.db")
+        qg._outcomes_schema_created = False
+        candidate = self._candidate()
+        candidate["decision_bucket"] = WATCH
+        assert qg.record_execution_quality_decision(
+            candidate,
+            pilot_id="tlive_20260713_120001_1234",
+            decision_ref="execution_decision:tlive_origin_1234",
+        )["ok"] is False
+        candidate["decision_bucket"] = PASS_EXECUTE
+        assert qg.record_execution_quality_decision(
+            candidate,
+            pilot_id="external-order",
+            decision_ref="execution_decision:tlive_origin_1234",
+        )["ok"] is False
+
+    def test_existing_schema_migrates_decision_ref(self, tmp_path, monkeypatch):
+        from core import toss_quality_gate as qg
+
+        db = tmp_path / "quality_legacy.db"
+        conn = sqlite3.connect(db)
+        conn.execute(
+            "CREATE TABLE quality_gate_decisions ("
+            "id INTEGER PRIMARY KEY, ticker TEXT, decision_bucket TEXT)"
+        )
+        conn.commit()
+        conn.close()
+        monkeypatch.setattr(qg, "_outcomes_db_path", lambda: db)
+        qg._outcomes_schema_created = False
+        migrated = qg._outcomes_conn()
+        cols = {row[1] for row in migrated.execute(
+            "PRAGMA table_info(quality_gate_decisions)"
+        ).fetchall()}
+        migrated.close()
+        assert "decision_ref" in cols
+        recorded = qg.record_execution_quality_decision(
+            self._candidate(),
+            pilot_id="tlive_20260713_partial_1234",
+            decision_ref="execution_decision:tlive_partial_1234",
+        )
+        assert recorded["ok"] is True
+
+    def test_same_pilot_id_cannot_bind_to_different_decision_ref(self, tmp_path, monkeypatch):
+        from core import toss_quality_gate as qg
+
+        monkeypatch.setattr(qg, "_outcomes_db_path", lambda: tmp_path / "quality_pilot_unique.db")
+        qg._outcomes_schema_created = False
+        pilot_id = "tlive_20260713_120010_1234"
+        first = qg.record_execution_quality_decision(
+            self._candidate(),
+            pilot_id=pilot_id,
+            decision_ref="execution_decision:tlive_origin_1010",
+        )
+        conflict = qg.record_execution_quality_decision(
+            self._candidate(),
+            pilot_id=pilot_id,
+            decision_ref="execution_decision:tlive_origin_2020",
+        )
+
+        assert first["ok"] is True
+        assert conflict == {"ok": False, "reason": "quality_pilot_id_conflict"}
+
+    def test_exact_quality_decision_idempotency_requires_immutable_payload(self, tmp_path, monkeypatch):
+        from core import toss_quality_gate as qg
+
+        monkeypatch.setattr(qg, "_outcomes_db_path", lambda: tmp_path / "quality_immutable.db")
+        qg._outcomes_schema_created = False
+        pilot_id = "tlive_20260713_120020_1234"
+        ref = "execution_decision:tlive_origin_3030"
+        first = qg.record_execution_quality_decision(
+            self._candidate(), pilot_id=pilot_id, decision_ref=ref
+        )
+
+        changed_price = self._candidate()
+        changed_price["limit_price"] += 100
+        price_conflict = qg.record_execution_quality_decision(
+            changed_price, pilot_id=pilot_id, decision_ref=ref
+        )
+        changed_bucket = self._candidate()
+        changed_bucket["decision_bucket"] = SMALL_PASS
+        bucket_conflict = qg.record_execution_quality_decision(
+            changed_bucket, pilot_id=pilot_id, decision_ref=ref
+        )
+
+        assert first["ok"] is True
+        assert price_conflict == {
+            "ok": False, "reason": "quality_decision_payload_conflict",
+        }
+        assert bucket_conflict == {
+            "ok": False, "reason": "quality_decision_payload_conflict",
+        }
+
+    def test_quality_schema_migration_failure_is_retryable_and_not_ready(self, tmp_path, monkeypatch):
+        from core import toss_quality_gate as qg
+
+        db = tmp_path / "quality_migration_retry.db"
+        seed = sqlite3.connect(db)
+        seed.execute(
+            "CREATE TABLE quality_gate_decisions ("
+            "id INTEGER PRIMARY KEY, ticker TEXT, decision_bucket TEXT)"
+        )
+        seed.commit()
+        seed.close()
+
+        real_connect = qg.sqlite3.connect
+        fail = {"enabled": True}
+
+        class ConnectionProxy:
+            def __init__(self, real):
+                object.__setattr__(self, "_real", real)
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+            def __setattr__(self, name, value):
+                setattr(self._real, name, value)
+
+            def execute(self, sql, *args):
+                if (
+                    fail["enabled"]
+                    and "ALTER TABLE" in sql
+                    and "decision_ref" in sql
+                ):
+                    raise sqlite3.OperationalError("database is locked")
+                return self._real.execute(sql, *args)
+
+        monkeypatch.setattr(
+            qg.sqlite3,
+            "connect",
+            lambda *args, **kwargs: ConnectionProxy(real_connect(*args, **kwargs)),
+        )
+        monkeypatch.setattr(qg, "_outcomes_db_path", lambda: db)
+        qg._outcomes_schema_created = False
+
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            qg._outcomes_conn()
+        assert qg._outcomes_schema_created is False
+
+        fail["enabled"] = False
+        migrated = qg._outcomes_conn()
+        indexes = {
+            row[1] for row in migrated.execute(
+                "PRAGMA index_list(quality_gate_decisions)"
+            ).fetchall()
+        }
+        migrated.close()
+        assert qg._outcomes_schema_created is True
+        assert "idx_qg_decision_ref_exact" in indexes
+        assert "idx_qg_pilot_id_exact" in indexes

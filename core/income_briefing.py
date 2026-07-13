@@ -24,7 +24,9 @@ raw API 응답은 payload에 넣지 않는다.
 
 from __future__ import annotations
 
+import json
 import logging
+import urllib.request
 from datetime import datetime, timedelta, timezone
 
 log = logging.getLogger(__name__)
@@ -68,6 +70,90 @@ def _clean_account(raw: str) -> str:
 def _is_kr_symbol(symbol: str) -> bool:
     s = str(symbol or "").upper().strip()
     return s.endswith((".KS", ".KQ")) or (s.isdigit() and len(s) == 6)
+
+
+def _validated_dashboard_policy(value: object) -> dict | None:
+    """Dashboard policy 생성기 계약을 정확히 검증. 모순은 표시 fail-closed."""
+    if not isinstance(value, dict) or value.get("cache_status") != "live":
+        return None
+    if "stale" in value and (
+        type(value.get("stale")) is not bool or value.get("stale") is not False
+    ):
+        return None
+    if "ok" in value and (
+        type(value.get("ok")) is not bool or value.get("ok") is not True
+    ):
+        return None
+
+    bool_fields = (
+        "autonomous_mode",
+        "autonomous_kill_switch",
+        "requires_user_confirmation",
+        "requires_second_confirmation",
+        "live_order_allowed",
+        "all_live_gates_open",
+    )
+    if any(type(value.get(key)) is not bool for key in bool_fields):
+        return None
+
+    autonomous = value["autonomous_mode"]
+    kill_switch = value["autonomous_kill_switch"]
+    all_gates = value["all_live_gates_open"]
+    auto_active = autonomous and not kill_switch
+    expected_mode = (
+        "autonomous_live_pilot" if auto_active else "approval_only_live_pilot"
+    )
+    expected_confirmation = not auto_active
+    expected_live_allowed = all_gates and not (autonomous and kill_switch)
+    expected_adapter = "enabled" if all_gates else "disabled"
+    transport = value.get("live_transport_status")
+
+    if (
+        value.get("mode") != expected_mode
+        or value["requires_user_confirmation"] is not expected_confirmation
+        or value["requires_second_confirmation"] is not expected_confirmation
+        or value["live_order_allowed"] is not expected_live_allowed
+        or value.get("adapter_status") != expected_adapter
+        or transport not in {"configured", "not_configured"}
+        or (expected_live_allowed and transport != "configured")
+    ):
+        return None
+    return dict(value)
+
+
+def _unverified_toss_policy(reason: str) -> dict:
+    return {
+        "mode": "policy_unverified",
+        "autonomous_mode": False,
+        "autonomous_kill_switch": True,
+        "live_order_allowed": False,
+        "all_live_gates_open": False,
+        "requires_user_confirmation": True,
+        "requires_second_confirmation": True,
+        "live_transport_status": "unverified",
+        "policy_error": str(reason or "policy_unverified")[:120],
+    }
+
+
+def _load_toss_live_policy() -> dict:
+    """실제 dashboard live policy만 신뢰하고, 불가/불일치는 표시를 fail-closed."""
+    try:
+        with urllib.request.urlopen(
+            "http://127.0.0.1:8787/api/toss/live-pilot-policy",
+            timeout=2,
+        ) as response:
+            policy = json.loads(response.read())
+        validated = _validated_dashboard_policy(policy)
+        if validated is not None:
+            return validated
+        log.warning("dashboard Toss policy 계약 불일치 — 표시 fail-closed")
+        return _unverified_toss_policy("dashboard_policy_contract_invalid")
+    except Exception as exc:
+        log.warning(
+            "live Toss policy GET unavailable — 표시 fail-closed: %s",
+            type(exc).__name__,
+        )
+        return _unverified_toss_policy(f"dashboard_policy_unavailable:{type(exc).__name__}")
 
 
 # ─── 1. payload 수집 ─────────────────────────────────────────────
@@ -125,13 +211,22 @@ def build_income_briefing_context(briefing_type: str) -> dict:
 
     # ── Toss 자동운영 모드 ──
     try:
-        from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
-        policy = compute_toss_live_pilot_policy() or {}
-        payload["toss"]["automation_mode"] = (
-            "autonomous_live_pilot" if policy.get("autonomous_mode") else "monitored_readonly"
-        )
-        payload["toss"]["kill_switch"] = bool(policy.get("autonomous_kill_switch"))
-        sources["toss_policy"] = "ok"
+        policy = _load_toss_live_policy()
+        policy_mode = str(policy.get("mode") or "")
+        if policy_mode not in {
+            "autonomous_live_pilot",
+            "approval_only_live_pilot",
+        }:
+            payload["toss"]["automation_mode"] = "policy_unverified"
+            payload["toss"]["kill_switch"] = True
+            sources["toss_policy"] = "error"
+            warnings.append("Toss 자동운영 정책 미검증 — 브리핑 실행표시 fail-closed")
+        else:
+            payload["toss"]["automation_mode"] = policy_mode
+            payload["toss"]["kill_switch"] = (
+                policy.get("autonomous_kill_switch") is True
+            )
+            sources["toss_policy"] = "ok"
     except Exception as e:
         warnings.append(f"Toss 정책 조회 실패: {str(e)[:80]}")
         sources["toss_policy"] = "error"

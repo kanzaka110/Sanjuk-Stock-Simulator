@@ -1,10 +1,10 @@
 """core/toss_live_pilot_preview.py
 
-승인형 Live Pilot 미리보기 생성 (fail-closed, read-only intent).
+정책 인지형 Live Pilot 미리보기 생성 (fail-closed, read-only intent).
 
 이번 단계에서는 실제 주문 API를 호출하지 않는다.
 모든 preview는 live_order_allowed=False 고정.
-최종 2단계 승인 필요 경고 포함.
+autonomous 정책은 Hermes PASS 후 결정론 게이트 자동 진행, manual 정책은 사용자 승인 경고 포함.
 
 금지:
 - 이 모듈에서 주문 API 호출
@@ -174,11 +174,35 @@ def build_live_pilot_preview(candidate: dict, policy: dict | None = None) -> dic
     if not blocks:  # 금액 체크는 기본 사항만 통과 시
         blocks += _check_amount(estimated_krw, policy)
 
-    # 경고
+    # 경고: 이 함수는 언제나 preview만 만들지만, 이후 실행 권한은 정책별로 다르다.
+    autonomous_policy = bool(
+        policy.get("autonomous_mode") is True
+        and policy.get("requires_user_confirmation") is not True
+        and policy.get("requires_second_confirmation") is not True
+    )
+    manual_confirmation = not autonomous_policy
+    requires_user_confirmation = (
+        policy.get("requires_user_confirmation") is True
+        if "requires_user_confirmation" in policy
+        else manual_confirmation
+    )
+    requires_second_confirmation = (
+        policy.get("requires_second_confirmation") is True
+        if "requires_second_confirmation" in policy
+        else manual_confirmation
+    )
     warnings: list[str] = list(policy.get("warnings", []))
-    warnings.append("승인형 live pilot 준비 단계")
+    warnings.append(
+        "수동 승인형 live pilot 준비 단계"
+        if manual_confirmation
+        else "Toss AI autonomous live pilot 준비 단계"
+    )
     warnings.append("아직 주문 전송 안 함")
-    warnings.append("최종 2단계 승인 필요")
+    warnings.append(
+        "최종 2단계 승인 필요"
+        if manual_confirmation
+        else "Hermes PASS 후 결정론 안전 게이트 자동 진행"
+    )
 
     ok = len(blocks) == 0
 
@@ -197,7 +221,8 @@ def build_live_pilot_preview(candidate: dict, policy: dict | None = None) -> dic
         "live_order_allowed": False,          # 이번 단계: 항상 False
         "live_order_sent": False,
         "adapter_status": "disabled",
-        "requires_second_confirmation": True,
+        "requires_user_confirmation": requires_user_confirmation,
+        "requires_second_confirmation": requires_second_confirmation,
         "blocks": blocks,
         "warnings": warnings,
         "max_order_krw": policy.get("max_order_krw"),
@@ -218,7 +243,7 @@ def build_live_pilot_telegram_text(preview: dict) -> str:
     """Telegram 전송용 Live Pilot 미리보기 텍스트 생성.
 
     금지 문구: 매수하기, 매도하기, 주문 실행, 실주문: 활성
-    허용 문구: 실주문 미리보기, 최종 승인 필요, 아직 주문 전송 안 함
+    manual이면 승인 필요, autonomous이면 Hermes PASS+결정론 게이트 자동 진행을 표시한다.
     """
     symbol = preview.get("symbol", "")
     side = preview.get("side", "buy")
@@ -230,11 +255,23 @@ def build_live_pilot_telegram_text(preview: dict) -> str:
     blocks = preview.get("blocks", [])
     warnings = preview.get("warnings", [])
 
+    manual_confirmation = bool(
+        preview.get("requires_user_confirmation")
+        or preview.get("requires_second_confirmation")
+    )
     lines = [
-        "[승인형 Live Pilot 미리보기]",
+        (
+            "[수동 승인형 Live Pilot 미리보기]"
+            if manual_confirmation
+            else "[Toss AI Autonomous Live Pilot 미리보기]"
+        ),
         "실주문 미리보기 · 아직 주문 전송 안 함",
         "실주문: 비활성",
-        "최종 2단계 승인 필요",
+        (
+            "최종 2단계 승인 필요"
+            if manual_confirmation
+            else "Hermes PASS 후 결정론 안전 게이트 자동 진행"
+        ),
         "",
     ]
 

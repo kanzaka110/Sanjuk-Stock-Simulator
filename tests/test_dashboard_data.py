@@ -754,6 +754,7 @@ def test_email_briefing_html_contracts_intentional_changes():
             "executable_actions": [
                 {
                     "side": "sell",
+                    "ticker": "EXEC",
                     "name": "실행매도종목",
                     "account": "Toss AI",
                     "qty": 1,

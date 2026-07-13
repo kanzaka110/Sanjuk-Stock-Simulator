@@ -32,6 +32,13 @@ _POLICY = {
     "live_order_allowed": False,
 }
 
+_AUTONOMOUS_POLICY = {
+    **_POLICY,
+    "autonomous_mode": True,
+    "requires_user_confirmation": False,
+    "requires_second_confirmation": False,
+}
+
 _OK_PREVIEW = {
     "ok": True,
     "symbol": "069500.KS",
@@ -101,6 +108,21 @@ class TestPreviewMessageRequiredPhrases(unittest.TestCase):
 
     def test_dispatch_block_notice(self):
         self.assertIn("전송 차단", self.msg)
+
+
+class TestAutonomousPreviewMessage(unittest.TestCase):
+    def test_no_user_approval_wording(self):
+        preview = {
+            **_OK_PREVIEW,
+            "requires_user_confirmation": False,
+            "requires_second_confirmation": False,
+        }
+        msg = format_live_pilot_preview_message(
+            preview, _PAYLOAD_RESULT, _AUTONOMOUS_POLICY
+        )
+        self.assertNotIn("최종 2단계 승인 필요", msg)
+        self.assertNotIn("최종 승인 버튼", msg)
+        self.assertIn("Hermes PASS 후 결정론 안전 게이트 자동 진행", msg)
 
 
 # ─── 2. 금지 CTA 없음 ────────────────────────────────────
@@ -196,6 +218,18 @@ class TestLivePilotKeyboard(unittest.TestCase):
         kbd = build_live_pilot_keyboard("tlive_test", _OK_PREVIEW)
         datas = [btn["callback_data"] for row in kbd for btn in row]
         self.assertTrue(any("cancel" in d for d in datas))
+
+    def test_autonomous_preview_has_no_approval_or_cancel_cta(self):
+        preview = {
+            **_OK_PREVIEW,
+            "requires_user_confirmation": False,
+            "requires_second_confirmation": False,
+        }
+        kbd = build_live_pilot_keyboard("tlive_auto", preview)
+        datas = [btn["callback_data"] for row in kbd for btn in row]
+        self.assertTrue(any("review" in d for d in datas))
+        self.assertFalse(any("confirm" in d for d in datas))
+        self.assertFalse(any("cancel" in d for d in datas))
 
     def test_blocked_preview_only_cancel(self):
         kbd = build_live_pilot_keyboard("tlive_test", _BLOCKED_PREVIEW)

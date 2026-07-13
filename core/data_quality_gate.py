@@ -53,6 +53,7 @@ class DataQualityReport:
     price_scale_anomalies: tuple[str, ...] = ()
     source_mismatches: tuple[str, ...] = ()
     fx_ok: bool = True
+    broker_snapshot_stale: bool = False
 
     def header_text(self) -> str:
         """브리핑 상단에 붙일 데이터 품질 헤더."""
@@ -203,4 +204,5 @@ def assess_data_quality(
         price_scale_anomalies=tuple(scale_anomalies),
         source_mismatches=tuple(mismatch_labels),
         fx_ok=fx_ok,
+        broker_snapshot_stale=bool(broker_snapshot_stale),
     )

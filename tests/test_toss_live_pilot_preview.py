@@ -29,6 +29,17 @@ def _candidate(symbol="069500.KS", price=137000, qty=1, disagreement=None):
     return c
 
 
+def _autonomous_policy():
+    return {
+        "blocked_symbols": [],
+        "max_order_krw": None,
+        "warnings": [],
+        "requires_user_confirmation": False,
+        "requires_second_confirmation": False,
+        "autonomous_mode": True,
+    }
+
+
 class TestPreviewBasic(unittest.TestCase):
     def test_preview_id_present(self):
         p = build_live_pilot_preview(_candidate())
@@ -79,6 +90,19 @@ class TestPreviewBasic(unittest.TestCase):
         p = build_live_pilot_preview(candidate)
         self.assertEqual(p["decision_ref"], f"execution_decision:{p['preview_id']}")
         self.assertNotIn("Bearer", p["decision_ref"])
+
+    def test_autonomous_policy_removes_user_approval_wording(self):
+        p = build_live_pilot_preview(_candidate(), _autonomous_policy())
+        combined = " ".join(p["warnings"])
+        self.assertFalse(p["requires_second_confirmation"])
+        self.assertNotIn("최종 2단계 승인 필요", combined)
+        self.assertIn("Hermes PASS 후 결정론 안전 게이트 자동 진행", combined)
+
+    def test_autonomous_telegram_text_uses_autonomous_contract(self):
+        p = build_live_pilot_preview(_candidate(), _autonomous_policy())
+        text = build_live_pilot_telegram_text(p)
+        self.assertNotIn("최종 2단계 승인 필요", text)
+        self.assertIn("Hermes PASS 후 결정론 안전 게이트 자동 진행", text)
 
 
 class TestPreview069500(unittest.TestCase):

@@ -27,10 +27,10 @@ sell_to_fund 후보에 병합하고, 자동매도 허용 여부를 fail-closed�
 
 [자동 BUY 게이트]
 evaluate_ai_berkshire_buy_gate()는 SELL 게이트와 반대 방향이다. 근거가
-살아있는(freshness_valid) effective avoid 또는 명시적 buy_checklist_status가
-fail/gray_zone인 신규 BUY를 하드 차단한다. 기존 score처럼 checklist 필드가
-없으면 avoid_only 동작을 유지한다. unscored / expired / invalid는 차단하지
-않고 research_status 진단만 남겨 재리서치 큐로 넘긴다.
+살아있는(freshness_valid) effective avoid 또는 strict checklist가 거부한
+신규 BUY를 하드 차단한다. strict marker가 있는 row는 classification/checklist/
+freshness 손상을 모두 차단한다. marker 없는 legacy row만 avoid_only 호환을
+유지한다. score unavailable은 helper에서 진단하고 주문 직전 경로에서 차단한다.
 
 [명시적 자동매도 거부]
 score 항목에 auto_sell_eligible=false가 있으면 trim/avoid라도 자동
@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Iterable, Mapping
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -63,6 +64,12 @@ _BUY_CHECKLIST_BLOCK_STATUSES = frozenset({"fail", "gray_zone"})
 
 # BUY 게이트가 "판단은 있으나 BUY 의미를 자동 결정하지 않는다"로 보는 판정
 _BUY_REVIEWED_CLASSIFICATIONS = frozenset({"hold", "protect", "trim", "sell_to_fund"})
+_VALID_CLASSIFICATIONS = frozenset({
+    "sell_to_fund", "avoid", "trim", "gray_zone", "hold", "protect",
+})
+_VALID_BUY_CHECKLIST_STATUSES = frozenset({"pass", "fail", "gray_zone"})
+_STRICT_BUY_GATE_VERSION = 1
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # classification → 기본 매도성향 점수 (0~10, 높을수록 팔아도 되는 쪽)
 _CLASSIFICATION_BASE_SCORE = {
@@ -124,8 +131,11 @@ def _coerce_date(value) -> date | None:
         return value.date()
     if isinstance(value, date):
         return value
+    text = str(value or "").strip()
+    if not _ISO_DATE_RE.fullmatch(text):
+        return None
     try:
-        return date.fromisoformat(str(value or "").strip())
+        return date.fromisoformat(text)
     except (TypeError, ValueError):
         return None
 
@@ -179,7 +189,7 @@ def _freshness_issues(raw: Mapping, today: date) -> list[str]:
     return issues
 
 
-def normalize_ai_berkshire_item(raw, as_of_date=None) -> dict:
+def normalize_ai_berkshire_item(raw, as_of_date=None, *, strict_buy_gate=False) -> dict:
     """score 항목 정규화 + thesis freshness 판정.
 
     stored_classification은 파일에 저장된 값, classification은 만료/근거
@@ -190,8 +200,19 @@ def normalize_ai_berkshire_item(raw, as_of_date=None) -> dict:
     raw = raw if isinstance(raw, Mapping) else {}
     today = _coerce_date(as_of_date) or datetime.now(KST).date()
     stored = str(raw.get("classification") or "").lower().strip() or None
+    strict = bool(
+        strict_buy_gate
+        or raw.get("strict_buy_gate") is True
+        or "buy_checklist_status" in raw
+    )
+    classification_valid = stored in _VALID_CLASSIFICATIONS
 
     issues = _freshness_issues(raw, today)
+    if strict and not classification_valid:
+        issues.insert(
+            0,
+            "missing_classification" if stored is None else "invalid_classification",
+        )
     freshness_valid = not issues
     thesis_expired = "expired" in issues
     effective = stored if freshness_valid else "gray_zone"
@@ -221,6 +242,8 @@ def normalize_ai_berkshire_item(raw, as_of_date=None) -> dict:
         "name": str(raw.get("name") or ""),
         "stored_classification": stored,
         "classification": effective,
+        "classification_valid": classification_valid,
+        "strict_buy_gate": strict,
         "thesis_expired": thesis_expired,
         "freshness_valid": freshness_valid,
         "freshness_issues": issues,
@@ -240,6 +263,7 @@ def normalize_ai_berkshire_item(raw, as_of_date=None) -> dict:
             if isinstance(raw.get("auto_sell_eligible"), bool)
             else None
         ),
+        "auto_sell_config_valid": isinstance(raw.get("auto_sell_eligible"), bool),
         "classification_change_reason": (
             classification_change_reason.strip()
             if isinstance(classification_change_reason, str)
@@ -279,7 +303,13 @@ def score_for_symbol(symbol: str, scores: Mapping | None = None,
         return None
     for key, raw in items.items():
         if _symbol_variants(key) & wanted:
-            return normalize_ai_berkshire_item(raw, as_of_date=as_of_date)
+            return normalize_ai_berkshire_item(
+                raw,
+                as_of_date=as_of_date,
+                strict_buy_gate=(
+                    scores.get("strict_buy_gate_version") == _STRICT_BUY_GATE_VERSION
+                ),
+            )
     return None
 
 
@@ -290,6 +320,8 @@ def _buy_gate_result(symbol: str, item: dict | None, buy_block: bool,
         "name": item["name"] if item else "",
         "stored_classification": item["stored_classification"] if item else None,
         "classification": item["classification"] if item else None,
+        "classification_valid": item["classification_valid"] if item else False,
+        "strict_buy_gate": item["strict_buy_gate"] if item else False,
         "freshness_valid": item["freshness_valid"] if item else False,
         "thesis_expired": item["thesis_expired"] if item else False,
         "freshness_issues": item["freshness_issues"] if item else [],
@@ -313,11 +345,11 @@ def _buy_gate_result(symbol: str, item: dict | None, buy_block: bool,
 
 def evaluate_ai_berkshire_buy_gate(symbol: str, scores: Mapping | None = None,
                                    as_of_date=None) -> dict:
-    """신규 BUY 1건에 대한 AI Berkshire 판정 (avoid_only 1단계).
+    """신규 BUY 1건에 대한 AI Berkshire 판정.
 
-    근거가 살아있는 effective avoid만 buy_block=True다. 그 외는 차단하지 않고
-    research_status로 재리서치 대상만 표시한다. score 파일 누락/파손은 예외를
-    올리지 않고 needs_research 진단으로 떨어진다.
+    strict row는 classification/checklist/freshness가 하나라도 손상되면 차단한다.
+    marker 없는 legacy row는 avoid_only 호환을 유지한다. score 파일 누락/파손은
+    예외 대신 needs_research 진단으로 반환하며 dispatch 계층이 fail-closed한다.
 
     research_status: ok / needs_research / expired / invalid
     입력 scores/row는 변경하지 않는다.
@@ -340,17 +372,64 @@ def evaluate_ai_berkshire_buy_gate(symbol: str, scores: Mapping | None = None,
         log.warning("ai_berkshire buy gate lookup failed (%s): %s", symbol, e)
         item = None
 
-    if item is None or not item["stored_classification"]:
+    if item is None:
+        return _buy_gate_result(symbol, None, False,
+                                "ai_berkshire_unscored", "needs_research")
+
+    checklist = item["buy_checklist_status"]
+    strict_checklist = item["strict_buy_gate"]
+    if strict_checklist and not item["classification_valid"]:
+        return _buy_gate_result(
+            symbol,
+            item,
+            True,
+            "ai_berkshire_strict_classification_invalid",
+            "invalid",
+        )
+    if strict_checklist and checklist is None:
+        return _buy_gate_result(
+            symbol,
+            item,
+            True,
+            "ai_berkshire_buy_checklist_missing",
+            "invalid",
+        )
+    if strict_checklist and checklist not in _VALID_BUY_CHECKLIST_STATUSES:
+        return _buy_gate_result(
+            symbol,
+            item,
+            True,
+            "ai_berkshire_buy_checklist_unknown",
+            "invalid",
+        )
+    if not item["stored_classification"]:
         return _buy_gate_result(symbol, item, False,
                                 "ai_berkshire_unscored", "needs_research")
     if item["thesis_expired"]:
-        return _buy_gate_result(symbol, item, False,
-                                "ai_berkshire_thesis_expired", "expired")
+        return _buy_gate_result(
+            symbol,
+            item,
+            strict_checklist,
+            (
+                "ai_berkshire_strict_thesis_expired"
+                if strict_checklist
+                else "ai_berkshire_thesis_expired"
+            ),
+            "expired",
+        )
     if not item["freshness_valid"]:
-        return _buy_gate_result(symbol, item, False,
-                                "ai_berkshire_thesis_invalid", "invalid")
+        return _buy_gate_result(
+            symbol,
+            item,
+            strict_checklist,
+            (
+                "ai_berkshire_strict_thesis_invalid"
+                if strict_checklist
+                else "ai_berkshire_thesis_invalid"
+            ),
+            "invalid",
+        )
 
-    checklist = item["buy_checklist_status"]
     if checklist in _BUY_CHECKLIST_BLOCK_STATUSES:
         return _buy_gate_result(
             symbol,
@@ -358,6 +437,14 @@ def evaluate_ai_berkshire_buy_gate(symbol: str, scores: Mapping | None = None,
             True,
             f"ai_berkshire_buy_checklist_{checklist}",
             "ok",
+        )
+    if strict_checklist and checklist != "pass":
+        return _buy_gate_result(
+            symbol,
+            item,
+            True,
+            "ai_berkshire_buy_checklist_unknown",
+            "invalid",
         )
 
     effective = item["classification"]
@@ -403,6 +490,8 @@ def apply_berkshire_to_sell_to_fund(
             eligible, block_reason = False, "ai_berkshire_thesis_expired"
         elif not item["freshness_valid"]:
             eligible, block_reason = False, "ai_berkshire_thesis_invalid"
+        elif item["strict_buy_gate"] and not item["auto_sell_config_valid"]:
+            eligible, block_reason = False, "ai_berkshire_strict_auto_sell_invalid"
         elif item["auto_sell_eligible"] is False:
             eligible, block_reason = False, "ai_berkshire_auto_sell_disabled"
         elif item["classification"] in _AUTO_SELL_CLASSIFICATIONS:
@@ -415,6 +504,8 @@ def apply_berkshire_to_sell_to_fund(
         merged["ai_berkshire"] = {
             "stored_classification": item["stored_classification"] if item else None,
             "classification": item["classification"] if item else None,
+            "classification_valid": item["classification_valid"] if item else False,
+            "strict_buy_gate": item["strict_buy_gate"] if item else False,
             "thesis_expired": item["thesis_expired"] if item else False,
             "freshness_valid": item["freshness_valid"] if item else False,
             "freshness_issues": item["freshness_issues"] if item else [],
@@ -427,6 +518,7 @@ def apply_berkshire_to_sell_to_fund(
             "source_urls": item["source_urls"] if item else [],
             "buy_checklist_status": item["buy_checklist_status"] if item else None,
             "score_auto_sell_eligible": item["auto_sell_eligible"] if item else None,
+            "auto_sell_config_valid": item["auto_sell_config_valid"] if item else False,
             "classification_change_reason": (
                 item["classification_change_reason"] if item else None
             ),

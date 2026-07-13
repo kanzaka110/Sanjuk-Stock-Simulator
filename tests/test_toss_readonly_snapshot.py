@@ -144,6 +144,45 @@ def test_snapshot_allowlist_roundtrip_atomic_private_and_read_only(snapshot_path
     assert loaded["broker_orders"][0]["client_order_id"] == "tlive_20260712_025100_1234"
 
 
+def test_snapshot_rejects_sensitive_assignment_hidden_in_allowed_text_field(snapshot_path):
+    result = snap.write_snapshot(
+        _summary(),
+        broker_orders=[{
+            "client_order_id": "tlive_20260712_025100_1234",
+            "broker_order_status": "authorization=private-value",
+            "symbol": "005930",
+            "side": "BUY",
+            "quantity": 1,
+            "filled_quantity": 1,
+            "filled_price": 61_000,
+        }],
+        now=1_000.0,
+    )
+
+    assert result == {"ok": False, "reason": "sensitive_data_detected"}
+    assert not snapshot_path.exists()
+
+
+def test_snapshot_rejects_naked_pat_hidden_in_allowed_text_field(snapshot_path):
+    fake_pat = "github_pat_" + "B" * 30
+    result = snap.write_snapshot(
+        _summary(),
+        broker_orders=[{
+            "client_order_id": "tlive_20260712_025100_1234",
+            "broker_order_status": fake_pat,
+            "symbol": "005930",
+            "side": "BUY",
+            "quantity": 1,
+            "filled_quantity": 1,
+            "filled_price": 61_000,
+        }],
+        now=1_000.0,
+    )
+
+    assert result == {"ok": False, "reason": "sensitive_data_detected"}
+    assert not snapshot_path.exists()
+
+
 def test_snapshot_v2_without_broker_orders_remains_compatible(snapshot_path):
     assert snap.write_snapshot(_summary(), now=1_000.0)["ok"] is True
     raw = json.loads(snapshot_path.read_text(encoding="utf-8"))
@@ -335,6 +374,26 @@ def test_non_owner_token_network_is_blocked(monkeypatch):
         assert tc._get_access_token() is None
 
 
+def test_partial_broker_order_query_is_not_published_as_complete_snapshot(monkeypatch):
+    from core import toss_client as tc
+
+    monkeypatch.setattr(tc, "get_accounts", lambda: [{
+        "accountSeq": "safe-seq", "accountType": "BROKERAGE",
+    }])
+    monkeypatch.setattr(tc, "get_holdings", lambda _seq: {"items": [], "marketValue": {}})
+    monkeypatch.setattr(tc, "get_buying_power", lambda _seq, _currency: {})
+    monkeypatch.setattr(tc, "get_exchange_rate", lambda _base, _quote: {})
+    monkeypatch.setattr(tc, "get_market_calendar", lambda _market: {})
+    monkeypatch.setattr(tc, "is_configured", lambda: True)
+
+    with patch("core.toss_live_order_http.list_orders", side_effect=[
+        {"ok": True, "orders": []},
+        {"ok": False, "reason": "closed_query_failed", "orders": []},
+    ]):
+        with pytest.raises(RuntimeError, match="broker_orders_incomplete:CLOSED"):
+            snap._raw_account_summary_from_broker()
+
+
 def test_owner_refresh_uses_direct_projection_without_dashboard_import(snapshot_path, monkeypatch):
     monkeypatch.setenv("TOSS_AUTONOMOUS_MODE", "true")
     monkeypatch.setattr(sys, "argv", ["main.py", "bot"])
@@ -346,6 +405,24 @@ def test_owner_refresh_uses_direct_projection_without_dashboard_import(snapshot_
     assert result["order_side_effects"] is False
     source = (ROOT / "core" / "toss_readonly_snapshot.py").read_text(encoding="utf-8")
     assert "core.dashboard_data" not in source
+
+
+def test_owner_refresh_syncs_exact_broker_fills_before_snapshot_write(snapshot_path, monkeypatch):
+    monkeypatch.setenv(snap.ROLE_ENV, snap.ROLE_OWNER)
+    monkeypatch.setattr(snap, "_LAST_REFRESH_MONOTONIC", 0.0)
+    orders = _broker_orders()
+    with patch(
+        "core.toss_readonly_snapshot._raw_account_summary_from_broker",
+        return_value=(_summary(), {}, orders),
+    ), patch(
+        "core.toss_live_pilot_events.sync_live_event_fills_from_broker_orders",
+        return_value={"updated": 1, "ambiguous": 0, "rejected": 1},
+    ) as sync:
+        result = snap.refresh_snapshot_if_due(force=True)
+
+    assert result["ok"] is True
+    assert result["fill_sync"] == {"updated": 1, "ambiguous": 0, "rejected": 1}
+    sync.assert_called_once_with(orders)
 
 
 def test_failed_refresh_preserves_last_known_good(snapshot_path, monkeypatch):

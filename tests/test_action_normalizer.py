@@ -177,6 +177,29 @@ class TestNormalizeSell:
 
 
 class TestDataQualityLimits:
+    def test_toss_ai_account_is_preserved_for_manual_strip(self):
+        from core.income_briefing import strip_toss_from_manual_normalized
+
+        for account_alias in ("[토스 AI]", "[TOSS AI]", "Toss"):
+            raw = {
+                "strategy_buy": [{
+                    "ticker": "BBB.KS",
+                    "name": "토스후보",
+                    "account": account_alias,
+                    "entry_price": "₩20,000",
+                    "reason": "즉시 진입",
+                }],
+                "strategy_sell": [],
+            }
+
+            n = normalize_actions(raw, "KR_OPEN", {}, {})
+
+            assert n["executable_actions"][0]["account"] == "[토스 AI]"
+            stripped = strip_toss_from_manual_normalized(n)
+            assert stripped is not None
+            assert stripped["executable_actions"] == []
+            assert stripped["toss_actions_stripped"] == 1
+
     def test_execution_limited_blocks_buy_and_holds_sell(self):
         from types import SimpleNamespace
         raw = {
@@ -208,6 +231,34 @@ class TestDataQualityLimits:
         assert n["executable_actions"][0]["ticker"] == "005930.KS"
         assert len(n["blocked_buys"]) == 1
         assert n["blocked_buys"][0]["ticker"] == "035720.KS"
+
+    def test_stale_samsung_snapshot_blocks_manual_but_not_toss_action(self):
+        from types import SimpleNamespace
+        raw = {
+            "strategy_buy": [
+                {"ticker": "AAA.KS", "name": "수동후보", "account": "[일반]",
+                 "entry_price": "₩10,000", "reason": "즉시 진입"},
+                {"ticker": "BBB.KS", "name": "토스후보", "account": "[토스 AI]",
+                 "entry_price": "₩20,000", "reason": "즉시 진입"},
+            ],
+            "strategy_sell": [],
+        }
+        n = normalize_actions(raw, "KR_OPEN", {}, {})
+        assert len(n["executable_actions"]) == 2
+        dq = SimpleNamespace(
+            execution_limited=False,
+            broker_snapshot_stale=True,
+            missing_price_tickers=(),
+            source_mismatches=(),
+            price_scale_anomalies=(),
+        )
+
+        n = apply_data_quality_limits(n, dq)
+        assert n is not None
+
+        assert [a["ticker"] for a in n["executable_actions"]] == ["BBB.KS"]
+        assert [a["ticker"] for a in n["blocked_buys"]] == ["AAA.KS"]
+        assert "삼성 원본 stale" in n["blocked_buys"][0]["block_reason"]
 
 
 class TestNoBuyReason:

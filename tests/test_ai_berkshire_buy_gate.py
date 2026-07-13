@@ -3,9 +3,9 @@
 AI Berkshire ③단계 — 자동 BUY 질적 게이트 (avoid_only 1단계).
 
 이번 단계 규칙:
-- score 있고 freshness_valid 이며 effective classification=avoid 인 신규 BUY만 하드 차단
-- unscored / score 파일 없음·파손 / expired / invalid / gray_zone 은 하드 차단하지 않고
-  진단(research_status)만 남긴다 (기존 ready 결과 유지)
+- strict checklist가 있는 항목은 fail/gray_zone/unknown 및 expired/invalid에서 fail-closed
+- checklist가 없는 legacy 항목은 기존 avoid-only 호환을 유지
+- unscored / score 파일 없음·파손은 진단(research_status)만 남긴다
 - hold / protect / trim / sell_to_fund 는 BUY 의미를 자동 결정하지 않는다 → reviewed_non_avoid
 - SELL 경로(sell_to_fund 자동매도, exit sell)는 이 게이트의 영향을 받지 않는다
 
@@ -20,6 +20,8 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
@@ -29,6 +31,16 @@ import core.toss_autonomous_pipeline as tap
 from core import dashboard_data as dd
 from core import discovery_candidates as disc
 from core.discovery_candidates import DiscoverySections, NewCandidate
+
+
+@pytest.fixture(autouse=True)
+def _isolated_quality_db(tmp_path, monkeypatch):
+    from core import toss_quality_gate as qg
+
+    monkeypatch.setattr(qg, "_outcomes_db_path", lambda: tmp_path / "quality.db")
+    qg._outcomes_schema_created = False
+    yield
+    qg._outcomes_schema_created = False
 
 
 _FRESH = {
@@ -48,6 +60,15 @@ def _item(classification, **overrides):
 
 def _scores(**items):
     return {"version": "ai_berkshire_toss_v2", "read_only": True, "items": dict(items)}
+
+
+def _strict_scores(**items):
+    return {
+        "version": "ai_berkshire_toss_v2",
+        "strict_buy_gate_version": 1,
+        "read_only": True,
+        "items": dict(items),
+    }
 
 
 _AVOID_SYM = "000660.KS"
@@ -135,14 +156,92 @@ def test_explicit_pass_checklist_does_not_grant_or_block_by_itself():
     assert gate["buy_checklist_status"] == "pass"
 
 
-def test_expired_checklist_does_not_retain_order_authority():
+def test_strict_schema_blocks_missing_or_unknown_classification():
+    missing = _item("hold", buy_checklist_status="pass")
+    missing.pop("classification")
+    cases = (missing, _item("mystery", buy_checklist_status="pass"))
+    for raw in cases:
+        gate = abt.evaluate_ai_berkshire_buy_gate(
+            _AVOID_SYM,
+            scores=_strict_scores(**{_AVOID_SYM: raw}),
+            as_of_date="2026-07-15",
+        )
+        assert gate["buy_block"] is True
+        assert gate["buy_reason"] == "ai_berkshire_strict_classification_invalid"
+
+
+def test_strict_schema_blocks_missing_null_blank_or_unknown_checklist():
+    missing = object()
+    for checklist in (missing, None, "", "maybe"):
+        raw = _item("hold", strict_buy_gate=True)
+        if checklist is not missing:
+            raw["buy_checklist_status"] = checklist
+        gate = abt.evaluate_ai_berkshire_buy_gate(
+            _AVOID_SYM,
+            scores=_strict_scores(**{_AVOID_SYM: raw}),
+            as_of_date="2026-07-15",
+        )
+        assert gate["buy_block"] is True
+        assert gate["buy_reason"] in {
+            "ai_berkshire_buy_checklist_missing",
+            "ai_berkshire_buy_checklist_unknown",
+        }
+
+
+def test_strict_schema_rejects_basic_and_week_iso_dates():
+    for bad_date in ("20260710", "2026-W28-5"):
+        raw = _item("hold", as_of=bad_date, buy_checklist_status="pass")
+        gate = abt.evaluate_ai_berkshire_buy_gate(
+            _AVOID_SYM,
+            scores=_strict_scores(**{_AVOID_SYM: raw}),
+            as_of_date="2026-07-15",
+        )
+        assert gate["buy_block"] is True
+        assert "invalid_as_of" in gate["freshness_issues"]
+
+
+def test_expired_strict_checklist_blocks_buy_fail_closed():
     scores = _scores(**{
         _AVOID_SYM: _item(
             "hold", valid_until="2026-07-01", buy_checklist_status="fail")
     })
     gate = abt.evaluate_ai_berkshire_buy_gate(
         _AVOID_SYM, scores=scores, as_of_date="2026-07-15")
+    assert gate["buy_block"] is True
+    assert gate["buy_reason"] == "ai_berkshire_strict_thesis_expired"
+    assert gate["research_status"] == "expired"
+
+
+def test_invalid_strict_checklist_blocks_buy_fail_closed():
+    scores = _scores(**{
+        _AVOID_SYM: _item(
+            "hold", source_urls=[], buy_checklist_status="pass")
+    })
+    gate = abt.evaluate_ai_berkshire_buy_gate(
+        _AVOID_SYM, scores=scores, as_of_date="2026-07-15")
+    assert gate["buy_block"] is True
+    assert gate["buy_reason"] == "ai_berkshire_strict_thesis_invalid"
+    assert gate["research_status"] == "invalid"
+
+
+def test_unknown_strict_checklist_value_blocks_buy_fail_closed():
+    scores = _scores(**{
+        _AVOID_SYM: _item("hold", buy_checklist_status="unexpected")
+    })
+    gate = abt.evaluate_ai_berkshire_buy_gate(
+        _AVOID_SYM, scores=scores, as_of_date="2026-07-15")
+    assert gate["buy_block"] is True
+    assert gate["buy_reason"] == "ai_berkshire_buy_checklist_unknown"
+
+
+def test_expired_legacy_item_keeps_migration_compatibility():
+    scores = _scores(**{
+        _AVOID_SYM: _item("hold", valid_until="2026-07-01")
+    })
+    gate = abt.evaluate_ai_berkshire_buy_gate(
+        _AVOID_SYM, scores=scores, as_of_date="2026-07-15")
     assert gate["buy_block"] is False
+    assert gate["buy_reason"] == "ai_berkshire_thesis_expired"
     assert gate["research_status"] == "expired"
 
 
@@ -298,6 +397,9 @@ def test_dashboard_checklist_fail_candidate_is_hard_blocked(monkeypatch):
     assert item["ai_berkshire_buy_block"] is True
     assert item["ai_berkshire_buy_reason"] == "ai_berkshire_buy_checklist_fail"
     assert item["ai_berkshire_buy_gate"]["buy_checklist_status"] == "fail"
+    assert item["ai_berkshire_buy_gate"]["strict_buy_gate"] is True
+    assert item["ai_berkshire_buy_gate"]["classification_valid"] is True
+    assert item["ai_berkshire_buy_gate"]["version"] == "ai_berkshire_buy_gate_strict_v3"
     assert item["stock_agent_ready"] is False
     assert item["executable_now"] is False
     assert item["execution_status"] == "hold_ai_berkshire_buy_checklist"
@@ -316,16 +418,18 @@ def test_dashboard_unscored_candidate_keeps_ready_and_marks_needs_research(monke
     assert item["stock_agent_ready"] is True
 
 
-def test_dashboard_broken_scores_file_keeps_ready_without_exception(monkeypatch):
+def test_dashboard_broken_scores_file_blocks_ready_without_exception(monkeypatch):
     sections = _sections(new=[_new_cand("000777.KS", "강한수입후보")])
     _patch_dashboard(monkeypatch, sections, {})
 
     item = next(i for i in dd.toss_buy_candidates_data(range_="today")["items"]
                 if i["symbol"] == "000777.KS")
 
-    assert item["ai_berkshire_buy_block"] is False
+    assert item["ai_berkshire_buy_block"] is True
+    assert item["ai_berkshire_buy_reason"] == "ai_berkshire_scores_unavailable"
     assert item["ai_berkshire_research_status"] == "needs_research"
-    assert item["stock_agent_ready"] is True
+    assert item["stock_agent_ready"] is False
+    assert item["executable_now"] is False
 
 
 def test_dashboard_expired_and_invalid_keep_ready_with_distinct_status(monkeypatch):
@@ -366,6 +470,14 @@ def _candidate(symbol=_AVOID_SYM, side="buy", **kw):
         "symbol": symbol, "side": side, "quantity": 10, "limit_price": 30_000.0,
         "stop_loss": 28_000, "target_price": 34_000,
         "stock_agent_ready": True, "decision_bucket": "PASS_EXECUTE",
+        "decision_reason": "quality pass", "quality_score": 88,
+        "quality_breakdown": {
+            "score_total": 88, "score_momentum": 20, "score_liquidity": 20,
+            "score_risk_reward": 18, "score_reliability": 15,
+            "score_market_regime": 15, "penalty_overheat": 0,
+            "penalty_duplicate": 0, "penalty_event_risk": 0,
+            "rr_ratio": 3.0, "regime": "강세장",
+        },
         "score": 88, "risk_reward": 3.0,
         "income_strategy": {"income_pass": True, "income_grade": "INCOME_PASS",
                             "expected_pnl_krw": 12_000, "income_edge_ratio": 0.02},
@@ -378,7 +490,8 @@ def _pipeline_mocks(scores):
     return (
         patch.object(abt, "load_ai_berkshire_scores", return_value=scores),
         patch("core.toss_live_pilot_preview.build_live_pilot_preview",
-              return_value={"ok": True, "symbol": _AVOID_SYM, "side": "buy"}),
+              return_value={"ok": True, "symbol": _AVOID_SYM, "side": "buy",
+                            "decision_ref": "execution_decision:tlive_test_1"}),
         patch("core.toss_live_pilot_ledger.record_live_pilot_preview",
               return_value={"ok": True, "pilot_id": "tlive_test_1"}),
         patch("core.toss_live_pilot_verification.create_verification_request",
@@ -453,9 +566,19 @@ def test_pipeline_hold_buy_still_dispatches():
     preview.assert_called_once()
 
 
-def test_pipeline_unscored_buy_still_dispatches():
-    """5. unscored는 하드 차단하지 않는다."""
+def test_pipeline_scores_unavailable_blocks_before_preview():
     (m_scores, m_prev, m_ledger, m_req, m_rec, m_verdict, m_final) = _pipeline_mocks({})
+    with m_scores, m_prev as preview, m_ledger, m_req, m_rec, m_verdict, m_final:
+        r = tap.process_candidate(_candidate(), dict(_POLICY_ON))
+
+    assert r["stage"] == "ai_berkshire_buy_blocked"
+    assert r["reason"] == "ai_berkshire_scores_unavailable"
+    preview.assert_not_called()
+
+
+def test_pipeline_unscored_symbol_with_available_scores_still_dispatches():
+    scores = _scores(**{"OTHER": _item("hold")})
+    (m_scores, m_prev, m_ledger, m_req, m_rec, m_verdict, m_final) = _pipeline_mocks(scores)
     with m_scores, m_prev as preview, m_ledger, m_req, m_rec, m_verdict, m_final:
         r = tap.process_candidate(_candidate(), dict(_POLICY_ON))
 
@@ -464,7 +587,7 @@ def test_pipeline_unscored_buy_still_dispatches():
 
 
 def test_pipeline_expired_avoid_buy_still_dispatches():
-    """6. expired avoid는 하드 차단 대상이 아니다 (재리서치 큐로만 넘어간다)."""
+    """legacy expired avoid without strict marker remains compatibility-only."""
     scores = _scores(**{_AVOID_SYM: _item("avoid", valid_until="2000-01-01")})
     (m_scores, m_prev, m_ledger, m_req, m_rec, m_verdict, m_final) = _pipeline_mocks(scores)
     with m_scores, m_prev as preview, m_ledger, m_req, m_rec, m_verdict, m_final:
@@ -474,7 +597,7 @@ def test_pipeline_expired_avoid_buy_still_dispatches():
     preview.assert_called_once()
 
 
-def test_pipeline_gate_error_does_not_block_or_raise():
+def test_pipeline_gate_error_blocks_before_preview():
     with patch.object(abt, "evaluate_ai_berkshire_buy_gate", side_effect=RuntimeError("x")), \
             patch("core.toss_live_pilot_preview.build_live_pilot_preview",
                   return_value={"ok": True}) as preview, \
@@ -488,8 +611,9 @@ def test_pipeline_gate_error_does_not_block_or_raise():
                   return_value={"status": "PASS", "reasons": [], "checks": {}}):
         r = tap.process_candidate(_candidate(), dict(_POLICY_ON))
 
-    assert r["stage"] == "verdict_recorded"
-    preview.assert_called_once()
+    assert r["stage"] == "ai_berkshire_buy_blocked"
+    assert r["reason"] == "ai_berkshire_gate_error"
+    preview.assert_not_called()
 
 
 # ═══════════════════════════════════════════════════════════════

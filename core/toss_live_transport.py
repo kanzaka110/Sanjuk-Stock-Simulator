@@ -19,7 +19,6 @@ Toss live order transport 인터페이스 + 기본 구현.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 import re
@@ -31,8 +30,7 @@ log = logging.getLogger(__name__)
 LIVE_TRANSPORT_STATUS: str = "not_configured"
 
 # 주문 schema 상수 (US_STOCK BUY+SELL 지정가)
-_CLIENT_ORDER_ID_MAX = 36
-_CLIENT_ORDER_ID_RE = re.compile(r"[^a-zA-Z0-9_-]")
+_CLIENT_ORDER_ID_RE = re.compile(r"^tlive_[A-Za-z0-9_-]{1,30}$")
 _DEFAULT_MAX_ORDER_KRW = 0  # 0/None = 임의 KRW cap 없음
 
 
@@ -103,16 +101,10 @@ def _as_positive_int(value) -> int | None:
     return None
 
 
-def _normalize_client_order_id(raw: str) -> str:
-    """clientOrderId 정규화: 허용문자만, 최대 36자 (길면 truncate+hash)."""
-    cleaned = _CLIENT_ORDER_ID_RE.sub("", str(raw or ""))
-    if not cleaned:
-        cleaned = "tlive"
-    if len(cleaned) <= _CLIENT_ORDER_ID_MAX:
-        return cleaned
-    digest = hashlib.sha256(str(raw).encode("utf-8")).hexdigest()[:8]
-    prefix = cleaned[: _CLIENT_ORDER_ID_MAX - 9]  # prefix + '-' + 8자 hash = 36
-    return f"{prefix}-{digest}"
+def _normalize_client_order_id(raw: str) -> str | None:
+    """Exact attribution 계약: 유효한 pilot ID만 원문 그대로 반환."""
+    value = str(raw or "")
+    return value if _CLIENT_ORDER_ID_RE.fullmatch(value) else None
 
 
 def _classify_asset_type(symbol: str) -> str:
@@ -227,6 +219,8 @@ def build_toss_order_create_request(
         blocks.append(f"amount_over_limit: {est:,.0f} > {float(max_order_krw):,.0f}")
 
     cid = _normalize_client_order_id(client_order_id)
+    if cid is None:
+        blocks.append("invalid_client_order_id")
 
     if blocks:
         return {"ok": False, "request": {}, "blocks": blocks, "warnings": warnings}
@@ -314,7 +308,7 @@ class LiveTossTransport(TossLiveTransportBase):
 
     [중요] production 기본 경로에서 자동 주입/자동 실행되지 않음.
     - DEFAULT_LIVE_TRANSPORT는 NotConfigured 유지
-    - env gate 3개 + Hermes PASS + 사용자 최종 승인 + BUY/SELL + US-only guard 통과
+    - env gate 3개 + Hermes PASS + 정책별 confirmation + BUY/SELL + US-only guard 통과
       + 명시적 transport 주입 없이는 실제 주문 불가
     - schema 검증(build_toss_order_create_request) 통과 시에만 HTTP 위임
 

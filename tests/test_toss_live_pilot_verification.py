@@ -308,6 +308,33 @@ class TestBuildHermesVerificationContext(unittest.TestCase):
         ctx = build_hermes_verification_context(_make_preview("p_ctx3"), self._policy())
         self.assertEqual(ctx["checks"]["amount_guard"], "ok")
 
+    def test_autonomous_policy_does_not_require_user_final_approval(self):
+        from core.toss_live_pilot_verification import build_hermes_verification_context
+        policy = {
+            **self._policy(),
+            "requires_user_confirmation": False,
+            "requires_second_confirmation": False,
+            "autonomous_mode": True,
+        }
+        ctx = build_hermes_verification_context(_make_preview("p_auto"), policy)
+        self.assertEqual(ctx["checks"]["user_final_approval_required"], "false")
+        self.assertEqual(
+            ctx["checks"]["execution_policy"],
+            "autonomous_after_hermes_pass_and_deterministic_gates",
+        )
+
+    def test_manual_policy_keeps_user_final_approval(self):
+        from core.toss_live_pilot_verification import build_hermes_verification_context
+        policy = {
+            **self._policy(),
+            "requires_user_confirmation": True,
+            "requires_second_confirmation": True,
+            "autonomous_mode": False,
+        }
+        ctx = build_hermes_verification_context(_make_preview("p_manual"), policy)
+        self.assertEqual(ctx["checks"]["user_final_approval_required"], "true")
+        self.assertEqual(ctx["checks"]["execution_policy"], "manual_user_confirmation")
+
     def test_blocked_symbol_detected(self):
         from core.toss_live_pilot_verification import build_hermes_verification_context
         preview = _make_preview("p_blocked", symbol="MU")

@@ -335,9 +335,31 @@ class TestDispatchLiveFakeSuccess(unittest.TestCase):
 
     def test_fake_success_message(self):
         result = self._dispatch_with_fake()
-        # 메시지 포맷: "승인형 BUY pilot 전송 완료" (side 대문자 영문)
+        # 수동 정책은 기존 승인형 문구를 유지한다.
         self.assertIn("승인형 BUY pilot 전송 완료", result["message"])
         self.assertNotIn("자동매매 시작", result["message"])
+
+    def test_autonomous_success_message_has_no_user_approval(self):
+        payload = {
+            "symbol": "091180.KS",
+            "side": "buy",
+            "order_type": "limit",
+            "quantity": 1,
+            "limit_price": 30_000.0,
+            "estimated_amount_krw": 30_000.0,
+        }
+        policy = {
+            **_POLICY_ENABLED,
+            "autonomous_mode": True,
+            "requires_user_confirmation": False,
+            "requires_second_confirmation": False,
+        }
+        result = dispatch_toss_order_live(
+            payload, policy, transport=_fake_transport_success
+        )
+        self.assertNotIn("사용자 최종 승인", result["message"])
+        self.assertIn("Toss AI autonomous", result["message"])
+        self.assertIn("결정론 안전 게이트", result["message"])
 
     def test_fake_success_no_sensitive_in_result(self):
         result = self._dispatch_with_fake()

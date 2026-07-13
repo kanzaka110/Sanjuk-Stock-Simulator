@@ -100,6 +100,7 @@ USDKRW_FALLBACK = 1450.0
 
 # 계좌 추론용 유효 계좌 집합 (대괄호 표기 통일)
 _VALID_ACCOUNTS: tuple[str, ...] = ("일반", "ISA", "RIA", "IRP", "연금저축")
+_TOSS_ACCOUNT_ALIASES: tuple[str, ...] = ("토스", "토스 ai", "toss", "toss ai")
 
 # 조건부 매수 주문표를 실행 후보로 렌더하기 위한 수량/총액 필수 필드 (price 무관)
 _REQUIRED_QTY_FIELDS: tuple[tuple[str, str], ...] = (
@@ -188,6 +189,8 @@ def _bracket_account(val) -> str:
     if not val:
         return ""
     bare = str(val).strip().strip("[]").strip()
+    if bare.casefold() in _TOSS_ACCOUNT_ALIASES:
+        return "[토스 AI]"
     return f"[{bare}]" if bare in _VALID_ACCOUNTS else ""
 
 
@@ -765,28 +768,38 @@ def apply_data_quality_limits(normalized: dict | None, data_quality) -> dict | N
         return normalized
 
     execution_limited = bool(getattr(data_quality, "execution_limited", False))
+    broker_snapshot_stale = bool(
+        getattr(data_quality, "broker_snapshot_stale", False)
+    )
     affected: set[str] = set()
     for tk in getattr(data_quality, "missing_price_tickers", ()) or ():
         affected.update(_normalize_ticker_aliases(tk))
     affected.update(_extract_quality_tickers(getattr(data_quality, "source_mismatches", ()) or ()))
     affected.update(_extract_quality_tickers(getattr(data_quality, "price_scale_anomalies", ()) or ()))
 
-    if not execution_limited and not affected:
+    if not execution_limited and not affected and not broker_snapshot_stale:
         return normalized
 
-    reason = (
-        "데이터 품질 실행제한 — 매수/매도 실행 금지"
-        if execution_limited else
-        "해당 종목 시세 품질 낮음 — 실행 판단 보류"
-    )
+    def _is_toss_action(action: dict) -> bool:
+        account = str(action.get("account") or "").lower()
+        return "toss" in account or "토스" in account
 
     def _is_affected(action: dict) -> bool:
         if execution_limited:
             return True
+        if broker_snapshot_stale and not _is_toss_action(action):
+            return True
         aliases = _normalize_ticker_aliases(action.get("ticker", ""))
         return bool(aliases & affected)
 
-    def _block_buy(action: dict) -> dict:
+    def _reason_for(action: dict) -> str:
+        if execution_limited:
+            return "데이터 품질 실행제한 — 매수/매도 실행 금지"
+        if broker_snapshot_stale and not _is_toss_action(action):
+            return "삼성 원본 stale — 수동계좌 매수/매도 실행 금지"
+        return "해당 종목 시세 품질 낮음 — 실행 판단 보류"
+
+    def _block_buy(action: dict, reason: str) -> dict:
         a = dict(action)
         a["action_type"] = BLOCKED_BUY
         a["blocked"] = True
@@ -794,7 +807,7 @@ def apply_data_quality_limits(normalized: dict | None, data_quality) -> dict | N
         a["block_reason"] = reason
         return a
 
-    def _hold_sell(action: dict) -> dict:
+    def _hold_sell(action: dict, reason: str) -> dict:
         a = dict(action)
         a["action_type"] = HOLD_REVIEW
         a["protected_hold"] = True
@@ -808,12 +821,13 @@ def apply_data_quality_limits(normalized: dict | None, data_quality) -> dict | N
         if not _is_affected(action):
             kept_exec.append(action)
             continue
+        reason = _reason_for(action)
         if action.get("side") == "buy":
-            normalized.setdefault("blocked_buys", []).append(_block_buy(action))
+            normalized.setdefault("blocked_buys", []).append(_block_buy(action, reason))
             normalized.setdefault("integrity_errors", []).append(
                 f"{action.get('name') or action.get('ticker')}: {reason}")
         else:
-            normalized.setdefault("cancelled_sells", []).append(_hold_sell(action))
+            normalized.setdefault("cancelled_sells", []).append(_hold_sell(action, reason))
             normalized.setdefault("integrity_errors", []).append(
                 f"{action.get('name') or action.get('ticker')}: {reason}")
     normalized["executable_actions"] = kept_exec
@@ -821,7 +835,9 @@ def apply_data_quality_limits(normalized: dict | None, data_quality) -> dict | N
     kept_cond_buy: list[dict] = []
     for action in normalized.get("conditional_buy_candidates", []) or []:
         if _is_affected(action):
-            normalized.setdefault("blocked_buys", []).append(_block_buy(action))
+            normalized.setdefault("blocked_buys", []).append(
+                _block_buy(action, _reason_for(action))
+            )
         else:
             kept_cond_buy.append(action)
     normalized["conditional_buy_candidates"] = kept_cond_buy
@@ -829,7 +845,9 @@ def apply_data_quality_limits(normalized: dict | None, data_quality) -> dict | N
     kept_cond_sell: list[dict] = []
     for action in normalized.get("conditional_sell_candidates", []) or []:
         if _is_affected(action):
-            normalized.setdefault("cancelled_sells", []).append(_hold_sell(action))
+            normalized.setdefault("cancelled_sells", []).append(
+                _hold_sell(action, _reason_for(action))
+            )
         else:
             kept_cond_sell.append(action)
     normalized["conditional_sell_candidates"] = kept_cond_sell

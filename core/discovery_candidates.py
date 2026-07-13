@@ -954,7 +954,7 @@ def toss_eligible_new_candidates(
         elif observation_flags:
             item["execution_status"] = "conditional_small_entry"
             item["observation_reason"] = " / ".join(observation_flags)
-            item["suggested_action"] = "소액 조건부 관찰매수 후보 · Hermes PASS와 승호 최종 승인 필요"
+            item["suggested_action"] = "소액 조건부 관찰매수 후보 · Hermes PASS 후 결정론 안전 게이트 자동 진행"
         else:
             item["execution_status"] = "executable"
         items.append(item)

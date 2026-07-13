@@ -224,21 +224,25 @@ def process_candidate(
         from core.ai_berkshire_toss import evaluate_ai_berkshire_buy_gate
         try:
             gate = evaluate_ai_berkshire_buy_gate(symbol)
-        except Exception as e:                       # 게이트 오류로 기존 경로를 끊지 않는다
+        except Exception as e:
             log.warning("ai_berkshire buy gate recheck failed (%s): %s", symbol, e)
-            gate = {}
-        if gate.get("buy_block"):
-            reason = str(gate.get("buy_reason") or "ai_berkshire_buy_blocked")
+            return {
+                "symbol": symbol,
+                "stage": "ai_berkshire_buy_blocked",
+                "reason": "ai_berkshire_gate_error",
+            }
+        gate_reason = str(gate.get("buy_reason") or "ai_berkshire_buy_blocked")
+        if gate.get("buy_block") or gate_reason == "ai_berkshire_scores_unavailable":
             stage = (
                 "ai_berkshire_avoid_blocked"
-                if reason == "ai_berkshire_avoid"
+                if gate_reason == "ai_berkshire_avoid"
                 else "ai_berkshire_buy_blocked"
             )
-            log.info("auto pipeline: %s blocked by ai_berkshire (%s)", symbol, reason)
+            log.info("auto pipeline: %s blocked by ai_berkshire (%s)", symbol, gate_reason)
             return {
                 "symbol": symbol,
                 "stage": stage,
-                "reason": reason,
+                "reason": gate_reason,
             }
 
     preview_input = {
@@ -267,6 +271,43 @@ def process_candidate(
     pilot_id = rec.get("pilot_id", "")
     if not pilot_id:
         return {"symbol": symbol, "stage": "ledger_failed", "reason": "no pilot_id"}
+
+    # 실행 판단 outcome 계약: 모든 BUY는 executable bucket + exact pilot/ref 품질 row가
+    # 기록돼야만 검증·finalizer로 진행한다. SELL 리스크 경로는 별도 P&L 계약이다.
+    if side == "buy":
+        from core.toss_quality_gate import (
+            EXECUTABLE_BUCKETS,
+            record_execution_quality_decision,
+        )
+        bucket = str(candidate.get("decision_bucket") or "")
+        if bucket not in EXECUTABLE_BUCKETS:
+            return {
+                "symbol": symbol,
+                "stage": "quality_attribution_failed",
+                "pilot_id": pilot_id,
+                "reason": "non_executable_decision_bucket",
+            }
+        try:
+            quality_record = record_execution_quality_decision(
+                candidate,
+                pilot_id=pilot_id,
+                decision_ref=str(preview.get("decision_ref") or ""),
+            )
+        except Exception as exc:
+            log.error("quality attribution failed: %s", type(exc).__name__)
+            return {
+                "symbol": symbol,
+                "stage": "quality_attribution_failed",
+                "pilot_id": pilot_id,
+                "reason": "quality_record_exception",
+            }
+        if not quality_record.get("ok"):
+            return {
+                "symbol": symbol,
+                "stage": "quality_attribution_failed",
+                "pilot_id": pilot_id,
+                "reason": str(quality_record.get("reason") or "quality_record_failed"),
+            }
 
     # 3. 검증 요청 (PENDING)
     verif_preview = {**preview, "pilot_id": pilot_id}
@@ -402,6 +443,8 @@ def retry_retryable_orders(now: datetime | None = None, state: dict | None = Non
                 "quantity": rec.get("quantity", 0),
                 "limit_price": rec.get("limit_price", 0),
                 "estimated_amount_krw": rec.get("estimated_amount_krw", 0),
+                "decision_ref": rec.get("decision_ref", ""),
+                "preview_id": rec.get("preview_id") or pilot_id,
                 "pilot_id": pilot_id,
             }
             verif = create_verification_request(preview_stub, pilot_id=pilot_id)
@@ -555,20 +598,34 @@ def send_daily_pipeline_report(now: datetime | None = None, force: bool = False)
         return {"skipped": "already_sent_today"}
 
     kpi = compute_deployment_kpi()
+    try:
+        from core.toss_quality_gate import evaluate_outcomes
+        outcomes = evaluate_outcomes()
+    except Exception as exc:
+        log.warning("quality outcome evaluation failed: %s", type(exc).__name__)
+        outcomes = {
+            "evaluated": 0,
+            "errors": 1,
+            "error": f"evaluation_failed:{type(exc).__name__}",
+        }
     message = _format_daily_report(kpi, state, today)
+    message += (
+        f"\n\n5일 outcome 평가: {int(outcomes.get('evaluated') or 0)}건"
+        f" / 오류 {int(outcomes.get('errors') or 0)}건"
+    )
 
     try:
         from core.telegram import send_simple_message
         sent = send_simple_message(message)
     except Exception as e:
         log.warning("daily pipeline report send failed: %s", e)
-        return {"sent": False, "reason": str(e)[:200]}
+        return {"sent": False, "reason": str(e)[:200], "outcomes": outcomes}
 
     if sent:
         state["report_date"] = today
         _save_state(state)
         log.info("daily pipeline report sent (%s)", today)
-    return {"sent": bool(sent), "kpi": kpi}
+    return {"sent": bool(sent), "kpi": kpi, "outcomes": outcomes}
 
 
 # ── 메인 실행 ────────────────────────────────────────────────────

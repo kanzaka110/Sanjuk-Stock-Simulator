@@ -95,7 +95,8 @@ _EVENTS = {"records": [
 ]}
 
 
-def _build(briefing_type="KR_OPEN", pf=None, toss=None, plan=None, buys=None):
+def _build(briefing_type="KR_OPEN", pf=None, toss=None, plan=None, buys=None,
+           policy=None):
     with patch("core.dashboard_data.toss_account_summary",
                return_value=dict(toss if toss is not None else _TOSS_SUMMARY)), \
          patch("core.dashboard_data.portfolio_data",
@@ -106,8 +107,12 @@ def _build(briefing_type="KR_OPEN", pf=None, toss=None, plan=None, buys=None):
                return_value=dict(plan if plan is not None else _PLAN)), \
          patch("core.dashboard_data.toss_live_pilot_events_data",
                return_value=dict(_EVENTS)), \
-         patch("core.toss_live_pilot_policy.compute_toss_live_pilot_policy",
-               return_value={"autonomous_mode": True, "autonomous_kill_switch": False}):
+         patch("core.income_briefing._load_toss_live_policy",
+               return_value=(policy if policy is not None else {
+                   "mode": "autonomous_live_pilot",
+                   "autonomous_mode": True,
+                   "autonomous_kill_switch": False,
+               })):
         return ib.build_income_briefing_context(briefing_type)
 
 
@@ -184,6 +189,218 @@ class TestSamsungStale(unittest.TestCase):
 # ─── 6~9. Toss 섹션 ──────────────────────────────────────────────
 
 class TestTossSection(unittest.TestCase):
+    def test_live_policy_get_overrides_detached_briefing_env(self):
+        """브리핑 프로세스 env보다 실제 dashboard live policy GET을 우선해야 함."""
+        import json
+        from unittest.mock import MagicMock
+
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps({
+            "mode": "autonomous_live_pilot",
+            "autonomous_mode": True,
+            "autonomous_kill_switch": False,
+            "requires_user_confirmation": False,
+            "requires_second_confirmation": False,
+            "live_order_allowed": True,
+            "all_live_gates_open": True,
+            "adapter_status": "enabled",
+            "live_transport_status": "configured",
+            "cache_status": "live",
+        }).encode("utf-8")
+        response.__exit__.return_value = False
+
+        with patch("core.dashboard_data.toss_account_summary", return_value=dict(_TOSS_SUMMARY)), \
+             patch("core.dashboard_data.portfolio_data", return_value=dict(_PORTFOLIO)), \
+             patch("core.dashboard_data.toss_buy_candidates_data", return_value=dict(_BUYS)), \
+             patch("core.dashboard_data.toss_rebalance_plan_data", return_value=dict(_PLAN)), \
+             patch("core.dashboard_data.toss_live_pilot_events_data", return_value=dict(_EVENTS)), \
+             patch("core.toss_live_pilot_policy.compute_toss_live_pilot_policy", return_value={
+                 "autonomous_mode": False,
+                 "autonomous_kill_switch": True,
+             }), \
+             patch("urllib.request.urlopen", return_value=response):
+            p = ib.build_income_briefing_context("KR_OPEN")
+
+        self.assertEqual(p["toss"]["automation_mode"], "autonomous_live_pilot")
+        self.assertFalse(p["toss"]["kill_switch"])
+
+    def test_dashboard_policy_matches_production_truth_table_exactly(self):
+        base = {
+            "cache_status": "live",
+            "mode": "autonomous_live_pilot",
+            "autonomous_mode": True,
+            "autonomous_kill_switch": False,
+            "requires_user_confirmation": False,
+            "requires_second_confirmation": False,
+            "live_order_allowed": True,
+            "all_live_gates_open": True,
+            "adapter_status": "enabled",
+            "live_transport_status": "configured",
+        }
+        approval = {
+            **base,
+            "mode": "approval_only_live_pilot",
+            "autonomous_mode": False,
+            "requires_user_confirmation": True,
+            "requires_second_confirmation": True,
+        }
+        killed = {
+            **approval,
+            "autonomous_mode": True,
+            "autonomous_kill_switch": True,
+            "live_order_allowed": False,
+        }
+        disabled = {
+            **approval,
+            "live_order_allowed": False,
+            "all_live_gates_open": False,
+            "adapter_status": "disabled",
+            "live_transport_status": "not_configured",
+        }
+        for valid in (base, approval, killed, disabled):
+            self.assertIsNotNone(ib._validated_dashboard_policy(valid), valid)
+
+        invalid = [
+            {**base, "cache_status": "fresh"},
+            {**base, "stale": "true"},
+            {**approval, "requires_user_confirmation": False},
+            {**approval, "all_live_gates_open": False, "live_order_allowed": True},
+            {**approval, "all_live_gates_open": False, "adapter_status": "enabled"},
+            {**base, "autonomous_kill_switch": True},
+        ]
+        for value in invalid:
+            self.assertIsNone(ib._validated_dashboard_policy(value), value)
+
+    def test_approval_policy_mode_is_preserved_in_briefing_payload(self):
+        policy = {
+            "cache_status": "live",
+            "mode": "approval_only_live_pilot",
+            "autonomous_mode": False,
+            "autonomous_kill_switch": False,
+            "requires_user_confirmation": True,
+            "requires_second_confirmation": True,
+            "live_order_allowed": True,
+            "all_live_gates_open": True,
+            "adapter_status": "enabled",
+            "live_transport_status": "configured",
+        }
+        p = _build(policy=policy)
+        self.assertEqual(p["toss"]["automation_mode"], "approval_only_live_pilot")
+        self.assertFalse(p["toss"]["kill_switch"])
+
+    def test_live_policy_rejects_stale_malformed_or_inconsistent_dashboard_payload(self):
+        import json
+        from unittest.mock import MagicMock
+
+        invalid_payloads = [
+            {
+                "mode": "autonomous_live_pilot",
+                "autonomous_mode": True,
+                "autonomous_kill_switch": False,
+                "requires_user_confirmation": False,
+                "requires_second_confirmation": False,
+                "live_order_allowed": True,
+                "all_live_gates_open": True,
+                "live_transport_status": "configured",
+            },
+            {
+                "mode": "autonomous_live_pilot",
+                "autonomous_mode": "false",
+                "autonomous_kill_switch": False,
+                "requires_user_confirmation": False,
+                "requires_second_confirmation": False,
+                "live_order_allowed": True,
+                "all_live_gates_open": True,
+                "live_transport_status": "configured",
+            },
+            {
+                "mode": "autonomous_live_pilot",
+                "autonomous_mode": True,
+                "autonomous_kill_switch": False,
+                "requires_user_confirmation": False,
+                "requires_second_confirmation": False,
+                "live_order_allowed": True,
+                "all_live_gates_open": True,
+                "live_transport_status": "configured",
+                "cache_status": "stale",
+            },
+            {
+                "mode": "monitored_readonly",
+                "autonomous_mode": True,
+                "autonomous_kill_switch": False,
+                "requires_user_confirmation": False,
+                "requires_second_confirmation": False,
+                "live_order_allowed": True,
+                "all_live_gates_open": True,
+                "live_transport_status": "configured",
+            },
+            {
+                "mode": "autonomous_live_pilot",
+                "autonomous_mode": True,
+                "autonomous_kill_switch": False,
+                "requires_user_confirmation": False,
+                "requires_second_confirmation": False,
+                "live_order_allowed": False,
+                "all_live_gates_open": False,
+                "live_transport_status": "configured",
+            },
+            {
+                "mode": "forged_mode",
+                "autonomous_mode": False,
+                "autonomous_kill_switch": False,
+                "requires_user_confirmation": False,
+                "requires_second_confirmation": False,
+                "live_order_allowed": False,
+                "all_live_gates_open": False,
+                "live_transport_status": "not_configured",
+            },
+        ]
+        fallback = {"autonomous_mode": False, "autonomous_kill_switch": True}
+        for payload in invalid_payloads:
+            response = MagicMock()
+            response.__enter__.return_value.read.return_value = json.dumps(payload).encode("utf-8")
+            response.__exit__.return_value = False
+            with patch("urllib.request.urlopen", return_value=response), \
+                 patch("core.toss_live_pilot_policy.compute_toss_live_pilot_policy", return_value=fallback):
+                loaded = ib._load_toss_live_policy()
+            self.assertIs(loaded["autonomous_mode"], False)
+            self.assertIs(loaded["autonomous_kill_switch"], True)
+
+    def test_stale_dashboard_policy_does_not_trust_detached_local_autonomous_env(self):
+        import json
+        from unittest.mock import MagicMock
+
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps({
+            "mode": "autonomous_live_pilot",
+            "autonomous_mode": True,
+            "autonomous_kill_switch": False,
+            "requires_user_confirmation": False,
+            "requires_second_confirmation": False,
+            "live_order_allowed": True,
+            "all_live_gates_open": True,
+            "adapter_status": "enabled",
+            "live_transport_status": "configured",
+            "cache_status": "stale",
+        }).encode("utf-8")
+        response.__exit__.return_value = False
+        with patch("urllib.request.urlopen", return_value=response), \
+             patch("core.toss_live_pilot_policy.compute_toss_live_pilot_policy",
+                   return_value={"autonomous_mode": True,
+                                 "autonomous_kill_switch": False}) as local:
+            loaded = ib._load_toss_live_policy()
+        self.assertEqual(loaded["mode"], "policy_unverified")
+        self.assertIs(loaded["autonomous_mode"], False)
+        self.assertIs(loaded["autonomous_kill_switch"], True)
+        local.assert_not_called()
+
+    def test_unverified_policy_is_not_rendered_as_monitored_readonly(self):
+        p = _build(policy=ib._unverified_toss_policy("synthetic"))
+        self.assertEqual(p["toss"]["automation_mode"], "policy_unverified")
+        self.assertEqual(p["quality"]["sources"]["toss_policy"], "error")
+        self.assertTrue(any("정책" in warning and "미검증" in warning
+                            for warning in p["quality"]["warnings"]))
+
     def test_not_ready_candidates_excluded_from_ready_buys(self):
         p = _build()
         symbols = {r["symbol"] for r in p["toss"]["ready_buys"]}

@@ -107,6 +107,72 @@ def test_broker_snapshot_stale_note():
     assert r.status == STATUS_WARNING
 
 
+def test_analyzer_wires_samsung_stale_into_manual_action_gate(monkeypatch):
+    """income payload stale이 analyzer 품질게이트를 거쳐 수동 action만 차단해야 함."""
+    import core.analyzer as analyzer
+    import core.data_quality_gate as dq
+    from core.action_normalizer import apply_data_quality_limits
+
+    captured = {}
+    real_assess = dq.assess_data_quality
+
+    def capture(*args, **kwargs):
+        captured["broker_snapshot_stale"] = kwargs.get("broker_snapshot_stale")
+        return real_assess(*args, **kwargs)
+
+    monkeypatch.setattr(dq, "assess_data_quality", capture)
+    income_payload = {
+        "income_kpi": {"samsung": {"data_status": "stale"}},
+    }
+    report = analyzer._assess_analysis_data_quality(
+        _snapshot(),
+        {"005930.KS": 62_000.0, "USDKRW=X": 1450.0},
+        ["005930.KS"],
+        _holdings(),
+        {},
+        income_payload,
+    )
+    assert captured["broker_snapshot_stale"] is True
+
+    normalized = {
+        "executable_actions": [
+            {"ticker": "005930.KS", "name": "삼성전자", "side": "buy", "account": "[일반]"},
+            {"ticker": "LIG.KS", "name": "토스후보", "side": "buy", "account": "[토스 AI]"},
+        ],
+        "conditional_buy_candidates": [],
+        "conditional_sell_candidates": [],
+        "blocked_buys": [],
+        "cancelled_sells": [],
+        "integrity_errors": [],
+    }
+    gated = apply_data_quality_limits(normalized, report)
+    assert gated is not None
+    assert [a["ticker"] for a in gated["executable_actions"]] == ["LIG.KS"]
+    assert [a["ticker"] for a in gated["blocked_buys"]] == ["005930.KS"]
+
+
+def test_analyzer_treats_missing_samsung_status_as_stale(monkeypatch):
+    import core.analyzer as analyzer
+    import core.data_quality_gate as dq
+
+    captured = {}
+
+    def capture(*args, **kwargs):
+        captured.update(kwargs)
+        return assess_data_quality(*args, **kwargs)
+
+    monkeypatch.setattr(dq, "assess_data_quality", capture)
+    analyzer._assess_analysis_data_quality(
+        _snapshot(),
+        {"005930.KS": 62_000.0, "USDKRW=X": 1450.0},
+        ["005930.KS"],
+        _holdings(),
+        {},
+        {},
+    )
+    assert captured["broker_snapshot_stale"] is True
+
+
 def test_no_baseline_ticker_skipped():
     # 평단 baseline 없는 종목은 스케일 판정에서 제외 (오탐 방지)
     prices = {"TSLA": 999_999.0, "USDKRW=X": 1450.0}

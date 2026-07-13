@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
 import os
 import re
 import sys
@@ -19,6 +20,8 @@ from pathlib import Path
 from typing import Any
 
 from config.settings import DB_DIR
+
+log = logging.getLogger(__name__)
 
 VERSION = "toss_readonly_snapshot_v2"
 REFRESH_INTERVAL_SEC = 300
@@ -34,6 +37,23 @@ _REFRESH_LOCK = threading.Lock()
 _LAST_REFRESH_MONOTONIC = 0.0
 _LONG_NUMBER_RE = re.compile(r"\b\d{8,}\b")
 _BEARER_RE = re.compile(r"(?i)bearer\s+(?!\[REDACTED\])[A-Za-z0-9._~+\-/]+=*")
+_SENSITIVE_ASSIGNMENT_RE = re.compile(
+    r"(?ix)\b(?:"
+    r"access[_-]?token|refresh[_-]?token|token|secret|password|authorization|"
+    r"api[_-]?key|app[_-]?(?:key|secret)|client[_-]?secret|credential(?:s)?|"
+    r"account[_-]?(?:no|number|id|seq)|connection[_-]?string"
+    r")\b[\"']?\s*[:=]\s*[^\s,;]+"
+)
+_NAKED_SECRET_RE = re.compile(
+    r"(?ix)(?:"
+    r"\bgithub_pat_[A-Za-z0-9_]{20,}\b|\bgh[pousr]_[A-Za-z0-9]{20,}\b|"
+    r"\bhf_[A-Za-z0-9]{20,}\b|\bsk-(?:live-)?[A-Za-z0-9_-]{20,}\b|"
+    r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b|\bAKIA[0-9A-Z]{16}\b|"
+    r"\bAIza[0-9A-Za-z_-]{30,}\b|"
+    r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b|"
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    r")"
+)
 _SENSITIVE_KEYS = {
     "access_token", "refresh_token", "token", "authorization",
     "account", "accountno", "accountnumber", "account_number", "account_id",
@@ -297,7 +317,12 @@ def _contains_sensitive(value: Any) -> bool:
     if isinstance(value, list):
         return any(_contains_sensitive(item) for item in value)
     if isinstance(value, str):
-        return bool(_BEARER_RE.search(value) or _LONG_NUMBER_RE.search(value))
+        return bool(
+            _BEARER_RE.search(value)
+            or _LONG_NUMBER_RE.search(value)
+            or _SENSITIVE_ASSIGNMENT_RE.search(value)
+            or _NAKED_SECRET_RE.search(value)
+        )
     return False
 
 
@@ -601,16 +626,15 @@ def _raw_account_summary_from_broker() -> tuple[dict, dict, list[dict]]:
     }
     calendars = {"KR": tc.get_market_calendar("KR"), "US": tc.get_market_calendar("US")}
     broker_orders: list[dict] = []
-    try:
-        from core.toss_live_order_http import list_orders
-        for status in ("OPEN", "CLOSED"):
-            result = list_orders(status, account_seq=seq)
-            if result.get("ok"):
-                broker_orders.extend(
-                    row for row in result.get("orders") or [] if isinstance(row, dict)
-                )
-    except Exception:
-        broker_orders = []
+    from core.toss_live_order_http import list_orders
+    for status in ("OPEN", "CLOSED"):
+        result = list_orders(status, account_seq=seq)
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            raise RuntimeError(f"broker_orders_incomplete:{status}")
+        rows = result.get("orders")
+        if not isinstance(rows, list):
+            raise RuntimeError(f"broker_orders_invalid:{status}")
+        broker_orders.extend(row for row in rows if isinstance(row, dict))
     return summary, calendars, broker_orders
 
 
@@ -628,7 +652,15 @@ def refresh_snapshot_if_due(*, force: bool = False) -> dict:
         summary, calendars, broker_orders = _raw_account_summary_from_broker()
         if not summary:
             return {"ok": False, "reason": "account_summary_unavailable", "order_side_effects": False}
+        fill_sync: dict = {"updated": 0, "ambiguous": 0, "rejected": 0}
+        try:
+            from core.toss_live_pilot_events import sync_live_event_fills_from_broker_orders
+            fill_sync = sync_live_event_fills_from_broker_orders(broker_orders)
+        except Exception as exc:
+            log.warning("exact broker fill sync failed: %s", type(exc).__name__)
+            fill_sync = {"updated": 0, "ambiguous": 0, "rejected": 0, "error": type(exc).__name__}
         result = write_snapshot(summary, calendars, broker_orders)
+        result["fill_sync"] = fill_sync
         result["order_side_effects"] = False
         return result
     except Exception as exc:

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime
 
 import requests
@@ -31,6 +32,114 @@ _SELL_CONTEXT_WORDS = ("매도", "팔", "청산", "익절", "손절", "축소", 
 # normalized 누락(None) 경로 안전망: 명백한 매수 CTA 문구만 제거 (적립/관망 등은 보존)
 # 주의: "매수"+"하기" 형태 리터럴 직접 표기 금지(금지 CTA 가드) → 런타임 조합으로 회피
 _BLOCKED_CTA_PHRASES = ("매수 검토", "매수 실행", "매수" + "하기", "주문 실행", "진입 검토")
+_NORMALIZED_ACTION_LIST_KEYS = (
+    "executable_actions",
+    "conditional_buy_candidates",
+    "conditional_sell_candidates",
+    "cancelled_sells",
+    "blocked_buys",
+)
+
+
+_NORMALIZED_NUMERIC_FIELDS = (
+    "gap_pct",
+    "current_price_num",
+    "entry_price_num",
+    "qty_num",
+    "order_total",
+)
+_EXPECTED_LIST_SIDE = {
+    "conditional_buy_candidates": "buy",
+    "conditional_sell_candidates": "sell",
+    "cancelled_sells": "sell",
+    "blocked_buys": "buy",
+}
+
+
+def _finite_number(value: object) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(float(value))
+    )
+
+
+def _clean_normalized_row(key: str, value: object) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    row = dict(value)
+    for field in ("ticker", "name"):
+        if field in row and not isinstance(row.get(field), str):
+            return None
+    if key == "executable_actions":
+        if (
+            not isinstance(row.get("ticker"), str)
+            or not row["ticker"].strip()
+            or row.get("side") not in {"buy", "sell"}
+        ):
+            return None
+    else:
+        expected_side = _EXPECTED_LIST_SIDE.get(key)
+        if "side" in row and row.get("side") != expected_side:
+            return None
+
+    for field in _NORMALIZED_NUMERIC_FIELDS:
+        if field in row and row.get(field) is not None and not _finite_number(row[field]):
+            return None
+    risk = row.get("execution_risk")
+    if risk is not None:
+        if not isinstance(risk, dict):
+            return None
+        if "has_warning" in risk and type(risk.get("has_warning")) is not bool:
+            return None
+        if "label" in risk and not isinstance(risk.get("label"), str):
+            return None
+        row["execution_risk"] = dict(risk)
+    missing = row.get("missing_fields")
+    if missing is not None and (
+        not isinstance(missing, list)
+        or any(not isinstance(item, str) for item in missing)
+    ):
+        return None
+    return row
+
+
+def _coerce_normalized(value: object) -> dict:
+    """Renderer용 normalized fail-closed projection."""
+    malformed = not isinstance(value, dict)
+    source = value if isinstance(value, dict) else {}
+    out = dict(source)
+    for key in _NORMALIZED_ACTION_LIST_KEYS:
+        rows = source.get(key, [])
+        if not isinstance(rows, list):
+            rows = []
+            malformed = True
+        clean_rows = []
+        for row in rows:
+            clean = _clean_normalized_row(key, row)
+            if clean is None:
+                malformed = True
+                continue
+            clean_rows.append(clean)
+        out[key] = clean_rows
+
+    errors = source.get("integrity_errors", [])
+    if not isinstance(errors, list):
+        errors = []
+        malformed = True
+    out["integrity_errors"] = [str(item) for item in errors if str(item).strip()]
+    if malformed:
+        out["integrity_errors"].append("normalized 구조 오류 — raw 실행문구 차단")
+    if not isinstance(out.get("no_buy_reason"), str):
+        out["no_buy_reason"] = ""
+    return out
+
+
+def _normalized_from_raw(raw: object) -> dict | None:
+    """키 부재만 legacy(None). 키가 있으면 빈/malformed도 fail-closed dict."""
+    if not isinstance(raw, dict) or "normalized" not in raw:
+        return None
+    return _coerce_normalized(raw.get("normalized"))
 
 
 def _strip_blocked_cta(text: str) -> str:
@@ -53,52 +162,90 @@ def _strip_blocked_cta(text: str) -> str:
 
 
 def _filter_blocked_from_text(text: str, normalized: dict | None) -> str:
-    """blocked_buys ticker/name이 매수 문맥으로 등장하는 문장을 제거/치환."""
+    """normalized와 일치하지 않는 raw 매수/매도 문장을 제거."""
     if not text:
         return text
-    if not normalized:
+    if normalized is None:
         return _strip_blocked_cta(text)
-    blocked = normalized.get("blocked_buys") or []
-    sell_limited = [
-        a for a in (normalized.get("cancelled_sells") or [])
-        if a.get("protected_hold") or a.get("data_quality_block") or a.get("action_type") == "HOLD_REVIEW"
-    ]
-    if not blocked and not sell_limited:
-        return text
-    # blocked/hold ticker/name 집합
-    buy_names: set[str] = set()
-    sell_names: set[str] = set()
-    for blk in blocked:
-        if blk.get("ticker"):
-            buy_names.add(blk["ticker"])
-        if blk.get("name"):
-            buy_names.add(blk["name"])
-    for item in sell_limited:
-        if item.get("ticker"):
-            sell_names.add(item["ticker"])
-        if item.get("name"):
-            sell_names.add(item["name"])
-    if not buy_names and not sell_names:
-        return text
-    # 문장 단위 분리 (줄바꿈, 마침표, ①②③ 번호, / 구분자)
-    parts = _re.split(r'(\n|(?=①|②|③|④|⑤|⑥|⑦|⑧|⑨|⑩)|(?<=[.] )|\s*/\s*)', text)
-    parts = [p for p in parts if p and p.strip()]
+    normalized = _coerce_normalized(normalized)
+
+    def _add_aliases(target: set[str], value: object) -> None:
+        name = str(value or "").strip()
+        if not name:
+            return
+        target.add(name)
+        alias = name.removesuffix(".KS").removesuffix(".KQ")
+        if alias:
+            target.add(alias)
+
+    allowed_buy_names: set[str] = set()
+    allowed_sell_names: set[str] = set()
+    blocked_buy_names: set[str] = set()
+    limited_sell_names: set[str] = set()
+
+    for action in normalized["executable_actions"]:
+        target = allowed_buy_names if action.get("side") == "buy" else allowed_sell_names
+        _add_aliases(target, action.get("ticker"))
+        _add_aliases(target, action.get("name"))
+    for action in normalized["blocked_buys"]:
+        _add_aliases(blocked_buy_names, action.get("ticker"))
+        _add_aliases(blocked_buy_names, action.get("name"))
+    for action in normalized["cancelled_sells"]:
+        _add_aliases(limited_sell_names, action.get("ticker"))
+        _add_aliases(limited_sell_names, action.get("name"))
+
+    def _mentions(names: set[str], part: str) -> bool:
+        for name in names:
+            escaped = _re.escape(name)
+            if _re.fullmatch(r"[A-Za-z0-9.]+", name):
+                pattern = rf"(?<![A-Za-z0-9]){escaped}(?![A-Za-z0-9])"
+                if _re.search(pattern, part, _re.IGNORECASE):
+                    return True
+            elif name in part:
+                return True
+        return False
+
+    symbol_pattern = _re.compile(
+        r"(?<![A-Za-z0-9])(?:[A-Z][A-Z0-9]{0,9}(?:\.(?:KS|KQ))?|\d{6}(?:\.(?:KS|KQ))?)(?![A-Za-z0-9])"
+    )
+    ignored_tokens = {"BUY", "SELL", "HOLD", "PASS", "BLOCK", "RIA", "ISA", "KR", "US", "ETF"}
+
+    def _has_unknown_symbol(part: str, allowed_names: set[str]) -> bool:
+        allowed_tokens: set[str] = set()
+        for name in allowed_names:
+            allowed_tokens.update(token.upper() for token in symbol_pattern.findall(name.upper()))
+        mentioned = {token.upper() for token in symbol_pattern.findall(part)}
+        return bool(mentioned - allowed_tokens - ignored_tokens)
+
+    parts = _re.split(
+        r'(\n|(?=①|②|③|④|⑤|⑥|⑦|⑧|⑨|⑩)|(?<=[.] )|\s*/\s*)',
+        text,
+    )
     result = []
-    for part in parts:
+    for part in (p for p in parts if p and p.strip()):
         part_lower = part.lower()
-        has_blocked_buy_name = any(n.lower() in part_lower or n in part for n in buy_names)
-        has_buy_context = any(w in part_lower for w in _BUY_CONTEXT_WORDS)
-        has_limited_sell_name = any(n.lower() in part_lower or n in part for n in sell_names)
-        has_sell_context = any(w in part_lower for w in _SELL_CONTEXT_WORDS)
-        if has_blocked_buy_name and has_buy_context:
-            continue  # 해당 매수 CTA 문장 제거
-        if has_limited_sell_name and has_sell_context:
-            continue  # 보호/데이터제한 매도 CTA 문장 제거
+        has_buy_context = any(word in part_lower for word in _BUY_CONTEXT_WORDS)
+        has_sell_context = any(word in part_lower for word in _SELL_CONTEXT_WORDS)
+        if has_buy_context:
+            if _mentions(blocked_buy_names, part):
+                continue
+            if (
+                not _mentions(allowed_buy_names, part)
+                or _has_unknown_symbol(part, allowed_buy_names)
+            ):
+                continue
+        if has_sell_context:
+            if _mentions(limited_sell_names, part):
+                continue
+            if (
+                not _mentions(allowed_sell_names, part)
+                or _has_unknown_symbol(part, allowed_sell_names)
+            ):
+                continue
         result.append(part)
+
     filtered = " ".join(result).strip()
-    # 선행/후행 구분자 정리
-    filtered = _re.sub(r'^[\s/·,]+|[\s/·,]+$', '', filtered).strip()
-    return filtered  # 전부 제거되면 "" → 호출부에서 섹션 생략
+    return _re.sub(r'^[\s/·,]+|[\s/·,]+$', '', filtered).strip()
 
 
 def _sanitize_markdown(text: str) -> str:
@@ -206,12 +353,20 @@ def _append_fill_risk(lines: list, action: dict) -> None:
         lines.append("  ℹ 체결 가능성: 눌림목 지정가 — 미체결 가능성 있음")
 
 
+def _execution_policy_note(account: object) -> str:
+    label = str(account or "").lower()
+    if "toss" in label or "토스" in label:
+        return "정규화 통과 · Hermes PASS 후 결정론 안전 게이트 자동 진행"
+    return "정규화 통과 · 삼성 등 수동 계좌는 승호 수동 승인 필요"
+
+
 def _render_normalized_sections(lines: list, normalized: dict, sep: str, next_action: str) -> None:
     """정규화 분류 결과를 4섹션으로 렌더 (결정론적).
 
     ⚡ 오늘 실제 실행 / 🕐 조건부 매수 후보 / 🕐🔴 조건부 매도 감시 / 🟡 매도 취소·홀딩 전환 / 🔍 매수 후보 없음 사유.
     actions 유무와 무관하게 각 섹션을 독립 표시 — 조건부/취소를 숨기지 않는다.
     """
+    normalized = _coerce_normalized(normalized)
     type_icon = {"매수·즉시": "🟢", "매도·즉시": "🔴", "예약매수": "🕐🟢", "예약매도": "🕐🔴"}
     executable = normalized.get("executable_actions", [])
     conditional = normalized.get("conditional_buy_candidates", [])
@@ -219,7 +374,18 @@ def _render_normalized_sections(lines: list, normalized: dict, sep: str, next_ac
     cancelled = normalized.get("cancelled_sells", [])
     blocked = normalized.get("blocked_buys", [])
     integrity_errors = normalized.get("integrity_errors", [])
-    no_buy = _filter_blocked_from_text(normalized.get("no_buy_reason", ""), normalized)
+    no_buy_raw = str(normalized.get("no_buy_reason", "") or "")
+    safe_no_buy_markers = ("없음", "차단", "보류", "대기", "불가", "제외", "관망", "아님")
+    no_buy = _filter_blocked_from_text(no_buy_raw, normalized)
+    if not no_buy and any(marker in no_buy_raw for marker in safe_no_buy_markers):
+        safe_parts = [
+            part.strip()
+            for part in _re.split(r"\n|\s*/\s*", no_buy_raw)
+            if part.strip()
+            and any(marker in part for marker in safe_no_buy_markers)
+            and not any(cta in part for cta in _BLOCKED_CTA_PHRASES)
+        ]
+        no_buy = " / ".join(safe_parts)
 
     # 🚫 정합성 충돌로 제외된 주문 (최우선 — 실행 전 경고)
     if integrity_errors:
@@ -247,7 +413,7 @@ def _render_normalized_sections(lines: list, normalized: dict, sep: str, next_ac
             if a.get("stop"):
                 lines.append(f"  🛑 {a['stop']}")
             _append_fill_risk(lines, a)
-            _append_hermes_verdict(lines, "PASS", "정규화 통과 · 실주문은 승호 최종 승인 필요")
+            _append_hermes_verdict(lines, "PASS", _execution_policy_note(a.get("account")))
         lines.append("")
     else:
         lines.append(sep)
@@ -438,7 +604,7 @@ def _build_impact_message(
         log.warning("income briefing 렌더 실패: %s", e)
     lines.append(f"🎯 *판단: {verdict}*")
     # oneliner에서 blocked ticker 매수 문맥 필터
-    _norm_for_filter = raw.get("normalized")
+    _norm_for_filter = _normalized_from_raw(raw)
     oneliner = _filter_blocked_from_text(oneliner, _norm_for_filter)
     if oneliner:
         lines.append(f"💬 {oneliner}")
@@ -446,7 +612,7 @@ def _build_impact_message(
 
     # 데일리 리뷰(US_CLOSE)는 결산·복기 전용 — 신규 액션 섹션을 띄우지 않는다
     is_daily_review = briefing_type == "US_CLOSE"
-    normalized = raw.get("normalized") if not is_daily_review else None
+    normalized = _normalized_from_raw(raw) if not is_daily_review else None
 
     if is_daily_review:
         lines.append(SEP)
@@ -505,7 +671,7 @@ def _build_impact_message(
         # 이유 표시 (blocked ticker 매수 문맥 필터 적용)
         _decision = raw.get("investment_decision", "관망")
         # normalized가 있고 executable 매수가 없으면 "매수실행" fallback 억제
-        if normalized and _decision == "매수실행":
+        if normalized is not None and _decision == "매수실행":
             _exec_buys = [a for a in (normalized.get("executable_actions") or [])
                           if a.get("side") == "buy"]
             if not _exec_buys:
@@ -615,7 +781,7 @@ def _build_summary_message(
     lines.append(f"📌 {title}")
     lines.append("")
     lines.append(f"🎯 판단: *{verdict}*")
-    oneliner = _filter_blocked_from_text(oneliner, raw.get("normalized"))
+    oneliner = _filter_blocked_from_text(oneliner, _normalized_from_raw(raw))
     if oneliner:
         lines.append(f"💬 {oneliner}")
     lines.append("")
@@ -629,7 +795,7 @@ def _build_summary_message(
         lines.append("")
 
     if next_action:
-        next_action = _filter_blocked_from_text(next_action, raw.get("normalized"))
+        next_action = _filter_blocked_from_text(next_action, _normalized_from_raw(raw))
     if next_action:
         lines.append(f"⏭ 다음 액션: {next_action}")
         lines.append("")
@@ -709,21 +875,32 @@ def _build_urgent_alert(
     normalized 결과가 있으면 blocked_buys 포함 ticker는 매수 긴급 알림에서 제외.
     """
     lines: list[str] = []
-    raw_buy = raw.get("strategy_buy", [])
-    raw_sell = raw.get("strategy_sell", [])
+    raw_buy_source = raw.get("strategy_buy")
+    raw_sell_source = raw.get("strategy_sell")
+    raw_buy = [row for row in raw_buy_source if isinstance(row, dict)] if isinstance(raw_buy_source, list) else []
+    raw_sell = [row for row in raw_sell_source if isinstance(row, dict)] if isinstance(raw_sell_source, list) else []
 
-    # normalized 결과에서 blocked ticker 집합 추출
-    normalized = raw.get("normalized")
-    blocked_tickers: set[str] = set()
-    if normalized:
-        for blk in (normalized.get("blocked_buys") or []):
-            tk = blk.get("ticker", "")
-            if tk:
-                blocked_tickers.add(tk)
+    # normalized 결과에서 실제 executable ticker만 긴급 알림 허용.
+    # raw Signal은 HOLD/BLOCK/cancelled 판정 전 값일 수 있으므로 별도 신뢰하지 않는다.
+    normalized = _normalized_from_raw(raw)
+    allowed_buy_tickers: set[str] | None = None
+    allowed_sell_tickers: set[str] | None = None
+    if normalized is not None:
+        executable = normalized.get("executable_actions") or []
+        allowed_buy_tickers = {
+            a.get("ticker", "") for a in executable
+            if a.get("side") == "buy" and a.get("ticker")
+        }
+        allowed_sell_tickers = {
+            a.get("ticker", "") for a in executable
+            if a.get("side") == "sell" and a.get("ticker")
+        }
 
-    # 🔥강력 매수 (blocked ticker 제외)
+    # 🔥강력 매수
     for sig in result.buy_signals:
-        if "강력" in sig.urgency and sig.ticker not in blocked_tickers:
+        if "강력" in sig.urgency and (
+            allowed_buy_tickers is None or sig.ticker in allowed_buy_tickers
+        ):
             matching = next((r for r in raw_buy if r.get("ticker") == sig.ticker), {})
             account = matching.get("account", "")
             acct_tag = f" {account}" if account else ""
@@ -734,9 +911,11 @@ def _build_urgent_alert(
                 lines.append(f"    ⏰ {sig.timing[:40]}")
             lines.append("")
 
-    # ⚡적극 매수 (blocked ticker 제외)
+    # ⚡적극 매수
     for sig in result.buy_signals:
-        if "적극" in sig.urgency and sig.ticker not in blocked_tickers:
+        if "적극" in sig.urgency and (
+            allowed_buy_tickers is None or sig.ticker in allowed_buy_tickers
+        ):
             matching = next((r for r in raw_buy if r.get("ticker") == sig.ticker), {})
             account = matching.get("account", "")
             acct_tag = f" {account}" if account else ""
@@ -747,7 +926,9 @@ def _build_urgent_alert(
 
     # 🔴즉시 매도
     for sig in result.sell_signals:
-        if "즉시" in sig.urgency:
+        if "즉시" in sig.urgency and (
+            allowed_sell_tickers is None or sig.ticker in allowed_sell_tickers
+        ):
             matching = next((r for r in raw_sell if r.get("ticker") == sig.ticker), {})
             account = matching.get("account", "")
             shares = matching.get("shares", "")
@@ -760,7 +941,9 @@ def _build_urgent_alert(
 
     # 🟠주의 매도
     for sig in result.sell_signals:
-        if "주의" in sig.urgency:
+        if "주의" in sig.urgency and (
+            allowed_sell_tickers is None or sig.ticker in allowed_sell_tickers
+        ):
             matching = next((r for r in raw_sell if r.get("ticker") == sig.ticker), {})
             account = matching.get("account", "")
             acct_tag = f" {account}" if account else ""
@@ -773,10 +956,14 @@ def _build_urgent_alert(
     decision = result.investment_decision
     if not lines and decision in ("매수실행", "매도실행"):
         suppress = False
-        if normalized and decision == "매수실행":
-            exec_buys = [a for a in (normalized.get("executable_actions") or []) if a.get("side") == "buy"]
-            if not exec_buys:
-                suppress = True  # blocked만 있는데 매수실행 신호 → 억제
+        if normalized is not None and decision in ("매수실행", "매도실행"):
+            wanted_side = "buy" if decision == "매수실행" else "sell"
+            matching_exec = [
+                a for a in (normalized.get("executable_actions") or [])
+                if a.get("side") == wanted_side
+            ]
+            if not matching_exec:
+                suppress = True  # normalized에서 실행 허용되지 않은 raw 신호 억제
         if not suppress:
             icon = "🟢" if decision == "매수실행" else "🔴"
             lines.append(f"{icon} *{decision}* — Notion 상세 확인 필요")
@@ -821,13 +1008,19 @@ def _build_briefing_message(
     }.get(result.advisor_verdict, "💡")
     lines.append(f"{verdict_icon}  *AI 판단:  {result.advisor_verdict}*")
     lines.append("")
-    _ol_filtered = _filter_blocked_from_text(result.advisor_oneliner or "", raw.get("normalized"))
+    _normalized = _normalized_from_raw(raw)
+    _ol_filtered = _filter_blocked_from_text(result.advisor_oneliner or "", _normalized)
     if _ol_filtered:
         oneliner_lines = _wrap_text(_ol_filtered, 38)
         lines.append(f"💬  {oneliner_lines[0]}")
         for ol in oneliner_lines[1:]:
             lines.append(f"      {ol}")
         lines.append("")
+
+    # 상세 plain 메일도 normalized 4섹션을 정본으로 사용한다.
+    # raw Signal은 normalized 판정 전 값일 수 있으므로 보조 설명에만 사용한다.
+    if _normalized is not None:
+        _render_normalized_sections(lines, _normalized, "─" * 24, raw.get("next_action", "") or "")
 
     # ── 긴급 액션 알림 (🔥강력 매수 / 🔴즉시 매도) ──
     urgent_actions = _build_urgent_alert(result, raw)
@@ -840,7 +1033,7 @@ def _build_briefing_message(
         lines.append("")
 
     # ── 매수 전략 (normalized 있으면 raw buy_signals 직접 노출 금지) ──
-    if result.buy_signals and not raw.get("normalized"):
+    if result.buy_signals and _normalized is None:
         lines.append("")
         lines.append(f"{'─' * 24}")
         lines.append("🟢  *매수 액션*")
@@ -858,7 +1051,7 @@ def _build_briefing_message(
             lines.append("")
 
     # ── 매도 전략 (normalized 있으면 raw sell_signals 직접 노출 금지) ──
-    if result.sell_signals and not raw.get("normalized"):
+    if result.sell_signals and _normalized is None:
         lines.append("")
         lines.append(f"{'─' * 24}")
         lines.append("🔴  *매도 / 주의*")
@@ -875,18 +1068,7 @@ def _build_briefing_message(
                 lines.append(f"    수량 {shares}")
             lines.append("")
 
-    # ── 차단된 매수 후보 (normalized 결과, old path에서도 표시) ──
-    _normalized = raw.get("normalized")
-    if _normalized:
-        _blocked = _normalized.get("blocked_buys") or []
-        if _blocked:
-            lines.append("")
-            lines.append(f"{'─' * 24}")
-            lines.append("🚫  *차단된 매수 후보*")
-            lines.append("")
-            for blk in _blocked:
-                lines.append(f"  • {blk.get('name', '')} — {blk.get('block_reason', '조건 불일치로 주문 제외')}")
-            lines.append("")
+    # normalized 분류는 위 4섹션에서 모두 렌더됨.
 
     # ── 매수도 매도도 없으면 ──
     if not result.buy_signals and not result.sell_signals:
@@ -896,7 +1078,8 @@ def _build_briefing_message(
         lines.append("")
 
     # ── 계좌별 전략 ──
-    acct_strategy = raw.get("account_strategy", {})
+    acct_strategy_raw = raw.get("account_strategy", {})
+    acct_strategy = acct_strategy_raw if isinstance(acct_strategy_raw, dict) else {}
     if acct_strategy:
         lines.append("")
         lines.append(f"{'─' * 24}")
@@ -904,6 +1087,8 @@ def _build_briefing_message(
         lines.append("")
         acct_icons = {"ISA": "🟦", "RIA": "🟧", "일반": "⬜", "연금_IRP": "🟪"}
         for key, strategy in acct_strategy.items():
+            if strategy:
+                strategy = _filter_blocked_from_text(str(strategy), _normalized)
             if strategy:
                 icon = acct_icons.get(key, "▪️")
                 lines.append(f"{icon} *{key}*")
@@ -941,7 +1126,7 @@ def _build_briefing_message(
     # ── 다음 액션 ──
     next_action = raw.get("next_action", "")
     if next_action:
-        next_action = _filter_blocked_from_text(next_action, raw.get("normalized"))
+        next_action = _filter_blocked_from_text(next_action, _normalized_from_raw(raw))
     if next_action:
         lines.append("")
         lines.append(f"{'─' * 24}")

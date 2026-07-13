@@ -424,6 +424,29 @@ def test_toss_buy_candidates_sizes_by_confidence_rr_and_stop(monkeypatch):
 
 
 
+def test_toss_candidate_missing_quality_bucket_is_never_stock_agent_ready(monkeypatch):
+    from core import toss_quality_gate as qg
+
+    weak = _new_cand("000445.KQ", "품질누락", price=48_000)
+    weak = weak.__class__(
+        **{**weak.__dict__,
+           "target_price": 56_000.0,
+           "stop_loss": 46_500.0,
+           "risk_reward": 3.0,
+           "risk_flags": ("수급 약함 — 즉시 실행보다 관찰",),
+           "suggested_accounts": ("삼성 수동", "ISA", "토스 AI")}
+    )
+    _patch_sections(monkeypatch, _sections(new=[weak]))
+    monkeypatch.setattr(qg, "score_candidates_batch", lambda items, **kwargs: items)
+
+    item = dd.toss_buy_candidates_data(range_="today")["items"][0]
+
+    assert not item.get("decision_bucket")
+    assert item["stock_agent_ready"] is False
+    assert item["executable_now"] is False
+    assert item["block_reason"] == "quality_gate_decision_missing"
+
+
 def test_toss_candidate_with_weak_flow_only_becomes_conditional_small_entry(monkeypatch):
     weak = _new_cand("000444.KQ", "수급약함", price=48_000)
     weak = weak.__class__(
@@ -829,7 +852,18 @@ def test_toss_buy_candidates_no_fixed_cap_uses_account_risk_sizing(monkeypatch):
     from core import toss_live_pilot_policy as tlp
     # 이 테스트는 수량 산정 계약만 검증한다. 실제 repo score의 종목별 BUY
     # 판정과 분리해 신규 score 추가가 sizing 결과를 바꾸지 않게 한다.
-    monkeypatch.setattr(abt, "load_ai_berkshire_scores", lambda *a, **k: {})
+    monkeypatch.setattr(abt, "load_ai_berkshire_scores", lambda *a, **k: {
+        "items": {
+            "UNRELATED": {
+                "classification": "hold",
+                "as_of": "2026-07-10",
+                "valid_until": "2099-12-31",
+                "thesis": "unrelated score fixture",
+                "red_lines": ["fixture"],
+                "source_urls": ["https://example.com/fixture"],
+            }
+        }
+    })
     monkeypatch.setattr(tlp, "compute_toss_live_pilot_policy", lambda *a, **k: {"max_order_krw": None})
     monkeypatch.setattr(dd, "_toss_holding_price_map", lambda: {})
     monkeypatch.setattr(dd, "_recent_toss_risk_sell_symbols", lambda *a, **k: {})

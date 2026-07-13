@@ -471,10 +471,21 @@ def dispatch_toss_order_live(
         result["order_request_preview"] = order_request_preview
 
     if sent:
+        autonomous_policy = bool(
+            policy.get("autonomous_mode") is True
+            and policy.get("requires_user_confirmation") is not True
+            and policy.get("requires_second_confirmation") is not True
+        )
+        execution_contract = (
+            "Toss AI autonomous 실행\n"
+            "Hermes PASS + 결정론 안전 게이트\n"
+            if autonomous_policy
+            else "Hermes 승인형 자동실행 범위\nHermes PASS + 사용자 최종 승인 1건\n"
+        )
         result["message"] = (
-            f"승인형 {str(payload.get('side', 'buy')).upper()} pilot 전송 완료\n"
-            "Hermes 승인형 자동실행 범위\n"
-            "Hermes PASS + 사용자 최종 승인 1건\n"
+            f"{'Toss AI autonomous' if autonomous_policy else '승인형'} "
+            f"{str(payload.get('side', 'buy')).upper()} pilot 전송 완료\n"
+            f"{execution_contract}"
             f"broker_order_id={broker_order_id or '미확인'}\n"
             f"broker_status={result.get('broker_order_status') or '확인대기'} filled_qty={float(result.get('filled_quantity') or 0):g}\n"
             "live_order_sent=true"

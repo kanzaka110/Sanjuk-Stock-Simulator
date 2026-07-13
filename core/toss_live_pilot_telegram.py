@@ -74,11 +74,24 @@ def format_live_pilot_preview_message(
     blocks = preview.get("blocks", [])
     ok = preview.get("ok", False) and not blocks
 
+    autonomous_policy = bool(
+        policy.get("autonomous_mode") is True
+        and policy.get("requires_user_confirmation") is not True
+        and policy.get("requires_second_confirmation") is not True
+    )
     lines = [
-        "[승인형 Live Pilot 미리보기]",
+        (
+            "[Toss AI Autonomous Live Pilot 미리보기]"
+            if autonomous_policy
+            else "[수동 승인형 Live Pilot 미리보기]"
+        ),
         "아직 주문 전송 안 함",
         "실주문: 비활성",
-        "최종 2단계 승인 필요",
+        (
+            "Hermes PASS 후 결정론 안전 게이트 자동 진행"
+            if autonomous_policy
+            else "최종 2단계 승인 필요"
+        ),
         "주문 API 호출 비활성",
         "",
     ]
@@ -101,7 +114,11 @@ def format_live_pilot_preview_message(
         lines.append(f"- adapter: {policy.get('adapter_status', 'disabled')}")
         lines.append("")
         lines.append("좋은 후보가 있을 때만 매수 — 후보 없으면 매수 없음/HOLD.")
-        lines.append("다음 단계: 최종 승인 버튼을 눌러도 이번 단계에서는 전송 차단됩니다.")
+        lines.append(
+            "다음 단계: Hermes PASS 후 결정론 안전 게이트가 자동 실행 여부를 판정합니다."
+            if autonomous_policy
+            else "다음 단계: 최종 승인 버튼을 눌러도 이번 단계에서는 전송 차단됩니다."
+        )
 
     return "\n".join(lines)
 
@@ -121,6 +138,20 @@ def build_live_pilot_keyboard(
     if not ok:
         return [[
             {"text": "취소", "callback_data": build_callback_data("cancel", preview_id)},
+        ]]
+
+    autonomous_preview = bool(
+        "requires_user_confirmation" in preview
+        and "requires_second_confirmation" in preview
+        and preview.get("requires_user_confirmation") is False
+        and preview.get("requires_second_confirmation") is False
+    )
+    if autonomous_preview:
+        return [[
+            {
+                "text": "Live Pilot 기록 확인",
+                "callback_data": build_callback_data("review", preview_id),
+            },
         ]]
 
     return [

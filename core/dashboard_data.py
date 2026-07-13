@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import logging
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -145,9 +146,12 @@ def _refresh_toss_live_policy() -> None:
             data["cache_status"] = "live"
             with _cache_lock:
                 _cache["toss_live_policy_fast"] = (time.monotonic(), data)
-    except Exception as e:
+    except Exception as exc:
         with _cache_lock:
-            _cache["toss_live_policy_last_error"] = (time.monotonic(), str(e)[-200:])
+            _cache["toss_live_policy_last_error"] = (
+                time.monotonic(),
+                f"policy_refresh_failed:{type(exc).__name__}",
+            )
     finally:
         with _cache_lock:
             event = _toss_policy_refreshing
@@ -3112,17 +3116,17 @@ def toss_rebalance_plan_data(limit: int = 80, market: str = "ALL") -> dict:
     return plan
 
 # ─── /api/toss/buy-candidates — 토스 전용 매수 후보 (신규 발굴 기반) ─────────────
-_AI_BERKSHIRE_BUY_GATE_VERSION = "ai_berkshire_buy_gate_checklist_v2"
+_AI_BERKSHIRE_BUY_GATE_VERSION = "ai_berkshire_buy_gate_strict_v3"
 _TOSS_BUY_CANDIDATE_CACHE_LIMIT = 100
 
 
 def _apply_ai_berkshire_buy_gate(out: dict, scores: dict | None) -> dict:
     """신규 BUY 후보에 AI Berkshire 질적 게이트를 적용 (in-place).
 
-    근거가 살아있는 avoid 또는 buy_checklist_status=fail/gray_zone을
-    stock_agent_ready에서 하드 차단한다. 기존 score에 checklist가 없으면
-    avoid_only 동작을 유지한다. unscored / expired / invalid는 진단 필드만
-    남기고 기존 판정을 유지한다. SELL 후보와 게이트 오류는 영향을 받지 않는다.
+    근거가 살아있는 avoid 또는 strict BUY 게이트 거부를 stock_agent_ready에서
+    하드 차단한다. marker 없는 legacy score는 avoid_only 동작을 유지한다.
+    score unavailable·게이트 오류는 fail-closed하고, 정상 score의 unscored symbol만
+    진단 필드를 남긴 채 기존 판정을 유지한다. SELL 후보는 영향을 받지 않는다.
     """
     from core.ai_berkshire_toss import evaluate_ai_berkshire_buy_gate
 
@@ -3131,12 +3135,25 @@ def _apply_ai_berkshire_buy_gate(out: dict, scores: dict | None) -> dict:
         return out
     try:
         gate = evaluate_ai_berkshire_buy_gate(symbol, scores=scores or {})
-    except Exception as e:                              # 게이트 오류로 후보를 잃지 않는다
+    except Exception as e:
         log.warning("ai_berkshire buy gate failed (%s): %s", symbol, e)
-        out["ai_berkshire_buy_block"] = False
-        out["ai_berkshire_buy_reason"] = "ai_berkshire_gate_error"
-        out["ai_berkshire_research_status"] = "needs_research"
-        return out
+        gate = {
+            "buy_block": True,
+            "buy_reason": "ai_berkshire_gate_error",
+            "research_status": "needs_research",
+            "stored_classification": None,
+            "classification": None,
+            "freshness_valid": False,
+            "thesis_expired": False,
+            "freshness_issues": ["gate_error"],
+            "as_of": None,
+            "valid_until": None,
+            "confidence": None,
+            "source_urls": [],
+            "buy_checklist_status": None,
+        }
+    if gate.get("buy_reason") == "ai_berkshire_scores_unavailable":
+        gate["buy_block"] = True
 
     out["ai_berkshire_buy_block"] = gate["buy_block"]
     out["ai_berkshire_buy_reason"] = gate["buy_reason"]
@@ -3145,6 +3162,8 @@ def _apply_ai_berkshire_buy_gate(out: dict, scores: dict | None) -> dict:
         "version": _AI_BERKSHIRE_BUY_GATE_VERSION,
         "stored_classification": gate["stored_classification"],
         "classification": gate["classification"],
+        "classification_valid": gate.get("classification_valid", False),
+        "strict_buy_gate": gate.get("strict_buy_gate", False),
         "freshness_valid": gate["freshness_valid"],
         "thesis_expired": gate["thesis_expired"],
         "freshness_issues": gate["freshness_issues"],
@@ -3161,6 +3180,9 @@ def _apply_ai_berkshire_buy_gate(out: dict, scores: dict | None) -> dict:
     if reason == "ai_berkshire_avoid":
         block_reason = "AI Berkshire avoid 판정 — 신규 BUY 차단 (기존 보유/매도 판단은 불변)"
         execution_status = "hold_ai_berkshire_avoid"
+    elif reason in {"ai_berkshire_scores_unavailable", "ai_berkshire_gate_error"}:
+        block_reason = "AI Berkshire score/게이트 확인 불가 — 신규 BUY fail-closed"
+        execution_status = "hold_ai_berkshire_unavailable"
     else:
         checklist = str(gate.get("buy_checklist_status") or "blocked")
         block_reason = (
@@ -3395,6 +3417,28 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
 
         scan_summary["configured_max_order_krw"] = max_order_krw
         scan_summary["candidate_affordability_limit_krw"] = candidate_affordability_limit_krw
+
+        # 품질 점수는 ready 판정 전에 반드시 채운다. GET 경로는 DB 기록/고비용 조회 없이
+        # 후보 객체만 결정론적으로 보강한다. 실패·누락은 아래 ready gate에서 차단된다.
+        try:
+            from core.toss_quality_gate import score_candidates_batch
+            quality_items = result.get("items") or []
+            for quality_market in ("KR", "US"):
+                market_items = [
+                    item for item in quality_items
+                    if str(item.get("market") or (
+                        "KR" if str(item.get("symbol") or "").endswith((".KS", ".KQ"))
+                        else "US"
+                    )).upper() == quality_market
+                ]
+                score_candidates_batch(
+                    market_items,
+                    market=quality_market,
+                    persist_decisions=False,
+                    expensive_checks=False,
+                )
+        except Exception as exc:
+            log.warning("Toss candidate quality scoring failed: %s", type(exc).__name__)
 
         def _enrich_for_stock_agent(item: dict) -> dict:
             """Add complete read-only order-review fields for Hermes stock-agent.
@@ -3722,14 +3766,26 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
             income_pass = bool((out.get("income_strategy") or {}).get("income_pass"))
 
             # 품질 게이트 + 수입 기대값 gate decision 반영
-            bucket = out.get("decision_bucket", "")
-            if bucket:
-                _exec_buckets = ("PASS_EXECUTE", "SMALL_PASS")
-                out["stock_agent_ready"] = bucket in _exec_buckets and income_pass and not missing and not out.get("limit_exceeded") and not hard_blocked
-                if bucket not in _exec_buckets and not out.get("block_reason"):
-                    out["block_reason"] = out.get("decision_reason", bucket)
-            else:
-                out["stock_agent_ready"] = income_pass and not missing and not out.get("limit_exceeded") and not hard_blocked
+            bucket = str(out.get("decision_bucket") or "")
+            _exec_buckets = ("PASS_EXECUTE", "SMALL_PASS")
+            out["stock_agent_ready"] = (
+                bucket in _exec_buckets
+                and income_pass
+                and not missing
+                and not out.get("limit_exceeded")
+                and not hard_blocked
+            )
+            if bucket not in _exec_buckets:
+                out["executable_now"] = False
+                if not hard_blocked:
+                    out["execution_status"] = (
+                        "quality_gate_blocked" if bucket else "quality_gate_missing"
+                    )
+                if not out.get("block_reason"):
+                    out["block_reason"] = (
+                        str(out.get("decision_reason") or bucket)
+                        if bucket else "quality_gate_decision_missing"
+                    )
 
             _apply_ai_berkshire_buy_gate(out, berkshire_scores)
             return out
@@ -4256,7 +4312,7 @@ def toss_live_pilot_policy_data() -> dict:
         "order_endpoint_confirmed": True,
         "order_endpoint": "POST /api/v1/orders",
         # read-only 표시값: env gate + adapter + transport가 모두 열린 경우에만 true.
-        # 실제 주문은 별도 Hermes PASS + 사용자 최종 승인 + transport dispatch guard 필요.
+        # 실제 주문은 Hermes PASS + 정책별 confirmation + transport dispatch guard 필요.
         "live_order_sent_possible": live_order_sent_possible,
     }
     return data
@@ -4334,9 +4390,19 @@ def _recent_toss_broker_orders(limit: int = 20) -> dict:
             1 for row in orders
             if str(row.get("broker_order_status") or "").upper() in {"OPEN", "PENDING", "ACCEPTED"}
         )
+        snapshot_error = str(snapshot.get("error") or "")
+        safe_snapshot_error = (
+            snapshot_error
+            if re.fullmatch(
+                r"snapshot_(?:missing|stale|invalid|unavailable)"
+                r"(?::[A-Za-z][A-Za-z0-9_]*)?",
+                snapshot_error,
+            )
+            else "broker_snapshot_unavailable"
+        )
         return {
             "ok": bool(snapshot.get("ok")),
-            "error": str(snapshot.get("error") or ""),
+            "error": "" if snapshot.get("ok") else safe_snapshot_error,
             "orders": orders[:limit],
             "open_count": open_count,
             "closed_count": max(0, len(orders) - open_count),
@@ -4381,8 +4447,14 @@ def _recent_toss_broker_orders(limit: int = 20) -> dict:
 
     try:
         from core.toss_live_order_http import list_orders
-    except Exception as e:
-        return {"ok": False, "error": str(e), "orders": [], "open_count": 0, "closed_count": 0}
+    except Exception:
+        return {
+            "ok": False,
+            "error": "broker_order_source_unavailable",
+            "orders": [],
+            "open_count": 0,
+            "closed_count": 0,
+        }
 
     orders: list[dict] = []
     errors: list[str] = []
@@ -4390,11 +4462,17 @@ def _recent_toss_broker_orders(limit: int = 20) -> dict:
     for status in ("OPEN", "CLOSED"):
         try:
             res = list_orders(status)
-        except Exception as e:
-            errors.append(f"{status}: {e}")
+        except Exception:
+            errors.append(f"{status}:broker_orders_unavailable")
             continue
         if not res.get("ok"):
-            errors.append(f"{status}: {res.get('reason') or 'unknown'}")
+            raw_reason = str(res.get("reason") or "")
+            safe_reason = (
+                raw_reason
+                if re.fullmatch(r"http_[1-5][0-9]{2}", raw_reason)
+                else "broker_orders_unavailable"
+            )
+            errors.append(f"{status}:{safe_reason}")
             continue
         rows = res.get("orders") or []
         counts[status] = len(rows)
@@ -4513,7 +4591,7 @@ def toss_live_pilot_events_data(limit: int = 50) -> dict:
         live_sent_real = int(summ.get("live_sent_real", 0))
         warnings = []
         if not broker_truth.get("ok", False):
-            warnings.append("브로커 주문 조회 실패/제한: " + str(broker_truth.get("error") or "unknown"))
+            warnings.append("브로커 주문 조회 실패/제한: broker_orders_unavailable")
         if broker_orders and not records:
             warnings.append("브로커 주문은 있으나 live-pilot 이벤트 ledger가 비어 있음 — 표시/기록 경로 점검 필요")
         allowed_assets = set(policy.get("allowed_asset_types") or [])
@@ -4544,13 +4622,15 @@ def toss_live_pilot_events_data(limit: int = 50) -> dict:
             "broker_open_count": broker_truth.get("open_count", 0),
             "broker_closed_count": broker_truth.get("closed_count", 0),
             "broker_truth_ok": broker_truth.get("ok", False),
-            "broker_truth_error": broker_truth.get("error", ""),
+            "broker_truth_error": (
+                "" if broker_truth.get("ok", False) else "broker_orders_unavailable"
+            ),
             "warnings": warnings,
             "read_only_broker_source": broker_truth.get("source"),
         }
-    except Exception as e:
+    except Exception:
         return {
-            "error": str(e),
+            "error": "events_data_unavailable",
             "summary": {},
             "live_sent_real": 0,
             "live_sent_mock_or_artifact": 0,

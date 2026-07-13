@@ -1269,6 +1269,298 @@ class TestActionsTelegramRender:
         # 차단된 KODEX 200의 '즉시 매수' 문구가 매수 후보 없음 사유로 부활하면 안 됨
         assert "KODEX 200 즉시 매수 진입 권고" not in msg
 
+    def test_no_buy_safe_marker_does_not_bypass_cta_filter(self):
+        from core.telegram import _build_impact_message
+
+        raw = {"normalized": {
+            "executable_actions": [],
+            "blocked_buys": [{"ticker": "NVDA", "name": "NVIDIA"}],
+            "no_buy_reason": "매수 후보 없음 / NVDA 매수 실행",
+        }}
+        msg = _build_impact_message(
+            self._make_result(raw), raw, "🇺🇸", "t", "US_BEFORE",
+        )
+
+        assert "매수 후보 없음" in msg
+        assert "NVDA 매수 실행" not in msg
+
+    def test_detailed_email_text_does_not_revive_cancelled_sell(self):
+        """cancelled_sells 종목이 raw 긴급매도·계좌전략에서 다시 실행문구로 나오면 안 됨."""
+        from core.models import BriefingResult, Signal
+        from core.telegram import _build_briefing_message
+
+        normalized = {
+            "executable_actions": [],
+            "conditional_buy_candidates": [],
+            "conditional_sell_candidates": [],
+            "cancelled_sells": [{
+                "ticker": "091160.KS",
+                "name": "KODEX 반도체",
+                "account": "[RIA]",
+                "action_type": "HOLD_REVIEW",
+                "protected_hold": True,
+                "hold_note": "보유 관리 · 실행 매도 아님",
+            }],
+            "blocked_buys": [],
+        }
+        raw = {
+            "normalized": normalized,
+            "account_strategy": {
+                "RIA": "오늘은 091160 KODEX 반도체 20주 즉시 매도",
+            },
+        }
+        result = BriefingResult(
+            title="테스트",
+            advisor_verdict="HOLD",
+            sell_signals=(Signal(
+                ticker="091160.KS",
+                name="KODEX 반도체",
+                signal="매도",
+                urgency="🔴즉시",
+            ),),
+            raw_json=raw,
+        )
+
+        msg = _build_briefing_message(result, raw, "KR_OPEN", "테스트", "")
+
+        assert "긴급 액션 필요" not in msg
+        assert "즉시 매도" not in msg
+        assert "KODEX 반도체 20주" not in msg
+
+    def test_empty_normalized_suppresses_raw_execution_fallback(self):
+        """normalized가 빈 dict여도 raw 매수/매도실행 fallback을 허용하면 안 됨."""
+        from core.models import BriefingResult
+        from core.telegram import _build_urgent_alert
+
+        raw = {"normalized": {}}
+        result = BriefingResult(investment_decision="매도실행", raw_json=raw)
+
+        alert = "\n".join(_build_urgent_alert(result, raw))
+
+        assert "매도실행" not in alert
+        assert alert == ""
+
+    def test_empty_normalized_hides_all_raw_action_sections(self):
+        from core.email import _build_briefing_html
+        from core.models import BriefingResult, Signal
+        from core.telegram import _build_briefing_message, _build_impact_message
+
+        raw = {
+            "normalized": {},
+            "strategy_buy": [{"ticker": "RAWBUY.KS", "name": "RAWBUY", "account": "[일반]"}],
+            "strategy_sell": [{"ticker": "RAWSELL.KS", "name": "RAWSELL", "account": "[RIA]"}],
+            "buy_recommendations": [{"ticker": "RAWBUY.KS", "name": "RAWBUY", "reason": "즉시 매수"}],
+            "sell_recommendations": [{"ticker": "RAWSELL.KS", "name": "RAWSELL", "reason": "즉시 매도"}],
+            "account_strategy": {"일반": "RAWBUY 즉시 매수", "RIA": "RAWSELL 즉시 매도"},
+            "next_action": "RAWBUY 매수 실행 / RAWSELL 매도 실행",
+            "advisor_conclusion": "RAWBUY 매수, RAWSELL 매도",
+        }
+        result = BriefingResult(
+            title="테스트",
+            advisor_verdict="HOLD",
+            buy_signals=(Signal(ticker="RAWBUY.KS", name="RAWBUY", signal="매수", urgency="🔥강력"),),
+            sell_signals=(Signal(ticker="RAWSELL.KS", name="RAWSELL", signal="매도", urgency="🔴즉시"),),
+            raw_json=raw,
+        )
+
+        outputs = [
+            _build_briefing_message(result, raw, "KR_OPEN", "테스트", ""),
+            _build_impact_message(result, raw, "KR_OPEN", "테스트", "KR_OPEN"),
+            _build_briefing_html(result, raw, "KR_OPEN", "테스트"),
+        ]
+        for output in outputs:
+            assert "RAWBUY" not in output
+            assert "RAWSELL" not in output
+            assert "즉시 매수" not in output
+            assert "즉시 매도" not in output
+
+    def test_email_legacy_missing_normalized_strips_generic_raw_buy_cta(self):
+        from core.email import _build_briefing_html
+        from core.models import BriefingResult
+
+        raw = {
+            "advisor_oneliner": "시장 변동성 확대 / RAWBUY 매수 실행",
+            "advisor_conclusion": "RAWBUY 매수 검토",
+            "next_action": "RAWBUY 주문 실행",
+            "strategy_summary": "현금 유지 / RAWBUY 진입 검토",
+            "account_strategy": {"일반": "RAWBUY 매수 실행"},
+            "advisor_scenarios": [{
+                "label": "반등",
+                "condition": "거래량 증가",
+                "action": "RAWBUY 매수 실행",
+            }],
+        }
+        result = BriefingResult(title="테스트", market_summary="시장 분석 유지", raw_json=raw)
+
+        html = _build_briefing_html(result, raw, "KR_OPEN", "테스트")
+
+        assert "시장 분석 유지" in html
+        assert "시장 변동성 확대" in html
+        assert "RAWBUY" not in html
+        assert "매수 실행" not in html
+        assert "매수 검토" not in html
+        assert "주문 실행" not in html
+        assert "진입 검토" not in html
+
+    def test_normalized_executable_requires_exact_side_and_symbol(self):
+        from core.telegram import _coerce_normalized
+
+        normalized = _coerce_normalized({
+            "executable_actions": [
+                {"ticker": "NVDA", "side": "BUY", "type": "매수·즉시"},
+                {"ticker": "", "side": "sell", "type": "매도·즉시"},
+                {"name": "종목명만", "side": "buy", "type": "매수·즉시"},
+            ],
+        })
+
+        assert normalized["executable_actions"] == []
+        assert any("normalized 구조 오류" in e
+                   for e in normalized["integrity_errors"])
+
+    def test_malformed_nested_action_fields_are_dropped_without_renderer_crash(self):
+        from core.models import BriefingResult
+        from core.telegram import _build_impact_message
+
+        raw = {"normalized": {
+            "conditional_buy_candidates": [{
+                "ticker": "BAD.NESTED",
+                "name": "BADNESTED",
+                "gap_pct": "not-a-number",
+                "execution_risk": "not-an-object",
+            }],
+        }}
+        result = BriefingResult(title="테스트", raw_json=raw)
+
+        message = _build_impact_message(result, raw, "KR_OPEN", "테스트")
+
+        assert "BADNESTED" not in message
+        assert "조건 불일치로 주문 제외" in message
+
+    def test_urgent_alert_rejects_truthy_non_list_raw_action_containers(self):
+        from core.models import BriefingResult
+        from core.telegram import _build_urgent_alert
+
+        raw = {
+            "normalized": {},
+            "strategy_buy": 7,
+            "strategy_sell": {"ticker": "NVDA"},
+        }
+        result = BriefingResult(
+            investment_decision="매수실행",
+            raw_json=raw,
+        )
+
+        assert _build_urgent_alert(result, raw) == []
+
+    def test_raw_action_alias_matching_uses_token_boundaries_and_rejects_mixed_tickers(self):
+        from core.telegram import _coerce_normalized, _filter_blocked_from_text
+
+        normalized = _coerce_normalized({
+            "executable_actions": [{
+                "ticker": "MU", "name": "Micron", "side": "buy", "type": "매수·즉시",
+            }],
+        })
+
+        assert _filter_blocked_from_text("momentum NVDA 매수 실행", normalized) == ""
+        assert _filter_blocked_from_text("MU와 NVDA 매수 실행", normalized) == ""
+        assert "MU" in _filter_blocked_from_text("MU 매수 실행", normalized)
+
+    def test_malformed_normalized_fails_closed_in_all_renderers(self):
+        from core.email import _build_briefing_html
+        from core.models import BriefingResult, Signal
+        from core.telegram import _build_briefing_message, _build_impact_message, _build_urgent_alert
+
+        malformed_values = [
+            ["bad"],
+            {"executable_actions": ["bad"], "cancelled_sells": [7]},
+        ]
+        for malformed in malformed_values:
+            raw = {
+                "normalized": malformed,
+                "strategy_buy": [{"ticker": "RAWBUY.KS", "name": "RAWBUY"}],
+                "buy_recommendations": [{"ticker": "RAWBUY.KS", "name": "RAWBUY", "reason": "즉시 매수"}],
+                "account_strategy": {"일반": "RAWBUY 즉시 매수"},
+                "next_action": "RAWBUY 매수 실행",
+            }
+            result = BriefingResult(
+                title="테스트",
+                investment_decision="매수실행",
+                buy_signals=(Signal(ticker="RAWBUY.KS", name="RAWBUY", signal="매수", urgency="🔥강력"),),
+                raw_json=raw,
+            )
+            outputs = [
+                "\n".join(_build_urgent_alert(result, raw)),
+                _build_briefing_message(result, raw, "KR_OPEN", "테스트", ""),
+                _build_impact_message(result, raw, "KR_OPEN", "테스트", "KR_OPEN"),
+                _build_briefing_html(result, raw, "KR_OPEN", "테스트"),
+            ]
+            for output in outputs:
+                assert "RAWBUY" not in output
+                assert "즉시 매수" not in output
+                assert "매수실행" not in output
+
+    def test_email_html_does_not_revive_cancelled_sell_from_raw_sections(self):
+        """HTML 이메일도 normalized와 충돌하는 raw 실행 문구를 제거해야 함."""
+        from core.email import _build_briefing_html
+        from core.models import BriefingResult
+
+        normalized = {
+            "executable_actions": [],
+            "conditional_buy_candidates": [],
+            "conditional_sell_candidates": [],
+            "cancelled_sells": [{
+                "ticker": "091160.KS",
+                "name": "KODEX 반도체",
+                "account": "[RIA]",
+                "action_type": "HOLD_REVIEW",
+                "protected_hold": True,
+                "hold_note": "보유 관리 · 실행 매도 아님",
+            }],
+            "blocked_buys": [],
+        }
+        raw = {
+            "normalized": normalized,
+            "advisor_conclusion": "091160 KODEX 반도체는 오늘 즉시 매도",
+            "next_action": "KODEX 반도체 20주 매도 실행",
+            "account_strategy": {"RIA": "091160 20주 즉시 매도"},
+            "advisor_scenarios": [{
+                "label": "하락",
+                "condition": "저가 이탈",
+                "action": "KODEX 반도체 전량 매도",
+                "amount": "20주",
+            }],
+        }
+        result = BriefingResult(
+            title="테스트",
+            advisor_verdict="HOLD",
+            raw_json=raw,
+        )
+
+        html = _build_briefing_html(result, raw, "KR_OPEN", "테스트")
+
+        assert "즉시 매도" not in html
+        assert "매도 실행" not in html
+        assert "전량 매도" not in html
+        assert "보유 관리" in html
+
+    def test_email_html_ignores_malformed_raw_action_sections(self):
+        """LLM action section shape가 깨져도 이메일 생성은 실패하지 않아야 함."""
+        from core.email import _build_briefing_html
+        from core.models import BriefingResult
+
+        raw = {
+            "normalized": {},
+            "account_strategy": ["잘못된 계좌전략"],
+            "advisor_scenarios": ["잘못된 시나리오", None, 7],
+        }
+        result = BriefingResult(title="테스트", advisor_verdict="HOLD", raw_json=raw)
+
+        html = _build_briefing_html(result, raw, "KR_OPEN", "테스트")
+
+        assert "<!DOCTYPE html>" in html
+        assert "잘못된 계좌전략" not in html
+        assert "잘못된 시나리오" not in html
+
 
 class TestIsActionablePolicy:
     """긴급알림 _is_actionable() 정책 테스트."""

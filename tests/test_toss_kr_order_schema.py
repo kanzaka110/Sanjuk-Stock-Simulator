@@ -34,7 +34,7 @@ class TestKrStockSchemaAllowed:
 
     def test_kr_symbol_allowed_with_kr_asset_type(self):
         result = build_toss_order_create_request(
-            _KR_PAYLOAD, client_order_id="test_kr", asset_type="KR_STOCK",
+            _KR_PAYLOAD, client_order_id="tlive_test_kr", asset_type="KR_STOCK",
         )
         assert result["ok"] is True
         # Toss API에는 suffix 없이 숫자 코드만 전송
@@ -42,7 +42,7 @@ class TestKrStockSchemaAllowed:
 
     def test_kr_symbol_blocked_with_us_asset_type(self):
         result = build_toss_order_create_request(
-            _KR_PAYLOAD, client_order_id="test_kr", asset_type="US_STOCK",
+            _KR_PAYLOAD, client_order_id="tlive_test_kr", asset_type="US_STOCK",
         )
         assert result["ok"] is False
         assert any("non_us" in b for b in result["blocks"])
@@ -50,7 +50,7 @@ class TestKrStockSchemaAllowed:
     def test_kr_symbol_auto_detect_asset_type(self):
         """asset_type=None이면 심볼에서 자동 판별, suffix strip."""
         result = build_toss_order_create_request(
-            _KR_PAYLOAD, client_order_id="test_kr",
+            _KR_PAYLOAD, client_order_id="tlive_test_kr",
         )
         assert result["ok"] is True
         assert result["request"]["symbol"] == "069500"
@@ -61,7 +61,7 @@ class TestKrStockPriceFormat:
 
     def test_kr_price_integer(self):
         result = build_toss_order_create_request(
-            _KR_PAYLOAD, client_order_id="test_kr", asset_type="KR_STOCK",
+            _KR_PAYLOAD, client_order_id="tlive_test_kr", asset_type="KR_STOCK",
         )
         assert result["ok"] is True
         assert result["request"]["price"] == "140000"
@@ -69,7 +69,7 @@ class TestKrStockPriceFormat:
     def test_kr_price_float_truncated(self):
         payload = {**_KR_PAYLOAD, "limit_price": 140000.5}
         result = build_toss_order_create_request(
-            payload, client_order_id="test_kr", asset_type="KR_STOCK",
+            payload, client_order_id="tlive_test_kr", asset_type="KR_STOCK",
         )
         assert result["ok"] is True
         assert result["request"]["price"] == "140000"
@@ -81,7 +81,7 @@ class TestDigitOnlyBlocked:
     def test_digit_only_blocked_us(self):
         payload = {**_US_PAYLOAD, "symbol": "005930"}
         result = build_toss_order_create_request(
-            payload, client_order_id="test", asset_type="US_STOCK",
+            payload, client_order_id="tlive_test", asset_type="US_STOCK",
         )
         assert result["ok"] is False
         assert any("digit_only" in b for b in result["blocks"])
@@ -89,7 +89,7 @@ class TestDigitOnlyBlocked:
     def test_digit_only_blocked_kr(self):
         payload = {**_KR_PAYLOAD, "symbol": "005930"}
         result = build_toss_order_create_request(
-            payload, client_order_id="test", asset_type="KR_STOCK",
+            payload, client_order_id="tlive_test", asset_type="KR_STOCK",
         )
         assert result["ok"] is False
         assert any("digit_only" in b for b in result["blocks"])
@@ -100,7 +100,7 @@ class TestUsStockUnchanged:
 
     def test_us_symbol_ok(self):
         result = build_toss_order_create_request(
-            _US_PAYLOAD, client_order_id="test_us", asset_type="US_STOCK",
+            _US_PAYLOAD, client_order_id="tlive_test_us", asset_type="US_STOCK",
         )
         assert result["ok"] is True
         assert result["request"]["symbol"] == "NVDA"
@@ -108,7 +108,7 @@ class TestUsStockUnchanged:
     def test_us_price_decimal(self):
         payload = {**_US_PAYLOAD, "limit_price": 190.50}
         result = build_toss_order_create_request(
-            payload, client_order_id="test_us", asset_type="US_STOCK",
+            payload, client_order_id="tlive_test_us", asset_type="US_STOCK",
         )
         assert result["ok"] is True
         assert result["request"]["price"] == "190.5"
@@ -120,7 +120,7 @@ class TestKosdaq:
     def test_kq_symbol_allowed(self):
         payload = {**_KR_PAYLOAD, "symbol": "091160.KQ"}
         result = build_toss_order_create_request(
-            payload, client_order_id="test_kq", asset_type="KR_STOCK",
+            payload, client_order_id="tlive_test_kq", asset_type="KR_STOCK",
         )
         assert result["ok"] is True
         assert result["request"]["symbol"] == "091160"

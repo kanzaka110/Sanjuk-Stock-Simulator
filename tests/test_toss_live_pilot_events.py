@@ -12,10 +12,13 @@ Live pilot callback 이벤트 로그 테스트.
 8. review / cancel / confirm 이벤트 타입 커버
 """
 
+import multiprocessing
 import tempfile
+import time
 import unittest
 import sqlite3
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 import sys
 
@@ -38,6 +41,46 @@ def _tmp_patch():
 def _reset():
     import core.toss_live_pilot_events as m
     m._schema_created = False
+
+
+def _cross_process_fill_worker(db_path, broker_row, barrier, delay_update, output):
+    import core.toss_live_pilot_events as events
+
+    real_connect = events.sqlite3.connect
+
+    class ConnectionProxy:
+        def __init__(self, real):
+            object.__setattr__(self, "_real", real)
+            object.__setattr__(self, "_barrier_used", False)
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+        def __setattr__(self, name, value):
+            setattr(self._real, name, value)
+
+        def execute(self, sql, *args):
+            normalized = " ".join(str(sql).split())
+            if normalized.startswith("UPDATE live_pilot_events") and delay_update:
+                time.sleep(0.35)
+            cursor = self._real.execute(sql, *args)
+            if (
+                normalized.startswith("SELECT * FROM live_pilot_events WHERE pilot_id")
+                and not self._barrier_used
+            ):
+                object.__setattr__(self, "_barrier_used", True)
+                barrier.wait(timeout=5)
+            return cursor
+
+    events._db_path = lambda: Path(db_path)
+    events._schema_created = True
+    events.sqlite3.connect = lambda *args, **kwargs: ConnectionProxy(
+        real_connect(*args, **kwargs)
+    )
+    try:
+        output.put(events.sync_live_event_fills_from_broker_orders([broker_row]))
+    except Exception as exc:
+        output.put({"error_type": type(exc).__name__})
 
 
 # ── 1. 기본 record_event ──────────────────────────────────
@@ -129,6 +172,18 @@ class TestRecordEventBasic(unittest.TestCase):
         self.assertIn("INVALID_PRICE", found[0]["error_body"])
         self.assertIn('\"symbol\": \"000270\"', found[0]["order_request_preview"])
 
+    def test_list_events_exception_logs_type_only(self):
+        from core import toss_live_pilot_events as events
+
+        synthetic_marker = "Bearer list-events-private"
+        with patch.object(
+            events, "_conn", side_effect=RuntimeError(synthetic_marker)
+        ):
+            with self.assertLogs(events.log, level="WARNING") as captured:
+                result = events.list_events(limit=5)
+        self.assertEqual(result, [])
+        self.assertNotIn(synthetic_marker, "\n".join(captured.output))
+
 
 # ── 2. symbol_name / symbol_label ────────────────────────
 
@@ -204,6 +259,113 @@ class TestSensitiveBlocked(unittest.TestCase):
         from core.toss_live_pilot_events import record_event
         r = record_event("tlive_sens3", "reviewed", "reviewed", reason="APP_KEY=xyz")
         self.assertFalse(r["ok"])
+
+    def test_lowercase_and_nested_credentials_blocked_in_all_text_fields(self):
+        from core.toss_live_pilot_events import record_event
+
+        cases = [
+            {"status": "authorization=private-value"},
+            {"preview_id": "accessToken:private-value"},
+            {"broker_order_status": "password=private-value"},
+            {"symbol": "client_secret=private-value"},
+            {"order_request_preview": {"nested": {"PaSsWoRd": "private-value"}}},
+        ]
+        for index, kwargs in enumerate(cases):
+            params = {
+                "pilot_id": f"tlive_sensitive_{index}",
+                "event_type": "reviewed",
+                "status": "reviewed",
+                **kwargs,
+            }
+            result = record_event(**params)
+            self.assertEqual(
+                result,
+                {"ok": False, "reason": "sensitive_field"},
+                msg=f"case {index} was not blocked",
+            )
+
+    def test_naked_pat_is_blocked_from_every_persisted_text_boundary(self):
+        from core.toss_live_pilot_events import record_event
+
+        fake_pat = "ghp_" + "A" * 40
+        fields = (
+            "pilot_id", "status", "preview_id", "verification_id",
+            "symbol", "side", "adapter_status", "reason", "message",
+            "broker_order_id", "broker_order_status", "error_body",
+            "order_request_preview",
+        )
+        for index, field in enumerate(fields):
+            params = {
+                "pilot_id": f"tlive_naked_{index}",
+                "event_type": "reviewed",
+                "status": "reviewed",
+                field: fake_pat,
+            }
+            result = record_event(**params)
+            self.assertEqual(result, {"ok": False, "reason": "sensitive_field"})
+        decision_result = record_event(
+            "tlive_naked_ref", "reviewed", "reviewed",
+            decision_ref="prediction:" + fake_pat,
+        )
+        self.assertEqual(
+            decision_result, {"ok": False, "reason": "sensitive_field"}
+        )
+
+
+class TestStrictEventIdentityAndBooleanContract(unittest.TestCase):
+    def setUp(self):
+        self._tmp, self._p = _tmp_patch()
+        self._p.start()
+        _reset()
+
+    def tearDown(self):
+        self._p.stop()
+        _reset()
+
+    def test_string_false_cannot_become_real_event(self):
+        from core.toss_live_pilot_events import record_event
+
+        result = record_event(
+            "tlive_strict_false", "autonomous_live_sent", "sent",
+            adapter_status="enabled",
+            live_order_sent="false",
+            live_order_allowed="false",
+        )
+        self.assertEqual(
+            result, {"ok": False, "reason": "live_boolean_contract_invalid"}
+        )
+
+    def test_overlong_decision_ref_is_rejected_without_truncation(self):
+        from core.toss_live_pilot_events import record_event
+
+        ref = "prediction:" + "A" * 200
+        result = record_event(
+            "tlive_long_ref", "reviewed", "reviewed", decision_ref=ref
+        )
+        self.assertEqual(result, {"ok": False, "reason": "invalid_decision_ref"})
+
+    def test_non_finite_or_boolean_financial_values_are_rejected(self):
+        from core.toss_live_pilot_events import record_event
+
+        cases: tuple[dict[str, Any], ...] = (
+            {"quantity": True},
+            {"quantity": float("nan")},
+            {"limit_price": float("inf")},
+            {"estimated_amount_krw": float("-inf")},
+            {"filled_quantity": float("nan")},
+            {"filled_price": True},
+        )
+        for index, kwargs in enumerate(cases):
+            with self.subTest(kwargs=kwargs):
+                result = record_event(
+                    f"tlive_invalid_number_{index}",
+                    "reviewed",
+                    "reviewed",
+                    **kwargs,
+                )
+                self.assertEqual(
+                    result, {"ok": False, "reason": "event_numeric_contract_invalid"}
+                )
 
 
 # ── 4. invalid event_type ─────────────────────────────────
@@ -408,6 +570,91 @@ def test_existing_sqlite_ledgers_gain_decision_ref_column(tmp_path, monkeypatch)
         assert "decision_ref" in columns
 
 
+def test_event_schema_migration_failure_does_not_mark_schema_ready(tmp_path, monkeypatch):
+    import pytest
+    from core import toss_live_pilot_events as events
+
+    path = tmp_path / "events_locked.db"
+    real_connect = sqlite3.connect
+    legacy = real_connect(path)
+    legacy.execute("CREATE TABLE live_pilot_events (event_id TEXT PRIMARY KEY)")
+    legacy.commit()
+    legacy.close()
+    fail_fill_column = {"enabled": True}
+
+    class ConnectionProxy:
+        def __init__(self, connection):
+            object.__setattr__(self, "_connection", connection)
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+        def __setattr__(self, name, value):
+            setattr(self._connection, name, value)
+
+        def execute(self, sql, *args):
+            if (
+                fail_fill_column["enabled"]
+                and sql.startswith("ALTER TABLE")
+                and "fill_updated_at" in sql
+            ):
+                raise sqlite3.OperationalError("database is locked")
+            return self._connection.execute(sql, *args)
+
+    monkeypatch.setattr(events, "_db_path", lambda: path)
+    monkeypatch.setattr(
+        events.sqlite3,
+        "connect",
+        lambda *args, **kwargs: ConnectionProxy(real_connect(*args, **kwargs)),
+    )
+    events._schema_created = False
+
+    with pytest.raises(sqlite3.OperationalError, match="locked"):
+        events._conn()
+    assert events._schema_created is False
+
+    fail_fill_column["enabled"] = False
+    migrated = events._conn()
+    columns = {
+        str(row[1])
+        for row in migrated.execute("PRAGMA table_info(live_pilot_events)").fetchall()
+    }
+    migrated.close()
+    assert "fill_updated_at" in columns
+    assert events._schema_created is True
+
+
+def test_event_partial_schema_migrates_complete_insert_contract(tmp_path, monkeypatch):
+    from core import toss_live_pilot_events as events
+
+    path = tmp_path / "events_partial.db"
+    legacy = sqlite3.connect(path)
+    legacy.execute("CREATE TABLE live_pilot_events (event_id TEXT PRIMARY KEY)")
+    legacy.commit()
+    legacy.close()
+    monkeypatch.setattr(events, "_db_path", lambda: path)
+    events._schema_created = False
+
+    migrated = events._conn()
+    columns = {
+        str(row[1])
+        for row in migrated.execute("PRAGMA table_info(live_pilot_events)").fetchall()
+    }
+    migrated.close()
+    required = {
+        "event_id", "pilot_id", "preview_id", "verification_id", "decision_ref",
+        "event_type", "status", "symbol", "symbol_name", "symbol_label", "side",
+        "quantity", "limit_price", "estimated_amount_krw", "live_order_sent",
+        "adapter_status", "live_order_allowed", "reason", "message",
+        "broker_order_id", "broker_order_status", "filled_quantity", "filled_price",
+        "fill_updated_at", "error_body", "order_request_preview", "created_at",
+        "delivered_to_hermes",
+    }
+    assert required <= columns
+    recorded = events.record_event("tlive_partial_schema", "reviewed", "reviewed")
+    assert recorded["ok"] is True
+
+
 def test_live_pilot_ledger_persists_immutable_decision_ref(tmp_path, monkeypatch):
     from core import toss_live_pilot_ledger as ledger
 
@@ -435,3 +682,447 @@ def test_live_pilot_ledger_persists_immutable_decision_ref(tmp_path, monkeypatch
         "ok": False,
         "reason": "invalid_decision_ref",
     }
+
+
+def test_exact_broker_fill_monotonically_updates_pending_autonomous_event(tmp_path, monkeypatch):
+    from core import toss_live_pilot_events as ev
+
+    monkeypatch.setattr(ev, "_db_path", lambda: tmp_path / "events_fill.db")
+    ev._schema_created = False
+    pilot_id = "tlive_20260713_100000_1234"
+    created = ev.record_event(
+        pilot_id=pilot_id,
+        event_type="autonomous_live_sent",
+        status="live_sent",
+        verification_id="hv_20260713_100000_1234",
+        decision_ref="execution_decision:tlive_20260713_100000_1234",
+        symbol="035720.KS",
+        side="sell",
+        quantity=2,
+        limit_price=35_900,
+        live_order_sent=True,
+        adapter_status="enabled",
+        live_order_allowed=True,
+        broker_order_status="PENDING",
+        filled_quantity=0,
+        filled_price=35_900,
+    )
+    assert created["ok"] is True
+
+    result = ev.sync_live_event_fills_from_broker_orders([{
+        "client_order_id": pilot_id,
+        "symbol": "035720",
+        "side": "SELL",
+        "quantity": 2,
+        "broker_order_status": "FILLED",
+        "filled_quantity": 2,
+        "filled_price": 35_850,
+    }])
+
+    assert result == {"updated": 1, "ambiguous": 0, "rejected": 0}
+    row = next(item for item in ev.list_events(limit=10) if item["event_id"] == created["event_id"])
+    assert row["filled_quantity"] == 2
+    assert row["filled_price"] == 35_850
+    assert row["broker_order_status"] == "FILLED"
+    assert row["fill_updated_at"]
+    assert ev.latest_fill_for_pilot(pilot_id)["filled_quantity"] == 2
+
+
+def test_initial_filled_event_sets_fill_updated_at(tmp_path, monkeypatch):
+    from core import toss_live_pilot_events as ev
+
+    monkeypatch.setattr(ev, "_db_path", lambda: tmp_path / "events_initial_fill.db")
+    ev._schema_created = False
+    created = ev.record_event(
+        pilot_id="tlive_20260713_100007_1234",
+        event_type="autonomous_live_sent",
+        status="live_sent",
+        decision_ref="execution_decision:tlive_20260713_100007_1234",
+        symbol="035720.KS",
+        side="buy",
+        quantity=2,
+        live_order_sent=True,
+        adapter_status="enabled",
+        live_order_allowed=True,
+        broker_order_status="FILLED",
+        filled_quantity=2,
+        filled_price=35_900,
+    )
+
+    row = next(item for item in ev.list_events(limit=10)
+               if item["event_id"] == created["event_id"])
+    assert row["fill_updated_at"]
+
+
+def test_broker_status_cannot_regress_from_filled_to_pending(tmp_path, monkeypatch):
+    from core import toss_live_pilot_events as ev
+
+    monkeypatch.setattr(ev, "_db_path", lambda: tmp_path / "events_status_regression.db")
+    ev._schema_created = False
+    pilot_id = "tlive_20260713_100008_1234"
+    ev.record_event(
+        pilot_id=pilot_id,
+        event_type="autonomous_live_sent",
+        status="live_sent",
+        decision_ref=f"execution_decision:{pilot_id}",
+        symbol="035720.KS",
+        side="buy",
+        quantity=2,
+        live_order_sent=True,
+        adapter_status="enabled",
+        live_order_allowed=True,
+        broker_order_status="FILLED",
+        filled_quantity=2,
+        filled_price=35_900,
+    )
+
+    result = ev.sync_live_event_fills_from_broker_orders([{
+        "client_order_id": pilot_id,
+        "symbol": "035720",
+        "side": "BUY",
+        "quantity": 2,
+        "filled_quantity": 2,
+        "filled_price": 35_900,
+        "broker_order_status": "PENDING",
+    }])
+
+    assert result == {"updated": 0, "ambiguous": 0, "rejected": 1}
+    row = next(item for item in ev.list_events(limit=10)
+               if item["pilot_id"] == pilot_id)
+    assert row["broker_order_status"] == "FILLED"
+
+
+def test_broker_fill_requires_exact_original_order_quantity(tmp_path, monkeypatch):
+    from core import toss_live_pilot_events as ev
+
+    monkeypatch.setattr(ev, "_db_path", lambda: tmp_path / "events_quantity.db")
+    ev._schema_created = False
+    pilot_id = "tlive_20260713_100004_1234"
+    ev.record_event(
+        pilot_id=pilot_id,
+        event_type="autonomous_live_sent",
+        status="live_sent",
+        decision_ref=f"execution_decision:{pilot_id}",
+        symbol="035720.KS",
+        side="buy",
+        quantity=2,
+        live_order_sent=True,
+        adapter_status="enabled",
+        live_order_allowed=True,
+    )
+    common = {
+        "client_order_id": pilot_id,
+        "symbol": "035720",
+        "side": "BUY",
+        "filled_quantity": 1,
+        "filled_price": 35_900,
+        "broker_order_status": "PARTIAL",
+    }
+
+    mismatch = ev.sync_live_event_fills_from_broker_orders([
+        {**common, "quantity": 99},
+    ])
+    missing = ev.sync_live_event_fills_from_broker_orders([common])
+    accepted = ev.sync_live_event_fills_from_broker_orders([
+        {**common, "quantity": 2},
+    ])
+
+    assert mismatch == {"updated": 0, "ambiguous": 0, "rejected": 1}
+    assert missing == {"updated": 0, "ambiguous": 0, "rejected": 1}
+    assert accepted == {"updated": 1, "ambiguous": 0, "rejected": 0}
+
+
+def test_broker_fill_sync_is_monotonic_across_processes(tmp_path, monkeypatch):
+    from core import toss_live_pilot_events as ev
+
+    db_path = tmp_path / "events_cross_process.db"
+    monkeypatch.setattr(ev, "_db_path", lambda: db_path)
+    ev._schema_created = False
+    pilot_id = "tlive_20260713_atomic_1234"
+    created = ev.record_event(
+        pilot_id,
+        "autonomous_live_sent",
+        "sent",
+        symbol="316140.KS",
+        side="buy",
+        quantity=3,
+        live_order_sent=True,
+        adapter_status="enabled",
+        live_order_allowed=True,
+    )
+    assert created["ok"] is True
+
+    common = {
+        "client_order_id": pilot_id,
+        "symbol": "316140",
+        "side": "buy",
+        "quantity": 3,
+        "broker_order_status": "PARTIAL",
+        "filled_at": "2026-07-13T12:00:00+09:00",
+    }
+    ctx = multiprocessing.get_context("fork")
+    barrier = ctx.Barrier(2)
+    output = ctx.Queue()
+    low = ctx.Process(
+        target=_cross_process_fill_worker,
+        args=(str(db_path), {**common, "filled_quantity": 1, "filled_price": 101},
+              barrier, True, output),
+    )
+    high = ctx.Process(
+        target=_cross_process_fill_worker,
+        args=(str(db_path), {**common, "filled_quantity": 2, "filled_price": 102},
+              barrier, False, output),
+    )
+    low.start()
+    high.start()
+    low.join(10)
+    high.join(10)
+    assert low.exitcode == 0 and high.exitcode == 0
+    outcomes = [output.get(timeout=2), output.get(timeout=2)]
+    assert all("error_type" not in outcome for outcome in outcomes), outcomes
+
+    row = next(
+        item for item in ev.list_events(limit=10) if item["pilot_id"] == pilot_id
+    )
+    assert row["filled_quantity"] == 2
+    assert row["filled_price"] == 102
+
+
+def test_cas_conflict_cannot_rollback_prior_pilot_update(tmp_path, monkeypatch):
+    from core import toss_live_pilot_events as ev
+
+    db_path = tmp_path / "events_cas_rollback.db"
+    monkeypatch.setattr(ev, "_db_path", lambda: db_path)
+    ev._schema_created = False
+    pilots = (
+        "tlive_20260713_casfirst_1234",
+        "tlive_20260713_cassecond_1234",
+    )
+    for pilot_id, symbol in zip(pilots, ("316140.KS", "035420.KS")):
+        result = ev.record_event(
+            pilot_id,
+            "autonomous_live_sent",
+            "sent",
+            symbol=symbol,
+            side="buy",
+            quantity=3,
+            live_order_sent=True,
+            adapter_status="enabled",
+            live_order_allowed=True,
+        )
+        assert result["ok"] is True
+    event_ids = {
+        row["pilot_id"]: row["event_id"] for row in ev.list_events(limit=10)
+    }
+    blocked_event_id = event_ids[pilots[1]]
+    real_connect = sqlite3.connect
+
+    class ZeroRowCursor:
+        rowcount = 0
+
+    class ConnectionProxy:
+        def __init__(self, real):
+            object.__setattr__(self, "_real", real)
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+        def __setattr__(self, name, value):
+            setattr(self._real, name, value)
+
+        def execute(self, sql, *args):
+            normalized = " ".join(str(sql).split())
+            params = args[0] if args else ()
+            if (
+                normalized.startswith("UPDATE live_pilot_events")
+                and len(params) > 4
+                and params[4] == blocked_event_id
+            ):
+                return ZeroRowCursor()
+            return self._real.execute(sql, *args)
+
+    def conflict_conn():
+        conn = real_connect(db_path, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        return ConnectionProxy(conn)
+
+    monkeypatch.setattr(ev, "_conn", conflict_conn)
+    orders = [
+        {
+            "client_order_id": pilots[0], "symbol": "316140", "side": "buy",
+            "quantity": 3, "filled_quantity": 1, "filled_price": 101,
+            "broker_order_status": "PARTIAL",
+            "filled_at": "2026-07-13T12:00:00+09:00",
+        },
+        {
+            "client_order_id": pilots[1], "symbol": "035420", "side": "buy",
+            "quantity": 3, "filled_quantity": 1, "filled_price": 202,
+            "broker_order_status": "PARTIAL",
+            "filled_at": "2026-07-13T12:00:01+09:00",
+        },
+    ]
+    outcome = ev.sync_live_event_fills_from_broker_orders(orders)
+    assert outcome == {"updated": 1, "ambiguous": 1, "rejected": 0}
+
+    verify = real_connect(db_path)
+    first_fill = verify.execute(
+        "SELECT filled_quantity FROM live_pilot_events WHERE pilot_id=?",
+        (pilots[0],),
+    ).fetchone()[0]
+    verify.close()
+    assert first_fill == 1
+
+
+def test_broker_fill_sync_rejects_symbol_or_client_id_mismatch(tmp_path, monkeypatch):
+    from core import toss_live_pilot_events as ev
+
+    monkeypatch.setattr(ev, "_db_path", lambda: tmp_path / "events_mismatch.db")
+    ev._schema_created = False
+    pilot_id = "tlive_20260713_100001_1234"
+    ev.record_event(
+        pilot_id=pilot_id,
+        event_type="autonomous_live_sent",
+        status="live_sent",
+        decision_ref="execution_decision:tlive_20260713_100001_1234",
+        symbol="035720.KS",
+        side="sell",
+        quantity=1,
+        live_order_sent=True,
+        adapter_status="enabled",
+        live_order_allowed=True,
+    )
+    result = ev.sync_live_event_fills_from_broker_orders([{
+        "client_order_id": pilot_id,
+        "symbol": "096770",
+        "side": "SELL",
+        "quantity": 1,
+        "filled_quantity": 1,
+        "filled_price": 100,
+    }, {
+        "client_order_id": "external_order",
+        "symbol": "035720",
+        "side": "SELL",
+        "quantity": 1,
+        "filled_quantity": 1,
+        "filled_price": 100,
+    }, {
+        "client_order_id": pilot_id,
+        "symbol": "035720",
+        "side": "SELL",
+        "quantity": 1,
+        "filled_quantity": 1,
+        "filled_price": 100,
+    }])
+    assert result == {"updated": 0, "ambiguous": 1, "rejected": 1}
+    row = ev.list_events(limit=1)[0]
+    assert row["filled_quantity"] == 0
+
+    quantity_unknown = ev.sync_live_event_fills_from_broker_orders([{
+        "client_order_id": pilot_id,
+        "symbol": "035720",
+        "side": "SELL",
+        "filled_quantity": 1,
+        "filled_price": 100,
+    }])
+    assert quantity_unknown == {"updated": 0, "ambiguous": 0, "rejected": 1}
+
+
+def test_duplicate_exact_broker_rows_require_ordered_cumulative_truth(tmp_path, monkeypatch):
+    from core import toss_live_pilot_events as ev
+
+    monkeypatch.setattr(ev, "_db_path", lambda: tmp_path / "events_duplicates.db")
+    ev._schema_created = False
+
+    def create(pilot_id: str):
+        return ev.record_event(
+            pilot_id=pilot_id,
+            event_type="autonomous_live_sent",
+            status="live_sent",
+            decision_ref=f"execution_decision:{pilot_id}",
+            symbol="035720.KS",
+            side="buy",
+            quantity=3,
+            live_order_sent=True,
+            adapter_status="enabled",
+            live_order_allowed=True,
+        )
+
+    ambiguous_id = "tlive_20260713_120002_1234"
+    create(ambiguous_id)
+    common = {
+        "client_order_id": ambiguous_id,
+        "symbol": "035720",
+        "side": "BUY",
+        "quantity": 3,
+        "broker_order_status": "PARTIAL",
+    }
+    result = ev.sync_live_event_fills_from_broker_orders([
+        {**common, "filled_quantity": 1, "filled_price": 35_900},
+        {**common, "filled_quantity": 2, "filled_price": 35_850},
+    ])
+    assert result == {"updated": 0, "ambiguous": 1, "rejected": 0}
+    row = next(r for r in ev.list_events(limit=10) if r["pilot_id"] == ambiguous_id)
+    assert row["filled_quantity"] == 0
+
+    ordered_id = "tlive_20260713_120003_1234"
+    create(ordered_id)
+    common["client_order_id"] = ordered_id
+    result = ev.sync_live_event_fills_from_broker_orders([
+        {**common, "filled_quantity": 1, "filled_price": 35_900,
+         "filled_at": "2026-07-13T12:00:01+09:00"},
+        {**common, "filled_quantity": 2, "filled_price": 35_850,
+         "filled_at": "2026-07-13T12:00:02+09:00"},
+    ])
+    assert result == {"updated": 1, "ambiguous": 0, "rejected": 0}
+    row = next(r for r in ev.list_events(limit=10) if r["pilot_id"] == ordered_id)
+    assert row["filled_quantity"] == 2
+    assert row["filled_price"] == 35_850
+
+
+def test_duplicate_broker_revisions_reject_invalid_time_or_cumulative_regression(tmp_path, monkeypatch):
+    from core import toss_live_pilot_events as ev
+
+    monkeypatch.setattr(ev, "_db_path", lambda: tmp_path / "events_revision_regression.db")
+    ev._schema_created = False
+
+    def create(pilot_id: str):
+        ev.record_event(
+            pilot_id=pilot_id,
+            event_type="autonomous_live_sent",
+            status="live_sent",
+            decision_ref=f"execution_decision:{pilot_id}",
+            symbol="035720.KS",
+            side="buy",
+            quantity=3,
+            live_order_sent=True,
+            adapter_status="enabled",
+            live_order_allowed=True,
+        )
+
+    regressed_id = "tlive_20260713_120005_1234"
+    create(regressed_id)
+    common = {
+        "client_order_id": regressed_id,
+        "symbol": "035720",
+        "side": "BUY",
+        "quantity": 3,
+        "broker_order_status": "PARTIAL",
+    }
+    regressed = ev.sync_live_event_fills_from_broker_orders([
+        {**common, "filled_quantity": 2, "filled_price": 35_900,
+         "filled_at": "2026-07-13T12:00:01+09:00"},
+        {**common, "filled_quantity": 1, "filled_price": 35_850,
+         "filled_at": "2026-07-13T12:00:02+09:00"},
+    ])
+    assert regressed == {"updated": 0, "ambiguous": 1, "rejected": 0}
+
+    invalid_time_id = "tlive_20260713_120006_1234"
+    create(invalid_time_id)
+    common["client_order_id"] = invalid_time_id
+    invalid_time = ev.sync_live_event_fills_from_broker_orders([
+        {**common, "filled_quantity": 1, "filled_price": 35_900,
+         "filled_at": "not-a-time"},
+        {**common, "filled_quantity": 2, "filled_price": 35_850,
+         "filled_at": "also-not-a-time"},
+    ])
+    assert invalid_time == {"updated": 0, "ambiguous": 1, "rejected": 0}

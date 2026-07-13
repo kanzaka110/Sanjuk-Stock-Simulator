@@ -260,6 +260,41 @@ class TestThesisFreshness(unittest.TestCase):
         self.assertTrue(out[0]["auto_sell_eligible"])
         self.assertIsNone(out[0]["ai_berkshire"]["score_auto_sell_eligible"])
 
+    def test_strict_row_rejects_missing_null_or_string_auto_sell_override(self):
+        missing = object()
+        for override in (missing, None, "false"):
+            raw = _item("trim", strict_buy_gate=True, buy_checklist_status="fail")
+            if override is not missing:
+                raw["auto_sell_eligible"] = override
+            scores = {
+                "strict_buy_gate_version": 1,
+                "items": {"AAA": raw},
+            }
+            out = abt.apply_berkshire_to_sell_to_fund(
+                [_row("AAA")], scores=scores, as_of_date="2026-07-15")
+            self.assertFalse(out[0]["auto_sell_eligible"])
+            self.assertEqual(
+                out[0]["auto_sell_block_reason"],
+                "ai_berkshire_strict_auto_sell_invalid",
+            )
+
+    def test_strict_true_still_requires_auto_sell_classification(self):
+        scores = {
+            "strict_buy_gate_version": 1,
+            "items": {
+                "AAA": _item(
+                    "hold",
+                    strict_buy_gate=True,
+                    buy_checklist_status="fail",
+                    auto_sell_eligible=True,
+                )
+            },
+        }
+        out = abt.apply_berkshire_to_sell_to_fund(
+            [_row("AAA")], scores=scores, as_of_date="2026-07-15")
+        self.assertFalse(out[0]["auto_sell_eligible"])
+        self.assertEqual(out[0]["auto_sell_block_reason"], "ai_berkshire_hold")
+
     def test_fresh_hold_and_protect_still_blocked(self):
         out = abt.apply_berkshire_to_sell_to_fund(
             [_row("ABBV"), _row("069500.KS")],

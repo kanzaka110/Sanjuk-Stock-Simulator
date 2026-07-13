@@ -7,7 +7,7 @@ build_toss_order_create_request() dry-run schema 변환 테스트.
 3. LIMIT only (limit → LIMIT, market → BLOCK)
 4. quantity 변환/검증
 5. price 변환/검증
-6. clientOrderId 정규화 (36자, 허용문자)
+6. clientOrderId pilot ID 원문 exact 검증
 7. 금액 한도 재확인
 8. 민감정보 없음
 9. 실제 HTTP/endpoint 없음
@@ -15,7 +15,6 @@ build_toss_order_create_request() dry-run schema 변환 테스트.
 
 from __future__ import annotations
 
-import re
 import sys
 import unittest
 from pathlib import Path
@@ -76,11 +75,11 @@ class TestSymbolNormalization(unittest.TestCase):
 
 class TestBuySell(unittest.TestCase):
     def test_buy_uppercased(self):
-        r = build_toss_order_create_request(_payload(side="buy"), client_order_id="t")
+        r = build_toss_order_create_request(_payload(side="buy"), client_order_id="tlive_t")
         self.assertEqual(r["request"]["side"], "BUY")
 
     def test_sell_uppercased(self):
-        r = build_toss_order_create_request(_payload(side="sell"), client_order_id="t")
+        r = build_toss_order_create_request(_payload(side="sell"), client_order_id="tlive_t")
         self.assertTrue(r["ok"])
         self.assertEqual(r["request"]["side"], "SELL")
 
@@ -89,11 +88,11 @@ class TestBuySell(unittest.TestCase):
 
 class TestLimitOnly(unittest.TestCase):
     def test_limit_uppercased(self):
-        r = build_toss_order_create_request(_payload(order_type="limit"), client_order_id="t")
+        r = build_toss_order_create_request(_payload(order_type="limit"), client_order_id="tlive_t")
         self.assertEqual(r["request"]["orderType"], "LIMIT")
 
     def test_market_blocked(self):
-        r = build_toss_order_create_request(_payload(order_type="market"), client_order_id="t")
+        r = build_toss_order_create_request(_payload(order_type="market"), client_order_id="tlive_t")
         self.assertFalse(r["ok"])
         self.assertTrue(any("order_type_not_limit" in b for b in r["blocks"]))
 
@@ -102,24 +101,24 @@ class TestLimitOnly(unittest.TestCase):
 
 class TestQuantity(unittest.TestCase):
     def test_int_to_string(self):
-        r = build_toss_order_create_request(_payload(quantity=1), client_order_id="t")
+        r = build_toss_order_create_request(_payload(quantity=1), client_order_id="tlive_t")
         self.assertEqual(r["request"]["quantity"], "1")
 
     def test_float_whole_ok(self):
-        r = build_toss_order_create_request(_payload(quantity=3.0), client_order_id="t")
+        r = build_toss_order_create_request(_payload(quantity=3.0), client_order_id="tlive_t")
         self.assertEqual(r["request"]["quantity"], "3")
 
     def test_zero_blocked(self):
-        r = build_toss_order_create_request(_payload(quantity=0), client_order_id="t")
+        r = build_toss_order_create_request(_payload(quantity=0), client_order_id="tlive_t")
         self.assertFalse(r["ok"])
         self.assertTrue(any("invalid_quantity" in b for b in r["blocks"]))
 
     def test_negative_blocked(self):
-        r = build_toss_order_create_request(_payload(quantity=-1), client_order_id="t")
+        r = build_toss_order_create_request(_payload(quantity=-1), client_order_id="tlive_t")
         self.assertFalse(r["ok"])
 
     def test_fractional_blocked(self):
-        r = build_toss_order_create_request(_payload(quantity=1.5), client_order_id="t")
+        r = build_toss_order_create_request(_payload(quantity=1.5), client_order_id="tlive_t")
         self.assertFalse(r["ok"])
         self.assertTrue(any("invalid_quantity" in b for b in r["blocks"]))
 
@@ -128,24 +127,24 @@ class TestQuantity(unittest.TestCase):
 
 class TestPrice(unittest.TestCase):
     def test_int_to_string(self):
-        r = build_toss_order_create_request(_payload(limit_price=30850), client_order_id="t")
+        r = build_toss_order_create_request(_payload(limit_price=30850), client_order_id="tlive_t")
         self.assertEqual(r["request"]["price"], "30850")
 
     def test_float_whole_ok(self):
-        r = build_toss_order_create_request(_payload(limit_price=30850.0), client_order_id="t")
+        r = build_toss_order_create_request(_payload(limit_price=30850.0), client_order_id="tlive_t")
         self.assertEqual(r["request"]["price"], "30850")
 
     def test_zero_blocked(self):
-        r = build_toss_order_create_request(_payload(limit_price=0), client_order_id="t")
+        r = build_toss_order_create_request(_payload(limit_price=0), client_order_id="tlive_t")
         self.assertFalse(r["ok"])
         self.assertTrue(any("invalid_price" in b for b in r["blocks"]))
 
     def test_negative_blocked(self):
-        r = build_toss_order_create_request(_payload(limit_price=-100), client_order_id="t")
+        r = build_toss_order_create_request(_payload(limit_price=-100), client_order_id="tlive_t")
         self.assertFalse(r["ok"])
 
     def test_fractional_ok(self):
-        r = build_toss_order_create_request(_payload(limit_price=30.85), client_order_id="t")
+        r = build_toss_order_create_request(_payload(limit_price=30.85), client_order_id="tlive_t")
         self.assertTrue(r["ok"])
         self.assertEqual(r["request"]["price"], "30.85")
 
@@ -202,30 +201,29 @@ class TestKrPriceTick(unittest.TestCase):
 class TestClientOrderId(unittest.TestCase):
     def test_simple_id_preserved(self):
         r = build_toss_order_create_request(_payload(), client_order_id="tlive_abc-123")
+        self.assertTrue(r["ok"])
         self.assertEqual(r["request"]["clientOrderId"], "tlive_abc-123")
 
-    def test_max_36_chars(self):
+    def test_long_id_blocked_instead_of_transformed(self):
         long_id = "tlive_" + "x" * 80
         r = build_toss_order_create_request(_payload(), client_order_id=long_id)
-        self.assertLessEqual(len(r["request"]["clientOrderId"]), 36)
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["request"], {})
+        self.assertIn("invalid_client_order_id", r["blocks"])
 
-    def test_disallowed_chars_stripped(self):
+    def test_disallowed_chars_blocked_instead_of_stripped(self):
         r = build_toss_order_create_request(
             _payload(), client_order_id="tlive!@#$%^&*() 001"
         )
-        cid = r["request"]["clientOrderId"]
-        self.assertTrue(re.fullmatch(r"[a-zA-Z0-9_-]+", cid))
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["request"], {})
+        self.assertIn("invalid_client_order_id", r["blocks"])
 
-    def test_empty_id_fallback(self):
+    def test_empty_id_is_blocked(self):
         r = build_toss_order_create_request(_payload(), client_order_id="")
-        self.assertTrue(r["request"]["clientOrderId"])
-        self.assertTrue(re.fullmatch(r"[a-zA-Z0-9_-]+", r["request"]["clientOrderId"]))
-
-    def test_long_id_deterministic(self):
-        long_id = "tlive_" + "y" * 100
-        r1 = build_toss_order_create_request(_payload(), client_order_id=long_id)
-        r2 = build_toss_order_create_request(_payload(), client_order_id=long_id)
-        self.assertEqual(r1["request"]["clientOrderId"], r2["request"]["clientOrderId"])
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["request"], {})
+        self.assertIn("invalid_client_order_id", r["blocks"])
 
 
 # ── 7. 금액 한도 ─────────────────────────────────────────
@@ -234,7 +232,7 @@ class TestAmountLimit(unittest.TestCase):
     def test_over_limit_blocked(self):
         r = build_toss_order_create_request(
             _payload(quantity=1, limit_price=150000, estimated_amount_krw=150000),
-            client_order_id="t",
+            client_order_id="tlive_t",
             max_order_krw=100000,
         )
         self.assertFalse(r["ok"])
@@ -243,7 +241,7 @@ class TestAmountLimit(unittest.TestCase):
     def test_within_limit_ok(self):
         r = build_toss_order_create_request(
             _payload(estimated_amount_krw=30850),
-            client_order_id="t",
+            client_order_id="tlive_t",
             max_order_krw=100000,
         )
         self.assertTrue(r["ok"])
@@ -253,15 +251,15 @@ class TestAmountLimit(unittest.TestCase):
 
 class TestFixedFields(unittest.TestCase):
     def test_time_in_force_day(self):
-        r = build_toss_order_create_request(_payload(), client_order_id="t")
+        r = build_toss_order_create_request(_payload(), client_order_id="tlive_t")
         self.assertEqual(r["request"]["timeInForce"], "DAY")
 
     def test_confirm_high_value_false(self):
-        r = build_toss_order_create_request(_payload(), client_order_id="t")
+        r = build_toss_order_create_request(_payload(), client_order_id="tlive_t")
         self.assertFalse(r["request"]["confirmHighValueOrder"])
 
     def test_warnings_present(self):
-        r = build_toss_order_create_request(_payload(), client_order_id="t")
+        r = build_toss_order_create_request(_payload(), client_order_id="tlive_t")
         self.assertIn("dry-run only", r["warnings"])
         self.assertIn("not sent", r["warnings"])
 
@@ -270,14 +268,14 @@ class TestFixedFields(unittest.TestCase):
 
 class TestNoSensitive(unittest.TestCase):
     def test_no_sensitive_in_request(self):
-        r = build_toss_order_create_request(_payload(), client_order_id="t")
+        r = build_toss_order_create_request(_payload(), client_order_id="tlive_t")
         s = str(r)
         for kw in ("accountNo", "Bearer", "Authorization",
                    "X-Tossinvest-Account", "APP_KEY", "APP_SECRET", "token"):
             self.assertNotIn(kw, s)
 
     def test_request_has_no_url(self):
-        r = build_toss_order_create_request(_payload(), client_order_id="t")
+        r = build_toss_order_create_request(_payload(), client_order_id="tlive_t")
         s = str(r["request"])
         self.assertNotIn("http", s.lower())
         self.assertNotIn("/api/", s)
