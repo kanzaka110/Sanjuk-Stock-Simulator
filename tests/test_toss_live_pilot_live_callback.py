@@ -53,6 +53,9 @@ def _create_pilot(db_patch_target, preview_ok=True, symbol="091180.KS"):
         "quantity": 1,
         "limit_price": 30000.0,
         "estimated_amount_krw": 30000.0,
+        "stop_loss": 28000.0,
+        "target_price": 34000.0,
+        "invalidation": "below 28000",
         "blocks": [] if preview_ok else ["test_block"],
         "warnings": [],
     }
@@ -131,14 +134,20 @@ class TestConfirmEnabledNoTransport(unittest.TestCase):
         m._schema_created = False
         self._env_patch = patch.dict(os.environ, _ALL_GATES_ENV)
         self._env_patch.start()
-        # Hermes 게이트 PASS로 우회
+        # Hermes/quality 게이트는 PASS로 고정 — 이 클래스는 transport=None 레이어 테스트
         self._hermes_patch = patch(
             "core.toss_live_pilot_verification.is_verification_passed",
             return_value=(True, [], {}),
         )
+        self._quality_patch = patch(
+            "core.toss_quality_gate.validate_execution_quality_decision",
+            return_value={"ok": True, "reason": "quality_decision_exact"},
+        )
         self._hermes_patch.start()
+        self._quality_patch.start()
 
     def tearDown(self):
+        self._quality_patch.stop()
         self._hermes_patch.stop()
         self._db_patch.stop()
         self._env_patch.stop()
@@ -170,14 +179,20 @@ class TestConfirmEnabledFakeSuccess(unittest.TestCase):
         m._schema_created = False
         self._env_patch = patch.dict(os.environ, _ALL_GATES_ENV)
         self._env_patch.start()
-        # Hermes 게이트 PASS로 우회 — 이 클래스는 adapter/transport 레이어 테스트
+        # Hermes/quality 게이트는 PASS로 고정 — 이 클래스는 adapter/transport 레이어 테스트
         self._hermes_patch = patch(
             "core.toss_live_pilot_verification.is_verification_passed",
             return_value=(True, [], {}),
         )
+        self._quality_patch = patch(
+            "core.toss_quality_gate.validate_execution_quality_decision",
+            return_value={"ok": True, "reason": "quality_decision_exact"},
+        )
         self._hermes_patch.start()
+        self._quality_patch.start()
 
     def tearDown(self):
+        self._quality_patch.stop()
         self._hermes_patch.stop()
         self._db_patch.stop()
         self._env_patch.stop()
@@ -248,6 +263,152 @@ class TestConfirmEnabledFakeSuccess(unittest.TestCase):
         self.assertTrue(matched)
         self.assertEqual(matched[0]["status"], "live_sent")
         self.assertTrue(bool(matched[0]["live_order_sent"]))
+
+
+# ─── 4. confirm — exact quality row gate ──────────────────
+
+class TestConfirmExactQualityLastMile(unittest.TestCase):
+    def setUp(self):
+        self.tmp, self.db_path = _make_db()
+        self.quality_path = Path(self.tmp) / "quality.db"
+        self._db_patch = patch(
+            "core.toss_live_pilot_ledger._db_path", return_value=self.db_path
+        )
+        self._quality_patch = patch(
+            "core.toss_quality_gate._outcomes_db_path", return_value=self.quality_path
+        )
+        self._db_patch.start()
+        self._quality_patch.start()
+        import core.toss_live_pilot_ledger as ledger
+        import core.toss_quality_gate as qg
+        ledger._schema_created = False
+        qg._outcomes_schema_created = False
+        self._env_patch = patch.dict(os.environ, _ALL_GATES_ENV)
+        self._env_patch.start()
+        self._hermes_patch = patch(
+            "core.toss_live_pilot_verification.is_verification_passed",
+            return_value=(True, [], {}),
+        )
+        self._hermes_patch.start()
+
+    def tearDown(self):
+        self._hermes_patch.stop()
+        self._env_patch.stop()
+        self._quality_patch.stop()
+        self._db_patch.stop()
+        import core.toss_live_pilot_ledger as ledger
+        import core.toss_quality_gate as qg
+        ledger._schema_created = False
+        qg._outcomes_schema_created = False
+
+    def test_missing_quality_row_blocks_before_dispatch(self):
+        rec = _create_pilot(self.db_path)
+        with patch(
+            "core.toss_live_pilot_adapter.can_send_live_pilot_order",
+            return_value=(True, []),
+        ), patch(
+            "core.toss_live_pilot_telegram.resolve_live_transport_for_confirm",
+            return_value=object(),
+        ) as resolver, patch(
+            "core.toss_live_pilot_adapter.dispatch_toss_order_live",
+            return_value={"ok": True, "live_order_sent": True},
+        ) as dispatch:
+            result = handle_live_pilot_callback(f"tlp:confirm:{rec['pilot_id']}")
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["live_order_sent"])
+        self.assertEqual(result["reason"], "quality_decision_missing")
+        resolver.assert_not_called()
+        dispatch.assert_not_called()
+
+    def test_exact_quality_row_allows_transport_resolution(self):
+        from core import toss_quality_gate as qg
+        from core.toss_live_pilot_telegram import handle_live_pilot_callback
+
+        created_rec = _create_pilot(self.db_path)
+        from core.toss_live_pilot_ledger import list_live_pilot_records
+        rec = next(
+            row for row in list_live_pilot_records()
+            if row["pilot_id"] == created_rec["pilot_id"]
+        )
+        candidate = {
+            "symbol": rec["symbol"],
+            "side": "buy",
+            "quantity": rec["quantity"],
+            "limit_price": rec["limit_price"],
+            "stop_loss": rec["stop_loss"],
+            "target_price": rec["target_price"],
+            "risk_reward": 1.5,
+            "decision_bucket": "PASS_EXECUTE",
+            "decision_reason": "quality pass",
+            "quality_score": 82.0,
+            "quality_breakdown": {
+                "score_total": 82.0,
+                "score_momentum": 20.0,
+                "score_liquidity": 15.0,
+                "score_risk_reward": 15.0,
+                "score_reliability": 10.0,
+                "score_market_regime": 10.0,
+                "score_supply_demand": 12.0,
+                "penalty_overheat": 0.0,
+                "penalty_duplicate": 0.0,
+                "penalty_event_risk": 0.0,
+                "rr_ratio": 1.5,
+                "regime": "neutral",
+            },
+        }
+        created = qg.record_execution_quality_decision(
+            candidate,
+            pilot_id=rec["pilot_id"],
+            decision_ref=rec["decision_ref"],
+        )
+        self.assertTrue(created["ok"])
+
+        with patch(
+            "core.toss_live_pilot_adapter.can_send_live_pilot_order",
+            return_value=(True, []),
+        ), patch(
+            "core.toss_live_pilot_telegram.resolve_live_transport_for_confirm",
+            return_value=object(),
+        ) as resolver, patch(
+            "core.toss_live_pilot_adapter.dispatch_toss_order_live",
+            return_value={"ok": True, "live_order_sent": True},
+        ) as dispatch:
+            result = handle_live_pilot_callback(f"tlp:confirm:{rec['pilot_id']}")
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["live_order_sent"])
+        resolver.assert_called_once()
+        dispatch.assert_called_once()
+
+    def test_quality_lookup_error_blocks_before_transport_resolution(self):
+        from core import toss_quality_gate as qg
+        from core.toss_live_pilot_telegram import handle_live_pilot_callback
+
+        rec = _create_pilot(self.db_path)
+        with patch(
+            "core.toss_live_pilot_adapter.can_send_live_pilot_order",
+            return_value=(True, []),
+        ), patch.object(
+            qg,
+            "validate_execution_quality_decision",
+            side_effect=RuntimeError("synthetic"),
+        ), patch(
+            "core.toss_live_pilot_telegram.resolve_live_transport_for_confirm",
+            return_value=object(),
+        ) as resolver, patch(
+            "core.toss_live_pilot_adapter.dispatch_toss_order_live",
+            return_value={"ok": True, "live_order_sent": True},
+        ) as dispatch:
+            result = handle_live_pilot_callback(
+                f"tlp:confirm:{rec['pilot_id']}"
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["live_order_sent"])
+        self.assertEqual(result["reason"], "quality_decision_unavailable")
+        resolver.assert_not_called()
+        dispatch.assert_not_called()
 
 
 # ─── 4. confirm — guard blocked ──────────────────────────

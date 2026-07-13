@@ -422,7 +422,63 @@ def _handle_confirm(preview_id: str) -> dict:
             "message": guard_msg,
         }
 
-    # 5. transport dispatch (transport=None → blocked)
+    # 5. BUY exact quality row — legacy confirm도 우회 불가
+    if str(preview_stub.get("side") or "").lower() == "buy":
+        try:
+            from core.toss_quality_gate import validate_execution_quality_decision
+            quality_check = validate_execution_quality_decision(rec, pilot_id=preview_id)
+        except Exception as exc:
+            logger.warning(
+                "confirm quality last-mile check failed: error_type=%s",
+                type(exc).__name__,
+            )
+            quality_check = {"ok": False, "reason": "quality_decision_unavailable"}
+        if not quality_check.get("ok"):
+            quality_reason = str(
+                quality_check.get("reason") or "quality_decision_unavailable"
+            )
+            try:
+                record_live_send_blocked(preview_id, [quality_reason])
+            except Exception as exc:
+                logger.warning(
+                    "confirm quality block ledger failed: error_type=%s",
+                    type(exc).__name__,
+                )
+            quality_msg = (
+                "[차단: 실행 품질 근거 불일치]\n"
+                "주문 전송 안 함\n"
+                "live_order_sent=false\n"
+                f"차단 사유: {quality_reason}"
+            )
+            try:
+                from core.toss_live_pilot_events import record_event
+                event_fields = _event_fields(rec)
+                event_fields["adapter_status"] = policy.get("adapter_status", "disabled")
+                record_event(
+                    pilot_id=preview_id,
+                    event_type="confirm_blocked_quality",
+                    status="live_send_blocked",
+                    preview_id=preview_id,
+                    verification_id=verification_id,
+                    reason=quality_reason,
+                    message=quality_msg,
+                    **event_fields,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "confirm_blocked_quality event failed: error_type=%s",
+                    type(exc).__name__,
+                )
+            return {
+                "ok": False,
+                "action": "confirm",
+                "live_order_sent": False,
+                "blocked": True,
+                "reason": quality_reason,
+                "message": quality_msg,
+            }
+
+    # 6. transport dispatch (transport=None → blocked)
     payload = {
         "symbol": preview_stub["symbol"],
         "side": preview_stub["side"],

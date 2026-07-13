@@ -72,10 +72,12 @@ def _clean_normalized_row(key: str, value: object) -> dict | None:
         if field in row and not isinstance(row.get(field), str):
             return None
     if key == "executable_actions":
+        side = row.get("side")
         if (
             not isinstance(row.get("ticker"), str)
             or not row["ticker"].strip()
-            or row.get("side") not in {"buy", "sell"}
+            or not isinstance(side, str)
+            or side not in {"buy", "sell"}
         ):
             return None
     else:

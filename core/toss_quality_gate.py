@@ -628,6 +628,7 @@ def score_candidates_batch(
                         entry_price=float(item.get("price") or item.get("limit_price") or 0),
                         stop_loss=float(item.get("stop_loss") or 0),
                         target_price=float(item.get("target_price") or 0),
+                        quantity=float(item.get("quantity") or 0),
                     )
                 except Exception as exc:
                     log.debug(
@@ -687,6 +688,7 @@ def _outcomes_conn() -> sqlite3.Connection:
                 score_risk_reward REAL,
                 score_reliability REAL,
                 score_market_regime REAL,
+                score_supply_demand REAL DEFAULT 0,
                 penalty_overheat REAL,
                 penalty_duplicate REAL,
                 penalty_event_risk REAL,
@@ -695,6 +697,7 @@ def _outcomes_conn() -> sqlite3.Connection:
                 entry_price REAL,
                 stop_loss REAL,
                 target_price REAL,
+                quantity REAL DEFAULT 0,
                 pilot_id TEXT DEFAULT '',
                 decision_ref TEXT DEFAULT '',
                 broker_order_id TEXT,
@@ -721,6 +724,7 @@ def _outcomes_conn() -> sqlite3.Connection:
             "score_risk_reward": "REAL DEFAULT 0",
             "score_reliability": "REAL DEFAULT 0",
             "score_market_regime": "REAL DEFAULT 0",
+            "score_supply_demand": "REAL DEFAULT 0",
             "penalty_overheat": "REAL DEFAULT 0",
             "penalty_duplicate": "REAL DEFAULT 0",
             "penalty_event_risk": "REAL DEFAULT 0",
@@ -729,6 +733,7 @@ def _outcomes_conn() -> sqlite3.Connection:
             "entry_price": "REAL DEFAULT 0",
             "stop_loss": "REAL DEFAULT 0",
             "target_price": "REAL DEFAULT 0",
+            "quantity": "REAL DEFAULT 0",
             "pilot_id": "TEXT DEFAULT ''",
             "decision_ref": "TEXT DEFAULT ''",
             "broker_order_id": "TEXT DEFAULT ''",
@@ -795,6 +800,7 @@ def record_quality_decision(
     stop_loss: float,
     target_price: float,
     pilot_id: str = "",
+    quantity: float = 0,
 ) -> int:
     """PASS_EXECUTE 결정을 DB에 기록. 반환: row id."""
     with _outcomes_lock:
@@ -804,16 +810,16 @@ def record_quality_decision(
                 """INSERT INTO quality_gate_decisions
                    (ticker, decided_at, decision_bucket, decision_reason,
                     score_total, score_momentum, score_liquidity, score_risk_reward,
-                    score_reliability, score_market_regime,
+                    score_reliability, score_market_regime, score_supply_demand,
                     penalty_overheat, penalty_duplicate, penalty_event_risk,
-                    rr_ratio, regime, entry_price, stop_loss, target_price, pilot_id)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    rr_ratio, regime, entry_price, stop_loss, target_price, quantity, pilot_id)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     qs.ticker, qs.scored_at, qs.decision_bucket, qs.decision_reason,
                     qs.score_total, qs.score_momentum, qs.score_liquidity, qs.score_risk_reward,
-                    qs.score_reliability, qs.score_market_regime,
+                    qs.score_reliability, qs.score_market_regime, qs.score_supply_demand,
                     qs.penalty_overheat, qs.penalty_duplicate, qs.penalty_event_risk,
-                    qs.rr_ratio, qs.regime, entry_price, stop_loss, target_price, pilot_id,
+                    qs.rr_ratio, qs.regime, entry_price, stop_loss, target_price, quantity, pilot_id,
                 ),
             )
             conn.commit()
@@ -848,6 +854,72 @@ def quality_decision_for_ref(decision_ref: str) -> dict:
             conn.close()
 
 
+def validate_execution_quality_decision(rec: dict, *, pilot_id: str) -> dict:
+    """BUY dispatch 직전 exact quality row와 ledger sizing을 대조한다."""
+    if not isinstance(rec, dict):
+        return {"ok": False, "reason": "quality_execution_contract_invalid"}
+
+    side = str(rec.get("side") or "").lower().strip()
+    if side != "buy":
+        return {"ok": True, "reason": "quality_not_required_for_non_buy", "skipped": True}
+
+    pid = str(pilot_id or "")
+    ref = str(rec.get("decision_ref") or "")
+    symbol = str(rec.get("symbol") or "").upper().strip()
+    quantity = _finite_number(rec.get("quantity"))
+    entry = _finite_number(rec.get("limit_price"))
+    stop = _finite_number(rec.get("stop_loss"))
+    target = _finite_number(rec.get("target_price"))
+    if (
+        not _CLIENT_ORDER_ID_RE.fullmatch(pid)
+        or str(rec.get("pilot_id") or "") != pid
+        or not _DECISION_REF_RE.fullmatch(ref)
+        or not symbol
+        or quantity is None or quantity <= 0
+        or entry is None or entry <= 0
+        or stop is None or stop <= 0
+        or target is None or target <= 0
+    ):
+        return {"ok": False, "reason": "quality_execution_contract_invalid"}
+
+    with _outcomes_lock:
+        conn = _outcomes_conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM quality_gate_decisions WHERE decision_ref=?",
+                (ref,),
+            ).fetchone()
+        finally:
+            conn.close()
+    if row is None:
+        return {"ok": False, "reason": "quality_decision_missing"}
+
+    exact_numbers = {
+        "quantity": float(quantity),
+        "entry_price": float(entry),
+        "stop_loss": float(stop),
+        "target_price": float(target),
+    }
+    if (
+        str(row["pilot_id"] or "") != pid
+        or str(row["decision_ref"] or "") != ref
+        or str(row["ticker"] or "").upper().strip() != symbol
+        or str(row["decision_bucket"] or "") not in EXECUTABLE_BUCKETS
+    ):
+        return {"ok": False, "reason": "quality_decision_mismatch"}
+    for key, expected in exact_numbers.items():
+        actual = _finite_number(row[key])
+        if actual is None or float(actual) != expected:
+            return {"ok": False, "reason": "quality_decision_mismatch"}
+    for key in (
+        "score_total", "score_momentum", "score_liquidity", "score_risk_reward",
+        "score_reliability", "score_market_regime", "score_supply_demand", "rr_ratio",
+    ):
+        if _finite_number(row[key]) is None:
+            return {"ok": False, "reason": "quality_decision_mismatch"}
+    return {"ok": True, "reason": "quality_decision_exact", "id": int(row["id"])}
+
+
 def record_execution_quality_decision(
     candidate: dict,
     *,
@@ -876,6 +948,7 @@ def record_execution_quality_decision(
     entry = _finite_number(candidate.get("limit_price") or candidate.get("price"))
     stop = _finite_number(candidate.get("stop_loss"))
     target = _finite_number(candidate.get("target_price"))
+    quantity = _finite_number(candidate.get("quantity"))
     rr = _finite_number(breakdown.get("rr_ratio") or candidate.get("risk_reward"))
     score_total = _finite_number(
         breakdown.get("score_total") if "score_total" in breakdown
@@ -885,6 +958,7 @@ def record_execution_quality_decision(
         entry is None or entry <= 0
         or stop is None or stop <= 0
         or target is None or target <= 0
+        or quantity is None or quantity <= 0
         or rr is None or rr < 1.2
         or score_total is None
     ):
@@ -908,6 +982,7 @@ def record_execution_quality_decision(
         "score_risk_reward": metric("score_risk_reward"),
         "score_reliability": metric("score_reliability"),
         "score_market_regime": metric("score_market_regime"),
+        "score_supply_demand": metric("score_supply_demand"),
         "penalty_overheat": metric("penalty_overheat"),
         "penalty_duplicate": metric("penalty_duplicate"),
         "penalty_event_risk": metric("penalty_event_risk"),
@@ -916,6 +991,7 @@ def record_execution_quality_decision(
         "entry_price": float(entry),
         "stop_loss": float(stop),
         "target_price": float(target),
+        "quantity": float(quantity),
     }
 
     def payload_matches(row: sqlite3.Row) -> bool:
@@ -935,9 +1011,9 @@ def record_execution_quality_decision(
             select_columns = (
                 "id, ticker, pilot_id, decision_ref, decision_bucket, decision_reason, "
                 "score_total, score_momentum, score_liquidity, score_risk_reward, "
-                "score_reliability, score_market_regime, penalty_overheat, "
+                "score_reliability, score_market_regime, score_supply_demand, penalty_overheat, "
                 "penalty_duplicate, penalty_event_risk, rr_ratio, regime, "
-                "entry_price, stop_loss, target_price"
+                "entry_price, stop_loss, target_price, quantity"
             )
             existing_ref = conn.execute(
                 f"SELECT {select_columns} FROM quality_gate_decisions WHERE decision_ref=?",
@@ -963,11 +1039,11 @@ def record_execution_quality_decision(
                 """INSERT INTO quality_gate_decisions
                    (ticker, decided_at, decision_bucket, decision_reason,
                     score_total, score_momentum, score_liquidity, score_risk_reward,
-                    score_reliability, score_market_regime,
+                    score_reliability, score_market_regime, score_supply_demand,
                     penalty_overheat, penalty_duplicate, penalty_event_risk,
-                    rr_ratio, regime, entry_price, stop_loss, target_price,
+                    rr_ratio, regime, entry_price, stop_loss, target_price, quantity,
                     pilot_id, decision_ref)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     symbol,
                     datetime.now(KST).strftime("%Y-%m-%dT%H:%M:%S+09:00"),
@@ -979,6 +1055,7 @@ def record_execution_quality_decision(
                     immutable_payload["score_risk_reward"],
                     immutable_payload["score_reliability"],
                     immutable_payload["score_market_regime"],
+                    immutable_payload["score_supply_demand"],
                     immutable_payload["penalty_overheat"],
                     immutable_payload["penalty_duplicate"],
                     immutable_payload["penalty_event_risk"],
@@ -987,6 +1064,7 @@ def record_execution_quality_decision(
                     immutable_payload["entry_price"],
                     immutable_payload["stop_loss"],
                     immutable_payload["target_price"],
+                    immutable_payload["quantity"],
                     pid,
                     ref,
                 ),

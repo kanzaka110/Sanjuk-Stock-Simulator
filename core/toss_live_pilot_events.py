@@ -13,11 +13,13 @@ event_type:
   confirm_blocked_hermes   | Hermes 검증 미완료/미통과로 차단
   confirm_blocked_policy   | Hermes PASS + live pilot 조건 미충족으로 차단
   confirm_blocked_transport| Hermes PASS + transport 미설정으로 차단
+  confirm_blocked_quality  | exact quality row 누락/불일치로 차단
   confirmed_but_not_sent   | Hermes PASS + guard 통과 + 최종 차단 (adapter 등)
   live_send_blocked        | guard 차단
   live_sent                | 진짜 live 전송 성공 (adapter enabled + live_order_allowed + sent)
   live_sent_artifact       | test/mock/리허설 전송 — production live_sent로 카운트 금지
   live_send_failed         | 전송 시도 후 실패
+  autonomous_blocked_quality | exact quality row 누락/불일치로 자율주문 차단
   autonomous_send_retryable | 자율주문 전송 실패이나 재시도 가능
 
 [오염 방지 invariant]
@@ -86,6 +88,7 @@ _VALID_EVENT_TYPES = frozenset([
     "confirm_blocked_hermes",
     "confirm_blocked_policy",
     "confirm_blocked_transport",
+    "confirm_blocked_quality",
     "confirmed_but_not_sent",
     "live_send_blocked",
     "live_sent",
@@ -95,6 +98,7 @@ _VALID_EVENT_TYPES = frozenset([
     "autonomous_blocked_hermes",
     "autonomous_blocked_policy",
     "autonomous_blocked_guard",
+    "autonomous_blocked_quality",
     "autonomous_live_sent",
     "autonomous_send_failed",
     "autonomous_send_retryable",

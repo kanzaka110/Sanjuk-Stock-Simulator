@@ -596,6 +596,7 @@ class TestExactExecutionQualityDecision:
             "side": "buy",
             "decision_bucket": PASS_EXECUTE,
             "decision_reason": "quality pass",
+            "quantity": 2,
             "quality_score": 82.0,
             "quality_breakdown": {
                 "score_total": 82.0,
@@ -604,6 +605,7 @@ class TestExactExecutionQualityDecision:
                 "score_risk_reward": 17.0,
                 "score_reliability": 13.0,
                 "score_market_regime": 14.0,
+                "score_supply_demand": 5.0,
                 "penalty_overheat": 0.0,
                 "penalty_duplicate": 0.0,
                 "penalty_event_risk": 0.0,
@@ -729,6 +731,71 @@ class TestExactExecutionQualityDecision:
         assert bucket_conflict == {
             "ok": False, "reason": "quality_decision_payload_conflict",
         }
+
+    def test_quantity_and_supply_demand_are_immutable(self, tmp_path, monkeypatch):
+        from core import toss_quality_gate as qg
+
+        monkeypatch.setattr(qg, "_outcomes_db_path", lambda: tmp_path / "quality_sizing.db")
+        qg._outcomes_schema_created = False
+        pilot_id = "tlive_20260713_120021_1234"
+        ref = "execution_decision:tlive_origin_3031"
+        first = qg.record_execution_quality_decision(
+            self._candidate(), pilot_id=pilot_id, decision_ref=ref
+        )
+
+        changed_quantity = self._candidate()
+        changed_quantity["quantity"] = 99
+        quantity_conflict = qg.record_execution_quality_decision(
+            changed_quantity, pilot_id=pilot_id, decision_ref=ref
+        )
+        changed_supply = self._candidate()
+        changed_supply["quality_breakdown"]["score_supply_demand"] = 9.0
+        supply_conflict = qg.record_execution_quality_decision(
+            changed_supply, pilot_id=pilot_id, decision_ref=ref
+        )
+        row = qg.quality_decision_for_ref(ref)
+
+        assert first["ok"] is True
+        assert row["quantity"] == 2
+        assert row["score_supply_demand"] == 5.0
+        assert quantity_conflict == {
+            "ok": False, "reason": "quality_decision_payload_conflict",
+        }
+        assert supply_conflict == {
+            "ok": False, "reason": "quality_decision_payload_conflict",
+        }
+
+    def test_last_mile_validation_requires_exact_row_and_sizing(self, tmp_path, monkeypatch):
+        from core import toss_quality_gate as qg
+
+        monkeypatch.setattr(qg, "_outcomes_db_path", lambda: tmp_path / "quality_last_mile.db")
+        qg._outcomes_schema_created = False
+        pilot_id = "tlive_20260713_120022_1234"
+        ref = "execution_decision:tlive_origin_3032"
+        candidate = self._candidate()
+        created = qg.record_execution_quality_decision(
+            candidate, pilot_id=pilot_id, decision_ref=ref
+        )
+        rec = {
+            "pilot_id": pilot_id,
+            "decision_ref": ref,
+            "symbol": candidate["symbol"],
+            "side": "buy",
+            "quantity": candidate["quantity"],
+            "limit_price": candidate["limit_price"],
+            "stop_loss": candidate["stop_loss"],
+            "target_price": candidate["target_price"],
+        }
+
+        exact = qg.validate_execution_quality_decision(rec, pilot_id=pilot_id)
+        mismatched = qg.validate_execution_quality_decision(
+            {**rec, "quantity": rec["quantity"] + 1}, pilot_id=pilot_id
+        )
+
+        assert created["ok"] is True
+        assert exact["ok"] is True
+        assert exact["reason"] == "quality_decision_exact"
+        assert mismatched == {"ok": False, "reason": "quality_decision_mismatch"}
 
     def test_quality_schema_migration_failure_is_retryable_and_not_ready(self, tmp_path, monkeypatch):
         from core import toss_quality_gate as qg

@@ -1417,6 +1417,48 @@ class TestActionsTelegramRender:
         assert any("normalized 구조 오류" in e
                    for e in normalized["integrity_errors"])
 
+    def test_unhashable_executable_side_fails_closed_in_all_renderers(self):
+        from core.email import _build_briefing_html
+        from core.models import BriefingResult, Signal
+        from core.telegram import _build_briefing_message, _build_impact_message, _build_urgent_alert
+
+        for bad_side in ({"nested": "buy"}, ["buy"], None):
+            raw = {
+                "normalized": {
+                    "executable_actions": [{
+                        "ticker": "RAWBUY.KS",
+                        "name": "RAWBUY",
+                        "side": bad_side,
+                        "type": "매수·즉시",
+                    }],
+                },
+                "strategy_buy": [{"ticker": "RAWBUY.KS", "name": "RAWBUY"}],
+                "buy_recommendations": [{
+                    "ticker": "RAWBUY.KS", "name": "RAWBUY", "reason": "즉시 매수",
+                }],
+                "account_strategy": {"일반": "RAWBUY 즉시 매수"},
+                "next_action": "RAWBUY 매수 실행",
+            }
+            result = BriefingResult(
+                title="테스트",
+                investment_decision="매수실행",
+                buy_signals=(Signal(
+                    ticker="RAWBUY.KS", name="RAWBUY", signal="매수", urgency="🔥강력",
+                ),),
+                raw_json=raw,
+            )
+
+            outputs = [
+                "\n".join(_build_urgent_alert(result, raw)),
+                _build_briefing_message(result, raw, "KR_OPEN", "테스트", ""),
+                _build_impact_message(result, raw, "KR_OPEN", "테스트", "KR_OPEN"),
+                _build_briefing_html(result, raw, "KR_OPEN", "테스트"),
+            ]
+            for output in outputs:
+                assert "RAWBUY" not in output
+                assert "즉시 매수" not in output
+                assert "매수실행" not in output
+
     def test_malformed_nested_action_fields_are_dropped_without_renderer_crash(self):
         from core.models import BriefingResult
         from core.telegram import _build_impact_message

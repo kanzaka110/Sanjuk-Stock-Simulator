@@ -226,9 +226,15 @@ class TestTelegramBuyNotConfiguredTransport(unittest.TestCase):
             "core.toss_live_pilot_verification.is_verification_passed",
             return_value=(True, [], {}),
         )
+        self._quality = patch(
+            "core.toss_quality_gate.validate_execution_quality_decision",
+            return_value={"ok": True, "reason": "quality_decision_exact"},
+        )
         self._hermes.start()
+        self._quality.start()
 
     def tearDown(self):
+        self._quality.stop()
         self._hermes.stop()
         self._db.stop()
         import core.toss_live_pilot_ledger as m

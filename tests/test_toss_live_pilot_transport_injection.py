@@ -200,9 +200,15 @@ class TestFakeSuccessIsolated(unittest.TestCase):
             "core.toss_live_pilot_verification.is_verification_passed",
             return_value=(True, [], {}),
         )
+        self._quality_patch = patch(
+            "core.toss_quality_gate.validate_execution_quality_decision",
+            return_value={"ok": True, "reason": "quality_decision_exact"},
+        )
         self._hermes_patch.start()
+        self._quality_patch.start()
 
     def tearDown(self):
+        self._quality_patch.stop()
         self._hermes_patch.stop()
         self._env_patch.stop()
         self._db_patch.stop()

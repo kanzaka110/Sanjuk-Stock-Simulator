@@ -35,6 +35,7 @@ _PILOT_REC = {
     "blocks": [],
     "live_order_sent": False,
     "stop_loss": 180.0,
+    "target_price": 210.0,
     "invalidation": "below $180",
 }
 
@@ -168,13 +169,130 @@ class TestSuccessfulExecution:
     @patch("core.toss_live_pilot_telegram.send_autonomous_result_message", return_value=True)
     def test_pass_triggers_order(self, mock_tg, mock_transport, mock_ledger):
         mock_transport.return_value = _mock_transport_success
-        with patch.dict(os.environ, _AUTO_ENV, clear=False):
+        with patch.dict(os.environ, _AUTO_ENV, clear=False), \
+             patch("core.toss_quality_gate.validate_execution_quality_decision",
+                   return_value={"ok": True, "reason": "quality_decision_exact"}):
             from core.toss_autonomous_finalizer import try_autonomous_finalize
             result = try_autonomous_finalize("test_pilot_001")
         assert result["ok"] is True
         assert result["live_order_sent"] is True
         assert result["broker_order_id"] == "mock_order_123"
         mock_ledger.assert_called_once()
+
+
+class TestExactQualityLastMile:
+    """BUY는 dispatch 직전 exact quality row가 없으면 차단."""
+
+    def test_missing_quality_row_blocks_before_dispatch(self, tmp_path, monkeypatch):
+        from core import toss_quality_gate as qg
+
+        pilot_id = "tlive_20260713_missing_qg"
+        rec = {**_PILOT_REC, "pilot_id": pilot_id}
+        monkeypatch.setattr(qg, "_outcomes_db_path", lambda: tmp_path / "missing_quality.db")
+        qg._outcomes_schema_created = False
+
+        with patch.dict(os.environ, _AUTO_ENV, clear=False), \
+             patch("core.toss_live_pilot_ledger.list_live_pilot_records", return_value=[rec]), \
+             patch("core.toss_live_pilot_verification.is_verification_passed", _mock_verif_pass), \
+             patch("core.toss_live_pilot_adapter.can_send_live_pilot_order", return_value=(True, [])), \
+             patch("core.toss_live_pilot_adapter.dispatch_toss_order_live", return_value=_mock_transport_success({}, {})) as dispatch, \
+             patch("core.toss_live_pilot_telegram.resolve_live_transport_for_confirm", return_value=object()) as resolver, \
+             patch("core.toss_live_pilot_ledger.record_live_sent"), \
+             patch("core.toss_live_pilot_telegram.send_autonomous_result_message", return_value=True), \
+             patch("core.toss_autonomous_finalizer._record_event"):
+            from core.toss_autonomous_finalizer import try_autonomous_finalize
+            result = try_autonomous_finalize(pilot_id)
+
+        assert result["ok"] is False
+        assert result["live_order_sent"] is False
+        assert result["reason"] == "quality_decision_missing"
+        resolver.assert_not_called()
+        dispatch.assert_not_called()
+
+    def test_exact_quality_row_allows_transport_resolution(self, tmp_path, monkeypatch):
+        from core import toss_quality_gate as qg
+
+        monkeypatch.setattr(qg, "_outcomes_db_path", lambda: tmp_path / "quality_exact.db")
+        qg._outcomes_schema_created = False
+        rec = {
+            **_PILOT_REC,
+            "pilot_id": "tlive_20260713_qg_exact",
+            "decision_ref": "execution_decision:tlive_qg_exact",
+        }
+        candidate = {
+            "symbol": rec["symbol"],
+            "side": "buy",
+            "quantity": rec["quantity"],
+            "limit_price": rec["limit_price"],
+            "stop_loss": rec["stop_loss"],
+            "target_price": rec["target_price"],
+            "risk_reward": 1.5,
+            "decision_bucket": "PASS_EXECUTE",
+            "decision_reason": "quality pass",
+            "quality_score": 82.0,
+            "quality_breakdown": {
+                "score_total": 82.0,
+                "score_momentum": 20.0,
+                "score_liquidity": 15.0,
+                "score_risk_reward": 15.0,
+                "score_reliability": 10.0,
+                "score_market_regime": 10.0,
+                "score_supply_demand": 12.0,
+                "penalty_overheat": 0.0,
+                "penalty_duplicate": 0.0,
+                "penalty_event_risk": 0.0,
+                "rr_ratio": 1.5,
+                "regime": "neutral",
+            },
+        }
+        created = qg.record_execution_quality_decision(
+            candidate,
+            pilot_id=rec["pilot_id"],
+            decision_ref=rec["decision_ref"],
+        )
+        assert created["ok"] is True
+
+        with patch.dict(os.environ, _AUTO_ENV, clear=False), \
+             patch("core.toss_live_pilot_ledger.list_live_pilot_records", return_value=[rec]), \
+             patch("core.toss_live_pilot_verification.is_verification_passed", _mock_verif_pass), \
+             patch("core.toss_live_pilot_adapter.can_send_live_pilot_order", return_value=(True, [])), \
+             patch("core.toss_live_pilot_telegram.resolve_live_transport_for_confirm", return_value=object()) as resolver, \
+             patch("core.toss_live_pilot_adapter.dispatch_toss_order_live", return_value=_mock_transport_success({}, {})) as dispatch, \
+             patch("core.toss_live_pilot_ledger.record_live_sent"), \
+             patch("core.toss_live_pilot_telegram.send_autonomous_result_message", return_value=True), \
+             patch("core.toss_autonomous_finalizer._record_event"):
+            from core.toss_autonomous_finalizer import try_autonomous_finalize
+            result = try_autonomous_finalize(rec["pilot_id"])
+
+        assert result["ok"] is True
+        assert result["live_order_sent"] is True
+        resolver.assert_called_once()
+        dispatch.assert_called_once()
+
+    def test_quality_lookup_error_blocks_before_transport_resolution(self):
+        from core import toss_quality_gate as qg
+
+        rec = {
+            **_PILOT_REC,
+            "pilot_id": "tlive_20260713_qg_error",
+            "decision_ref": "execution_decision:tlive_qg_error",
+        }
+        with patch.dict(os.environ, _AUTO_ENV, clear=False), \
+             patch("core.toss_live_pilot_ledger.list_live_pilot_records", return_value=[rec]), \
+             patch("core.toss_live_pilot_verification.is_verification_passed", _mock_verif_pass), \
+             patch("core.toss_live_pilot_adapter.can_send_live_pilot_order", return_value=(True, [])), \
+             patch.object(qg, "validate_execution_quality_decision", side_effect=RuntimeError("synthetic")), \
+             patch("core.toss_live_pilot_telegram.resolve_live_transport_for_confirm", return_value=object()) as resolver, \
+             patch("core.toss_live_pilot_adapter.dispatch_toss_order_live", return_value=_mock_transport_success({}, {})) as dispatch, \
+             patch("core.toss_live_pilot_ledger.record_live_sent"), \
+             patch("core.toss_autonomous_finalizer._record_event"):
+            from core.toss_autonomous_finalizer import try_autonomous_finalize
+            result = try_autonomous_finalize(rec["pilot_id"])
+
+        assert result["ok"] is False
+        assert result["reason"] == "quality_decision_unavailable"
+        resolver.assert_not_called()
+        dispatch.assert_not_called()
 
 
 class TestDispatchFailure:
@@ -187,7 +305,9 @@ class TestDispatchFailure:
     @patch("core.toss_live_pilot_telegram.send_autonomous_result_message", return_value=True)
     def test_dispatch_fail_recorded(self, mock_tg, mock_transport, mock_ledger):
         mock_transport.return_value = _mock_transport_fail
-        with patch.dict(os.environ, _AUTO_ENV, clear=False):
+        with patch.dict(os.environ, _AUTO_ENV, clear=False), \
+             patch("core.toss_quality_gate.validate_execution_quality_decision",
+                   return_value={"ok": True, "reason": "quality_decision_exact"}):
             from core.toss_autonomous_finalizer import try_autonomous_finalize
             result = try_autonomous_finalize("test_pilot_001")
         assert result["ok"] is False
@@ -204,7 +324,9 @@ class TestNoTransport:
     @patch("core.toss_live_pilot_telegram.resolve_live_transport_for_confirm", return_value=None)
     @patch("core.toss_live_pilot_telegram.send_autonomous_result_message", return_value=True)
     def test_no_transport_blocked(self, mock_tg, mock_transport, mock_ledger):
-        with patch.dict(os.environ, _AUTO_ENV, clear=False):
+        with patch.dict(os.environ, _AUTO_ENV, clear=False), \
+             patch("core.toss_quality_gate.validate_execution_quality_decision",
+                   return_value={"ok": True, "reason": "quality_decision_exact"}):
             from core.toss_autonomous_finalizer import try_autonomous_finalize
             result = try_autonomous_finalize("test_pilot_001")
         assert result["ok"] is False
@@ -221,7 +343,9 @@ class TestTelegramResultSent:
     @patch("core.toss_live_pilot_telegram.send_autonomous_result_message", return_value=True)
     def test_telegram_sent_on_success(self, mock_tg, mock_transport, mock_ledger):
         mock_transport.return_value = _mock_transport_success
-        with patch.dict(os.environ, _AUTO_ENV, clear=False):
+        with patch.dict(os.environ, _AUTO_ENV, clear=False), \
+             patch("core.toss_quality_gate.validate_execution_quality_decision",
+                   return_value={"ok": True, "reason": "quality_decision_exact"}):
             from core.toss_autonomous_finalizer import try_autonomous_finalize
             try_autonomous_finalize("test_pilot_001")
         mock_tg.assert_called_once()
@@ -244,7 +368,9 @@ class TestHttp422Diagnostics:
     ):
         mock_transport.return_value = _mock_transport_http_422
         mock_event.return_value = {"ok": True, "event_id": "tle_mock"}
-        with patch.dict(os.environ, _AUTO_ENV, clear=False):
+        with patch.dict(os.environ, _AUTO_ENV, clear=False), \
+             patch("core.toss_quality_gate.validate_execution_quality_decision",
+                   return_value={"ok": True, "reason": "quality_decision_exact"}):
             from core.toss_autonomous_finalizer import try_autonomous_finalize
             result = try_autonomous_finalize("test_pilot_001")
         assert result["ok"] is False

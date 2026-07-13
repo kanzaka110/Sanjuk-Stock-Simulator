@@ -227,7 +227,45 @@ def _finalize_impl(pilot_id: str, allow_retry: bool = False) -> dict:
             "guard_reasons": guard_reasons,
         }
 
-    # 6. transport + dispatch
+    # 6. BUY exact quality row — 마지막 pre-dispatch 공통 경계
+    if str(preview_stub.get("side") or "").lower() == "buy":
+        try:
+            from core.toss_quality_gate import validate_execution_quality_decision
+            quality_check = validate_execution_quality_decision(rec, pilot_id=pilot_id)
+        except Exception as exc:
+            log.warning(
+                "autonomous quality last-mile check failed: error_type=%s",
+                type(exc).__name__,
+            )
+            quality_check = {"ok": False, "reason": "quality_decision_unavailable"}
+        if not quality_check.get("ok"):
+            quality_reason = str(
+                quality_check.get("reason") or "quality_decision_unavailable"
+            )
+            try:
+                record_live_send_blocked(pilot_id, [quality_reason])
+            except Exception as exc:
+                log.warning(
+                    "autonomous quality block ledger failed: error_type=%s",
+                    type(exc).__name__,
+                )
+            _record_event(
+                pilot_id=pilot_id,
+                event_type="autonomous_blocked_quality",
+                status="live_send_blocked",
+                verification_id=verification_id,
+                reason=quality_reason,
+                rec=rec,
+                policy=policy,
+            )
+            return {
+                "ok": False,
+                "action": "autonomous_finalize",
+                "live_order_sent": False,
+                "reason": quality_reason,
+            }
+
+    # 7. transport + dispatch
     payload = {
         "symbol": preview_stub["symbol"],
         "side": preview_stub["side"],

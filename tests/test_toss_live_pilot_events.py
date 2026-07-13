@@ -138,6 +138,21 @@ class TestRecordEventBasic(unittest.TestCase):
         types = {e["event_type"] for e in events}
         self.assertIn("cancelled", types)
 
+    def test_quality_last_mile_block_event_types_are_persisted(self):
+        from core.toss_live_pilot_events import record_event, list_events
+
+        for event_type in ("autonomous_blocked_quality", "confirm_blocked_quality"):
+            result = record_event(
+                "tlive_quality_block",
+                event_type,
+                "live_send_blocked",
+                reason="quality_decision_missing",
+            )
+            self.assertTrue(result["ok"])
+        types = {e["event_type"] for e in list_events(limit=10)}
+        self.assertIn("autonomous_blocked_quality", types)
+        self.assertIn("confirm_blocked_quality", types)
+
     def test_decision_ref_persisted_in_event(self):
         from core.toss_live_pilot_events import record_event, list_events
         ref = "execution_decision:tlive_trace"

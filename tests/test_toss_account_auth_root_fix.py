@@ -494,6 +494,7 @@ def test_insufficient_buying_power_marks_rebalance_needed_in_finalizer():
          patch("core.toss_live_pilot_ledger.record_live_send_failed") as failed, \
          patch("core.toss_live_pilot_ledger.record_live_send_retryable") as retryable, \
          patch("core.toss_live_pilot_events.record_event", return_value={"ok": True}), \
+         patch("core.toss_quality_gate.validate_execution_quality_decision", return_value={"ok": True, "reason": "quality_decision_exact"}), \
          patch("core.toss_live_pilot_telegram.resolve_live_transport_for_confirm", return_value=transport), \
          patch("core.toss_live_pilot_telegram.send_autonomous_result_message", return_value=True):
         result = try_autonomous_finalize("cash_short_pilot")
