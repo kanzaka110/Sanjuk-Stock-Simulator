@@ -1,133 +1,346 @@
 {
   "version": "ai_berkshire_toss_v2",
   "read_only": true,
-  "note": "기존 운영 8종목 의미 보존 + 2026-07-11 staging 3종목 안전 병합 후보. 운영 score가 아니며 별도 승인 전 사용 금지.",
+  "note": "Local handoff candidate only. Generated from validator-PASS complete staging; not an operating score until separately applied and verified.",
   "items": {
     "035720.KS": {
       "name": "카카오",
       "classification": "hold",
       "sell_to_fund_adjustment": -2.0,
-      "as_of": "2026-07-10",
-      "valid_until": "2026-10-10",
-      "thesis": "거버넌스 리스크는 있으나 1Q26 실적 개선과 카카오톡 플랫폼 해자가 유지되어 즉시 자동매도는 과하다.",
+      "as_of": "2026-07-12",
+      "valid_until": "2026-08-05",
+      "thesis": "카카오는 약 4958만명의 국내 카카오톡 네트워크와 광고·커머스·결제 생태계의 영업 레버리지가 핵심 가치지만, 거버넌스·자본배분 불확실성, AI 손실과 일부 콘텐츠 역성장 및 보통 수준의 밸류에이션 때문에 기존 보유만 정당화된다.",
       "red_lines": [
-        "카카오톡 기반 광고/커머스 매출의 명확한 역성장 추세",
-        "거버넌스 이슈로 핵심 자회사 지배력 상실 또는 대규모 자산 매각 강제"
+        "국내 카카오톡 분기 평균 MAU가 4800만명 미만으로 2개 연속 분기 공시되면 네트워크 해자 약화로 재평가한다.",
+        "톡비즈 매출이 전년 동기 대비 감소하는 상태가 2개 연속 분기 공시되면 핵심 수익화 논지를 철회한다.",
+        "연결 영업이익률이 8.0% 미만으로 2개 연속 분기 공시되거나 연간 공식 영업이익률 가이던스가 8.0% 미만으로 낮아지면 trim 또는 sell_to_fund를 재평가한다.",
+        "카카오 별도 AI 부문 영업손실이 분기 1000억원을 초과하는 상태가 2개 연속 분기 이어지면서 플랫폼 매출 성장률이 5% 미만이면 AI 투자 논지를 재검토한다.",
+        "연결 현금및현금성자산과 단기금융상품 합계에서 단기·장기차입금을 뺀 순유동성이 4조원 미만으로 공시되면 재무 안전마진 훼손으로 재평가한다.",
+        "2026년 7월 10일 상장주식수 442,981,070주 대비 CB 전환·주식매수선택권·유상증자에 따른 누적 신규 상장주식이 12개월 내 3%를 초과하고 동등한 소각이 없으면 희석 red line 위반으로 재평가한다."
       ],
       "confidence": "medium",
       "source_urls": [
-        "https://finance.naver.com/item/main.naver?code=035720"
-      ]
+        "https://www.kakaocorp.com/ir/referenceRoom/earningsAnnouncement?selectedYear=2026",
+        "https://t1.kakaocdn.net/kakaocorp/admin/ir/results-announcement/6015.pdf",
+        "https://t1.kakaocdn.net/kakaocorp/admin/ir/results-announcement/6001.xlsx",
+        "https://www.kakaocorp.com/page/detail/12064?lang=ENG",
+        "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260515001802",
+        "https://www.kakaocorp.com/ir/stockInformation?lang=en",
+        "https://www.kakaocorp.com/ir/disclosureInformation?lang=en",
+        "https://engkind.krx.co.kr/external/2026/05/19/000400/20260519000810/91763.htm"
+      ],
+      "research_status": "complete",
+      "proposed_classification": "hold",
+      "classification_change_reason": "strict checklist 최초 마이그레이션 결과 운영 score의 hold를 유지한다. 2026년 1분기 매출 1조9421억원·영업이익 2114억원·영업이익률 10.9%와 톡비즈 매출 9% 증가는 핵심 플랫폼 논지를 지지하고, 4958만명 규모 국내 카카오톡 MAU와 약 6.90조원의 계산 순유동성도 방어력을 제공한다. 다만 포털 매출은 9%, 스토리 매출은 14% 감소했고 AI 부문 분기 영업손실은 550억원이며, 2026년 7월 10일 회사 IR의 PER 30.1배는 뚜렷한 안전마진으로 보기 어렵다. 따라서 protect나 신규 BUY pass가 아니라 기존 보유 hold와 BUY fail을 독립적으로 제안한다.",
+      "evidence_urls": [
+        "https://www.kakaocorp.com/ir/referenceRoom/earningsAnnouncement?selectedYear=2026",
+        "https://t1.kakaocdn.net/kakaocorp/admin/ir/results-announcement/6015.pdf",
+        "https://t1.kakaocdn.net/kakaocorp/admin/ir/results-announcement/6001.xlsx",
+        "https://www.kakaocorp.com/page/detail/12064?lang=ENG",
+        "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260515001802",
+        "https://www.kakaocorp.com/ir/stockInformation?lang=en",
+        "https://www.kakaocorp.com/ir/disclosureInformation?lang=en",
+        "https://engkind.krx.co.kr/external/2026/05/19/000400/20260519000810/91763.htm"
+      ],
+      "checked_at": "2026-07-12T21:52:44+09:00",
+      "buy_checklist_status": "fail",
+      "strict_buy_gate": true,
+      "auto_sell_eligible": false
     },
     "015760.KS": {
       "name": "한국전력",
       "classification": "sell_to_fund",
       "sell_to_fund_adjustment": 0.0,
-      "as_of": "2026-07-10",
-      "valid_until": "2026-10-10",
-      "thesis": "요금 정책·부채·연료비 의존이 커서 보호할 고품질 compounder가 아니며 현금 확보용 축소 후보를 유지한다.",
+      "as_of": "2026-07-12",
+      "valid_until": "2026-08-10",
+      "thesis": "한국전력은 필수 전력망과 규제 독점 지위를 보유하지만 요금 결정권 제약, 128조원대 총차입금과 지속적인 대규모 설비투자로 주주 귀속 복리수익의 예측성이 낮아 현금 확보용 sell_to_fund 후보로 남는다.",
       "red_lines": [
-        "전기요금 정상화로 구조적 흑자 전환과 부채 감축이 공시로 확인되면 재평가"
+        "연결 총차입금 및 사채가 115조원 미만으로 감소하고 부채총계/자본총계가 3.0배 미만이며 연결 영업이익률이 4개 연속 분기 10% 이상이면 sell_to_fund 논지를 hold 이상으로 재평가한다.",
+        "연결 영업이익률이 5.0% 미만이거나 연결 순손실인 상태가 2개 연속 분기 공시되면 재무 회복 논지를 철회하고 avoid 여부를 재평가한다.",
+        "연결 이자지급액이 영업활동현금흐름의 25%를 초과하면서 총차입금 및 사채가 130조원 이상인 상태가 2개 연속 분기면 부채 red line 위반으로 재평가한다.",
+        "연결 영업활동현금흐름에서 유형·무형자산 취득액을 뺀 금액이 2개 연속 분기 음수이고 총차입금 및 사채가 2026년 1분기 말 128.2111조원보다 5조원 이상 증가하면 자본집약 위험 확대로 재평가한다.",
+        "전력판매사업부문이 2개 연속 분기 영업손실을 기록하고 같은 기간 연결 총차입금 및 사채가 감소하지 않으면 요금·원가 회수 논지를 철회한다."
       ],
       "confidence": "medium",
       "source_urls": [
-        "https://finance.naver.com/item/main.naver?code=015760"
-      ]
+        "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260515002075",
+        "https://www.kepco.co.kr/home/about/invest/irinfo/irreport/boardList.do",
+        "https://www.kepco.co.kr/home/about/invest/stinfo/capital/conts.do",
+        "https://home.kepco.co.kr/kepco/KE/ntcob/list.do?boardCd=BRD_000319&menuCd=FN270703",
+        "https://api.finance.naver.com/siseJson.naver?symbol=015760&requestType=1&startTime=20260710&endTime=20260710&timeframe=day"
+      ],
+      "research_status": "complete",
+      "proposed_classification": "sell_to_fund",
+      "classification_change_reason": "strict checklist 최초 마이그레이션 결과 운영 score의 sell_to_fund를 유지한다. 2026년 1분기 연결 매출 24.3985조원·영업이익 3.7842조원·영업이익률 15.5%와 영업현금흐름 7.3070조원은 흑자 회복을 확인하지만, 3월 말 부채 206.3779조원·총차입금 및 사채 128.2111조원은 각각 자본의 약 4.01배·2.49배다. 2026년 7월 10일 종가 기준 지배주주지분 PBR 약 0.46배의 저평가에도 정부·산업은행 51.1% 지배와 요금 정책, 대규모 설비투자·연료비 의존 때문에 보호할 복리기업으로 보기 어렵다. 최초 migration이므로 실제 red line 위반 및 운영 게이트 검증 없이 자동매도 권한은 부여하지 않는다.",
+      "evidence_urls": [
+        "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260515002075",
+        "https://www.kepco.co.kr/home/about/invest/irinfo/irreport/boardList.do",
+        "https://www.kepco.co.kr/home/about/invest/stinfo/capital/conts.do",
+        "https://home.kepco.co.kr/kepco/KE/ntcob/list.do?boardCd=BRD_000319&menuCd=FN270703",
+        "https://api.finance.naver.com/siseJson.naver?symbol=015760&requestType=1&startTime=20260710&endTime=20260710&timeframe=day"
+      ],
+      "checked_at": "2026-07-12T23:21:58+09:00",
+      "buy_checklist_status": "fail",
+      "strict_buy_gate": true,
+      "auto_sell_eligible": false
     },
     "XOM": {
       "name": "Exxon Mobil",
       "classification": "trim",
       "sell_to_fund_adjustment": 1.0,
-      "as_of": "2026-07-10",
-      "valid_until": "2026-10-10",
-      "thesis": "나쁜 회사는 아니지만 원자재 사이클 노출이 커서 USD 현금 확보 목적의 축소(trim) 후보다.",
+      "as_of": "2026-07-12",
+      "valid_until": "2026-07-30",
+      "thesis": "Guyana·Permian·LNG의 저원가 성장자산과 통합 정제·화학망 및 건전한 대차대조표는 장기 현금창출을 지지하지만, 수익이 원자재 가격과 마진에 민감하고 대규모 자본투자가 필요하며 현재 정상화 현금수익률의 안전마진이 낮아 현금 확보용 trim 후보로 남는다.",
       "red_lines": [
-        "저유가 구간에서도 FCF와 주주환원이 구조적으로 유지되면 축소 판단 재평가"
+        "최근 12개월 영업활동현금흐름에서 현금 자본적지출을 뺀 FCF가 최근 12개월 현금배당보다 적은 상태가 2개 연속 분기 공시되면 주주환원 지속가능성을 재평가한다.",
+        "분기말 순부채가 600억달러를 초과하거나 순부채/자본 비율이 20%를 초과하면 재무 안전마진 훼손으로 분류를 재평가한다.",
+        "석유환산 생산량이 2개 연속 분기 420만배럴/일 미만이고 같은 기간 Guyana·Permian 등 advantaged volumes의 증가가 이를 상쇄하지 못하면 성장자산 논지를 재검토한다.",
+        "연간 현금 자본적지출이 300억달러를 초과하면서 같은 해 영업현금흐름/현금 자본적지출 배율이 1.5배 미만이면 자본효율 악화로 재평가한다.",
+        "현금 주당배당이 삭감되거나 자사주 매입을 차입으로 유지하는 가운데 순부채가 500억달러를 초과하면 management 점수와 trim 분류를 즉시 재검토한다.",
+        "원자재 가격 하락·규제·지정학 사건으로 최근 12개월 세후 손상차손 및 자산 몰수·철수 손실 합계가 50억달러를 초과하면 포트폴리오 해자와 위험 점수를 재평가한다."
       ],
       "confidence": "medium",
       "source_urls": [
-        "https://investor.exxonmobil.com/"
-      ]
+        "https://investor.exxonmobil.com/company-information/press-releases/detail/1204/exxonmobil-announces-first-quarter-2026-results",
+        "https://www.sec.gov/Archives/edgar/data/34088/000003408826000067/xom-20260331.htm",
+        "https://www.sec.gov/Archives/edgar/data/34088/000003408826000045/xom-20251231.htm",
+        "https://www.sec.gov/Archives/edgar/data/2115436/000211543626000003/xom-20260707.htm",
+        "https://www.sec.gov/Archives/edgar/data/2115436/000211543626000003/f8k2q991070726.htm",
+        "https://www.sec.gov/Archives/edgar/data/34088/000119312526291986/d70995d8k.htm",
+        "https://query1.finance.yahoo.com/v8/finance/chart/XOM?period1=1783296000&period2=1783987200&interval=1d&events=history"
+      ],
+      "research_status": "complete",
+      "proposed_classification": "trim",
+      "classification_change_reason": "strict checklist 최초 마이그레이션 결과 운영 score의 trim을 유지한다. 2025년 영업현금흐름 519.70억달러와 유형자산 취득 283.58억달러의 차액은 236.12억달러였고, 2026년 1분기 생산량 459.4만 석유환산배럴/일과 13.1% 순부채비율은 규모·통합·재무 해자를 지지한다. 반면 1분기 일반회계기준 FCF 27억달러보다 주주환원 92억달러가 컸고, 회사가 제시한 2분기 가격·마진 순풍에는 중동 생산·공급 차질과 손상·충당금 등 조정항목이 함께 존재해 한 분기 수치 연환산은 부적절하다. 2026년 7월 10일 종가 138.88달러는 2025년 EPS의 약 20.7배이고 2025년 단순 FCF 수익률은 약 4.1%여서 원자재 사이클과 연간 270~290억달러 자본투자 위험을 감수할 뚜렷한 신규 매수 안전마진은 확인되지 않았다. 따라서 가격 변화만이 아니라 현금흐름 커버리지·자본집약도·사이클 위험을 근거로 trim과 BUY fail을 독립 제안하되 최초 migration에서 자동매도 권한은 부여하지 않는다.",
+      "evidence_urls": [
+        "https://investor.exxonmobil.com/company-information/press-releases/detail/1204/exxonmobil-announces-first-quarter-2026-results",
+        "https://www.sec.gov/Archives/edgar/data/34088/000003408826000067/xom-20260331.htm",
+        "https://www.sec.gov/Archives/edgar/data/34088/000003408826000045/xom-20251231.htm",
+        "https://www.sec.gov/Archives/edgar/data/2115436/000211543626000003/xom-20260707.htm",
+        "https://www.sec.gov/Archives/edgar/data/2115436/000211543626000003/f8k2q991070726.htm",
+        "https://www.sec.gov/Archives/edgar/data/34088/000119312526291986/d70995d8k.htm",
+        "https://query1.finance.yahoo.com/v8/finance/chart/XOM?period1=1783296000&period2=1783987200&interval=1d&events=history"
+      ],
+      "checked_at": "2026-07-12T23:42:47+09:00",
+      "buy_checklist_status": "fail",
+      "strict_buy_gate": true,
+      "auto_sell_eligible": false
     },
     "035420.KS": {
       "name": "NAVER",
       "classification": "hold",
       "sell_to_fund_adjustment": -3.5,
-      "as_of": "2026-07-10",
-      "valid_until": "2026-10-10",
-      "thesis": "검색·커머스 중심의 사업품질과 해자가 유지되고 밸류에이션 부담이 낮아 자동매도 후순위다.",
+      "as_of": "2026-07-12",
+      "valid_until": "2026-08-05",
+      "thesis": "NAVER는 국내 검색·광고·커머스·결제의 데이터 순환과 2조원대 순현금으로 기존 보유를 정당화하지만 AI 인프라 비용, 글로벌 C2C·콘텐츠 실행 위험과 마진 하락 때문에 protect가 아닌 hold로 유지한다.",
       "red_lines": [
-        "국내 검색 점유율의 명확한 하락 추세 지속",
-        "커머스/광고 매출의 2개 분기 연속 역성장"
+        "네이버 플랫폼 매출의 전년 동기 대비 성장률이 5% 미만이거나 광고 매출이 역성장하는 상태가 2개 연속 분기 공시되면 핵심 해자·수익화 논지를 재평가한다.",
+        "연결 영업이익률이 15.0% 미만으로 2개 연속 분기 공시되면 AI·성장투자의 영업 레버리지 훼손으로 trim 또는 sell_to_fund를 재평가한다.",
+        "회사 공식 정의의 연결 순현금이 1조원 미만으로 감소하거나 연결 차입금이 5조원을 초과하면서 회사 정의 연결 FCF가 2개 연속 분기 음수이면 재무 안전마진 훼손으로 재평가한다.",
+        "글로벌 도전 부문의 분기 영업손실이 1000억원을 초과하고 해당 부문 매출 성장률이 10% 미만인 상태가 2개 연속 분기면 글로벌 확장 논지를 철회한다.",
+        "Npay 분기 결제액의 전년 동기 대비 성장률이 10% 미만으로 2개 연속 분기 공시되면 파이낸셜 플랫폼 네트워크 확장 논지를 재평가한다.",
+        "공식 주가 API의 2026년 7월 10일 상장주식수 156,944,242주 대비 유상증자·전환·주식보상에 따른 순증가가 12개월 내 3%를 초과하고 동등한 소각이 없으면 희석 red line 위반으로 재평가한다."
       ],
       "confidence": "medium",
       "source_urls": [
-        "https://finance.naver.com/item/main.naver?code=035420"
-      ]
+        "https://www.navercorp.com/api/article/download/0ce4e7c3-c1ab-4628-9848-baecc3cfcf86",
+        "https://www.navercorp.com/en/media/pressReleasesDetail?seq=10034270",
+        "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260515001511",
+        "https://www.navercorp.com/api/finance/stockInfo?tradingRankingYn=Y"
+      ],
+      "research_status": "complete",
+      "proposed_classification": "hold",
+      "classification_change_reason": "strict checklist 최초 마이그레이션 결과 운영 score의 hold를 유지한다. 2026년 1분기 매출은 3.2411조원으로 16.3% 증가했고 네이버 플랫폼·파이낸셜 플랫폼 매출은 각각 14.7%·18.9% 증가해 검색·광고·커머스·결제 생태계의 해자를 지지한다. 다만 영업비용이 18.3% 증가하면서 영업이익률은 16.7%로 전년 동기보다 1.4%p 하락했고, 콘텐츠 매출은 1.4% 감소했으며 글로벌 도전 부문은 142억원 영업손실이었다. 회사 정의 순현금 2.3373조원과 2026년 7월 10일 공식 주가 API의 PER 16.6배는 방어력을 제공하지만 AI 인프라 투자와 글로벌 사업 실행 위험을 감안해 protect나 신규 BUY pass로 올리지 않는다.",
+      "evidence_urls": [
+        "https://www.navercorp.com/api/article/download/0ce4e7c3-c1ab-4628-9848-baecc3cfcf86",
+        "https://www.navercorp.com/en/media/pressReleasesDetail?seq=10034270",
+        "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260515001511",
+        "https://www.navercorp.com/api/finance/stockInfo?tradingRankingYn=Y"
+      ],
+      "checked_at": "2026-07-12T23:21:58+09:00",
+      "buy_checklist_status": "gray_zone",
+      "strict_buy_gate": true,
+      "auto_sell_eligible": false
     },
     "068270.KS": {
       "name": "셀트리온",
       "classification": "hold",
       "sell_to_fund_adjustment": -1.0,
-      "as_of": "2026-07-10",
-      "valid_until": "2026-10-10",
-      "thesis": "밸류에이션 부담은 있으나 바이오시밀러 실적 개선과 파이프라인이 살아 있어 자동매도를 보류한다.",
+      "as_of": "2026-07-12",
+      "valid_until": "2026-07-31",
+      "thesis": "셀트리온은 글로벌 직판과 고수익 신규 바이오시밀러 확대로 2026년 매출·마진이 개선 중이지만 높은 평가배수, 대규모 무형자산과 규제·특허 위험 때문에 현재는 신규 매수보다 보유가 합리적이다.",
       "red_lines": [
-        "주력 바이오시밀러 매출 역성장 전환",
-        "핵심 신규 파이프라인 승인 실패 누적"
+        "2026년 2분기 최종 연결 매출이 1.17조원 미만이거나 영업이익이 3,870억원 미만으로 확정되어 7월 3일 잠정치보다 10% 이상 낮아지는 경우",
+        "회사가 2026년 연결 매출 5.3조원 또는 영업이익 1.8조원 목표를 공식적으로 하향하는 경우",
+        "연결 영업이익률이 2개 분기 연속 20% 미만이거나 영업현금흐름에서 유형·무형자산 취득액을 뺀 단순 잉여현금흐름이 2개 분기 연속 음수인 경우",
+        "분기말 단기차입금·유동성장기차입금·장기차입금 합계에서 현금및현금성자산과 단기금융자산을 뺀 순차입금이 3.0조원을 초과하는 경우",
+        "한 분기에 재고평가손실 또는 무형자산·영업권 손상차손이 5,000억원 이상 발생하는 경우",
+        "FDA 또는 EMA가 핵심 판매 제품의 안전성·제조품질 문제로 허가를 취소하거나 판매를 중단시키는 경우"
       ],
       "confidence": "medium",
       "source_urls": [
+        "https://www.celltrion.com/ko-kr/company/media-center/press-release/4750",
+        "https://www.celltrion.com/ko-kr/company/media-center/press-release/4837",
+        "https://www.celltrion.com/ko-kr/company/media-center/press-release/4800",
+        "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260515002932",
+        "https://dart.fss.or.kr/report/viewer.do?rcpNo=20260515002932&dcmNo=11388371&eleId=20&offset=242898&length=31927&dtd=dart4.xsd",
+        "https://dart.fss.or.kr/report/viewer.do?rcpNo=20260515002932&dcmNo=11388371&eleId=21&offset=274825&length=26391&dtd=dart4.xsd",
+        "https://dart.fss.or.kr/report/viewer.do?rcpNo=20260515002932&dcmNo=11388371&eleId=24&offset=422834&length=33007&dtd=dart4.xsd",
+        "https://dart.fss.or.kr/report/viewer.do?rcpNo=20260515002932&dcmNo=11388371&eleId=36&offset=1532557&length=21960&dtd=dart4.xsd",
+        "https://api.finance.naver.com/siseJson.naver?symbol=068270&requestType=1&startTime=20260710&endTime=20260710&timeframe=day",
         "https://finance.naver.com/item/main.naver?code=068270"
-      ]
+      ],
+      "research_status": "complete",
+      "proposed_classification": "hold",
+      "classification_change_reason": "신규 strict checklist 마이그레이션이다. 공식 2026년 1분기와 2분기 잠정 실적은 고성장·마진 개선을 확인했지만, 2분기 최종 수치가 남아 있고 2026-07-10 종가 기준 약 2.29배로 계산되는 장부가 배수와 약 2.37조원의 순차입금 추정치는 신규 매수 안전마진을 제한한다.",
+      "evidence_urls": [
+        "https://www.celltrion.com/ko-kr/company/media-center/press-release/4750",
+        "https://www.celltrion.com/ko-kr/company/media-center/press-release/4837",
+        "https://www.celltrion.com/ko-kr/company/media-center/press-release/4800",
+        "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260515002932",
+        "https://dart.fss.or.kr/report/viewer.do?rcpNo=20260515002932&dcmNo=11388371&eleId=20&offset=242898&length=31927&dtd=dart4.xsd",
+        "https://dart.fss.or.kr/report/viewer.do?rcpNo=20260515002932&dcmNo=11388371&eleId=21&offset=274825&length=26391&dtd=dart4.xsd",
+        "https://dart.fss.or.kr/report/viewer.do?rcpNo=20260515002932&dcmNo=11388371&eleId=24&offset=422834&length=33007&dtd=dart4.xsd",
+        "https://dart.fss.or.kr/report/viewer.do?rcpNo=20260515002932&dcmNo=11388371&eleId=36&offset=1532557&length=21960&dtd=dart4.xsd",
+        "https://api.finance.naver.com/siseJson.naver?symbol=068270&requestType=1&startTime=20260710&endTime=20260710&timeframe=day",
+        "https://finance.naver.com/item/main.naver?code=068270"
+      ],
+      "checked_at": "2026-07-12T22:37:40+09:00",
+      "buy_checklist_status": "fail",
+      "strict_buy_gate": true,
+      "auto_sell_eligible": false
     },
     "ABBV": {
       "name": "AbbVie",
       "classification": "hold",
       "sell_to_fund_adjustment": -3.5,
-      "as_of": "2026-07-10",
-      "valid_until": "2026-10-10",
-      "thesis": "Humira 이후 Skyrizi·Rinvoq 중심 전환이 진행 중이며 자유현금흐름 창출력이 유지된다.",
+      "as_of": "2026-07-12",
+      "valid_until": "2026-07-30",
+      "thesis": "Skyrizi·Rinvoq와 신경과학 포트폴리오의 성장 및 강한 연간 현금창출력은 Humira 이후 전환을 지지하지만, 높은 순부채와 109억달러 Apogee 인수의 장기 회수기간 및 보통 수준의 평가배수 때문에 신규 매수보다 기존 보유가 타당하다.",
       "red_lines": [
-        "Skyrizi와 Rinvoq의 성장세가 명확히 둔화",
-        "자유현금흐름 마진이 20% 아래로 하락하고 회복 근거가 없음"
+        "Skyrizi와 Rinvoq 합산 글로벌 순매출의 전년 동기 성장률이 2개 연속 분기 10% 미만이면 Humira 대체 성장 논지를 재검토한다.",
+        "분기말 총차입금(단기차입금, 유동성 장기부채, 장기부채 합계)에서 현금및현금성자산을 뺀 순부채가 800억달러를 초과하거나 Apogee 인수 종결 후 4개 분기 안에 700억달러 이하로 감소하지 않으면 management 점수와 hold 분류를 재평가한다.",
+        "최근 12개월 영업활동현금흐름에서 유형자산 취득을 뺀 단순 FCF가 최근 12개월 현금배당보다 적은 상태가 2개 연속 분기 공시되면 배당·부채 상환 능력을 재평가한다.",
+        "신규 acquired IPR&D·마일스톤 비용을 제외한 핵심 영업 요인 때문에 회사의 2026년 조정 희석 EPS 가이던스 하단이 13.50달러 미만으로 낮아지면 수익성 논지를 재검토한다.",
+        "FDA 또는 EMA가 Skyrizi나 Rinvoq의 핵심 적응증을 철회하거나 중대한 신규 안전성 제한을 부과해 해당 제품의 글로벌 분기 매출이 전년 동기 대비 20% 이상 감소하면 해자와 분류를 즉시 재평가한다.",
+        "Apogee 인수대가 109억달러의 50%를 초과하는 누적 손상차손이 종결 후 3년 안에 인식되면 자본배분 논지를 철회하고 trim 여부를 재평가한다."
       ],
-      "confidence": "medium-high",
+      "confidence": "medium",
       "source_urls": [
-        "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001551152&type=10-Q"
-      ]
+        "https://news.abbvie.com/2026-04-29-AbbVie-Reports-First-Quarter-2026-Financial-Results",
+        "https://www.sec.gov/Archives/edgar/data/1551152/000155115226000017/abbv-20260331.htm",
+        "https://www.sec.gov/Archives/edgar/data/1551152/000155115226000008/abbv-20251231.htm",
+        "https://news.abbvie.com/2026-06-22-AbbVie-to-Acquire-Apogee-Therapeutics,-Deepening-Immunology-Portfolio",
+        "https://www.sec.gov/Archives/edgar/data/1551152/000155115226000021/abbv-20260706.htm",
+        "https://news.abbvie.com/2026-06-26-AbbVie-to-Host-Second-Quarter-2026-Earnings-Conference-Call",
+        "https://query1.finance.yahoo.com/v8/finance/chart/ABBV?period1=1783296000&period2=1783987200&interval=1d&events=history"
+      ],
+      "research_status": "complete",
+      "proposed_classification": "hold",
+      "classification_change_reason": "strict checklist 최초 마이그레이션 결과 운영 score의 hold를 유지한다. 2026년 1분기 순매출은 150.02억달러로 12.4% 증가했고 Skyrizi·Rinvoq 합산 매출은 66.02억달러로 전체의 약 44.0%였으며 각각 30.9%·23.3% 성장해 Humira 이후 전환 논지를 지지한다. 2025년 단순 FCF 178.16억달러는 배당·자사주 매입 합계 126.37억달러를 웃돌았지만, 2026년 3월 말 총차입금은 728.58억달러이고 109억달러 현금 Apogee 인수는 2032년부터 조정 EPS 증대가 예상되는 장기 자본배분이다. 2026년 7월 10일 종가 248.08달러는 최신 조정 EPS 가이던스 중간값 14.01달러의 약 17.7배여서 protect 또는 신규 BUY pass를 정당화할 명확한 안전마진은 확인되지 않았다. 2분기 IPR&D·마일스톤 비용만으로 분류를 바꾸지 않고 기존 보유 hold와 BUY gray_zone을 독립적으로 제안한다.",
+      "evidence_urls": [
+        "https://news.abbvie.com/2026-04-29-AbbVie-Reports-First-Quarter-2026-Financial-Results",
+        "https://www.sec.gov/Archives/edgar/data/1551152/000155115226000017/abbv-20260331.htm",
+        "https://www.sec.gov/Archives/edgar/data/1551152/000155115226000008/abbv-20251231.htm",
+        "https://news.abbvie.com/2026-06-22-AbbVie-to-Acquire-Apogee-Therapeutics,-Deepening-Immunology-Portfolio",
+        "https://www.sec.gov/Archives/edgar/data/1551152/000155115226000021/abbv-20260706.htm",
+        "https://news.abbvie.com/2026-06-26-AbbVie-to-Host-Second-Quarter-2026-Earnings-Conference-Call",
+        "https://query1.finance.yahoo.com/v8/finance/chart/ABBV?period1=1783296000&period2=1783987200&interval=1d&events=history"
+      ],
+      "checked_at": "2026-07-12T23:42:47+09:00",
+      "buy_checklist_status": "gray_zone",
+      "strict_buy_gate": true,
+      "auto_sell_eligible": false
     },
     "024110.KS": {
       "name": "기업은행",
       "classification": "hold",
       "sell_to_fund_adjustment": -1.5,
-      "as_of": "2026-07-10",
-      "valid_until": "2026-10-10",
-      "thesis": "저PBR·배당 thesis가 유효하고 현금조달 압박이 없어 자동매도를 보류한다.",
+      "as_of": "2026-07-12",
+      "valid_until": "2026-08-10",
+      "thesis": "기업은행은 국책 기반의 중소기업 대출 프랜차이즈와 낮은 밸류에이션·배당이 하방을 지지하지만, 8%대 ROE와 정책적 자본배분 제약 및 연체·커버리지 악화 때문에 고품질 복리주가 아닌 보유형 인컴 자산이다.",
       "red_lines": [
-        "배당 축소 발표",
-        "NPL 등 건전성 지표의 급격한 악화"
+        "은행 기준 NPL 비율이 1.50% 이상이거나 총연체율이 1.10% 이상인 상태가 2개 연속 분기 공시되면 trim 또는 sell_to_fund를 재평가한다.",
+        "신기준 NPL 커버리지 비율이 100% 미만이고 연환산 대손비용률이 0.60%를 초과하는 상태가 같은 분기에 확인되면 보유 논지를 재검토한다.",
+        "연결 CET1 비율이 11.0% 미만으로 공시되면 배당·성장 여력 훼손으로 분류를 재검토한다.",
+        "은행 분기 NIM이 1.50% 미만으로 2개 연속 분기 공시되면 핵심 수익성 저하로 재평가한다.",
+        "연간 보통주 DPS가 900원 미만이 되거나 배당성향이 30% 미만으로 공식 확정되면 배당 논지를 철회한다."
       ],
       "confidence": "medium",
       "source_urls": [
-        "https://finance.naver.com/item/main.naver?code=024110"
-      ]
+        "https://global.ibk.co.kr/en/investor/FactBook",
+        "https://global.ibk.co.kr/en/download/1617",
+        "https://global.ibk.co.kr/upload/global/2026/2026051515470934640298299246253.pdf",
+        "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260515001341",
+        "https://global.ibk.co.kr/en/investor/StatusofShareholders",
+        "https://api.finance.naver.com/siseJson.naver?symbol=024110&requestType=1&startTime=20260710&endTime=20260710&timeframe=day"
+      ],
+      "research_status": "complete",
+      "proposed_classification": "hold",
+      "classification_change_reason": "strict checklist 최초 마이그레이션 결과 운영 score의 hold를 유지한다. 2026년 1분기 연결 순이익은 7.5% 감소했지만 분기 NIM 1.60%, NPL 비율 1.28%, CET1 비율 11.51%로 수익 기반과 자본은 유지됐다. 반면 총연체율은 0.95%로 상승했고 NPL 커버리지 비율은 105.2%로 하락해 protect로 올릴 근거가 부족하다. 2026년 7월 10일 종가 기준 계산 PBR 약 0.46배·FY2025 순이익 기준 PER 약 6.25배·배당수익률 약 4.93%의 안전마진은 있으나, 가격만으로 분류하거나 BUY 상태를 올리지 않았다.",
+      "evidence_urls": [
+        "https://global.ibk.co.kr/en/investor/FactBook",
+        "https://global.ibk.co.kr/en/download/1617",
+        "https://global.ibk.co.kr/upload/global/2026/2026051515470934640298299246253.pdf",
+        "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260515001341",
+        "https://global.ibk.co.kr/en/investor/StatusofShareholders",
+        "https://api.finance.naver.com/siseJson.naver?symbol=024110&requestType=1&startTime=20260710&endTime=20260710&timeframe=day"
+      ],
+      "checked_at": "2026-07-12T21:52:44+09:00",
+      "buy_checklist_status": "gray_zone",
+      "strict_buy_gate": true,
+      "auto_sell_eligible": false
     },
     "316140.KS": {
       "name": "우리금융지주",
       "classification": "hold",
       "sell_to_fund_adjustment": -1.8,
-      "as_of": "2026-07-10",
-      "valid_until": "2026-10-10",
-      "thesis": "저PBR·배당 thesis가 유효하고 현금조달 압박이 없어 자동매도를 보류한다.",
+      "as_of": "2026-07-12",
+      "valid_until": "2026-07-23",
+      "thesis": "우리금융지주는 0.60배 안팎의 장부가 할인과 개선된 13.6% 보통주자본비율, 배당·소각 정책이 장점이지만 낮은 ROE와 상승한 신용비용, 보험 통합·주식교환 실행 위험 때문에 현재는 보유가 합리적이다.",
       "red_lines": [
-        "배당 정책 후퇴(축소/중단)",
-        "그룹 건전성 지표의 급격한 악화"
+        "그룹 보통주자본비율이 한 분기라도 13.0% 미만으로 하락하는 경우",
+        "그룹 고정이하여신비율이 0.90% 이상이거나 고정이하여신 커버리지비율이 110% 미만으로 하락하는 경우",
+        "우리은행 연체율이 0.55% 이상이면서 은행 고정이하여신비율도 0.45% 이상인 상태가 같은 분기에 발생하는 경우",
+        "그룹 분기 신용손실충당금이 7,000억원 이상이거나 지배주주순이익이 2개 분기 연속 5,000억원 미만인 경우",
+        "그룹 연환산 ROE가 2개 분기 연속 6.0% 미만인 경우",
+        "2026년 연간 주당배당금이 2025년 1,360원보다 감소하거나 발표한 자기주식 매입분의 소각을 철회하는 경우",
+        "동양생명 주식교환 조건 변경으로 신주가 교환 전 발행주식의 1.5%를 초과하거나 거래 후 보통주자본비율 전망이 13.0% 미만으로 낮아지는 경우"
       ],
       "confidence": "medium",
       "source_urls": [
+        "https://www.woorifg.com/cmm/fms/FileDown.do?fileId=FILE_000000000004133&saveFileNm=202605191029433290.xlsx&fileSeq=0",
+        "https://www.woorifg.com/cmm/fms/FileDown.do?fileId=FILE_000000000004100&saveFileNm=202605150524314000.xlsx&fileSeq=0",
+        "https://www.sec.gov/Archives/edgar/data/1264136/000119312526225545/d153085d6k.htm",
+        "https://www.sec.gov/Archives/edgar/data/1264136/000119312526225545/d153085dex991.htm",
+        "https://www.sec.gov/Archives/edgar/data/1264136/000119312526264816/d287034d6k.htm",
+        "https://www.sec.gov/Archives/edgar/data/1264136/000119312526264807/d783540d6k.htm",
+        "https://www.woorifg.com/kor/investor/ir/earnings-announcement/view.do?seq=1129&top=1",
+        "https://www.woorifg.com/kor/pr/announcement/view.do?seq=166&f=&q=",
+        "https://www.woorifg.com/cmm/fms/FileDown.do?fileId=FILE_000000000004472&saveFileNm=202606240218158590.pdf&fileSeq=0",
+        "https://api.finance.naver.com/siseJson.naver?symbol=316140&requestType=1&startTime=20260710&endTime=20260710&timeframe=day",
         "https://finance.naver.com/item/main.naver?code=316140"
-      ]
+      ],
+      "research_status": "complete",
+      "proposed_classification": "hold",
+      "classification_change_reason": "신규 strict checklist 마이그레이션이다. 2026년 1분기 보통주자본비율 13.6%, 2025년 주당배당금 1,360원과 2,000억원 자기주식 매입·소각 결의는 방어력을 높이지만, 그룹 ROE 6.53%, 신용손실충당금 20.96% 증가, 동양생명 완전자회사화 주식교환과 7월 24일 실적 발표가 남아 있어 protect나 신규 BUY보다 hold가 타당하다.",
+      "evidence_urls": [
+        "https://www.woorifg.com/cmm/fms/FileDown.do?fileId=FILE_000000000004133&saveFileNm=202605191029433290.xlsx&fileSeq=0",
+        "https://www.woorifg.com/cmm/fms/FileDown.do?fileId=FILE_000000000004100&saveFileNm=202605150524314000.xlsx&fileSeq=0",
+        "https://www.sec.gov/Archives/edgar/data/1264136/000119312526225545/d153085d6k.htm",
+        "https://www.sec.gov/Archives/edgar/data/1264136/000119312526225545/d153085dex991.htm",
+        "https://www.sec.gov/Archives/edgar/data/1264136/000119312526264816/d287034d6k.htm",
+        "https://www.sec.gov/Archives/edgar/data/1264136/000119312526264807/d783540d6k.htm",
+        "https://www.woorifg.com/kor/investor/ir/earnings-announcement/view.do?seq=1129&top=1",
+        "https://www.woorifg.com/kor/pr/announcement/view.do?seq=166&f=&q=",
+        "https://www.woorifg.com/cmm/fms/FileDown.do?fileId=FILE_000000000004472&saveFileNm=202606240218158590.pdf&fileSeq=0",
+        "https://api.finance.naver.com/siseJson.naver?symbol=316140&requestType=1&startTime=20260710&endTime=20260710&timeframe=day",
+        "https://finance.naver.com/item/main.naver?code=316140"
+      ],
+      "checked_at": "2026-07-12T22:37:40+09:00",
+      "buy_checklist_status": "gray_zone",
+      "strict_buy_gate": true,
+      "auto_sell_eligible": false
     },
     "000270.KS": {
       "name": "기아",
@@ -247,5 +460,6 @@
       "buy_checklist_status": "fail",
       "auto_sell_eligible": false
     }
-  }
+  },
+  "strict_buy_gate_version": 1
 }
