@@ -698,6 +698,7 @@ def _outcomes_conn() -> sqlite3.Connection:
                 stop_loss REAL,
                 target_price REAL,
                 quantity REAL DEFAULT 0,
+                side TEXT DEFAULT '',
                 pilot_id TEXT DEFAULT '',
                 decision_ref TEXT DEFAULT '',
                 broker_order_id TEXT,
@@ -734,6 +735,7 @@ def _outcomes_conn() -> sqlite3.Connection:
             "stop_loss": "REAL DEFAULT 0",
             "target_price": "REAL DEFAULT 0",
             "quantity": "REAL DEFAULT 0",
+            "side": "TEXT DEFAULT ''",
             "pilot_id": "TEXT DEFAULT ''",
             "decision_ref": "TEXT DEFAULT ''",
             "broker_order_id": "TEXT DEFAULT ''",
@@ -917,6 +919,22 @@ def validate_execution_quality_decision(rec: dict, *, pilot_id: str) -> dict:
     ):
         if _finite_number(row[key]) is None:
             return {"ok": False, "reason": "quality_decision_mismatch"}
+    # side 증명: legacy/migration row(side 미기록)는 buy 증명 전까지 fail-closed
+    try:
+        row_side = str(row["side"] or "").lower().strip()
+    except (KeyError, IndexError):
+        row_side = ""
+    if row_side != "buy":
+        return {"ok": False, "reason": "quality_decision_side_unverified"}
+    # RR도 저장값을 신뢰하지 않는다 — 가격 3종으로 재계산·대조 (fail-closed)
+    stored_rr = _finite_number(row["rr_ratio"])
+    computed_rr = _recompute_rr_ratio(
+        row["entry_price"], row["stop_loss"], row["target_price"])
+    if (
+        stored_rr is None or computed_rr is None
+        or abs(computed_rr - float(stored_rr)) > _RR_RECOMPUTE_TOLERANCE
+    ):
+        return {"ok": False, "reason": "quality_decision_rr_mismatch"}
     # 저장된 총점/PASS도 신뢰하지 않는다 — dispatch 직전 재계산 대조 (fail-closed)
     if not _quality_scores_verified(
             row, row["score_total"], str(row["decision_bucket"] or ""),
@@ -932,6 +950,25 @@ _RECOMPUTE_COMPONENT_KEYS = (
 )
 # 저장 시 컴포넌트별 round(…,1) 누적 오차 허용치 (9필드 × 0.05 + 여유)
 _RECOMPUTE_TOLERANCE = 0.75
+# RR 재계산 허용치 — 호출자 1소수 반올림(±0.05) + float 오차 여유
+_RR_RECOMPUTE_TOLERANCE = 0.08
+
+
+def _recompute_rr_ratio(entry, stop, target) -> float | None:
+    """BUY 기준 RR = (target-entry)/(entry-stop). caller rr_ratio를 신뢰하지 않는다.
+
+    entry<=stop(위험 0 이하)·target<=entry(보상 0 이하)·비유한 값은 None (fail-closed).
+    """
+    e = _finite_number(entry)
+    s = _finite_number(stop)
+    t = _finite_number(target)
+    if e is None or s is None or t is None:
+        return None
+    risk = float(e) - float(s)
+    reward = float(t) - float(e)
+    if risk <= 0 or reward <= 0:
+        return None
+    return reward / risk
 
 
 def _recompute_score_total(source) -> float | None:
@@ -1024,9 +1061,22 @@ def record_execution_quality_decision(
     ):
         return {"ok": False, "reason": "quality_execution_values_invalid"}
 
-    def metric(name: str) -> float:
+    # 컴포넌트 6종+페널티 3종 전부 present+finite 필수 — 누락을 0.0으로
+    # 대체하던 관대한 계약 제거 (누락 = 산출 증거 부재 = 기록 거부)
+    component_values: dict[str, float] = {}
+    for name in _RECOMPUTE_COMPONENT_KEYS:
         value = _finite_number(breakdown.get(name))
-        return float(value) if value is not None else 0.0
+        if value is None:
+            return {"ok": False, "reason": "quality_components_missing"}
+        component_values[name] = float(value)
+
+    # RR도 caller 주장을 신뢰하지 않는다 — 가격 3종으로 재계산·대조
+    computed_rr = _recompute_rr_ratio(entry, stop, target)
+    if computed_rr is None or abs(computed_rr - float(rr)) > _RR_RECOMPUTE_TOLERANCE:
+        return {"ok": False, "reason": "quality_rr_recompute_mismatch"}
+
+    def metric(name: str) -> float:
+        return component_values[name]
 
     immutable_payload = {
         "ticker": symbol,
@@ -1052,6 +1102,7 @@ def record_execution_quality_decision(
         "stop_loss": float(stop),
         "target_price": float(target),
         "quantity": float(quantity),
+        "side": side,
     }
 
     # 호출자가 주장한 총점/PASS를 신뢰하지 않는다 — 기록 시점 재계산 대조 (fail-closed)
@@ -1078,7 +1129,7 @@ def record_execution_quality_decision(
                 "score_total, score_momentum, score_liquidity, score_risk_reward, "
                 "score_reliability, score_market_regime, score_supply_demand, penalty_overheat, "
                 "penalty_duplicate, penalty_event_risk, rr_ratio, regime, "
-                "entry_price, stop_loss, target_price, quantity"
+                "entry_price, stop_loss, target_price, quantity, side"
             )
             existing_ref = conn.execute(
                 f"SELECT {select_columns} FROM quality_gate_decisions WHERE decision_ref=?",
@@ -1107,8 +1158,8 @@ def record_execution_quality_decision(
                     score_reliability, score_market_regime, score_supply_demand,
                     penalty_overheat, penalty_duplicate, penalty_event_risk,
                     rr_ratio, regime, entry_price, stop_loss, target_price, quantity,
-                    pilot_id, decision_ref)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    side, pilot_id, decision_ref)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     symbol,
                     datetime.now(KST).strftime("%Y-%m-%dT%H:%M:%S+09:00"),
@@ -1130,6 +1181,7 @@ def record_execution_quality_decision(
                     immutable_payload["stop_loss"],
                     immutable_payload["target_price"],
                     immutable_payload["quantity"],
+                    immutable_payload["side"],
                     pid,
                     ref,
                 ),

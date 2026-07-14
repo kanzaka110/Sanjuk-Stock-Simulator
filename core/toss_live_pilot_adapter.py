@@ -30,6 +30,16 @@ from datetime import datetime, timezone, timedelta
 
 log = logging.getLogger(__name__)
 
+
+def _is_exact_bool(value) -> bool:
+    """exact bool 계약 — 문자열 "true"/"false"·정수 0/1은 schema invalid."""
+    return type(value) is bool
+
+
+def _exact_true(value) -> bool:
+    """실행 허용은 exact True만. 그 외 모든 값(문자열·정수 포함)은 불허."""
+    return value is True
+
 _ADAPTER_STATUS = "disabled"   # 코드 기본값 (env gate로 override 가능)
 
 _VALID_SIDES = frozenset(["buy", "sell"])
@@ -153,15 +163,20 @@ def can_send_live_pilot_order(
     """
     reasons: list[str] = []
 
-    # 1. policy gate
-    if not policy.get("live_pilot_enabled"):
+    # 1. policy gate — exact bool 계약: type is bool 필수, 허용은 is True만
+    for key in ("live_pilot_enabled", "live_order_allowed", "autonomous_mode"):
+        if not _is_exact_bool(policy.get(key)):
+            reasons.append(
+                f"policy_schema_invalid: {key}={policy.get(key)!r} (exact bool 필수)"
+            )
+    if not _exact_true(policy.get("live_pilot_enabled")):
         reasons.append("live_pilot_enabled=false")
-    if not policy.get("live_order_allowed"):
+    if not _exact_true(policy.get("live_order_allowed")):
         reasons.append("live_order_allowed=false")
     if policy.get("adapter_status") != "enabled":
         reasons.append(f"adapter_status={policy.get('adapter_status', 'disabled')}")
-    # autonomous 모드: user confirmation 불필요
-    if not policy.get("autonomous_mode"):
+    # autonomous 모드(exact True)만 user confirmation 생략
+    if not _exact_true(policy.get("autonomous_mode")):
         if not policy.get("requires_user_confirmation"):
             reasons.append("requires_user_confirmation missing")
         if not policy.get("requires_second_confirmation"):
@@ -173,18 +188,32 @@ def can_send_live_pilot_order(
     if side not in allowed_sides:
         reasons.append(f"side_not_allowed: side={side!r}")
 
-    # 2. preview valid
-    if not preview.get("ok"):
+    # 2. preview valid — ok/live_order_sent는 exact bool 계약
+    if not _is_exact_bool(preview.get("ok")):
+        reasons.append(
+            f"preview_schema_invalid: ok={preview.get('ok')!r} (exact bool 필수)")
+    if not _is_exact_bool(preview.get("live_order_sent", False)):
+        reasons.append(
+            "preview_schema_invalid: live_order_sent="
+            f"{preview.get('live_order_sent')!r} (exact bool 필수)")
+    if not _exact_true(preview.get("ok")):
         reasons.append("preview_not_ok")
     if preview.get("blocks"):
         reasons.append(f"preview_blocked: {preview['blocks']}")
-    if preview.get("live_order_sent"):
+    if preview.get("live_order_sent") is True:
         reasons.append("preview live_order_sent=true (duplicate guard)")
 
-    # 3. payload valid
-    if not payload_result.get("ok"):
+    # 3. payload valid — 같은 exact bool 계약
+    if not _is_exact_bool(payload_result.get("ok")):
+        reasons.append(
+            f"payload_schema_invalid: ok={payload_result.get('ok')!r} (exact bool 필수)")
+    if not _is_exact_bool(payload_result.get("live_order_sent", False)):
+        reasons.append(
+            "payload_schema_invalid: live_order_sent="
+            f"{payload_result.get('live_order_sent')!r} (exact bool 필수)")
+    if not _exact_true(payload_result.get("ok")):
         reasons.append("payload_not_ok")
-    if payload_result.get("live_order_sent"):
+    if payload_result.get("live_order_sent") is True:
         reasons.append("payload live_order_sent=true")
 
     # 4. symbol/asset guard
@@ -425,8 +454,35 @@ def dispatch_toss_order_live(
             "message": f"주문 전송 실패: {e}\n주문 전송 비활성",
         }
 
-    # transport 성공 여부 판단 (transport 결과 신뢰)
-    sent = bool(transport_result.get("ok")) and bool(transport_result.get("live_order_sent"))
+    # transport 결과도 신뢰하지 않는다 — ok/live_order_sent/broker_confirmed는
+    # exact bool 계약. 타입 위반은 transport_schema_invalid + live_order_sent=False.
+    schema_violations = [
+        key for key in ("ok", "live_order_sent", "broker_confirmed")
+        if not _is_exact_bool(transport_result.get(key, False))
+    ]
+    if schema_violations:
+        log.error(
+            "transport schema invalid (fail-closed): fields=%s", schema_violations)
+        return {
+            "ok": False,
+            "blocked": False,
+            "reason": "transport_schema_invalid",
+            "live_order_sent": False,
+            "broker_confirmed": False,
+            "failure_reason": (
+                "transport_schema_invalid: "
+                + ", ".join(
+                    f"{k}={transport_result.get(k)!r}" for k in schema_violations)
+            ),
+            "symbol": symbol,
+            "payload_hash": payload_hash,
+            "message": "transport 응답 스키마 위반 — 전송 여부 불명, fail-closed\n"
+                       "live_order_sent=false",
+        }
+    sent = (
+        transport_result.get("ok") is True
+        and transport_result.get("live_order_sent") is True
+    )
     broker_order_id = transport_result.get("broker_order_id", "")
     # broker_order_id에서 민감 패턴 제거 (accountNo 형식 등)
     import re as _re
@@ -448,7 +504,7 @@ def dispatch_toss_order_live(
         "limit_price": payload.get("limit_price"),
         "estimated_amount_krw": payload.get("estimated_amount_krw"),
         "broker_order_id": broker_order_id,
-        "broker_confirmed": bool(transport_result.get("broker_confirmed")),
+        "broker_confirmed": transport_result.get("broker_confirmed") is True,
         "broker_order_status": transport_result.get("broker_order_status", ""),
         "filled_quantity": transport_result.get("filled_quantity", 0.0),
         "filled_price": transport_result.get("filled_price", 0.0),

@@ -25,6 +25,7 @@ if str(_ROOT) not in sys.path:
 _POLICY_DISABLED = {
     "live_pilot_enabled": False,
     "live_order_allowed": False,
+    "autonomous_mode": False,
     "adapter_status": "disabled",
     "requires_user_confirmation": True,
     "requires_second_confirmation": True,
@@ -41,6 +42,7 @@ _POLICY_DISABLED = {
 _POLICY_ENABLED = {
     "live_pilot_enabled": True,
     "live_order_allowed": True,
+    "autonomous_mode": False,
     "adapter_status": "enabled",
     "requires_user_confirmation": True,
     "requires_second_confirmation": True,

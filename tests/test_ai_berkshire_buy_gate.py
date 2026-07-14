@@ -474,11 +474,12 @@ def _candidate(symbol=_AVOID_SYM, side="buy", **kw):
         "quality_breakdown": {
             "score_total": 88, "score_momentum": 20, "score_liquidity": 20,
             "score_risk_reward": 18, "score_reliability": 15,
-            "score_market_regime": 15, "penalty_overheat": 0,
+            "score_market_regime": 15, "score_supply_demand": 0,
+            "penalty_overheat": 0,
             "penalty_duplicate": 0, "penalty_event_risk": 0,
-            "rr_ratio": 3.0, "regime": "강세장",
+            "rr_ratio": 2.0, "regime": "강세장",
         },
-        "score": 88, "risk_reward": 3.0,
+        "score": 88, "risk_reward": 2.0,
         "income_strategy": {"income_pass": True, "income_grade": "INCOME_PASS",
                             "expected_pnl_krw": 12_000, "income_edge_ratio": 0.02},
     }

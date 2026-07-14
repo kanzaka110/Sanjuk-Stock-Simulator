@@ -609,7 +609,7 @@ class TestExactExecutionQualityDecision:
                 "penalty_overheat": 0.0,
                 "penalty_duplicate": 0.0,
                 "penalty_event_risk": 0.0,
-                "rr_ratio": 2.0,
+                "rr_ratio": 3.04,
                 "regime": "강세장",
             },
             "limit_price": 28_750,
@@ -715,6 +715,9 @@ class TestExactExecutionQualityDecision:
 
         changed_price = self._candidate()
         changed_price["limit_price"] += 100
+        # 내부 정합(RR 재계산 일치)은 유지한 변조 — payload conflict 경로 검증
+        # (34000-28850)/(28850-27025) = 2.8219
+        changed_price["quality_breakdown"]["rr_ratio"] = 2.82
         price_conflict = qg.record_execution_quality_decision(
             changed_price, pilot_id=pilot_id, decision_ref=ref
         )
@@ -875,7 +878,7 @@ class TestFailClosedRecompute:
             "penalty_overheat": 0.0,
             "penalty_duplicate": 0.0,
             "penalty_event_risk": 0.0,
-            "rr_ratio": 2.0,
+            "rr_ratio": 3.04,
             "regime": "강세장",
         }
         breakdown.update(overrides.pop("breakdown", {}))
@@ -958,3 +961,144 @@ class TestFailClosedRecompute:
         }
         out = qg.validate_execution_quality_decision(rec, pilot_id=pilot_id)
         assert out["ok"] is True
+
+
+class TestHermesProbeRegression:
+    """Hermes 재검증 probe 3종 — canonical regression (2026-07-14 FAIL 재발 방지)."""
+
+    def _breakdown(self, **over):
+        b = {
+            "score_total": 87.0, "score_momentum": 20.0, "score_liquidity": 18.0,
+            "score_risk_reward": 17.0, "score_reliability": 13.0,
+            "score_market_regime": 14.0, "score_supply_demand": 5.0,
+            "penalty_overheat": 0.0, "penalty_duplicate": 0.0,
+            "penalty_event_risk": 0.0,
+            "rr_ratio": 3.04,  # (34000-28750)/(28750-27025) = 3.0435
+            "regime": "강세장",
+        }
+        b.update(over)
+        return b
+
+    def _candidate(self, **over):
+        c = {
+            "symbol": "316140.KS", "side": "buy",
+            "decision_bucket": PASS_EXECUTE, "decision_reason": "quality pass",
+            "quantity": 2, "quality_score": 87.0,
+            "quality_breakdown": self._breakdown(**over.pop("breakdown", {})),
+            "limit_price": 28_750, "stop_loss": 27_025, "target_price": 34_000,
+        }
+        c.update(over)
+        return c
+
+    def _setup(self, qg, tmp_path, monkeypatch, name):
+        monkeypatch.setattr(qg, "_outcomes_db_path", lambda: tmp_path / name)
+        qg._outcomes_schema_created = False
+
+    # probe 1: adapter string/int bool
+    def test_probe_adapter_rejects_string_and_int_policy_bools(self):
+        from core.toss_live_pilot_adapter import can_send_live_pilot_order
+        preview = {"ok": True, "side": "buy", "symbol": "AAPL",
+                   "limit_price": 100.0, "quantity": 1,
+                   "estimated_amount_krw": 150000.0}
+        payload = {"ok": True}
+        for bad in ("true", "false", 1, 0):
+            policy = {
+                "live_pilot_enabled": bad, "live_order_allowed": bad,
+                "autonomous_mode": bad, "adapter_status": "enabled",
+                "allowed_asset_types": ["US_STOCK"], "allowed_sides": ["buy"],
+            }
+            ok, reasons = can_send_live_pilot_order(policy, preview, payload)
+            assert ok is False, f"policy bool {bad!r} 통과됨"
+            assert any("policy_schema_invalid" in r for r in reasons), reasons
+
+    def test_probe_adapter_rejects_string_preview_flags(self):
+        from core.toss_live_pilot_adapter import can_send_live_pilot_order
+        policy = {
+            "live_pilot_enabled": True, "live_order_allowed": True,
+            "autonomous_mode": True, "adapter_status": "enabled",
+            "allowed_asset_types": ["US_STOCK"], "allowed_sides": ["buy"],
+        }
+        preview = {"ok": "true", "live_order_sent": "false", "side": "buy",
+                   "symbol": "AAPL", "limit_price": 100.0, "quantity": 1,
+                   "estimated_amount_krw": 150000.0}
+        ok, reasons = can_send_live_pilot_order(policy, preview, {"ok": True})
+        assert ok is False
+        assert any("preview_schema_invalid" in r for r in reasons), reasons
+
+    def test_probe_transport_string_flags_fail_closed(self):
+        from core import toss_live_pilot_adapter as adapter
+        policy = {
+            "live_pilot_enabled": True, "live_order_allowed": True,
+            "autonomous_mode": True, "adapter_status": "enabled",
+        }
+        result = adapter.dispatch_toss_order_live(
+            {"symbol": "AAPL", "quantity": 1, "limit_price": 100.0},
+            policy,
+            transport=lambda payload, pol: {
+                "ok": "true", "live_order_sent": "true", "broker_confirmed": 1,
+            },
+        )
+        assert result["ok"] is False
+        assert result["live_order_sent"] is False
+        assert result["reason"] == "transport_schema_invalid"
+
+    # probe 2: missing components
+    def test_probe_missing_component_rejected(self, tmp_path, monkeypatch):
+        from core import toss_quality_gate as qg
+        self._setup(qg, tmp_path, monkeypatch, "probe_missing.db")
+        cand = self._candidate()
+        del cand["quality_breakdown"]["score_supply_demand"]
+        out = qg.record_execution_quality_decision(
+            cand, pilot_id="tlive_20260714_110000_0001",
+            decision_ref="execution_decision:tlive_probe_0001")
+        assert out["ok"] is False
+        assert out["reason"] == "quality_components_missing"
+
+    # probe 3: forged RR
+    def test_probe_forged_rr_rejected_at_record(self, tmp_path, monkeypatch):
+        from core import toss_quality_gate as qg
+        self._setup(qg, tmp_path, monkeypatch, "probe_rr1.db")
+        cand = self._candidate(breakdown={"rr_ratio": 9.0})  # 실제 3.04
+        out = qg.record_execution_quality_decision(
+            cand, pilot_id="tlive_20260714_110001_0001",
+            decision_ref="execution_decision:tlive_probe_0002")
+        assert out["ok"] is False
+        assert out["reason"] == "quality_rr_recompute_mismatch"
+
+    def test_probe_forged_rr_rejected_at_validate(self, tmp_path, monkeypatch):
+        from core import toss_quality_gate as qg
+        self._setup(qg, tmp_path, monkeypatch, "probe_rr2.db")
+        pilot_id = "tlive_20260714_110002_0001"
+        ref = "execution_decision:tlive_probe_0003"
+        assert qg.record_execution_quality_decision(
+            self._candidate(), pilot_id=pilot_id, decision_ref=ref)["ok"] is True
+        conn = qg._outcomes_conn()
+        conn.execute(
+            "UPDATE quality_gate_decisions SET rr_ratio=9.0 WHERE decision_ref=?",
+            (ref,))
+        conn.commit(); conn.close()
+        rec = {"side": "buy", "pilot_id": pilot_id, "decision_ref": ref,
+               "symbol": "316140.KS", "quantity": 2,
+               "limit_price": 28_750, "stop_loss": 27_025, "target_price": 34_000}
+        out = qg.validate_execution_quality_decision(rec, pilot_id=pilot_id)
+        assert out["ok"] is False
+        assert out["reason"] == "quality_decision_rr_mismatch"
+
+    # side 증명 (항목 6)
+    def test_legacy_row_without_side_fails_closed(self, tmp_path, monkeypatch):
+        from core import toss_quality_gate as qg
+        self._setup(qg, tmp_path, monkeypatch, "probe_side.db")
+        pilot_id = "tlive_20260714_110003_0001"
+        ref = "execution_decision:tlive_probe_0004"
+        assert qg.record_execution_quality_decision(
+            self._candidate(), pilot_id=pilot_id, decision_ref=ref)["ok"] is True
+        conn = qg._outcomes_conn()
+        conn.execute(
+            "UPDATE quality_gate_decisions SET side='' WHERE decision_ref=?", (ref,))
+        conn.commit(); conn.close()
+        rec = {"side": "buy", "pilot_id": pilot_id, "decision_ref": ref,
+               "symbol": "316140.KS", "quantity": 2,
+               "limit_price": 28_750, "stop_loss": 27_025, "target_price": 34_000}
+        out = qg.validate_execution_quality_decision(rec, pilot_id=pilot_id)
+        assert out["ok"] is False
+        assert out["reason"] == "quality_decision_side_unverified"

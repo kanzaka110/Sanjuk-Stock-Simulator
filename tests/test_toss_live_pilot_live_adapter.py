@@ -210,6 +210,7 @@ class TestCanSendDailyGuard(unittest.TestCase):
 _POLICY_FINAL = {
     "live_pilot_enabled": True,
     "live_order_allowed": True,
+    "autonomous_mode": False,
     "adapter_status": "enabled",
     "requires_user_confirmation": True,
     "requires_second_confirmation": True,
