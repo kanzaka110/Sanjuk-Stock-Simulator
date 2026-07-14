@@ -55,8 +55,55 @@ _ADAPTER_STATUS = "disabled"   # 코드 기본값 (env gate로 override 가능)
 _VALID_SIDES = frozenset(["buy", "sell"])
 _VALID_ORDER_TYPES = frozenset(["limit"])
 _CLIENT_ORDER_ID_RE = re.compile(r"^tlive_[A-Za-z0-9_-]{1,30}$")
+_KR_SYMBOL_RE = re.compile(r"^[0-9]{6}\.(?:KS|KQ)$")
+_US_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9]{0,9}(?:[.-][A-Z0-9]{1,5})?$")
+_KNOWN_ASSET_TYPES = frozenset(["KR_STOCK", "US_STOCK"])
 
 KST = timezone(timedelta(hours=9))
+
+
+def _load_authoritative_dispatch_record(pilot_id: str) -> dict | None:
+    """Ledger와 만료되지 않은 Hermes PASS가 같은 pilot인지 다시 확인한다."""
+    try:
+        from core.toss_live_pilot_ledger import list_live_pilot_records
+        from core.toss_live_pilot_verification import is_verification_passed
+
+        records = list_live_pilot_records(limit=200)
+        record = next(
+            (
+                item for item in records
+                if isinstance(item, dict) and item.get("pilot_id") == pilot_id
+            ),
+            None,
+        )
+        if not record or record.get("status") in {
+            "blocked", "cancelled", "live_sent", "live_send_failed",
+        }:
+            return None
+
+        verified, _reasons, verification = is_verification_passed(pilot_id)
+        if not verified or not isinstance(verification, dict):
+            return None
+        # is_verification_passed(pilot_id)가 만료·status·pilot 결속을 검증한다.
+        # 반환 snapshot의 선택 필드는 존재할 때만 ledger와 재대조한다.
+        optional_identity = {
+            "symbol": lambda value: str(value or "").strip().upper(),
+            "side": lambda value: str(value or "").strip().lower(),
+            "quantity": _finite_numeric,
+            "limit_price": _finite_numeric,
+        }
+        for key, normalize in optional_identity.items():
+            if key in verification and (
+                normalize(verification.get(key)) != normalize(record.get(key))
+            ):
+                return None
+        return record
+    except Exception as exc:
+        log.warning(
+            "authoritative dispatch record unavailable: error_type=%s",
+            type(exc).__name__,
+        )
+        return None
 
 
 # ─── payload 생성 ─────────────────────────────────────────────────
@@ -478,7 +525,12 @@ def dispatch_toss_order_live(
         contract_violations.append("policy.adapter_status_not_enabled")
     raw_symbol = payload.get("symbol")
     sym_text = raw_symbol.strip().upper() if isinstance(raw_symbol, str) else ""
-    if not sym_text or sym_text.isdigit():
+    if _KR_SYMBOL_RE.fullmatch(sym_text):
+        asset_type = "KR_STOCK"
+    elif _US_SYMBOL_RE.fullmatch(sym_text):
+        asset_type = "US_STOCK"
+    else:
+        asset_type = ""
         contract_violations.append("payload.symbol_invalid")
     raw_blocked_symbols = policy.get("blocked_symbols", [])
     if not isinstance(raw_blocked_symbols, (list, tuple, set, frozenset)):
@@ -491,9 +543,12 @@ def dispatch_toss_order_live(
     if sym_text and sym_text in blocked_symbols:
         contract_violations.append("payload.symbol_blocked")
 
-    raw_allowed_assets = policy.get(
-        "allowed_asset_types", ["KR_STOCK", "US_STOCK"],
-    )
+    raw_allowed_assets = policy.get("allowed_asset_types")
+    if (
+        policy.get("autonomous_mode") is not True
+        and raw_allowed_assets is None
+    ):
+        raw_allowed_assets = list(_KNOWN_ASSET_TYPES)
     if not isinstance(raw_allowed_assets, (list, tuple, set, frozenset)):
         contract_violations.append("policy.allowed_asset_types_invalid")
         allowed_assets = set()
@@ -501,8 +556,12 @@ def dispatch_toss_order_live(
         allowed_assets = {
             str(value).strip().upper() for value in raw_allowed_assets
         }
-    asset_type = "KR_STOCK" if sym_text.endswith((".KS", ".KQ")) else "US_STOCK"
-    if sym_text and asset_type not in allowed_assets:
+        if (
+            not allowed_assets
+            or not allowed_assets.issubset(_KNOWN_ASSET_TYPES)
+        ):
+            contract_violations.append("policy.allowed_asset_types_invalid")
+    if asset_type and asset_type not in allowed_assets:
         contract_violations.append("payload.asset_type_not_allowed")
 
     raw_side = payload.get("side")
@@ -539,6 +598,20 @@ def dispatch_toss_order_live(
             contract_violations.append("policy.autonomous_kill_switch_not_exact_bool")
         elif kill_switch is True:
             contract_violations.append("policy.autonomous_kill_switch_active")
+        autonomous_assets = policy.get("autonomous_allowed_asset_types")
+        if not isinstance(autonomous_assets, (list, tuple, set, frozenset)):
+            contract_violations.append("policy.autonomous_allowed_asset_types_invalid")
+        else:
+            normalized_autonomous_assets = {
+                str(value).strip().upper() for value in autonomous_assets
+            }
+            if (
+                not normalized_autonomous_assets
+                or not normalized_autonomous_assets.issubset(_KNOWN_ASSET_TYPES)
+            ):
+                contract_violations.append("policy.autonomous_allowed_asset_types_invalid")
+            elif asset_type and asset_type not in normalized_autonomous_assets:
+                contract_violations.append("payload.autonomous_asset_type_not_allowed")
         autonomous_sides = policy.get("autonomous_allowed_sides", ["buy"])
         if not isinstance(autonomous_sides, (list, tuple, set, frozenset)):
             contract_violations.append("policy.autonomous_allowed_sides_invalid")
@@ -548,13 +621,26 @@ def dispatch_toss_order_live(
             contract_violations.append("payload.autonomous_side_not_allowed")
         client_order_id = payload.get("client_order_id")
         pilot_id = payload.get("pilot_id")
-        if (
-            not isinstance(client_order_id, str)
-            or not _CLIENT_ORDER_ID_RE.fullmatch(client_order_id)
-            or not isinstance(pilot_id, str)
-            or pilot_id != client_order_id
-        ):
+        order_ids_valid = (
+            isinstance(client_order_id, str)
+            and _CLIENT_ORDER_ID_RE.fullmatch(client_order_id) is not None
+            and isinstance(pilot_id, str)
+            and pilot_id == client_order_id
+        )
+        if not order_ids_valid:
             contract_violations.append("payload.autonomous_order_ids_invalid")
+        else:
+            authoritative = _load_authoritative_dispatch_record(str(client_order_id))
+            if not isinstance(authoritative, dict):
+                contract_violations.append("payload.autonomous_order_provenance_invalid")
+            elif (
+                str(authoritative.get("pilot_id") or "") != client_order_id
+                or str(authoritative.get("symbol") or "").strip().upper() != sym_text
+                or str(authoritative.get("side") or "").strip().lower() != side
+                or _finite_numeric(authoritative.get("quantity")) != qty_value
+                or _finite_numeric(authoritative.get("limit_price")) != price_value
+            ):
+                contract_violations.append("payload.autonomous_order_provenance_mismatch")
     if contract_violations:
         log.warning(
             "live dispatch blocked before transport (contract): %s",
@@ -572,6 +658,7 @@ def dispatch_toss_order_live(
     # payload 해시 (로그용, 민감정보 제외)
     safe_payload = {k: v for k, v in payload.items()
                     if k not in ("accountNo", "token", "key", "secret", "password")}
+    safe_payload["symbol"] = sym_text
     payload_hash = hashlib.sha256(
         json.dumps(safe_payload, sort_keys=True, ensure_ascii=False).encode()
     ).hexdigest()[:16]
