@@ -206,7 +206,7 @@ def process_candidate(
     symbol = str(candidate.get("symbol") or candidate.get("ticker") or "")
     side = str(candidate.get("side") or "buy").lower()
     income = candidate.get("income_strategy") or {}
-    if side == "buy" and not income.get("income_pass"):
+    if side == "buy" and income.get("income_pass") is not True:
         return {
             "symbol": symbol,
             "stage": "income_gate_blocked",

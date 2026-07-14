@@ -36,6 +36,24 @@ _CLEARED_ENV = {
 }
 
 
+def _seal_quality_proof_for_test(qg, candidate):
+    candidate.setdefault("side", "buy")
+    breakdown = candidate["quality_breakdown"]
+    breakdown["decision_bucket"] = candidate.get("decision_bucket", "")
+    breakdown["decision_reason"] = candidate.get("decision_reason", "")
+    breakdown["score_symbol"] = str(candidate.get("symbol") or candidate.get("ticker") or "").upper()
+    breakdown["score_side"] = str(candidate.get("side") or "buy").lower()
+    breakdown["score_schema_version"] = qg.QUALITY_SCORE_SCHEMA_VERSION
+    weight_hash = qg._weight_profile_hash()
+    breakdown["weight_profile_hash"] = weight_hash
+    breakdown["score_breakdown_sha256"] = qg._score_breakdown_hash(
+        breakdown, schema_version=qg.QUALITY_SCORE_SCHEMA_VERSION,
+        weight_hash=weight_hash,
+    )
+    assert breakdown["score_breakdown_sha256"]
+    assert qg.attach_quality_proof(candidate) is True
+
+
 def _make_db():
     """임시 DB + 패치 반환 (setUp용)."""
     tmp = tempfile.mkdtemp()
@@ -357,7 +375,7 @@ class TestConfirmExactQualityLastMile(unittest.TestCase):
                 "regime": "neutral",
             },
         }
-        qg.attach_quality_proof(candidate)
+        _seal_quality_proof_for_test(qg, candidate)
         created = qg.record_execution_quality_decision(
             candidate,
             pilot_id=rec["pilot_id"],

@@ -26,6 +26,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
+import re
 from datetime import datetime, timezone, timedelta
 
 log = logging.getLogger(__name__)
@@ -40,10 +42,19 @@ def _exact_true(value) -> bool:
     """실행 허용은 exact True만. 그 외 모든 값(문자열·정수 포함)은 불허."""
     return value is True
 
+
+def _finite_numeric(value) -> float | None:
+    """bool/string을 숫자로 세탁하지 않는 finite 실행 경계 파서."""
+    if isinstance(value, bool) or type(value) not in (int, float):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
 _ADAPTER_STATUS = "disabled"   # 코드 기본값 (env gate로 override 가능)
 
 _VALID_SIDES = frozenset(["buy", "sell"])
 _VALID_ORDER_TYPES = frozenset(["limit"])
+_CLIENT_ORDER_ID_RE = re.compile(r"^tlive_[A-Za-z0-9_-]{1,30}$")
 
 KST = timezone(timedelta(hours=9))
 
@@ -438,6 +449,21 @@ def dispatch_toss_order_live(
 
     symbol = payload.get("symbol", "unknown")
 
+    # transport 자체가 없으면 payload를 해석할 이유 없이 기존 typed block을 유지한다.
+    # callable이 주입된 경우에만 아래 독립 주문 계약을 검증한다.
+    if transport is None:
+        log.info("live dispatch blocked: transport not injected, symbol=%s", symbol)
+        return {
+            "ok": False,
+            "blocked": True,
+            "reason": "live_transport_not_injected",
+            "live_order_sent": False,
+            "adapter_status": policy.get("adapter_status", "disabled"),
+            "live_order_allowed": policy.get("live_order_allowed", False),
+            "symbol": symbol,
+            "message": "주문 전송 조건 미충족 — transport not injected\n아직 주문 전송 안 함",
+        }
+
     # 0.5 transport 호출 전 독립 계약 검증 — 빈/불량 policy·payload는
     # can_send 선행 여부와 무관하게 여기서 한 번 더 차단한다 (defense in depth).
     contract_violations: list[str] = []
@@ -450,21 +476,85 @@ def dispatch_toss_order_live(
         contract_violations.append("policy.live_order_allowed_not_true")
     if policy.get("adapter_status") != "enabled":
         contract_violations.append("policy.adapter_status_not_enabled")
-    sym_text = str(payload.get("symbol") or "").strip()
+    raw_symbol = payload.get("symbol")
+    sym_text = raw_symbol.strip().upper() if isinstance(raw_symbol, str) else ""
     if not sym_text or sym_text.isdigit():
         contract_violations.append("payload.symbol_invalid")
-    try:
-        qty_value = float(payload.get("quantity"))
-    except (TypeError, ValueError):
-        qty_value = 0.0
-    if qty_value <= 0:
+    raw_blocked_symbols = policy.get("blocked_symbols", [])
+    if not isinstance(raw_blocked_symbols, (list, tuple, set, frozenset)):
+        contract_violations.append("policy.blocked_symbols_invalid")
+        blocked_symbols = set()
+    else:
+        blocked_symbols = {
+            str(value).strip().upper() for value in raw_blocked_symbols
+        }
+    if sym_text and sym_text in blocked_symbols:
+        contract_violations.append("payload.symbol_blocked")
+
+    raw_allowed_assets = policy.get(
+        "allowed_asset_types", ["KR_STOCK", "US_STOCK"],
+    )
+    if not isinstance(raw_allowed_assets, (list, tuple, set, frozenset)):
+        contract_violations.append("policy.allowed_asset_types_invalid")
+        allowed_assets = set()
+    else:
+        allowed_assets = {
+            str(value).strip().upper() for value in raw_allowed_assets
+        }
+    asset_type = "KR_STOCK" if sym_text.endswith((".KS", ".KQ")) else "US_STOCK"
+    if sym_text and asset_type not in allowed_assets:
+        contract_violations.append("payload.asset_type_not_allowed")
+
+    raw_side = payload.get("side")
+    side = raw_side.strip().lower() if isinstance(raw_side, str) else ""
+    if side not in _VALID_SIDES:
+        contract_violations.append("payload.side_invalid")
+    allowed_sides = policy.get("allowed_sides", list(_VALID_SIDES))
+    if not isinstance(allowed_sides, (list, tuple, set, frozenset)):
+        contract_violations.append("policy.allowed_sides_invalid")
+    elif side and side not in {str(value).strip().lower() for value in allowed_sides}:
+        contract_violations.append("payload.side_not_allowed")
+
+    if str(payload.get("order_type") or "").strip().lower() not in _VALID_ORDER_TYPES:
+        contract_violations.append("payload.order_type_invalid")
+
+    qty_value = _finite_numeric(payload.get("quantity"))
+    if (
+        qty_value is None
+        or qty_value <= 0
+        or not qty_value.is_integer()
+    ):
         contract_violations.append("payload.quantity_invalid")
-    try:
-        price_value = float(payload.get("limit_price"))
-    except (TypeError, ValueError):
-        price_value = 0.0
-    if price_value <= 0:
+
+    price_value = _finite_numeric(payload.get("limit_price"))
+    if (
+        price_value is None
+        or price_value <= 0
+    ):
         contract_violations.append("payload.limit_price_invalid")
+
+    if policy.get("autonomous_mode") is True:
+        kill_switch = policy.get("autonomous_kill_switch")
+        if not _is_exact_bool(kill_switch):
+            contract_violations.append("policy.autonomous_kill_switch_not_exact_bool")
+        elif kill_switch is True:
+            contract_violations.append("policy.autonomous_kill_switch_active")
+        autonomous_sides = policy.get("autonomous_allowed_sides", ["buy"])
+        if not isinstance(autonomous_sides, (list, tuple, set, frozenset)):
+            contract_violations.append("policy.autonomous_allowed_sides_invalid")
+        elif side and side not in {
+            str(value).strip().lower() for value in autonomous_sides
+        }:
+            contract_violations.append("payload.autonomous_side_not_allowed")
+        client_order_id = payload.get("client_order_id")
+        pilot_id = payload.get("pilot_id")
+        if (
+            not isinstance(client_order_id, str)
+            or not _CLIENT_ORDER_ID_RE.fullmatch(client_order_id)
+            or not isinstance(pilot_id, str)
+            or pilot_id != client_order_id
+        ):
+            contract_violations.append("payload.autonomous_order_ids_invalid")
     if contract_violations:
         log.warning(
             "live dispatch blocked before transport (contract): %s",
@@ -477,20 +567,6 @@ def dispatch_toss_order_live(
             "failure_reason": "dispatch_contract_invalid: " + ", ".join(contract_violations),
             "symbol": symbol,
             "message": "dispatch 계약 위반 — transport 미호출\nlive_order_sent=false",
-        }
-
-    # transport 없으면 항상 차단
-    if transport is None:
-        log.info("live dispatch blocked: transport not injected, symbol=%s", symbol)
-        return {
-            "ok": False,
-            "blocked": True,
-            "reason": "live_transport_not_injected",
-            "live_order_sent": False,
-            "adapter_status": policy.get("adapter_status", "disabled"),
-            "live_order_allowed": policy.get("live_order_allowed", False),
-            "symbol": symbol,
-            "message": "주문 전송 조건 미충족 — transport not injected\n아직 주문 전송 안 함",
         }
 
     # payload 해시 (로그용, 민감정보 제외)

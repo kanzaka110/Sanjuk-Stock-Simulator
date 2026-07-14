@@ -91,10 +91,10 @@ def _make_db_patch():
     return patch("core.toss_live_pilot_ledger._db_path", return_value=p)
 
 
-def _create_pilot():
+def _create_pilot(symbol="AAPL"):
     from core.toss_live_pilot_ledger import record_live_pilot_preview
     preview = {
-        "ok": True, "preview_id": "tlive_inj_test", "symbol": "091180.KS",
+        "ok": True, "preview_id": "tlive_inj_test", "symbol": symbol,
         "side": "buy", "quantity": 1, "limit_price": 30000.0,
         "estimated_amount_krw": 30000.0, "blocks": [], "warnings": [],
     }

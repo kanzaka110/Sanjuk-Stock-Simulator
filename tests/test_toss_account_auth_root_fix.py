@@ -457,7 +457,7 @@ def test_insufficient_buying_power_marks_rebalance_needed_in_finalizer():
     from core.toss_autonomous_finalizer import try_autonomous_finalize
 
     rec = {
-        "pilot_id": "cash_short_pilot",
+        "pilot_id": "tlive_cash_short_pilot",
         "symbol": "009540.KS",
         "side": "buy",
         "quantity": 1,
@@ -497,7 +497,7 @@ def test_insufficient_buying_power_marks_rebalance_needed_in_finalizer():
          patch("core.toss_quality_gate.validate_execution_quality_decision", return_value={"ok": True, "reason": "quality_decision_exact"}), \
          patch("core.toss_live_pilot_telegram.resolve_live_transport_for_confirm", return_value=transport), \
          patch("core.toss_live_pilot_telegram.send_autonomous_result_message", return_value=True):
-        result = try_autonomous_finalize("cash_short_pilot")
+        result = try_autonomous_finalize("tlive_cash_short_pilot")
 
     assert result["live_order_sent"] is False
     assert result["rebalance_needed"] is True

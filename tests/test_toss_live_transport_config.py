@@ -157,7 +157,7 @@ class TestDispatchWithNotConfiguredTransport(unittest.TestCase):
             return transport.send_buy_order(payload)
 
         payload = {
-            "symbol": "091180.KS", "side": "buy", "quantity": 1,
+            "symbol": "091180.KS", "side": "buy", "order_type": "limit", "quantity": 1,
             "limit_price": 30000.0, "estimated_amount_krw": 30000.0,
         }
         policy = {
@@ -179,7 +179,7 @@ class TestDispatchWithNotConfiguredTransport(unittest.TestCase):
             return transport.send_buy_order(payload)
 
         payload = {
-            "symbol": "091180.KS", "side": "buy", "quantity": 1,
+            "symbol": "091180.KS", "side": "buy", "order_type": "limit", "quantity": 1,
             "limit_price": 30000.0, "estimated_amount_krw": 30000.0,
         }
         policy = {"live_order_allowed": True, "adapter_status": "enabled",

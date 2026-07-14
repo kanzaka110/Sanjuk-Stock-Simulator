@@ -714,3 +714,18 @@ class TestExactBoolReadiness(unittest.TestCase):
     def test_exact_true_still_ready(self):
         ready, _ = self._select([_candidate("A.KS", stock_agent_ready=True)])
         self.assertEqual([r["symbol"] for r in ready], ["A.KS"])
+
+    def test_direct_buy_processor_rejects_string_income_before_preview(self):
+        item = _candidate("A.KS")
+        item["income_strategy"] = {"income_pass": "false"}
+        with patch(
+            "core.ai_berkshire_toss.evaluate_ai_berkshire_buy_gate",
+            return_value={"buy_block": False, "buy_reason": "ok"},
+        ), patch(
+            "core.toss_live_pilot_preview.build_live_pilot_preview",
+            return_value={"ok": False, "block_summary": "should_not_reach"},
+        ) as preview:
+            result = tap.process_candidate(item, dict(_POLICY_ON))
+
+        self.assertEqual(result["stage"], "income_gate_blocked")
+        preview.assert_not_called()

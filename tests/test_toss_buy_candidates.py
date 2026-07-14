@@ -9,6 +9,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
@@ -31,6 +33,18 @@ def _new_cand(ticker, name, market="KR", price=30_000, score=70):
         reasons=("거래대금 충분", "수급 개선"),
         target_price=target, stop_loss=stop, risk_reward=1.8,
         change_pct=2.0, tags=("거래량급증",),
+    )
+
+
+def _strong_cand(ticker, name, price):
+    candidate = _new_cand(ticker, name, price=price, score=88)
+    return candidate.__class__(
+        **{
+            **candidate.__dict__,
+            "target_price": round(price * 1.16, 2),
+            "stop_loss": round(price * 0.94, 2),
+            "risk_reward": 2.6,
+        }
     )
 
 
@@ -200,7 +214,7 @@ def test_toss_buy_candidates_excludes_reuse_and_scan_rejects_when_zero(monkeypat
 def test_toss_buy_candidates_over_limit_shown_not_executable(monkeypatch):
     # 한도 초과 KR 후보도 items에 포함하되 즉시 실행 불가로 표시한다.
     # 1회 한도 50만원 초과(60만원) 후보.
-    sections = _sections(new=[_new_cand("222.KS", "고가주", price=600_000)])
+    sections = _sections(new=[_strong_cand("222.KS", "고가주", 600_000)])
     _patch_sections(monkeypatch, sections)
 
     result = dd.toss_buy_candidates_data(range_="today")
@@ -231,8 +245,8 @@ def test_toss_buy_candidates_price_field_populated(monkeypatch):
 
 
 def test_toss_buy_candidates_within_limit_executable(monkeypatch):
-    # 한도 이내 후보는 executable_now=True / limit_exceeded=False.
-    sections = _sections(new=[_new_cand("000111.KS", "소액주", price=30_000)])
+    # 한도 이내이고 실행 품질도 충족한 후보는 executable_now=True.
+    sections = _sections(new=[_strong_cand("000111.KS", "소액주", 30_000)])
     _patch_sections(monkeypatch, sections)
 
     result = dd.toss_buy_candidates_data(range_="today")
@@ -244,8 +258,8 @@ def test_toss_buy_candidates_within_limit_executable(monkeypatch):
 
 
 def test_toss_buy_candidates_154700_executable(monkeypatch):
-    # 원익IPS급 154,700원 후보 — 1회 한도 50만원 이내라 즉시 실행 가능.
-    sections = _sections(new=[_new_cand("240810.KS", "원익IPS", price=154_700)])
+    # 원익IPS급 154,700원 + 실행 품질 충족 후보는 1회 한도 이내라 실행 가능.
+    sections = _sections(new=[_strong_cand("240810.KS", "원익IPS", 154_700)])
     _patch_sections(monkeypatch, sections)
 
     result = dd.toss_buy_candidates_data(range_="today")
@@ -386,7 +400,7 @@ def test_toss_buy_candidates_blocks_buy_limit_above_current(monkeypatch):
     assert "55,000원 > 현재가 53,500원" in item["block_reason"]
 
 def test_toss_buy_candidates_limit_exceeded_not_stock_agent_ready(monkeypatch):
-    sections = _sections(new=[_new_cand("222.KS", "고가주", price=600_000)])
+    sections = _sections(new=[_strong_cand("222.KS", "고가주", 600_000)])
     _patch_sections(monkeypatch, sections)
 
     result = dd.toss_buy_candidates_data(range_="today")
@@ -441,10 +455,12 @@ def test_toss_candidate_missing_quality_bucket_is_never_stock_agent_ready(monkey
 
     item = dd.toss_buy_candidates_data(range_="today")["items"][0]
 
-    assert not item.get("decision_bucket")
+    assert item["decision_bucket"] == "BLOCK"
+    assert item["decision_reason"] == "quality_finalization_failed"
     assert item["stock_agent_ready"] is False
     assert item["executable_now"] is False
-    assert item["block_reason"] == "quality_gate_decision_missing"
+    assert item["execution_status"] == "quality_finalization_failed"
+    assert item["block_reason"] == "최종 품질 증명 생성 실패"
 
 
 def test_toss_candidate_with_weak_flow_only_becomes_conditional_small_entry(monkeypatch):
@@ -702,6 +718,77 @@ def test_toss_buy_candidates_income_block_disables_stock_agent_ready(monkeypatch
     assert item["income_strategy"]["income_pass"] is False
     assert item["stock_agent_ready"] is False
     assert "수입 기대값" in item["block_reason"]
+
+
+def test_toss_buy_candidates_non_boolean_income_pass_never_sets_ready(monkeypatch):
+    strong = _new_cand("000114.KS", "타입오염후보", price=50_000, score=88)
+    strong = strong.__class__(
+        **{**strong.__dict__, "target_price": 58_000.0,
+           "stop_loss": 47_000.0, "risk_reward": 2.6}
+    )
+    _patch_sections(monkeypatch, _sections(new=[strong]))
+    monkeypatch.setattr(dd, "_toss_holding_price_map", lambda: {})
+    monkeypatch.setattr(dd, "_recent_toss_risk_sell_symbols", lambda *a, **k: {})
+    monkeypatch.setattr(dd, "_pending_toss_order_symbols", lambda *a, **k: {})
+
+    from core import toss_income_strategy
+    monkeypatch.setattr(
+        toss_income_strategy,
+        "compute_income_edge",
+        lambda *a, **k: {
+            "version": "income_v1",
+            "income_pass": "false",
+            "income_grade": "PASS",
+            "expected_pnl_krw": 100_000,
+        },
+    )
+
+    result = dd.toss_buy_candidates_data(range_="today")
+    item = next(i for i in result["items"] if i["symbol"] == "000114.KS")
+
+    assert item["income_strategy"]["income_pass"] == "false"
+    assert item["stock_agent_ready"] is False
+
+
+def test_finalized_dashboard_buy_records_and_validates_quality(
+    monkeypatch, tmp_path,
+):
+    strong = _new_cand("000115.KS", "최종품질후보", price=50_000, score=88)
+    strong = strong.__class__(
+        **{**strong.__dict__, "target_price": 58_000.0,
+           "stop_loss": 47_000.0, "risk_reward": 2.6}
+    )
+    _patch_sections(monkeypatch, _sections(new=[strong]))
+    monkeypatch.setattr(dd, "_toss_holding_price_map", lambda: {})
+    monkeypatch.setattr(dd, "_recent_toss_risk_sell_symbols", lambda *a, **k: {})
+    monkeypatch.setattr(dd, "_pending_toss_order_symbols", lambda *a, **k: {})
+
+    from core import toss_quality_gate as qg
+    monkeypatch.setattr(qg, "_outcomes_db_path", lambda: tmp_path / "final-dashboard.db")
+    qg._outcomes_schema_created = False
+
+    result = dd.toss_buy_candidates_data(range_="today")
+    item = next(i for i in result["items"] if i["symbol"] == "000115.KS")
+    pilot_id = "tlive_20260714_160010_0001"
+    decision_ref = "execution_decision:hermes_dashboard_final_0001"
+
+    recorded = qg.record_execution_quality_decision(
+        item, pilot_id=pilot_id, decision_ref=decision_ref,
+    )
+    rec = {
+        "side": "buy", "pilot_id": pilot_id, "decision_ref": decision_ref,
+        "symbol": item["symbol"], "quantity": item["quantity"],
+        "limit_price": item["limit_price"], "stop_loss": item["stop_loss"],
+        "target_price": item["target_price"],
+    }
+    validated = qg.validate_execution_quality_decision(rec, pilot_id=pilot_id)
+
+    assert item["quality_breakdown"]["rr_ratio"] == pytest.approx(
+        qg._recompute_rr_ratio(item["limit_price"], item["stop_loss"], item["target_price"]),
+        abs=0.01,
+    )
+    assert recorded["ok"] is True
+    assert validated["ok"] is True
 
 
 def test_toss_buy_candidates_same_symbol_pending_blocks_ready(monkeypatch):

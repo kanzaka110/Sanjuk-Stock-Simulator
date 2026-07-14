@@ -31,7 +31,7 @@ import re
 import sqlite3
 import threading
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -53,6 +53,9 @@ BLOCK = "BLOCK"
 EXECUTABLE_BUCKETS = frozenset([PASS_EXECUTE, SMALL_PASS])
 
 _ALL_BUCKETS = frozenset([PASS_EXECUTE, SMALL_PASS, WAIT_PULLBACK, WATCH, CHASE_BLOCK, BLOCK])
+
+# v3: scorer-owned breakdown hash + separate execution snapshot binding.
+QUALITY_SCORE_SCHEMA_VERSION = 3
 
 
 # ── QualityScore ─────────────────────────────────────────────────
@@ -76,9 +79,13 @@ class QualityScore:
     regime: str
     scored_at: str
     score_supply_demand: float = 0.0  # KRX 기관/외국인 수급 보정 (-10 ~ +10)
+    score_side: str = "buy"
+    score_schema_version: int = QUALITY_SCORE_SCHEMA_VERSION
+    weight_profile_hash: str = ""
+    score_breakdown_sha256: str = ""
 
     def to_dict(self) -> dict:
-        return {
+        result = {
             "score_total": round(self.score_total, 1),
             "score_momentum": round(self.score_momentum, 1),
             "score_liquidity": round(self.score_liquidity, 1),
@@ -94,7 +101,16 @@ class QualityScore:
             "decision_reason": self.decision_reason,
             "rr_ratio": round(self.rr_ratio, 2),
             "regime": self.regime,
+            "score_symbol": self.ticker.upper().strip(),
+            "score_side": self.score_side,
         }
+        if self.weight_profile_hash and self.score_breakdown_sha256:
+            result.update({
+                "score_schema_version": self.score_schema_version,
+                "weight_profile_hash": self.weight_profile_hash,
+                "score_breakdown_sha256": self.score_breakdown_sha256,
+            })
+        return result
 
 
 # ── 점수 가중치 (자동 캘리브레이션 구조, P3-4) ────────────────────
@@ -551,7 +567,7 @@ def score_candidate(
         blocking_risk_flags=blocking_flags,
     )
 
-    return QualityScore(
+    quality_score = QualityScore(
         ticker=ticker,
         score_total=score_total,
         score_momentum=s_momentum,
@@ -569,6 +585,18 @@ def score_candidate(
         regime=regime_str,
         scored_at=datetime.now(KST).strftime("%Y-%m-%dT%H:%M:%S+09:00"),
         score_supply_demand=s_supply,
+        score_side=str(candidate.get("side") or "buy").lower().strip(),
+    )
+    weight_hash = _weight_profile_hash(w)
+    breakdown_hash = _score_breakdown_hash(
+        quality_score.to_dict(),
+        schema_version=QUALITY_SCORE_SCHEMA_VERSION,
+        weight_hash=weight_hash,
+    )
+    return replace(
+        quality_score,
+        weight_profile_hash=weight_hash,
+        score_breakdown_sha256=breakdown_hash or "",
     )
 
 
@@ -620,11 +648,11 @@ def score_candidates_batch(
             )
             item["quality_score"] = qs.score_total
             item["quality_breakdown"] = qs.to_dict()
-            # 계보 증명 (B6): 이 breakdown이 현재 가중치 프로필과 이 후보에서
-            # 산출됐음을 바인딩 — record는 이 증명 없이는 기록을 거부한다.
-            attach_quality_proof(item)
             item["decision_bucket"] = qs.decision_bucket
             item["decision_reason"] = qs.decision_reason
+            # scorer proof는 qs.to_dict()에 이미 포함된다. 여기서는 실행 대상
+            # snapshot만 별도로 결합하며 score proof를 다시 발급하지 않는다.
+            attach_quality_proof(item)
 
             # PASS_EXECUTE / SMALL_PASS → quality DB 기록
             if persist_decisions and qs.decision_bucket in EXECUTABLE_BUCKETS:
@@ -705,8 +733,9 @@ def _outcomes_conn() -> sqlite3.Connection:
                 target_price REAL,
                 quantity REAL DEFAULT 0,
                 side TEXT DEFAULT '',
-                score_schema_version REAL DEFAULT 0,
+                score_schema_version INTEGER DEFAULT 0,
                 weight_profile_hash TEXT DEFAULT '',
+                score_breakdown_sha256 TEXT DEFAULT '',
                 candidate_snapshot_sha256 TEXT DEFAULT '',
                 pilot_id TEXT DEFAULT '',
                 decision_ref TEXT DEFAULT '',
@@ -745,8 +774,9 @@ def _outcomes_conn() -> sqlite3.Connection:
             "target_price": "REAL DEFAULT 0",
             "quantity": "REAL DEFAULT 0",
             "side": "TEXT DEFAULT ''",
-            "score_schema_version": "REAL DEFAULT 0",
+            "score_schema_version": "INTEGER DEFAULT 0",
             "weight_profile_hash": "TEXT DEFAULT ''",
+            "score_breakdown_sha256": "TEXT DEFAULT ''",
             "candidate_snapshot_sha256": "TEXT DEFAULT ''",
             "pilot_id": "TEXT DEFAULT ''",
             "decision_ref": "TEXT DEFAULT ''",
@@ -947,18 +977,27 @@ def validate_execution_quality_decision(rec: dict, *, pilot_id: str) -> dict:
     try:
         row_version = _finite_number(row["score_schema_version"])
         row_weights = str(row["weight_profile_hash"] or "")
+        row_breakdown_hash = str(row["score_breakdown_sha256"] or "")
         row_snapshot = str(row["candidate_snapshot_sha256"] or "")
     except (KeyError, IndexError):
-        row_version, row_weights, row_snapshot = None, "", ""
+        row_version, row_weights, row_breakdown_hash, row_snapshot = None, "", "", ""
     if (
         row_version is None
+        or not float(row_version).is_integer()
         or int(row_version) != QUALITY_SCORE_SCHEMA_VERSION
-        or not row_weights or not row_snapshot
+        or not row_weights or not row_breakdown_hash or not row_snapshot
     ):
         return {"ok": False, "reason": "quality_decision_proof_missing"}
     if row_weights != _weight_profile_hash():
         # 기록 이후 가중치 프로필 변경 — 낡은 결정으로 dispatch 금지
         return {"ok": False, "reason": "quality_decision_weights_changed"}
+    expected_breakdown_hash = _score_breakdown_hash(
+        row,
+        schema_version=QUALITY_SCORE_SCHEMA_VERSION,
+        weight_hash=row_weights,
+    )
+    if not expected_breakdown_hash or expected_breakdown_hash != row_breakdown_hash:
+        return {"ok": False, "reason": "quality_decision_breakdown_mismatch"}
     dispatch_snapshot = candidate_snapshot_hash({
         "symbol": symbol, "side": side, "quantity": quantity,
         "limit_price": entry, "stop_loss": stop, "target_price": target,
@@ -996,8 +1035,7 @@ _RECOMPUTE_TOLERANCE = 0.75
 # RR 재계산 허용치 — 호출자 1소수 반올림(±0.05) + float 오차 여유
 _RR_RECOMPUTE_TOLERANCE = 0.08
 
-# ── 계보 증명 (B6): scorer가 어떤 가중치·후보로 이 점수를 만들었는지 바인딩 ──
-QUALITY_SCORE_SCHEMA_VERSION = 2
+# ── 계보 증명: scorer proof와 실행 snapshot을 분리 ───────────────
 
 # 컴포넌트 정규 범위 (B5): scorer 절대 최대 × 최대 가중치 1.5 기준.
 # (min, max) 연속 범위 또는 frozenset 이산 집합. 저장 반올림(0.1) 여유 0.06.
@@ -1037,11 +1075,110 @@ def _component_bounds_violations(source) -> list[str]:
     return bad
 
 
-def _weight_profile_hash() -> str:
-    """현재 가중치 프로필의 결정론 해시 — 점수 산출 시점 프로필 바인딩용."""
-    weights = {k: round(float(v), 6) for k, v in sorted(get_score_weights().items())}
+def _weight_profile_hash(weights: Mapping | None = None) -> str:
+    """지정된 가중치의 결정론 해시. None일 때만 현재 프로필을 읽는다."""
+    source = get_score_weights() if weights is None else weights
+    normalized = {
+        key: round(float(source[key]), 6)
+        for key in sorted(_DEFAULT_WEIGHTS)
+    }
+    weights = normalized
     payload = json.dumps(weights, sort_keys=True, ensure_ascii=False)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+_SCORE_PROOF_NUMERIC_FIELDS = (
+    "score_total", "score_momentum", "score_liquidity", "score_risk_reward",
+    "score_reliability", "score_market_regime", "score_supply_demand",
+    "penalty_overheat", "penalty_duplicate", "penalty_event_risk", "rr_ratio",
+)
+_SCORE_PROOF_TEXT_FIELDS = (
+    "decision_bucket", "decision_reason", "regime", "score_symbol", "score_side",
+)
+
+
+def _source_value(source, key: str):
+    try:
+        return source[key]
+    except (KeyError, IndexError, TypeError):
+        aliases = {"score_symbol": "ticker", "score_side": "side"}
+        alias = aliases.get(key)
+        if not alias:
+            return None
+        try:
+            return source[alias]
+        except (KeyError, IndexError, TypeError):
+            return None
+
+
+def _score_identity_matches(candidate: dict, breakdown: dict) -> bool:
+    raw_side = candidate.get("side")
+    symbol = str(candidate.get("symbol") or candidate.get("ticker") or "").upper().strip()
+    side = raw_side.lower().strip() if isinstance(raw_side, str) else ""
+    return (
+        bool(symbol)
+        and side == "buy"
+        and str(breakdown.get("score_symbol") or "").upper().strip() == symbol
+        and str(breakdown.get("score_side") or "").lower().strip() == side
+    )
+
+
+def _score_breakdown_hash(
+    source,
+    *,
+    schema_version=None,
+    weight_hash: str | None = None,
+) -> str | None:
+    """저장 가능한 전체 score breakdown의 canonical SHA-256."""
+    raw_version = (
+        schema_version if schema_version is not None
+        else _source_value(source, "score_schema_version")
+    )
+    version_number = _finite_number(raw_version)
+    if (
+        version_number is None
+        or not float(version_number).is_integer()
+        or int(version_number) != QUALITY_SCORE_SCHEMA_VERSION
+    ):
+        return None
+    profile_hash = str(
+        weight_hash if weight_hash is not None
+        else (_source_value(source, "weight_profile_hash") or "")
+    )
+    if not profile_hash:
+        return None
+    payload: dict[str, object] = {
+        "score_schema_version": QUALITY_SCORE_SCHEMA_VERSION,
+        "weight_profile_hash": profile_hash,
+    }
+    for key in _SCORE_PROOF_NUMERIC_FIELDS:
+        value = _finite_number(_source_value(source, key))
+        if value is None:
+            return None
+        payload[key] = round(float(value), 6)
+    for key in _SCORE_PROOF_TEXT_FIELDS:
+        payload[key] = str(_source_value(source, key) or "")
+    canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _score_proof_valid(breakdown: dict, *, require_current_weights: bool) -> bool:
+    version = breakdown.get("score_schema_version")
+    weight_hash = str(breakdown.get("weight_profile_hash") or "")
+    proof_hash = str(breakdown.get("score_breakdown_sha256") or "")
+    if (
+        type(version) is not int
+        or version != QUALITY_SCORE_SCHEMA_VERSION
+        or not weight_hash
+        or not proof_hash
+    ):
+        return False
+    expected = _score_breakdown_hash(
+        breakdown, schema_version=version, weight_hash=weight_hash,
+    )
+    if not expected or expected != proof_hash:
+        return False
+    return not require_current_weights or weight_hash == _weight_profile_hash()
 
 
 _SNAPSHOT_FIELDS = ("symbol", "side", "quantity", "limit_price", "stop_loss", "target_price")
@@ -1072,22 +1209,114 @@ def candidate_snapshot_hash(candidate) -> str | None:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
-def attach_quality_proof(candidate: dict) -> None:
-    """scorer 산출 직후 breakdown에 계보 증명 3필드를 주입한다.
+def attach_quality_proof(candidate: dict) -> bool:
+    """검증된 scorer proof에 최종 실행 snapshot만 결합한다.
 
-    - score_schema_version: 점수 스키마 버전
-    - weight_profile_hash: 산출에 사용된 가중치 프로필 해시
-    - candidate_snapshot_sha256: 이 후보(심볼·side·수량·가격 3종)의 스냅샷 해시
-    record_execution_quality_decision은 이 증명 없이는 기록을 거부한다.
+    임의 caller breakdown에 score proof를 새로 발급하지 않는다.
     """
+    if not isinstance(candidate, dict):
+        return False
     breakdown = candidate.get("quality_breakdown")
     if not isinstance(breakdown, dict):
-        return
-    breakdown["score_schema_version"] = QUALITY_SCORE_SCHEMA_VERSION
-    breakdown["weight_profile_hash"] = _weight_profile_hash()
+        return False
+    if not _score_proof_valid(breakdown, require_current_weights=True):
+        breakdown.pop("candidate_snapshot_sha256", None)
+        return False
+    if not _score_identity_matches(candidate, breakdown):
+        breakdown.pop("candidate_snapshot_sha256", None)
+        return False
+    if str(candidate.get("decision_bucket") or "") != str(
+        breakdown.get("decision_bucket") or ""
+    ):
+        breakdown.pop("candidate_snapshot_sha256", None)
+        return False
     snapshot = candidate_snapshot_hash(candidate)
-    if snapshot:
-        breakdown["candidate_snapshot_sha256"] = snapshot
+    if not snapshot:
+        breakdown.pop("candidate_snapshot_sha256", None)
+        return False
+    breakdown["candidate_snapshot_sha256"] = snapshot
+    return True
+
+
+def finalize_quality_proof(candidate: dict) -> bool:
+    """최종 가격 3종으로 RR 차원을 재계산하고 scorer proof를 갱신한다.
+
+    기존 scorer proof와 그때 사용한 weight hash가 먼저 유효해야 한다.
+    다른 컴포넌트는 재발급하지 않고, 가격 변경의 영향을 받는 RR/total/bucket만
+    같은 weight profile에서 결정론적으로 갱신한다.
+    """
+    if not isinstance(candidate, dict):
+        return False
+    breakdown = candidate.get("quality_breakdown")
+    if not isinstance(breakdown, dict):
+        return False
+    if not _score_proof_valid(breakdown, require_current_weights=True):
+        breakdown.pop("candidate_snapshot_sha256", None)
+        return False
+    if not _score_identity_matches(candidate, breakdown):
+        breakdown.pop("candidate_snapshot_sha256", None)
+        return False
+    rr = _recompute_rr_ratio(
+        candidate.get("limit_price") or candidate.get("price"),
+        candidate.get("stop_loss"),
+        candidate.get("target_price"),
+    )
+    if rr is None:
+        breakdown.pop("candidate_snapshot_sha256", None)
+        return False
+    weights = get_score_weights()
+    weight_hash = str(breakdown.get("weight_profile_hash") or "")
+    if _weight_profile_hash(weights) != weight_hash:
+        breakdown.pop("candidate_snapshot_sha256", None)
+        return False
+
+    prior_bucket = str(breakdown.get("decision_bucket") or "")
+    prior_reason = str(breakdown.get("decision_reason") or "")
+    candidate["risk_reward"] = round(float(rr), 6)
+    breakdown["rr_ratio"] = round(float(rr), 2)
+    breakdown["score_risk_reward"] = round(
+        _score_risk_reward({"risk_reward": rr}) * float(weights["risk_reward"]), 1,
+    )
+    total = _recompute_score_total(breakdown)
+    if total is None:
+        breakdown.pop("candidate_snapshot_sha256", None)
+        return False
+    total = round(float(total), 1)
+    event_penalty = _finite_number(breakdown.get("penalty_event_risk"))
+    days_to_earnings = 0 if event_penalty == -15.0 else (5 if event_penalty == -5.0 else -1)
+    change_pct = _finite_number(candidate.get("change_pct")) or 0.0
+    bucket, reason = _decide_bucket(
+        total,
+        float(rr),
+        str(breakdown.get("regime") or "판단불가"),
+        float(change_pct),
+        bool(candidate.get("stop_loss")),
+        bool(candidate.get("target_price")),
+        days_to_earnings,
+        blocking_risk_flags=candidate.get("blocking_risk_flags") or [],
+    )
+    # scorer가 이미 내린 비실행 결정을 final 가격 재계산이 승격하면 안 된다.
+    # 실행 bucket 사이에서도 SMALL_PASS → PASS_EXECUTE 자동 승격은 금지한다.
+    if prior_bucket not in EXECUTABLE_BUCKETS:
+        bucket, reason = prior_bucket, prior_reason
+    elif prior_bucket == SMALL_PASS and bucket == PASS_EXECUTE:
+        bucket, reason = prior_bucket, prior_reason
+    breakdown["score_total"] = total
+    breakdown["decision_bucket"] = bucket
+    breakdown["decision_reason"] = reason
+    candidate["quality_score"] = total
+    candidate["decision_bucket"] = bucket
+    candidate["decision_reason"] = reason
+    proof_hash = _score_breakdown_hash(
+        breakdown,
+        schema_version=QUALITY_SCORE_SCHEMA_VERSION,
+        weight_hash=weight_hash,
+    )
+    if not proof_hash:
+        breakdown.pop("candidate_snapshot_sha256", None)
+        return False
+    breakdown["score_breakdown_sha256"] = proof_hash
+    return attach_quality_proof(candidate)
 
 
 def _recompute_rr_ratio(entry, stop, target) -> float | None:
@@ -1222,11 +1451,28 @@ def record_execution_quality_decision(
     # 계보 증명 (B6): scorer가 이 후보·현재 가중치로 산출했음을 검증
     proof_version = breakdown.get("score_schema_version")
     proof_weights = str(breakdown.get("weight_profile_hash") or "")
+    proof_breakdown_hash = str(breakdown.get("score_breakdown_sha256") or "")
     proof_snapshot = str(breakdown.get("candidate_snapshot_sha256") or "")
-    if proof_version != QUALITY_SCORE_SCHEMA_VERSION or not proof_weights or not proof_snapshot:
+    if (
+        type(proof_version) is not int
+        or proof_version != QUALITY_SCORE_SCHEMA_VERSION
+        or not proof_weights or not proof_breakdown_hash or not proof_snapshot
+    ):
         return {"ok": False, "reason": "quality_proof_missing"}
     if proof_weights != _weight_profile_hash():
         return {"ok": False, "reason": "quality_proof_weight_mismatch"}
+    expected_breakdown_hash = _score_breakdown_hash(
+        breakdown,
+        schema_version=proof_version,
+        weight_hash=proof_weights,
+    )
+    if (
+        not expected_breakdown_hash
+        or expected_breakdown_hash != proof_breakdown_hash
+        or str(breakdown.get("decision_bucket") or "") != bucket
+        or not _score_identity_matches(candidate, breakdown)
+    ):
+        return {"ok": False, "reason": "quality_proof_breakdown_mismatch"}
     if proof_snapshot != (candidate_snapshot_hash(candidate) or ""):
         return {"ok": False, "reason": "quality_proof_candidate_mismatch"}
 
@@ -1236,11 +1482,7 @@ def record_execution_quality_decision(
     immutable_payload = {
         "ticker": symbol,
         "decision_bucket": bucket,
-        "decision_reason": str(
-            candidate.get("decision_reason")
-            or breakdown.get("decision_reason")
-            or ""
-        )[:500],
+        "decision_reason": str(breakdown.get("decision_reason") or "")[:500],
         "score_total": float(score_total),
         "score_momentum": metric("score_momentum"),
         "score_liquidity": metric("score_liquidity"),
@@ -1258,8 +1500,9 @@ def record_execution_quality_decision(
         "target_price": float(target),
         "quantity": float(quantity),
         "side": side,
-        "score_schema_version": float(QUALITY_SCORE_SCHEMA_VERSION),
+        "score_schema_version": QUALITY_SCORE_SCHEMA_VERSION,
         "weight_profile_hash": proof_weights,
+        "score_breakdown_sha256": proof_breakdown_hash,
         "candidate_snapshot_sha256": proof_snapshot,
     }
 
@@ -1275,6 +1518,14 @@ def record_execution_quality_decision(
                 actual_number = _finite_number(actual)
                 if actual_number is None or float(actual_number) != expected:
                     return False
+            elif isinstance(expected, int):
+                actual_number = _finite_number(actual)
+                if (
+                    actual_number is None
+                    or not float(actual_number).is_integer()
+                    or int(actual_number) != expected
+                ):
+                    return False
             elif str(actual or "") != expected:
                 return False
         return True
@@ -1288,7 +1539,8 @@ def record_execution_quality_decision(
                 "score_reliability, score_market_regime, score_supply_demand, penalty_overheat, "
                 "penalty_duplicate, penalty_event_risk, rr_ratio, regime, "
                 "entry_price, stop_loss, target_price, quantity, side, "
-                "score_schema_version, weight_profile_hash, candidate_snapshot_sha256"
+                "score_schema_version, weight_profile_hash, score_breakdown_sha256, "
+                "candidate_snapshot_sha256"
             )
             existing_ref = conn.execute(
                 f"SELECT {select_columns} FROM quality_gate_decisions WHERE decision_ref=?",
@@ -1318,8 +1570,8 @@ def record_execution_quality_decision(
                     penalty_overheat, penalty_duplicate, penalty_event_risk,
                     rr_ratio, regime, entry_price, stop_loss, target_price, quantity,
                     side, score_schema_version, weight_profile_hash,
-                    candidate_snapshot_sha256, pilot_id, decision_ref)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                     score_breakdown_sha256, candidate_snapshot_sha256, pilot_id, decision_ref)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     symbol,
                     datetime.now(KST).strftime("%Y-%m-%dT%H:%M:%S+09:00"),
@@ -1344,6 +1596,7 @@ def record_execution_quality_decision(
                     immutable_payload["side"],
                     immutable_payload["score_schema_version"],
                     immutable_payload["weight_profile_hash"],
+                    immutable_payload["score_breakdown_sha256"],
                     immutable_payload["candidate_snapshot_sha256"],
                     pid,
                     ref,

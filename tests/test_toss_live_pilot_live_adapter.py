@@ -284,24 +284,28 @@ class TestCanSendFinalPolicy(unittest.TestCase):
 
 class TestDispatchLiveNoTransport(unittest.TestCase):
     def test_no_transport_blocked(self):
-        payload = {"symbol": "091180.KS", "quantity": 1, "limit_price": 30000}
+        payload = {"symbol": "091180.KS", "side": "buy", "order_type": "limit",
+                   "quantity": 1, "limit_price": 30000}
         result = dispatch_toss_order_live(payload, _POLICY_ENABLED, transport=None)
         self.assertFalse(result["ok"])
         self.assertTrue(result["blocked"])
         self.assertFalse(result["live_order_sent"])
 
     def test_no_transport_reason(self):
-        payload = {"symbol": "091180.KS", "quantity": 1, "limit_price": 30000}
+        payload = {"symbol": "091180.KS", "side": "buy", "order_type": "limit",
+                   "quantity": 1, "limit_price": 30000}
         result = dispatch_toss_order_live(payload, _POLICY_ENABLED, transport=None)
         self.assertEqual(result["reason"], "live_transport_not_injected")
 
     def test_no_transport_message(self):
-        payload = {"symbol": "091180.KS", "quantity": 1, "limit_price": 30000}
+        payload = {"symbol": "091180.KS", "side": "buy", "order_type": "limit",
+                   "quantity": 1, "limit_price": 30000}
         result = dispatch_toss_order_live(payload, _POLICY_ENABLED, transport=None)
         self.assertIn("아직 주문 전송 안 함", result["message"])
 
     def test_disabled_policy_no_transport_blocked(self):
-        payload = {"symbol": "091180.KS", "quantity": 1, "limit_price": 30000}
+        payload = {"symbol": "091180.KS", "side": "buy", "order_type": "limit",
+                   "quantity": 1, "limit_price": 30000}
         result = dispatch_toss_order_live(payload, _POLICY_DISABLED, transport=None)
         self.assertFalse(result["live_order_sent"])
         self.assertTrue(result["blocked"])
@@ -349,10 +353,13 @@ class TestDispatchLiveFakeSuccess(unittest.TestCase):
             "quantity": 1,
             "limit_price": 30_000.0,
             "estimated_amount_krw": 30_000.0,
+            "client_order_id": "tlive_adapter_auto_0001",
+            "pilot_id": "tlive_adapter_auto_0001",
         }
         policy = {
             **_POLICY_ENABLED,
             "autonomous_mode": True,
+            "autonomous_kill_switch": False,
             "requires_user_confirmation": False,
             "requires_second_confirmation": False,
         }
@@ -385,7 +392,8 @@ class TestDispatchLiveFakeSuccess(unittest.TestCase):
 
 class TestDispatchLiveFakeFailure(unittest.TestCase):
     def _dispatch_with_fake_fail(self):
-        payload = {"symbol": "091180.KS", "quantity": 1, "limit_price": 30000,
+        payload = {"symbol": "091180.KS", "side": "buy", "order_type": "limit",
+                   "quantity": 1, "limit_price": 30000,
                    "estimated_amount_krw": 30000}
         return dispatch_toss_order_live(
             payload, _POLICY_ENABLED, transport=_fake_transport_failure
@@ -415,7 +423,8 @@ class TestDispatchLiveTransportException(unittest.TestCase):
         def exploding_transport(payload, policy):
             raise RuntimeError("connection refused")
 
-        payload = {"symbol": "091180.KS", "quantity": 1, "limit_price": 30000}
+        payload = {"symbol": "091180.KS", "side": "buy", "order_type": "limit",
+                   "quantity": 1, "limit_price": 30000}
         result = dispatch_toss_order_live(
             payload, _POLICY_ENABLED, transport=exploding_transport
         )
@@ -426,7 +435,8 @@ class TestDispatchLiveTransportException(unittest.TestCase):
         def exploding_transport(payload, policy):
             raise RuntimeError("network error")
 
-        payload = {"symbol": "091180.KS", "quantity": 1, "limit_price": 30000}
+        payload = {"symbol": "091180.KS", "side": "buy", "order_type": "limit",
+                   "quantity": 1, "limit_price": 30000}
         result = dispatch_toss_order_live(
             payload, _POLICY_ENABLED, transport=exploding_transport
         )

@@ -337,7 +337,7 @@ class TestFakeBuyTransportSuccess(unittest.TestCase):
             return {"ok": True, "live_order_sent": True, "broker_order_id": "mock_123"}
 
         payload = {
-            "symbol": "SOFI", "side": "buy", "quantity": 1,
+            "symbol": "SOFI", "side": "buy", "order_type": "limit", "quantity": 1,
             "limit_price": 30000.0, "estimated_amount_krw": 30000.0,
         }
         result = dispatch_toss_order_live(payload, _POLICY_ENABLED, transport=_fake_buy)
@@ -352,7 +352,7 @@ class TestFakeBuyTransportSuccess(unittest.TestCase):
             return {"ok": True, "live_order_sent": True, "broker_order_id": "mock_123"}
 
         payload = {
-            "symbol": "SOFI", "side": "buy", "quantity": 1,
+            "symbol": "SOFI", "side": "buy", "order_type": "limit", "quantity": 1,
             "limit_price": 30000.0, "estimated_amount_krw": 30000.0,
         }
         result = dispatch_toss_order_live(payload, _POLICY_ENABLED, transport=_fake_buy)

@@ -16,6 +16,25 @@ import pytest
 
 KST = timezone(timedelta(hours=9))
 
+
+def _seal_quality_proof_for_test(qg, candidate):
+    candidate.setdefault("side", "buy")
+    breakdown = candidate["quality_breakdown"]
+    breakdown["decision_bucket"] = candidate.get("decision_bucket", "")
+    breakdown["decision_reason"] = candidate.get("decision_reason", "")
+    breakdown["score_symbol"] = str(candidate.get("symbol") or candidate.get("ticker") or "").upper()
+    breakdown["score_side"] = str(candidate.get("side") or "buy").lower()
+    breakdown["score_schema_version"] = qg.QUALITY_SCORE_SCHEMA_VERSION
+    weight_hash = qg._weight_profile_hash()
+    breakdown["weight_profile_hash"] = weight_hash
+    breakdown["score_breakdown_sha256"] = qg._score_breakdown_hash(
+        breakdown, schema_version=qg.QUALITY_SCORE_SCHEMA_VERSION,
+        weight_hash=weight_hash,
+    )
+    assert breakdown["score_breakdown_sha256"]
+    assert qg.attach_quality_proof(candidate) is True
+
+
 _AUTO_ENV = {
     "TOSS_LIVE_PILOT_ENABLED": "true",
     "TOSS_LIVE_ORDER_ALLOWED": "true",
@@ -24,7 +43,7 @@ _AUTO_ENV = {
 }
 
 _PILOT_REC = {
-    "pilot_id": "test_pilot_001",
+    "pilot_id": "tlive_test_pilot_001",
     "decision_ref": "execution_decision:tlive_test_001",
     "symbol": "NVDA",
     "side": "buy",
@@ -93,7 +112,7 @@ class TestAutonomousDisabled:
     def test_skipped_when_disabled(self):
         with patch.dict(os.environ, {**_AUTO_ENV, "TOSS_AUTONOMOUS_MODE": "false"}, clear=False):
             from core.toss_autonomous_finalizer import try_autonomous_finalize
-            result = try_autonomous_finalize("test_pilot_001")
+            result = try_autonomous_finalize("tlive_test_pilot_001")
         assert result["ok"] is False
         assert result.get("skipped") is True
         assert result["reason"] == "autonomous_mode_disabled"
@@ -106,7 +125,7 @@ class TestKillSwitch:
         env = {**_AUTO_ENV, "TOSS_AUTONOMOUS_KILL_SWITCH": "true"}
         with patch.dict(os.environ, env, clear=False):
             from core.toss_autonomous_finalizer import try_autonomous_finalize
-            result = try_autonomous_finalize("test_pilot_001")
+            result = try_autonomous_finalize("tlive_test_pilot_001")
         assert result["ok"] is False
         assert result["reason"] == "autonomous_kill_switch_active"
 
@@ -119,7 +138,7 @@ class TestHermesGate:
     def test_blocked_by_hermes_hold(self):
         with patch.dict(os.environ, _AUTO_ENV, clear=False):
             from core.toss_autonomous_finalizer import try_autonomous_finalize
-            result = try_autonomous_finalize("test_pilot_001")
+            result = try_autonomous_finalize("tlive_test_pilot_001")
         assert result["ok"] is False
         assert result["reason"] == "hermes_verification_required"
 
@@ -128,7 +147,7 @@ class TestHermesGate:
     def test_blocked_by_hermes_pending(self):
         with patch.dict(os.environ, _AUTO_ENV, clear=False):
             from core.toss_autonomous_finalizer import try_autonomous_finalize
-            result = try_autonomous_finalize("test_pilot_001")
+            result = try_autonomous_finalize("tlive_test_pilot_001")
         assert result["ok"] is False
         assert result["reason"] == "hermes_verification_required"
 
@@ -153,7 +172,7 @@ class TestAlreadyProcessed:
         with patch.dict(os.environ, _AUTO_ENV, clear=False):
             with patch("core.toss_live_pilot_ledger.list_live_pilot_records", return_value=[sent_rec]):
                 from core.toss_autonomous_finalizer import try_autonomous_finalize
-                result = try_autonomous_finalize("test_pilot_001")
+                result = try_autonomous_finalize("tlive_test_pilot_001")
         assert result["ok"] is False
         assert result.get("skipped") is True
         assert "already_processed" in result["reason"]
@@ -173,7 +192,7 @@ class TestSuccessfulExecution:
              patch("core.toss_quality_gate.validate_execution_quality_decision",
                    return_value={"ok": True, "reason": "quality_decision_exact"}):
             from core.toss_autonomous_finalizer import try_autonomous_finalize
-            result = try_autonomous_finalize("test_pilot_001")
+            result = try_autonomous_finalize("tlive_test_pilot_001")
         assert result["ok"] is True
         assert result["live_order_sent"] is True
         assert result["broker_order_id"] == "mock_order_123"
@@ -245,7 +264,7 @@ class TestExactQualityLastMile:
                 "regime": "neutral",
             },
         }
-        qg.attach_quality_proof(candidate)
+        _seal_quality_proof_for_test(qg, candidate)
         created = qg.record_execution_quality_decision(
             candidate,
             pilot_id=rec["pilot_id"],
@@ -310,7 +329,7 @@ class TestDispatchFailure:
              patch("core.toss_quality_gate.validate_execution_quality_decision",
                    return_value={"ok": True, "reason": "quality_decision_exact"}):
             from core.toss_autonomous_finalizer import try_autonomous_finalize
-            result = try_autonomous_finalize("test_pilot_001")
+            result = try_autonomous_finalize("tlive_test_pilot_001")
         assert result["ok"] is False
         assert result["live_order_sent"] is False
         mock_ledger.assert_called_once()
@@ -329,7 +348,7 @@ class TestNoTransport:
              patch("core.toss_quality_gate.validate_execution_quality_decision",
                    return_value={"ok": True, "reason": "quality_decision_exact"}):
             from core.toss_autonomous_finalizer import try_autonomous_finalize
-            result = try_autonomous_finalize("test_pilot_001")
+            result = try_autonomous_finalize("tlive_test_pilot_001")
         assert result["ok"] is False
         assert result["live_order_sent"] is False
 
@@ -348,7 +367,7 @@ class TestTelegramResultSent:
              patch("core.toss_quality_gate.validate_execution_quality_decision",
                    return_value={"ok": True, "reason": "quality_decision_exact"}):
             from core.toss_autonomous_finalizer import try_autonomous_finalize
-            try_autonomous_finalize("test_pilot_001")
+            try_autonomous_finalize("tlive_test_pilot_001")
         mock_tg.assert_called_once()
         text = mock_tg.call_args[0][0]
         assert "자율실행 체결" in text
@@ -373,7 +392,7 @@ class TestHttp422Diagnostics:
              patch("core.toss_quality_gate.validate_execution_quality_decision",
                    return_value={"ok": True, "reason": "quality_decision_exact"}):
             from core.toss_autonomous_finalizer import try_autonomous_finalize
-            result = try_autonomous_finalize("test_pilot_001")
+            result = try_autonomous_finalize("tlive_test_pilot_001")
         assert result["ok"] is False
         assert result["reason"] == "http_422"
         assert "INVALID_PRICE" in result["error_body"]
@@ -391,7 +410,7 @@ class TestHttp422Diagnostics:
         self, mock_tg, mock_dispatch, mock_block
     ):
         today = datetime.now(KST).strftime("%Y-%m-%dT09:01:00+09:00")
-        current = {**_PILOT_REC, "pilot_id": "test_pilot_001", "symbol": "000270.KS"}
+        current = {**_PILOT_REC, "pilot_id": "tlive_test_pilot_001", "symbol": "000270.KS"}
         prior = {
             **_PILOT_REC,
             "pilot_id": "old_failed",
@@ -403,7 +422,7 @@ class TestHttp422Diagnostics:
         with patch("core.toss_live_pilot_ledger.list_live_pilot_records", return_value=[current, prior]):
             with patch.dict(os.environ, _AUTO_ENV, clear=False):
                 from core.toss_autonomous_finalizer import try_autonomous_finalize
-                result = try_autonomous_finalize("test_pilot_001")
+                result = try_autonomous_finalize("tlive_test_pilot_001")
         assert result["ok"] is False
         assert result["reason"] == "prior_http_422_today"
         mock_dispatch.assert_not_called()
@@ -416,7 +435,7 @@ def test_autonomous_event_receives_decision_ref_and_live_policy_flag():
     policy = {"adapter_status": "enabled", "live_order_allowed": True}
     with patch("core.toss_live_pilot_events.record_event") as record:
         _record_event(
-            pilot_id="test_pilot_001",
+            pilot_id="tlive_test_pilot_001",
             event_type="autonomous_live_sent",
             status="live_sent",
             verification_id="hv_mock",

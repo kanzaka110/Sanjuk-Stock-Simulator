@@ -3668,7 +3668,7 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
                     "income_block_label": f"수입 게이트 계산 실패: {e}"[:180],
                 }
             out["income_strategy"] = income_strategy
-            if not income_strategy.get("income_pass") and not out.get("block_reason"):
+            if income_strategy.get("income_pass") is not True and not out.get("block_reason"):
                 out["block_reason"] = "수입 기대값 gate 차단: " + str(
                     income_strategy.get("income_block_label")
                     or income_strategy.get("income_block_reason")
@@ -3745,12 +3745,28 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
             if out.get("observation_flags"):
                 risk_notes.extend(str(f) for f in out.get("observation_flags") or [])
             income_strategy = out.get("income_strategy") or {}
-            if income_strategy and not income_strategy.get("income_pass"):
+            if income_strategy and income_strategy.get("income_pass") is not True:
                 risk_notes.append(
                     "수입 기대값 gate 차단: "
                     + str(income_strategy.get("income_block_label") or income_strategy.get("income_block_reason") or "income_pass=false")
                 )
             out["risk_notes"] = risk_notes
+
+            # income plan이 stop/target을 조정한 최종 가격으로 RR·total·bucket을
+            # 같은 scorer weight profile에서 다시 계산하고 실행 snapshot을 결합한다.
+            try:
+                from core.toss_quality_gate import finalize_quality_proof
+                quality_finalized = finalize_quality_proof(out)
+            except Exception as exc:
+                quality_finalized = False
+                log.debug("quality proof finalization failed: %s", type(exc).__name__)
+            if not quality_finalized:
+                out["decision_bucket"] = "BLOCK"
+                out["decision_reason"] = "quality_finalization_failed"
+                out["executable_now"] = False
+                out["execution_status"] = "quality_finalization_failed"
+                if not out.get("block_reason"):
+                    out["block_reason"] = "최종 품질 증명 생성 실패"
 
             missing = []
             required = {
@@ -3769,8 +3785,11 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
                 if value in (None, "", 0, 0.0, []):
                     missing.append(key)
             out["missing_fields"] = missing
-            hard_blocked = out.get("execution_status") in {"hold_risk_flags", "chase_block", "data_quality_block", "cash_unavailable"} or bool(out.get("blocking_risk_flags"))
-            income_pass = bool((out.get("income_strategy") or {}).get("income_pass"))
+            hard_blocked = out.get("execution_status") in {
+                "hold_risk_flags", "chase_block", "data_quality_block",
+                "cash_unavailable", "quality_finalization_failed",
+            } or bool(out.get("blocking_risk_flags"))
+            income_pass = (out.get("income_strategy") or {}).get("income_pass") is True
 
             # 품질 게이트 + 수입 기대값 gate decision 반영
             bucket = str(out.get("decision_bucket") or "")
@@ -3795,14 +3814,6 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
                     )
 
             _apply_ai_berkshire_buy_gate(out, berkshire_scores)
-            # 계보 증명 재부착: quality batch는 quantity 확정 전에 돌므로,
-            # 최종 실행 필드(수량·가격) 확정 후 snapshot을 최종 상태에 바인딩.
-            # 이 재부착이 없으면 record가 proof mismatch로 전량 fail-closed.
-            try:
-                from core.toss_quality_gate import attach_quality_proof
-                attach_quality_proof(out)
-            except Exception as exc:
-                log.debug("quality proof attach failed: %s", type(exc).__name__)
             return out
 
         items = [

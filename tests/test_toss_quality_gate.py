@@ -26,6 +26,26 @@ from core.toss_quality_gate import (
 )
 
 
+def _seal_quality_proof_for_test(qg, candidate):
+    """저수준 DB 변조 테스트 전용. production binder 우회 의도를 명시한다."""
+    candidate.setdefault("side", "buy")
+    breakdown = candidate["quality_breakdown"]
+    breakdown["decision_bucket"] = candidate.get("decision_bucket", "")
+    breakdown["decision_reason"] = candidate.get("decision_reason", "")
+    breakdown["score_symbol"] = str(candidate.get("symbol") or candidate.get("ticker") or "").upper()
+    breakdown["score_side"] = str(candidate.get("side") or "buy").lower()
+    breakdown["score_schema_version"] = qg.QUALITY_SCORE_SCHEMA_VERSION
+    weight_hash = qg._weight_profile_hash()
+    breakdown["weight_profile_hash"] = weight_hash
+    breakdown["score_breakdown_sha256"] = qg._score_breakdown_hash(
+        breakdown,
+        schema_version=qg.QUALITY_SCORE_SCHEMA_VERSION,
+        weight_hash=weight_hash,
+    )
+    assert breakdown["score_breakdown_sha256"]
+    assert qg.attach_quality_proof(candidate) is True
+
+
 @pytest.fixture(autouse=True)
 def _no_network_supply(monkeypatch):
     """수급 조회가 테스트에서 네트워크를 타지 않게 기본 차단."""
@@ -617,7 +637,7 @@ class TestExactExecutionQualityDecision:
             "stop_loss": 27_025,
             "target_price": 34_000,
         }
-        qg.attach_quality_proof(cand)
+        _seal_quality_proof_for_test(qg, cand)
         return cand
 
     def test_records_exact_ref_and_is_idempotent(self, tmp_path, monkeypatch):
@@ -721,13 +741,13 @@ class TestExactExecutionQualityDecision:
         # 내부 정합(RR 재계산 일치)은 유지한 변조 — payload conflict 경로 검증
         # (34000-28850)/(28850-27025) = 2.8219
         changed_price["quality_breakdown"]["rr_ratio"] = 2.82
-        qg.attach_quality_proof(changed_price)  # 변조 후에도 증명은 정합 — payload conflict 경로 검증
+        _seal_quality_proof_for_test(qg, changed_price)  # 변조 후에도 증명은 정합 — payload conflict 경로 검증
         price_conflict = qg.record_execution_quality_decision(
             changed_price, pilot_id=pilot_id, decision_ref=ref
         )
         changed_bucket = self._candidate()
         changed_bucket["decision_bucket"] = SMALL_PASS
-        qg.attach_quality_proof(changed_bucket)
+        _seal_quality_proof_for_test(qg, changed_bucket)
         bucket_conflict = qg.record_execution_quality_decision(
             changed_bucket, pilot_id=pilot_id, decision_ref=ref
         )
@@ -753,7 +773,7 @@ class TestExactExecutionQualityDecision:
 
         changed_quantity = self._candidate()
         changed_quantity["quantity"] = 99
-        qg.attach_quality_proof(changed_quantity)
+        _seal_quality_proof_for_test(qg, changed_quantity)
         quantity_conflict = qg.record_execution_quality_decision(
             changed_quantity, pilot_id=pilot_id, decision_ref=ref
         )
@@ -762,7 +782,7 @@ class TestExactExecutionQualityDecision:
         # 내부 정합(합=91)은 유지하되 기존 기록과 다른 변조 — payload conflict 경로 검증
         changed_supply["quality_breakdown"]["score_total"] = 91.0
         changed_supply["quality_score"] = 91.0
-        qg.attach_quality_proof(changed_supply)
+        _seal_quality_proof_for_test(qg, changed_supply)
         supply_conflict = qg.record_execution_quality_decision(
             changed_supply, pilot_id=pilot_id, decision_ref=ref
         )
@@ -903,7 +923,7 @@ class TestFailClosedRecompute:
         }
         cand.update(overrides)
         from core import toss_quality_gate as qg
-        qg.attach_quality_proof(cand)
+        _seal_quality_proof_for_test(qg, cand)
         return cand
 
     def _setup(self, qg, tmp_path, monkeypatch, name):
@@ -953,7 +973,7 @@ class TestFailClosedRecompute:
         }
         out = qg.validate_execution_quality_decision(rec, pilot_id=pilot_id)
         assert out["ok"] is False
-        assert "recompute" in out["reason"]
+        assert out["reason"] == "quality_decision_breakdown_mismatch"
 
     def test_consistent_decision_passes_end_to_end(self, tmp_path, monkeypatch):
         from core import toss_quality_gate as qg
@@ -998,7 +1018,7 @@ class TestHermesProbeRegression:
         }
         c.update(over)
         from core import toss_quality_gate as qg
-        qg.attach_quality_proof(c)
+        _seal_quality_proof_for_test(qg, c)
         return c
 
     def _setup(self, qg, tmp_path, monkeypatch, name):
@@ -1041,9 +1061,14 @@ class TestHermesProbeRegression:
         policy = {
             "live_pilot_enabled": True, "live_order_allowed": True,
             "autonomous_mode": True, "adapter_status": "enabled",
+            "autonomous_kill_switch": False,
+            "allowed_sides": ["buy"], "autonomous_allowed_sides": ["buy"],
         }
         result = adapter.dispatch_toss_order_live(
-            {"symbol": "AAPL", "quantity": 1, "limit_price": 100.0},
+            {"symbol": "AAPL", "side": "buy", "order_type": "limit",
+             "quantity": 1, "limit_price": 100.0,
+             "client_order_id": "tlive_probe_transport_0001",
+             "pilot_id": "tlive_probe_transport_0001"},
             policy,
             transport=lambda payload, pol: {
                 "ok": "true", "live_order_sent": "true", "broker_confirmed": 1,
@@ -1093,7 +1118,7 @@ class TestHermesProbeRegression:
                "limit_price": 28_750, "stop_loss": 27_025, "target_price": 34_000}
         out = qg.validate_execution_quality_decision(rec, pilot_id=pilot_id)
         assert out["ok"] is False
-        assert out["reason"] == "quality_decision_rr_mismatch"
+        assert out["reason"] == "quality_decision_breakdown_mismatch"
 
     # side 증명 (항목 6)
     def test_legacy_row_without_side_fails_closed(self, tmp_path, monkeypatch):
@@ -1134,7 +1159,7 @@ class TestLateFindingsProbeMatrix:
             "limit_price": 28_750, "stop_loss": 27_025, "target_price": 34_000,
         }
         cand.update(over)
-        qg.attach_quality_proof(cand)
+        _seal_quality_proof_for_test(qg, cand)
         return cand
 
     def _setup(self, qg, tmp_path, monkeypatch, name):
@@ -1166,8 +1191,13 @@ class TestLateFindingsProbeMatrix:
     def test_b2_none_transport_result_fail_closed(self):
         from core import toss_live_pilot_adapter as adapter
         policy = {"live_pilot_enabled": True, "live_order_allowed": True,
-                  "autonomous_mode": True, "adapter_status": "enabled"}
-        payload = {"symbol": "AAPL", "quantity": 1, "limit_price": 100.0}
+                  "autonomous_mode": True, "adapter_status": "enabled",
+                  "autonomous_kill_switch": False,
+                  "allowed_sides": ["buy"], "autonomous_allowed_sides": ["buy"]}
+        payload = {"symbol": "AAPL", "side": "buy", "order_type": "limit",
+                   "quantity": 1, "limit_price": 100.0,
+                   "client_order_id": "tlive_probe_none_0001",
+                   "pilot_id": "tlive_probe_none_0001"}
         result = adapter.dispatch_toss_order_live(
             payload, policy, transport=lambda p, pol: None)
         assert result["ok"] is False
@@ -1211,7 +1241,7 @@ class TestLateFindingsProbeMatrix:
             "score_risk_reward": 5.0, "score_reliability": 5.0,
             "score_market_regime": 5.0, "score_supply_demand": 5.0,
         })
-        qg.attach_quality_proof(cand)
+        _seal_quality_proof_for_test(qg, cand)
         out = qg.record_execution_quality_decision(
             cand, pilot_id="tlive_20260714_120002_0001",
             decision_ref="execution_decision:tlive_late_0002")
@@ -1224,7 +1254,7 @@ class TestLateFindingsProbeMatrix:
         cand = self._proofed_candidate(qg, quality_score=77.0)
         cand["quality_breakdown"].update(
             {"score_total": 77.0, "penalty_duplicate": -10.0})  # {−20,0}만 허용
-        qg.attach_quality_proof(cand)
+        _seal_quality_proof_for_test(qg, cand)
         out = qg.record_execution_quality_decision(
             cand, pilot_id="tlive_20260714_120003_0001",
             decision_ref="execution_decision:tlive_late_0003")
