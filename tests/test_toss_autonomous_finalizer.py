@@ -24,6 +24,16 @@ def _seal_quality_proof_for_test(qg, candidate):
     breakdown["decision_reason"] = candidate.get("decision_reason", "")
     breakdown["score_symbol"] = str(candidate.get("symbol") or candidate.get("ticker") or "").upper()
     breakdown["score_side"] = str(candidate.get("side") or "buy").lower()
+    event_penalty = float(breakdown.get("penalty_event_risk") or 0.0)
+    breakdown.update({
+        "decision_change_pct": float(candidate.get("change_pct") or 0.0),
+        "decision_days_to_earnings": 0 if event_penalty == -15.0 else (5 if event_penalty == -5.0 else -1),
+        "decision_has_stop": bool(candidate.get("stop_loss")),
+        "decision_has_target": bool(candidate.get("target_price")),
+        "decision_blocking_risk_flags": list(candidate.get("blocking_risk_flags") or []),
+        "decision_origin_bucket": breakdown["decision_bucket"],
+        "decision_origin_reason": breakdown["decision_reason"],
+    })
     breakdown["score_schema_version"] = qg.QUALITY_SCORE_SCHEMA_VERSION
     weight_hash = qg._weight_profile_hash()
     breakdown["weight_profile_hash"] = weight_hash

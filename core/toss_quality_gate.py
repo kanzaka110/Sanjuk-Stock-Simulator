@@ -54,8 +54,8 @@ EXECUTABLE_BUCKETS = frozenset([PASS_EXECUTE, SMALL_PASS])
 
 _ALL_BUCKETS = frozenset([PASS_EXECUTE, SMALL_PASS, WAIT_PULLBACK, WATCH, CHASE_BLOCK, BLOCK])
 
-# v3: scorer-owned breakdown hash + separate execution snapshot binding.
-QUALITY_SCORE_SCHEMA_VERSION = 3
+# v4: scorer identity + every bucket-changing input + execution snapshot binding.
+QUALITY_SCORE_SCHEMA_VERSION = 4
 
 
 # ── QualityScore ─────────────────────────────────────────────────
@@ -79,7 +79,14 @@ class QualityScore:
     regime: str
     scored_at: str
     score_supply_demand: float = 0.0  # KRX 기관/외국인 수급 보정 (-10 ~ +10)
-    score_side: str = "buy"
+    score_side: str = ""
+    decision_change_pct: float = 0.0
+    decision_days_to_earnings: int = -1
+    decision_has_stop: bool = False
+    decision_has_target: bool = False
+    decision_blocking_risk_flags: tuple = ()
+    decision_origin_bucket: str = ""
+    decision_origin_reason: str = ""
     score_schema_version: int = QUALITY_SCORE_SCHEMA_VERSION
     weight_profile_hash: str = ""
     score_breakdown_sha256: str = ""
@@ -103,6 +110,13 @@ class QualityScore:
             "regime": self.regime,
             "score_symbol": self.ticker.upper().strip(),
             "score_side": self.score_side,
+            "decision_change_pct": round(self.decision_change_pct, 6),
+            "decision_days_to_earnings": self.decision_days_to_earnings,
+            "decision_has_stop": self.decision_has_stop,
+            "decision_has_target": self.decision_has_target,
+            "decision_blocking_risk_flags": list(self.decision_blocking_risk_flags),
+            "decision_origin_bucket": self.decision_origin_bucket,
+            "decision_origin_reason": self.decision_origin_reason,
         }
         if self.weight_profile_hash and self.score_breakdown_sha256:
             result.update({
@@ -585,7 +599,18 @@ def score_candidate(
         regime=regime_str,
         scored_at=datetime.now(KST).strftime("%Y-%m-%dT%H:%M:%S+09:00"),
         score_supply_demand=s_supply,
-        score_side=str(candidate.get("side") or "buy").lower().strip(),
+        score_side=(
+            str(candidate.get("side")).lower().strip()
+            if isinstance(candidate.get("side"), str)
+            else ""
+        ),
+        decision_change_pct=change_pct,
+        decision_days_to_earnings=days_to_earnings,
+        decision_has_stop=has_stop,
+        decision_has_target=has_target,
+        decision_blocking_risk_flags=tuple(blocking_flags),
+        decision_origin_bucket=bucket,
+        decision_origin_reason=reason,
     )
     weight_hash = _weight_profile_hash(w)
     breakdown_hash = _score_breakdown_hash(
@@ -737,6 +762,13 @@ def _outcomes_conn() -> sqlite3.Connection:
                 weight_profile_hash TEXT DEFAULT '',
                 score_breakdown_sha256 TEXT DEFAULT '',
                 candidate_snapshot_sha256 TEXT DEFAULT '',
+                decision_change_pct REAL DEFAULT 0,
+                decision_days_to_earnings INTEGER DEFAULT -1,
+                decision_has_stop INTEGER DEFAULT 0,
+                decision_has_target INTEGER DEFAULT 0,
+                decision_blocking_risk_flags TEXT DEFAULT '[]',
+                decision_origin_bucket TEXT DEFAULT '',
+                decision_origin_reason TEXT DEFAULT '',
                 pilot_id TEXT DEFAULT '',
                 decision_ref TEXT DEFAULT '',
                 broker_order_id TEXT,
@@ -778,6 +810,13 @@ def _outcomes_conn() -> sqlite3.Connection:
             "weight_profile_hash": "TEXT DEFAULT ''",
             "score_breakdown_sha256": "TEXT DEFAULT ''",
             "candidate_snapshot_sha256": "TEXT DEFAULT ''",
+            "decision_change_pct": "REAL DEFAULT 0",
+            "decision_days_to_earnings": "INTEGER DEFAULT -1",
+            "decision_has_stop": "INTEGER DEFAULT 0",
+            "decision_has_target": "INTEGER DEFAULT 0",
+            "decision_blocking_risk_flags": "TEXT DEFAULT '[]'",
+            "decision_origin_bucket": "TEXT DEFAULT ''",
+            "decision_origin_reason": "TEXT DEFAULT ''",
             "pilot_id": "TEXT DEFAULT ''",
             "decision_ref": "TEXT DEFAULT ''",
             "broker_order_id": "TEXT DEFAULT ''",
@@ -1017,6 +1056,8 @@ def validate_execution_quality_decision(rec: dict, *, pilot_id: str) -> dict:
         or abs(computed_rr - float(stored_rr)) > _RR_RECOMPUTE_TOLERANCE
     ):
         return {"ok": False, "reason": "quality_decision_rr_mismatch"}
+    if not _stored_bucket_replay_matches(row):
+        return {"ok": False, "reason": "quality_decision_bucket_replay_mismatch"}
     # 저장된 총점/PASS도 신뢰하지 않는다 — dispatch 직전 재계산 대조 (fail-closed)
     if not _quality_scores_verified(
             row, row["score_total"], str(row["decision_bucket"] or ""),
@@ -1094,6 +1135,7 @@ _SCORE_PROOF_NUMERIC_FIELDS = (
 )
 _SCORE_PROOF_TEXT_FIELDS = (
     "decision_bucket", "decision_reason", "regime", "score_symbol", "score_side",
+    "decision_origin_bucket", "decision_origin_reason",
 )
 
 
@@ -1109,6 +1151,128 @@ def _source_value(source, key: str):
             return source[alias]
         except (KeyError, IndexError, TypeError):
             return None
+
+
+def _canonical_blocking_flags(value) -> tuple[str, ...] | None:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+    if not isinstance(value, (list, tuple)):
+        return None
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip() or len(item) > 120:
+            return None
+        result.append(item.strip())
+    return tuple(result)
+
+
+def _canonical_proof_bool(value) -> bool | None:
+    if type(value) is bool:
+        return value
+    if type(value) is int and value in (0, 1):
+        return bool(value)
+    return None
+
+
+def _decision_context_payload(source) -> dict[str, object] | None:
+    change_pct = _finite_number(_source_value(source, "decision_change_pct"))
+    days = _finite_number(_source_value(source, "decision_days_to_earnings"))
+    has_stop = _canonical_proof_bool(_source_value(source, "decision_has_stop"))
+    has_target = _canonical_proof_bool(_source_value(source, "decision_has_target"))
+    flags = _canonical_blocking_flags(
+        _source_value(source, "decision_blocking_risk_flags")
+    )
+    origin_bucket = str(_source_value(source, "decision_origin_bucket") or "")
+    origin_reason = str(_source_value(source, "decision_origin_reason") or "")
+    if (
+        change_pct is None
+        or days is None
+        or not float(days).is_integer()
+        or has_stop is None
+        or has_target is None
+        or flags is None
+        or origin_bucket not in _ALL_BUCKETS
+        or not origin_reason
+    ):
+        return None
+    return {
+        "decision_change_pct": round(float(change_pct), 6),
+        "decision_days_to_earnings": int(days),
+        "decision_has_stop": has_stop,
+        "decision_has_target": has_target,
+        "decision_blocking_risk_flags": list(flags),
+        "decision_origin_bucket": origin_bucket,
+        "decision_origin_reason": origin_reason,
+    }
+
+
+def _replayed_bucket(source) -> tuple[str, str] | None:
+    context = _decision_context_payload(source)
+    total = _recompute_score_total(source)
+    rr = _finite_number(_source_value(source, "rr_ratio"))
+    if context is None or total is None or rr is None:
+        return None
+    change_pct = _finite_number(context["decision_change_pct"])
+    days = _finite_number(context["decision_days_to_earnings"])
+    has_stop = _canonical_proof_bool(context["decision_has_stop"])
+    has_target = _canonical_proof_bool(context["decision_has_target"])
+    flags = _canonical_blocking_flags(context["decision_blocking_risk_flags"])
+    if (
+        change_pct is None
+        or days is None
+        or not float(days).is_integer()
+        or has_stop is None
+        or has_target is None
+        or flags is None
+    ):
+        return None
+    bucket, reason = _decide_bucket(
+        round(float(total), 1),
+        float(rr),
+        str(_source_value(source, "regime") or "판단불가"),
+        float(change_pct),
+        has_stop,
+        has_target,
+        int(days),
+        blocking_risk_flags=list(flags),
+    )
+    origin_bucket = str(context["decision_origin_bucket"])
+    origin_reason = str(context["decision_origin_reason"])
+    if origin_bucket not in EXECUTABLE_BUCKETS:
+        return origin_bucket, origin_reason
+    if origin_bucket == SMALL_PASS and bucket == PASS_EXECUTE:
+        return origin_bucket, origin_reason
+    return bucket, reason
+
+
+def _stored_bucket_replay_matches(source) -> bool:
+    replayed = _replayed_bucket(source)
+    return bool(
+        replayed
+        and replayed[0] == str(_source_value(source, "decision_bucket") or "")
+    )
+
+
+def _score_decision_context_matches(candidate: dict, breakdown: dict) -> bool:
+    context = _decision_context_payload(breakdown)
+    candidate_change = _finite_number(candidate.get("change_pct", 0.0))
+    candidate_flags = _canonical_blocking_flags(
+        candidate.get("blocking_risk_flags") or []
+    )
+    return bool(
+        context
+        and candidate_change is not None
+        and candidate_flags is not None
+        and context["decision_change_pct"] == round(float(candidate_change), 6)
+        and context["decision_has_stop"] is bool(candidate.get("stop_loss"))
+        and context["decision_has_target"] is bool(candidate.get("target_price"))
+        and (_canonical_blocking_flags(
+            context["decision_blocking_risk_flags"]
+        ) or ()) == candidate_flags
+    )
 
 
 def _score_identity_matches(candidate: dict, breakdown: dict) -> bool:
@@ -1158,6 +1322,10 @@ def _score_breakdown_hash(
         payload[key] = round(float(value), 6)
     for key in _SCORE_PROOF_TEXT_FIELDS:
         payload[key] = str(_source_value(source, key) or "")
+    decision_context = _decision_context_payload(source)
+    if decision_context is None:
+        return None
+    payload["decision_context"] = decision_context
     canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -1225,6 +1393,9 @@ def attach_quality_proof(candidate: dict) -> bool:
     if not _score_identity_matches(candidate, breakdown):
         breakdown.pop("candidate_snapshot_sha256", None)
         return False
+    if not _score_decision_context_matches(candidate, breakdown):
+        breakdown.pop("candidate_snapshot_sha256", None)
+        return False
     if str(candidate.get("decision_bucket") or "") != str(
         breakdown.get("decision_bucket") or ""
     ):
@@ -1256,6 +1427,9 @@ def finalize_quality_proof(candidate: dict) -> bool:
     if not _score_identity_matches(candidate, breakdown):
         breakdown.pop("candidate_snapshot_sha256", None)
         return False
+    if not _score_decision_context_matches(candidate, breakdown):
+        breakdown.pop("candidate_snapshot_sha256", None)
+        return False
     rr = _recompute_rr_ratio(
         candidate.get("limit_price") or candidate.get("price"),
         candidate.get("stop_loss"),
@@ -1270,8 +1444,12 @@ def finalize_quality_proof(candidate: dict) -> bool:
         breakdown.pop("candidate_snapshot_sha256", None)
         return False
 
-    prior_bucket = str(breakdown.get("decision_bucket") or "")
-    prior_reason = str(breakdown.get("decision_reason") or "")
+    decision_context = _decision_context_payload(breakdown)
+    if decision_context is None:
+        breakdown.pop("candidate_snapshot_sha256", None)
+        return False
+    origin_bucket = str(decision_context["decision_origin_bucket"])
+    origin_reason = str(decision_context["decision_origin_reason"])
     candidate["risk_reward"] = round(float(rr), 6)
     breakdown["rr_ratio"] = round(float(rr), 2)
     breakdown["score_risk_reward"] = round(
@@ -1282,25 +1460,39 @@ def finalize_quality_proof(candidate: dict) -> bool:
         breakdown.pop("candidate_snapshot_sha256", None)
         return False
     total = round(float(total), 1)
-    event_penalty = _finite_number(breakdown.get("penalty_event_risk"))
-    days_to_earnings = 0 if event_penalty == -15.0 else (5 if event_penalty == -5.0 else -1)
-    change_pct = _finite_number(candidate.get("change_pct")) or 0.0
+    context_change = _finite_number(decision_context["decision_change_pct"])
+    context_days = _finite_number(decision_context["decision_days_to_earnings"])
+    context_has_stop = _canonical_proof_bool(decision_context["decision_has_stop"])
+    context_has_target = _canonical_proof_bool(decision_context["decision_has_target"])
+    context_flags = _canonical_blocking_flags(
+        decision_context["decision_blocking_risk_flags"]
+    )
+    if (
+        context_change is None
+        or context_days is None
+        or not float(context_days).is_integer()
+        or context_has_stop is None
+        or context_has_target is None
+        or context_flags is None
+    ):
+        breakdown.pop("candidate_snapshot_sha256", None)
+        return False
     bucket, reason = _decide_bucket(
         total,
         float(rr),
         str(breakdown.get("regime") or "판단불가"),
-        float(change_pct),
-        bool(candidate.get("stop_loss")),
-        bool(candidate.get("target_price")),
-        days_to_earnings,
-        blocking_risk_flags=candidate.get("blocking_risk_flags") or [],
+        float(context_change),
+        context_has_stop,
+        context_has_target,
+        int(context_days),
+        blocking_risk_flags=list(context_flags),
     )
     # scorer가 이미 내린 비실행 결정을 final 가격 재계산이 승격하면 안 된다.
     # 실행 bucket 사이에서도 SMALL_PASS → PASS_EXECUTE 자동 승격은 금지한다.
-    if prior_bucket not in EXECUTABLE_BUCKETS:
-        bucket, reason = prior_bucket, prior_reason
-    elif prior_bucket == SMALL_PASS and bucket == PASS_EXECUTE:
-        bucket, reason = prior_bucket, prior_reason
+    if origin_bucket not in EXECUTABLE_BUCKETS:
+        bucket, reason = origin_bucket, origin_reason
+    elif origin_bucket == SMALL_PASS and bucket == PASS_EXECUTE:
+        bucket, reason = origin_bucket, origin_reason
     breakdown["score_total"] = total
     breakdown["decision_bucket"] = bucket
     breakdown["decision_reason"] = reason
@@ -1461,6 +1653,8 @@ def record_execution_quality_decision(
         return {"ok": False, "reason": "quality_proof_missing"}
     if proof_weights != _weight_profile_hash():
         return {"ok": False, "reason": "quality_proof_weight_mismatch"}
+    if not _score_decision_context_matches(candidate, breakdown):
+        return {"ok": False, "reason": "quality_proof_context_mismatch"}
     expected_breakdown_hash = _score_breakdown_hash(
         breakdown,
         schema_version=proof_version,
@@ -1475,6 +1669,9 @@ def record_execution_quality_decision(
         return {"ok": False, "reason": "quality_proof_breakdown_mismatch"}
     if proof_snapshot != (candidate_snapshot_hash(candidate) or ""):
         return {"ok": False, "reason": "quality_proof_candidate_mismatch"}
+    decision_context = _decision_context_payload(breakdown)
+    if decision_context is None:
+        return {"ok": False, "reason": "quality_proof_context_mismatch"}
 
     def metric(name: str) -> float:
         return component_values[name]
@@ -1504,6 +1701,17 @@ def record_execution_quality_decision(
         "weight_profile_hash": proof_weights,
         "score_breakdown_sha256": proof_breakdown_hash,
         "candidate_snapshot_sha256": proof_snapshot,
+        "decision_change_pct": decision_context["decision_change_pct"],
+        "decision_days_to_earnings": decision_context["decision_days_to_earnings"],
+        "decision_has_stop": decision_context["decision_has_stop"],
+        "decision_has_target": decision_context["decision_has_target"],
+        "decision_blocking_risk_flags": json.dumps(
+            decision_context["decision_blocking_risk_flags"],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        "decision_origin_bucket": str(decision_context["decision_origin_bucket"]),
+        "decision_origin_reason": str(decision_context["decision_origin_reason"]),
     }
 
     # 호출자가 주장한 총점/PASS를 신뢰하지 않는다 — 기록 시점 재계산 대조 (fail-closed)
@@ -1540,7 +1748,10 @@ def record_execution_quality_decision(
                 "penalty_duplicate, penalty_event_risk, rr_ratio, regime, "
                 "entry_price, stop_loss, target_price, quantity, side, "
                 "score_schema_version, weight_profile_hash, score_breakdown_sha256, "
-                "candidate_snapshot_sha256"
+                "candidate_snapshot_sha256, decision_change_pct, "
+                "decision_days_to_earnings, decision_has_stop, decision_has_target, "
+                "decision_blocking_risk_flags, decision_origin_bucket, "
+                "decision_origin_reason"
             )
             existing_ref = conn.execute(
                 f"SELECT {select_columns} FROM quality_gate_decisions WHERE decision_ref=?",
@@ -1570,8 +1781,12 @@ def record_execution_quality_decision(
                     penalty_overheat, penalty_duplicate, penalty_event_risk,
                     rr_ratio, regime, entry_price, stop_loss, target_price, quantity,
                     side, score_schema_version, weight_profile_hash,
-                     score_breakdown_sha256, candidate_snapshot_sha256, pilot_id, decision_ref)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    score_breakdown_sha256, candidate_snapshot_sha256,
+                    decision_change_pct, decision_days_to_earnings,
+                    decision_has_stop, decision_has_target,
+                    decision_blocking_risk_flags, decision_origin_bucket,
+                    decision_origin_reason, pilot_id, decision_ref)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     symbol,
                     datetime.now(KST).strftime("%Y-%m-%dT%H:%M:%S+09:00"),
@@ -1598,6 +1813,13 @@ def record_execution_quality_decision(
                     immutable_payload["weight_profile_hash"],
                     immutable_payload["score_breakdown_sha256"],
                     immutable_payload["candidate_snapshot_sha256"],
+                    immutable_payload["decision_change_pct"],
+                    immutable_payload["decision_days_to_earnings"],
+                    immutable_payload["decision_has_stop"],
+                    immutable_payload["decision_has_target"],
+                    immutable_payload["decision_blocking_risk_flags"],
+                    immutable_payload["decision_origin_bucket"],
+                    immutable_payload["decision_origin_reason"],
                     pid,
                     ref,
                 ),

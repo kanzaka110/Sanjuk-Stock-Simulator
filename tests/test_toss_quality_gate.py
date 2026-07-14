@@ -34,6 +34,16 @@ def _seal_quality_proof_for_test(qg, candidate):
     breakdown["decision_reason"] = candidate.get("decision_reason", "")
     breakdown["score_symbol"] = str(candidate.get("symbol") or candidate.get("ticker") or "").upper()
     breakdown["score_side"] = str(candidate.get("side") or "buy").lower()
+    event_penalty = float(breakdown.get("penalty_event_risk") or 0.0)
+    breakdown.update({
+        "decision_change_pct": float(candidate.get("change_pct") or 0.0),
+        "decision_days_to_earnings": 0 if event_penalty == -15.0 else (5 if event_penalty == -5.0 else -1),
+        "decision_has_stop": bool(candidate.get("stop_loss")),
+        "decision_has_target": bool(candidate.get("target_price")),
+        "decision_blocking_risk_flags": list(candidate.get("blocking_risk_flags") or []),
+        "decision_origin_bucket": breakdown["decision_bucket"],
+        "decision_origin_reason": breakdown["decision_reason"],
+    })
     breakdown["score_schema_version"] = qg.QUALITY_SCORE_SCHEMA_VERSION
     weight_hash = qg._weight_profile_hash()
     breakdown["weight_profile_hash"] = weight_hash
@@ -1062,18 +1072,26 @@ class TestHermesProbeRegression:
             "live_pilot_enabled": True, "live_order_allowed": True,
             "autonomous_mode": True, "adapter_status": "enabled",
             "autonomous_kill_switch": False,
+            "allowed_asset_types": ["US_STOCK"],
+            "autonomous_allowed_asset_types": ["US_STOCK"],
             "allowed_sides": ["buy"], "autonomous_allowed_sides": ["buy"],
         }
-        result = adapter.dispatch_toss_order_live(
-            {"symbol": "AAPL", "side": "buy", "order_type": "limit",
-             "quantity": 1, "limit_price": 100.0,
-             "client_order_id": "tlive_probe_transport_0001",
-             "pilot_id": "tlive_probe_transport_0001"},
-            policy,
-            transport=lambda payload, pol: {
-                "ok": "true", "live_order_sent": "true", "broker_confirmed": 1,
-            },
-        )
+        payload = {
+            "symbol": "AAPL", "side": "buy", "order_type": "limit",
+            "quantity": 1, "limit_price": 100.0,
+            "client_order_id": "tlive_probe_transport_0001",
+            "pilot_id": "tlive_probe_transport_0001",
+        }
+        with patch.object(
+            adapter, "_load_authoritative_dispatch_record", return_value=payload,
+        ):
+            result = adapter.dispatch_toss_order_live(
+                payload,
+                policy,
+                transport=lambda order, pol: {
+                    "ok": "true", "live_order_sent": "true", "broker_confirmed": 1,
+                },
+            )
         assert result["ok"] is False
         assert result["live_order_sent"] is False
         assert result["reason"] == "transport_schema_invalid"
@@ -1193,13 +1211,18 @@ class TestLateFindingsProbeMatrix:
         policy = {"live_pilot_enabled": True, "live_order_allowed": True,
                   "autonomous_mode": True, "adapter_status": "enabled",
                   "autonomous_kill_switch": False,
+                  "allowed_asset_types": ["US_STOCK"],
+                  "autonomous_allowed_asset_types": ["US_STOCK"],
                   "allowed_sides": ["buy"], "autonomous_allowed_sides": ["buy"]}
         payload = {"symbol": "AAPL", "side": "buy", "order_type": "limit",
                    "quantity": 1, "limit_price": 100.0,
                    "client_order_id": "tlive_probe_none_0001",
                    "pilot_id": "tlive_probe_none_0001"}
-        result = adapter.dispatch_toss_order_live(
-            payload, policy, transport=lambda p, pol: None)
+        with patch.object(
+            adapter, "_load_authoritative_dispatch_record", return_value=payload,
+        ):
+            result = adapter.dispatch_toss_order_live(
+                payload, policy, transport=lambda p, pol: None)
         assert result["ok"] is False
         assert result["live_order_sent"] is False
         assert result["reason"] == "transport_schema_invalid"

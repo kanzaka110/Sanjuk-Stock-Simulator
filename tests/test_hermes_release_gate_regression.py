@@ -15,6 +15,8 @@ POLICY = {
     "autonomous_mode": True,
     "autonomous_kill_switch": False,
     "adapter_status": "enabled",
+    "allowed_asset_types": ["US_STOCK", "KR_STOCK"],
+    "autonomous_allowed_asset_types": ["US_STOCK", "KR_STOCK"],
     "allowed_sides": ["buy"],
     "autonomous_allowed_sides": ["buy"],
     "blocked_symbols": ["MU"],
@@ -30,6 +32,24 @@ PAYLOAD = {
     "client_order_id": "tlive_20260714_160000_0001",
     "pilot_id": "tlive_20260714_160000_0001",
 }
+
+
+def _install_authoritative_dispatch(monkeypatch, payload=None):
+    order = deepcopy(payload or PAYLOAD)
+    record = {
+        "pilot_id": order["pilot_id"],
+        "symbol": order["symbol"],
+        "side": order["side"],
+        "quantity": order["quantity"],
+        "limit_price": order["limit_price"],
+        "status": "verified",
+    }
+    monkeypatch.setattr(
+        adapter,
+        "_load_authoritative_dispatch_record",
+        lambda pilot_id: deepcopy(record) if pilot_id == record["pilot_id"] else None,
+        raising=False,
+    )
 
 
 def _remove(*keys):
@@ -70,7 +90,8 @@ def test_autonomous_dispatch_rejects_malformed_contract_before_transport(case, m
     assert result["reason"] == "dispatch_contract_invalid"
 
 
-def test_autonomous_dispatch_accepts_complete_exact_contract_with_fake_transport():
+def test_autonomous_dispatch_accepts_complete_exact_contract_with_fake_transport(monkeypatch):
+    _install_authoritative_dispatch(monkeypatch)
     calls = []
 
     def fake_transport(order, policy):
@@ -84,6 +105,73 @@ def test_autonomous_dispatch_accepts_complete_exact_contract_with_fake_transport
     assert len(calls) == 1
     assert result["ok"] is True
     assert result["live_order_sent"] is True
+
+
+def test_autonomous_dispatch_rejects_format_valid_forged_id_before_transport(monkeypatch):
+    monkeypatch.setattr(
+        adapter, "_load_authoritative_dispatch_record", lambda pilot_id: None,
+        raising=False,
+    )
+    calls = []
+
+    result = adapter.dispatch_toss_order_live(
+        deepcopy(PAYLOAD),
+        dict(POLICY),
+        transport=lambda order, policy: calls.append((order, policy)) or {
+            "ok": True, "live_order_sent": True, "broker_confirmed": True,
+        },
+    )
+
+    assert calls == []
+    assert result["ok"] is False
+    assert result["reason"] == "dispatch_contract_invalid"
+
+
+@pytest.mark.parametrize(
+    "policy_patch,payload_patch",
+    [
+        ({"allowed_asset_types": None}, {}),
+        ({}, {"symbol": "NOT/A/TICKER"}),
+        ({}, {"symbol": "12345.KS"}),
+    ],
+)
+def test_autonomous_dispatch_rejects_missing_scope_or_unsupported_symbol(
+    monkeypatch, policy_patch, payload_patch,
+):
+    payload = {**PAYLOAD, **payload_patch}
+    _install_authoritative_dispatch(monkeypatch, payload)
+    policy = {**POLICY, **policy_patch}
+    if policy_patch.get("allowed_asset_types", object()) is None:
+        policy.pop("allowed_asset_types", None)
+    calls = []
+
+    result = adapter.dispatch_toss_order_live(
+        payload,
+        policy,
+        transport=lambda order, live_policy: calls.append((order, live_policy)) or {
+            "ok": True, "live_order_sent": True, "broker_confirmed": True,
+        },
+    )
+
+    assert calls == []
+    assert result["reason"] == "dispatch_contract_invalid"
+
+
+def test_autonomous_dispatch_normalizes_symbol_before_transport(monkeypatch):
+    payload = {**PAYLOAD, "symbol": " aapl "}
+    _install_authoritative_dispatch(monkeypatch, {**payload, "symbol": "AAPL"})
+    calls = []
+
+    result = adapter.dispatch_toss_order_live(
+        payload,
+        {**POLICY, "allowed_asset_types": ["US_STOCK"]},
+        transport=lambda order, policy: calls.append(order) or {
+            "ok": True, "live_order_sent": True, "broker_confirmed": True,
+        },
+    )
+
+    assert result["ok"] is True
+    assert calls[0]["symbol"] == "AAPL"
 
 
 @pytest.mark.parametrize(
@@ -163,6 +251,27 @@ def _temp_quality_db(monkeypatch, tmp_path: Path, name: str):
     qg._outcomes_schema_created = False
 
 
+def test_quality_db_schema_persists_full_bucket_context(tmp_path, monkeypatch):
+    _temp_quality_db(monkeypatch, tmp_path, "context-schema.db")
+    conn = qg._outcomes_conn()
+    columns = {
+        str(row[1]) for row in conn.execute(
+            "PRAGMA table_info(quality_gate_decisions)"
+        ).fetchall()
+    }
+    conn.close()
+
+    assert {
+        "decision_change_pct",
+        "decision_days_to_earnings",
+        "decision_has_stop",
+        "decision_has_target",
+        "decision_blocking_risk_flags",
+        "decision_origin_bucket",
+        "decision_origin_reason",
+    } <= columns
+
+
 def test_public_execution_binder_does_not_mint_proof_for_manual_breakdown():
     candidate = _raw_quality_candidate()
     candidate["quality_breakdown"] = {
@@ -186,6 +295,52 @@ def test_public_execution_binder_does_not_mint_proof_for_manual_breakdown():
     assert qg.attach_quality_proof(candidate) is False
     assert "score_breakdown_sha256" not in candidate["quality_breakdown"]
     assert "candidate_snapshot_sha256" not in candidate["quality_breakdown"]
+
+
+def test_missing_side_at_scoring_cannot_be_laundered_into_buy_proof():
+    candidate = _raw_quality_candidate()
+    candidate.pop("side")
+    score = qg.score_candidate(
+        candidate,
+        regime_obj=None,
+        accuracy_stats={},
+        expensive_checks=False,
+        fetch_budget={"remaining": 0},
+    )
+    candidate["quality_score"] = score.score_total
+    candidate["quality_breakdown"] = score.to_dict()
+    candidate["decision_bucket"] = score.decision_bucket
+    candidate["decision_reason"] = score.decision_reason
+    candidate["side"] = "buy"
+
+    assert qg.attach_quality_proof(candidate) is False
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("change_pct", 9.0),
+        ("blocking_risk_flags", ["late_block"]),
+    ],
+)
+def test_record_rejects_bucket_context_mutation_after_scoring(
+    tmp_path, monkeypatch, field, value,
+):
+    _temp_quality_db(monkeypatch, tmp_path, f"context-{field}.db")
+    candidate = _scored_quality_candidate()
+    candidate[field] = value
+
+    result = qg.record_execution_quality_decision(
+        candidate,
+        pilot_id="tlive_context_0001",
+        decision_ref=f"execution_decision:context_{field}",
+    )
+
+    assert result["ok"] is False
+    assert result["reason"] in {
+        "quality_proof_context_mismatch",
+        "quality_proof_breakdown_mismatch",
+    }
 
 
 def test_post_proof_breakdown_mutation_is_rejected(tmp_path, monkeypatch):
@@ -251,6 +406,45 @@ def test_final_stop_change_rescores_rr_and_record_validate_pass(tmp_path, monkey
     assert validated["ok"] is True
 
 
+def test_validate_rejects_self_consistent_bucket_context_rewrite(tmp_path, monkeypatch):
+    _temp_quality_db(monkeypatch, tmp_path, "context-rewrite.db")
+    candidate = _scored_quality_candidate()
+    pilot_id = "tlive_context_rewrite_0001"
+    decision_ref = "execution_decision:context_rewrite_0001"
+    assert qg.record_execution_quality_decision(
+        candidate, pilot_id=pilot_id, decision_ref=decision_ref,
+    )["ok"] is True
+
+    conn = qg._outcomes_conn()
+    row = conn.execute(
+        "SELECT * FROM quality_gate_decisions WHERE decision_ref=?",
+        (decision_ref,),
+    ).fetchone()
+    tampered = dict(row)
+    tampered["decision_change_pct"] = 9.0
+    tampered_hash = qg._score_breakdown_hash(
+        tampered,
+        schema_version=qg.QUALITY_SCORE_SCHEMA_VERSION,
+        weight_hash=tampered["weight_profile_hash"],
+    )
+    assert tampered_hash
+    conn.execute(
+        "UPDATE quality_gate_decisions "
+        "SET decision_change_pct=?, score_breakdown_sha256=? WHERE decision_ref=?",
+        (9.0, tampered_hash, decision_ref),
+    )
+    conn.commit()
+    conn.close()
+
+    result = qg.validate_execution_quality_decision(
+        _quality_rec(candidate, pilot_id, decision_ref), pilot_id=pilot_id,
+    )
+    assert result == {
+        "ok": False,
+        "reason": "quality_decision_bucket_replay_mismatch",
+    }
+
+
 def test_fractional_score_schema_version_is_rejected_at_validate(tmp_path, monkeypatch):
     _temp_quality_db(monkeypatch, tmp_path, "version.db")
     candidate = _scored_quality_candidate()
@@ -287,7 +481,7 @@ def test_finalizer_rejects_score_identity_change(field, value):
     assert "candidate_snapshot_sha256" not in candidate["quality_breakdown"]
 
 
-def test_finalizer_never_promotes_existing_non_executable_bucket():
+def test_finalizer_rejects_non_executable_bucket_context_mutation():
     candidate = _raw_quality_candidate()
     candidate["blocking_risk_flags"] = ["deterministic_block"]
     score = qg.score_candidate(
@@ -304,5 +498,6 @@ def test_finalizer_never_promotes_existing_non_executable_bucket():
     candidate["blocking_risk_flags"] = []
     candidate["stop_loss"] = 95.0
 
-    assert qg.finalize_quality_proof(candidate) is True
+    assert qg.finalize_quality_proof(candidate) is False
     assert candidate["decision_bucket"] == qg.BLOCK
+    assert "candidate_snapshot_sha256" not in candidate["quality_breakdown"]

@@ -360,12 +360,19 @@ class TestDispatchLiveFakeSuccess(unittest.TestCase):
             **_POLICY_ENABLED,
             "autonomous_mode": True,
             "autonomous_kill_switch": False,
+            "allowed_asset_types": ["KR_STOCK"],
+            "autonomous_allowed_asset_types": ["KR_STOCK"],
+            "autonomous_allowed_sides": ["buy"],
             "requires_user_confirmation": False,
             "requires_second_confirmation": False,
         }
-        result = dispatch_toss_order_live(
-            payload, policy, transport=_fake_transport_success
-        )
+        with patch(
+            "core.toss_live_pilot_adapter._load_authoritative_dispatch_record",
+            return_value=payload,
+        ):
+            result = dispatch_toss_order_live(
+                payload, policy, transport=_fake_transport_success
+            )
         self.assertNotIn("사용자 최종 승인", result["message"])
         self.assertIn("Toss AI autonomous", result["message"])
         self.assertIn("결정론 안전 게이트", result["message"])
