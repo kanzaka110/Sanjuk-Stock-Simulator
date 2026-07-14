@@ -23,7 +23,8 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-import core.dart_monitor as dm
+import core.dart_monitor as dm  # noqa: E402
+from core.source_observations import SourceObservationStore  # noqa: E402
 
 _NOW = datetime(2026, 7, 2, 11, 0, tzinfo=KST)  # 목요일 11:00
 
@@ -173,9 +174,53 @@ class TestRun(unittest.TestCase):
 
     def test_fetch_failed_skips(self):
         with tempfile.TemporaryDirectory() as tmp:
-            r, _, _ = self._run(tmp, fetched={"ok": False, "reason": "http_500",
-                                              "items": []})
+            previous = (_NOW - timedelta(minutes=31)).isoformat()
+            r, _, state_path = self._run(
+                tmp,
+                state={"last_checked_at": previous},
+                fetched={"ok": False, "reason": "http_500", "items": []},
+            )
+            saved = json.loads(state_path.read_text(encoding="utf-8"))
         self.assertEqual(r["skipped"], "http_500")
+        self.assertEqual(saved["last_checked_at"], previous)
+
+    def test_later_page_no_data_is_failed_without_alert_or_throttle_advance(self):
+        page1 = MagicMock(status_code=200)
+        page1.json.return_value = {
+            "status": "000",
+            "total_page": 2,
+            "total_count": 1,
+            "list": [dict(_DISCLOSURE)],
+        }
+        page2 = MagicMock(status_code=200)
+        page2.json.return_value = {"status": "013"}
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.json"
+            previous = (_NOW - timedelta(minutes=31)).isoformat()
+            state_path.write_text(
+                json.dumps({"last_checked_at": previous}), encoding="utf-8"
+            )
+            store = SourceObservationStore(Path(tmp) / "observations.db")
+            with patch.dict("os.environ", {"DART_API_KEY": "k"}), \
+                 patch.object(dm, "_state_path", return_value=state_path), \
+                 patch.object(dm, "_toss_holding_codes", return_value={"123450"}), \
+                 patch("requests.get", side_effect=[page1, page2]), \
+                 patch("core.telegram.send_simple_message") as send:
+                result = dm.run_dart_monitor(
+                    now=_NOW,
+                    force=True,
+                    observation_store=store,
+                )
+            saved = json.loads(state_path.read_text(encoding="utf-8"))
+            run = store.latest_collection_run(source="opendart_disclosures")
+
+        self.assertEqual(result["skipped"], "dart_status_013")
+        self.assertEqual(result["observation_run_status"], "failed")
+        self.assertEqual(saved["last_checked_at"], previous)
+        self.assertIsNotNone(run)
+        assert run is not None
+        self.assertEqual(run.error_type, "dart_status_013")
+        send.assert_not_called()
 
     def test_no_risk_hits_no_send(self):
         with tempfile.TemporaryDirectory() as tmp:

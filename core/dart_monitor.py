@@ -18,15 +18,43 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import time
+from concurrent.futures import (
+    ThreadPoolExecutor,
+    TimeoutError as FuturesTimeoutError,
+    as_completed,
+)
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from uuid import uuid4
+
+from core.source_observation_collectors import (
+    CollectorResult,
+    record_dart_disclosure_observations,
+)
+from core.source_observations import SourceObservationStore
 
 log = logging.getLogger(__name__)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
 
 KST = timezone(timedelta(hours=9))
 
 _DART_LIST_URL = "https://opendart.fss.or.kr/api/list.json"
 _DART_VIEW_URL = "https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"
+_DART_PAGE_WORKERS = 5
+_MAX_DART_PAGES = 20
+_DART_HTTP_TIMEOUT = (3.0, 5.0)
+_DART_TOTAL_TIMEOUT_SECONDS = 45.0
+_SAFE_ERROR_TYPE_RE = re.compile(
+    r"^(?:no_api_key|fetch_failed|fetch_error:[A-Z][A-Za-z0-9_]{0,48}(?:Error|Exception|Timeout)|"
+    r"http_[1-5][0-9]{2}|dart_status_[A-Za-z0-9_-]{1,32}|"
+    r"collector_timeout|pagination_invalid|pagination_limit|partial_fetch)$"
+)
 
 # 리스크 키워드 → 심각도
 RISK_KEYWORDS: dict[str, str] = {
@@ -93,7 +121,7 @@ def _save_state(state: dict) -> None:
 # ── 공시 조회 ────────────────────────────────────────────────────
 
 def fetch_recent_disclosures(days: int = 2, now: datetime | None = None) -> dict:
-    """DART 최근 공시 목록 조회. 실패 시 {"ok": False, "reason": ...}."""
+    """DART 최근 공시 전체 페이지 조회. 한 페이지라도 실패하면 전부 폐기한다."""
     key = _api_key()
     if not key:
         return {"ok": False, "reason": "no_api_key", "items": []}
@@ -102,41 +130,165 @@ def fetch_recent_disclosures(days: int = 2, now: datetime | None = None) -> dict
     bgn = (now - timedelta(days=days)).strftime("%Y%m%d")
     end = now.strftime("%Y%m%d")
 
+    import requests
+
+    def fetch_page(page_no: int) -> dict:
+        try:
+            response = requests.get(
+                _DART_LIST_URL,
+                params={
+                    "crtfc_key": key,
+                    "bgn_de": bgn,
+                    "end_de": end,
+                    "page_count": 100,
+                    "page_no": page_no,
+                },
+                timeout=_DART_HTTP_TIMEOUT,
+            )
+            if response.status_code != 200:
+                return {
+                    "ok": False,
+                    "reason": f"http_{response.status_code}",
+                    "items": [],
+                }
+            data = response.json()
+        except Exception as exc:
+            error_type = type(exc).__name__
+            log.warning("DART list fetch failed: %s", error_type)
+            return {
+                "ok": False,
+                "reason": f"fetch_error:{error_type}",
+                "items": [],
+            }
+
+        status = str(data.get("status", ""))
+        if status == "013" and page_no == 1:
+            return {
+                "ok": True,
+                "page_no": page_no,
+                "total_page": 1,
+                "total_count": 0,
+                "items": [],
+            }
+        if status != "000":
+            return {
+                "ok": False,
+                "reason": f"dart_status_{status}",
+                "items": [],
+            }
+        try:
+            total_page = int(data.get("total_page") or 1)
+            raw_total_count = data.get("total_count")
+            if raw_total_count in (None, ""):
+                if total_page != 1:
+                    raise ValueError("missing_total_count")
+                total_count = len(data.get("list") or [])
+            else:
+                total_count = int(raw_total_count)
+        except (TypeError, ValueError):
+            return {"ok": False, "reason": "pagination_invalid", "items": []}
+        if not (1 <= total_page <= _MAX_DART_PAGES) or total_count < 0:
+            reason = "pagination_limit" if total_page > _MAX_DART_PAGES else "pagination_invalid"
+            return {"ok": False, "reason": reason, "items": []}
+
+        page_items = [
+            {
+                "rcept_no": str(row.get("rcept_no") or ""),
+                "rcept_dt": str(row.get("rcept_dt") or ""),
+                "stock_code": str(row.get("stock_code") or "").strip(),
+                "corp_name": str(row.get("corp_name") or ""),
+                "report_nm": str(row.get("report_nm") or ""),
+            }
+            for row in data.get("list") or []
+        ]
+        return {
+            "ok": True,
+            "page_no": page_no,
+            "total_page": total_page,
+            "total_count": total_count,
+            "items": page_items,
+        }
+
+    deadline = time.monotonic() + _DART_TOTAL_TIMEOUT_SECONDS
+    executor = ThreadPoolExecutor(max_workers=_DART_PAGE_WORKERS)
+    first_future = executor.submit(fetch_page, 1)
     try:
-        import requests
-        r = requests.get(
-            _DART_LIST_URL,
-            params={
-                "crtfc_key": key,
-                "bgn_de": bgn,
-                "end_de": end,
-                "page_count": 100,
-            },
-            timeout=15,
-        )
-        if r.status_code != 200:
-            return {"ok": False, "reason": f"http_{r.status_code}", "items": []}
-        data = r.json()
-    except Exception as e:
-        log.warning("DART list fetch failed: %s", e)
-        return {"ok": False, "reason": f"fetch_error: {e}", "items": []}
+        first = first_future.result(timeout=max(0.0, deadline - time.monotonic()))
+    except FuturesTimeoutError:
+        first_future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        return {"ok": False, "reason": "collector_timeout", "items": []}
+    except Exception as exc:
+        error_type = type(exc).__name__
+        executor.shutdown(wait=False, cancel_futures=True)
+        return {
+            "ok": False,
+            "reason": f"fetch_error:{error_type}",
+            "items": [],
+        }
+    if not first["ok"]:
+        executor.shutdown(wait=True)
+        return first
+    total_page = int(first["total_page"])
+    total_count = int(first["total_count"])
+    pages = {1: first}
+    if total_page > 1:
+        futures = {
+            executor.submit(fetch_page, page_no): page_no
+            for page_no in range(2, total_page + 1)
+        }
+        failure: dict | None = None
+        try:
+            remaining = max(0.0, deadline - time.monotonic())
+            for future in as_completed(futures, timeout=remaining):
+                page_no = futures[future]
+                try:
+                    page = future.result()
+                except Exception as exc:
+                    error_type = type(exc).__name__
+                    log.warning("DART page worker failed: %s", error_type)
+                    failure = {
+                        "ok": False,
+                        "reason": f"fetch_error:{error_type}",
+                        "items": [],
+                    }
+                    break
+                if not page["ok"]:
+                    failure = page
+                    break
+                if (
+                    int(page["total_page"]) != total_page
+                    or int(page["total_count"]) != total_count
+                ):
+                    failure = {
+                        "ok": False,
+                        "reason": "pagination_invalid",
+                        "items": [],
+                    }
+                    break
+                pages[page_no] = page
+        except FuturesTimeoutError:
+            failure = {"ok": False, "reason": "collector_timeout", "items": []}
+        if failure is not None:
+            for pending in futures:
+                pending.cancel()
+            executor.shutdown(wait=False, cancel_futures=True)
+            return failure
+    executor.shutdown(wait=True)
 
-    status = str(data.get("status", ""))
-    if status == "013":  # 조회 데이터 없음
-        return {"ok": True, "items": []}
-    if status != "000":
-        return {"ok": False, "reason": f"dart_status_{status}", "items": []}
-
-    items = []
-    for row in data.get("list") or []:
-        items.append({
-            "rcept_no": str(row.get("rcept_no") or ""),
-            "rcept_dt": str(row.get("rcept_dt") or ""),
-            "stock_code": str(row.get("stock_code") or "").strip(),
-            "corp_name": str(row.get("corp_name") or ""),
-            "report_nm": str(row.get("report_nm") or ""),
-        })
-    return {"ok": True, "items": items}
+    items = [
+        item
+        for page_no in range(1, total_page + 1)
+        for item in pages[page_no]["items"]
+    ]
+    if total_count != len(items):
+        return {"ok": False, "reason": "partial_fetch", "items": []}
+    return {
+        "ok": True,
+        "items": items,
+        "pages_fetched": total_page,
+        "total_count": total_count,
+    }
 
 
 def screen_disclosures(items: list[dict], stock_codes: set[str]) -> list[dict]:
@@ -194,12 +346,59 @@ def _format_alert_message(hits: list[dict]) -> str:
 
 # ── 메인 루틴 ────────────────────────────────────────────────────
 
-def run_dart_monitor(now: datetime | None = None, force: bool = False) -> dict:
+def _record_failed_observation_run(
+    *,
+    started_at: datetime,
+    reason: str,
+    observation_store: SourceObservationStore | None,
+) -> tuple[str, str]:
+    candidate = str(reason).strip()
+    safe_reason = candidate if _SAFE_ERROR_TYPE_RE.fullmatch(candidate) else "fetch_failed"
+    try:
+        store = observation_store or SourceObservationStore(
+            _state_path().parent / "source_observations.db"
+        )
+        collected_at = _utc_now()
+        run = store.record_collection_run(
+            source="opendart_disclosures",
+            run_id=(
+                f"dart:{collected_at.strftime('%Y%m%dT%H%M%S%fZ')}:{uuid4().hex}"
+            ),
+            started_at=started_at,
+            completed_at=collected_at,
+            rows_seen=0,
+            rows_inserted=0,
+            rows_duplicate=0,
+            rows_skipped=0,
+            rows_invalid=0,
+            error_type=safe_reason or "fetch_failed",
+        )
+        return run.status, ""
+    except Exception as e:
+        log.warning("DART failed-run persistence failed: %s", e)
+        return "", type(e).__name__
+
+
+def run_dart_monitor(
+    now: datetime | None = None,
+    force: bool = False,
+    observation_store: SourceObservationStore | None = None,
+) -> dict:
     """DART 공시 모니터 1회 실행. monitor 루프에서 주기 호출."""
+    run_started_at = _utc_now()
     now = now or datetime.now(KST)
 
     if not _api_key():
-        return {"skipped": "no_api_key"}
+        run_status, observation_error = _record_failed_observation_run(
+            started_at=run_started_at,
+            reason="no_api_key",
+            observation_store=observation_store,
+        )
+        return {
+            "skipped": "no_api_key",
+            "observation_error": observation_error,
+            "observation_run_status": run_status,
+        }
 
     if not force:
         if now.weekday() >= 5:
@@ -226,12 +425,77 @@ def run_dart_monitor(now: datetime | None = None, force: bool = False) -> dict:
         return {"skipped": "no_holdings"}
 
     fetched = fetch_recent_disclosures(now=now)
-    state["last_checked_at"] = now.isoformat()
     if not fetched.get("ok"):
+        reason = str(fetched.get("reason") or "fetch_failed")
+        observation_run_status, observation_error = _record_failed_observation_run(
+            started_at=run_started_at,
+            reason=reason,
+            observation_store=observation_store,
+        )
         _save_state(state)
-        return {"skipped": fetched.get("reason", "fetch_failed")}
+        return {
+            "skipped": reason,
+            "observation_error": observation_error,
+            "observation_run_status": observation_run_status,
+        }
 
-    hits = screen_disclosures(fetched["items"], codes)
+    state["last_checked_at"] = now.isoformat()
+    items = fetched["items"]
+    observation_result = CollectorResult(0, 0, 0, 0, 0)
+    observation_error = ""
+    observation_run_status = ""
+    store = observation_store
+    collected_at = _utc_now()
+    run_id = f"dart:{collected_at.strftime('%Y%m%dT%H%M%S%fZ')}:{uuid4().hex}"
+    try:
+        store = store or SourceObservationStore(
+            _state_path().parent / "source_observations.db"
+        )
+        with store.atomic_write():
+            observation_result = record_dart_disclosure_observations(
+                items,
+                store=store,
+                ingested_at=collected_at,
+            )
+            run = store.record_collection_run(
+                source="opendart_disclosures",
+                run_id=run_id,
+                started_at=run_started_at,
+                completed_at=collected_at,
+                rows_seen=observation_result.seen,
+                rows_inserted=observation_result.inserted,
+                rows_duplicate=observation_result.duplicates,
+                rows_skipped=observation_result.skipped,
+                rows_invalid=observation_result.invalid,
+                error_type="",
+            )
+        observation_run_status = run.status
+    except Exception as exc:
+        observation_error = type(exc).__name__
+        observation_result = CollectorResult(len(items), 0, 0, 0, 0)
+        log.warning("DART observation persistence failed: %s", observation_error)
+        if store is not None:
+            try:
+                failed_run = store.record_collection_run(
+                    source="opendart_disclosures",
+                    run_id=run_id,
+                    started_at=run_started_at,
+                    completed_at=_utc_now(),
+                    rows_seen=len(items),
+                    rows_inserted=0,
+                    rows_duplicate=0,
+                    rows_skipped=0,
+                    rows_invalid=0,
+                    error_type=f"persistence_{observation_error}"[:128],
+                )
+                observation_run_status = failed_run.status
+            except Exception as run_exc:
+                log.warning(
+                    "DART failed-run persistence failed: %s",
+                    type(run_exc).__name__,
+                )
+
+    hits = screen_disclosures(items, codes)
 
     seen: list[str] = list(state.get("seen_rcept_nos") or [])
     new_hits = [h for h in hits if h.get("rcept_no") and h["rcept_no"] not in seen]
@@ -254,4 +518,11 @@ def run_dart_monitor(now: datetime | None = None, force: bool = False) -> dict:
         "hit_count": len(hits),
         "new_hit_count": len(new_hits),
         "sent": sent,
+        "observation_seen": observation_result.seen,
+        "observation_inserted": observation_result.inserted,
+        "observation_duplicates": observation_result.duplicates,
+        "observation_skipped": observation_result.skipped,
+        "observation_invalid": observation_result.invalid,
+        "observation_error": observation_error,
+        "observation_run_status": observation_run_status,
     }

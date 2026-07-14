@@ -21,10 +21,22 @@ import logging
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from uuid import uuid4
 
 import requests
 
+from core.source_observation_collectors import (
+    CollectorResult,
+    record_sec_filing_observations,
+)
+from core.source_observations import SourceObservationStore
+
 log = logging.getLogger(__name__)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
 
 KST = timezone(timedelta(hours=9))
 
@@ -150,16 +162,26 @@ def _us_holding_tickers() -> list[str]:
 
 # ── 공시 조회 ────────────────────────────────────────────────────
 
-def fetch_recent_filings(ticker: str, cik: int, days: int = _LOOKBACK_DAYS) -> list[dict]:
+def fetch_recent_filings(
+    ticker: str,
+    cik: int,
+    days: int = _LOOKBACK_DAYS,
+    *,
+    error_types: list[str] | None = None,
+) -> list[dict]:
     """단일 종목 최근 공시 중 감시 form만 반환. 실패 시 빈 리스트."""
     try:
         r = requests.get(_SUBMISSIONS_URL.format(cik=cik), headers=_UA, timeout=15)
         if r.status_code != 200:
             log.warning("EDGAR submissions HTTP %s (%s)", r.status_code, ticker)
+            if error_types is not None:
+                error_types.append(f"http_{r.status_code}")
             return []
         recent = (r.json().get("filings") or {}).get("recent") or {}
     except Exception as e:
         log.warning("EDGAR submissions fetch failed (%s): %s", ticker, e)
+        if error_types is not None:
+            error_types.append(type(e).__name__)
         return []
 
     forms = recent.get("form") or []
@@ -226,8 +248,13 @@ def _format_alert_message(hits: list[dict]) -> str:
 
 # ── 메인 루틴 ────────────────────────────────────────────────────
 
-def run_edgar_monitor(now: datetime | None = None, force: bool = False) -> dict:
+def run_edgar_monitor(
+    now: datetime | None = None,
+    force: bool = False,
+    observation_store: SourceObservationStore | None = None,
+) -> dict:
     """EDGAR 공시 모니터 1회 실행. monitor 루프에서 주기 호출."""
+    run_started_at = _utc_now()
     now = now or datetime.now(KST)
 
     state = _load_json(_state_path())
@@ -252,12 +279,70 @@ def run_edgar_monitor(now: datetime | None = None, force: bool = False) -> dict:
     state["last_checked_at"] = now.isoformat()
 
     hits: list[dict] = []
+    fetch_errors: list[str] = []
+    missing_cik_count = 0
     for tk in tickers:
         cik = cik_map.get(tk.upper())
         if not cik:
+            missing_cik_count += 1
+            fetch_errors.append("missing_cik")
             continue
-        hits.extend(fetch_recent_filings(tk, cik))
+        hits.extend(fetch_recent_filings(tk, cik, error_types=fetch_errors))
         time.sleep(0.15)  # SEC rate limit 예의 (10 req/s 한도)
+
+    observation_result = CollectorResult(0, 0, 0, 0, 0)
+    observation_error = ""
+    observation_run_status = ""
+    store = observation_store
+    collected_at = _utc_now()
+    run_id = f"sec:{collected_at.strftime('%Y%m%dT%H%M%S%fZ')}:{uuid4().hex}"
+    try:
+        store = store or SourceObservationStore(
+            _state_path().parent / "source_observations.db"
+        )
+        with store.atomic_write():
+            observation_result = record_sec_filing_observations(
+                hits,
+                store=store,
+                ingested_at=collected_at,
+            )
+            run = store.record_collection_run(
+                source="sec_submissions",
+                run_id=run_id,
+                started_at=run_started_at,
+                completed_at=collected_at,
+                rows_seen=observation_result.seen,
+                rows_inserted=observation_result.inserted,
+                rows_duplicate=observation_result.duplicates,
+                rows_skipped=observation_result.skipped,
+                rows_invalid=observation_result.invalid,
+                error_type=",".join(sorted(set(fetch_errors)))[:128],
+            )
+        observation_run_status = run.status
+    except Exception as exc:
+        observation_error = type(exc).__name__
+        observation_result = CollectorResult(len(hits), 0, 0, 0, 0)
+        log.warning("EDGAR observation persistence failed: %s", observation_error)
+        if store is not None:
+            try:
+                failed_run = store.record_collection_run(
+                    source="sec_submissions",
+                    run_id=run_id,
+                    started_at=run_started_at,
+                    completed_at=_utc_now(),
+                    rows_seen=len(hits),
+                    rows_inserted=0,
+                    rows_duplicate=0,
+                    rows_skipped=0,
+                    rows_invalid=0,
+                    error_type=f"persistence_{observation_error}"[:128],
+                )
+                observation_run_status = failed_run.status
+            except Exception as run_exc:
+                log.warning(
+                    "EDGAR failed-run persistence failed: %s",
+                    type(run_exc).__name__,
+                )
 
     seen: list[str] = list(state.get("seen_accessions") or [])
     new_hits = [h for h in hits if h.get("accession") and h["accession"] not in seen]
@@ -280,4 +365,13 @@ def run_edgar_monitor(now: datetime | None = None, force: bool = False) -> dict:
         "hit_count": len(hits),
         "new_hit_count": len(new_hits),
         "sent": sent,
+        "observation_seen": observation_result.seen,
+        "observation_inserted": observation_result.inserted,
+        "observation_duplicates": observation_result.duplicates,
+        "observation_skipped": observation_result.skipped,
+        "observation_invalid": observation_result.invalid,
+        "observation_error": observation_error,
+        "observation_run_status": observation_run_status,
+        "source_fetch_error_count": len(fetch_errors),
+        "source_mapping_missing_count": missing_cik_count,
     }
