@@ -268,7 +268,7 @@ def _income_waitlist_row(item: Mapping, fx_usdkrw: float = 0.0) -> dict | None:
         "risk_reward": item.get("risk_reward"),
         "execution_status": item.get("execution_status"),
         "block_reason": item.get("block_reason"),
-        "stock_agent_ready": bool(item.get("stock_agent_ready")),
+        "stock_agent_ready": item.get("stock_agent_ready") is True,
     }
 
 
@@ -504,6 +504,12 @@ def compute_income_edge(
         grade = "BLOCK"
         block_reason = "missing_income_inputs"
         block_label = "수입 기대값 계산 필수값 부족"
+    elif pending_orders is None:
+        # pending 상태 조회 실패 = '모름' — 중복 주문 방지 위해 차단 (fail-closed)
+        income_pass = False
+        grade = "BLOCK"
+        block_reason = "pending_state_unavailable"
+        block_label = "PENDING 주문 상태 확인 불가 — 중복 방지 차단"
     elif _has_same_symbol_pending(pending_orders, symbol):
         income_pass = False
         grade = "BLOCK"

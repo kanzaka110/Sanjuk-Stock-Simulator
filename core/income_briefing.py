@@ -413,7 +413,8 @@ def _toss_ready_and_blocks(buys: dict) -> tuple[list[dict], list[dict]]:
     ready = []
     for it in items:
         income = it.get("income_strategy") or {}
-        if not (it.get("stock_agent_ready") and income.get("income_pass")):
+        # exact bool만 신뢰 — 문자열 오염 시 fail-closed
+        if not (it.get("stock_agent_ready") is True and income.get("income_pass") is True):
             continue
         ready.append({
             "symbol": it.get("symbol") or it.get("ticker"),
@@ -773,7 +774,9 @@ def _judge_manual_ticket(act: dict, held: set[str], stale: bool):
                 "score": _num(act.get("score"), 65.0),
                 "market": "KR" if _is_kr_symbol(symbol) else "US",
             })
-            edge = compute_income_edge(cand)
+            # 삼성 수동 티켓 — Toss pending 맵과 무관한 계좌이므로 '없음'({})이 사실.
+            # (None='모름'과 구분: 여기서 None을 쓰면 fail-closed로 수동 티켓이 전부 막힌다)
+            edge = compute_income_edge(cand, pending_orders={})
             ticket["estimated_amount_krw"] = edge.get("estimated_amount_krw")
             ticket["expected_pnl_krw"] = edge.get("expected_pnl_krw")
             ticket["income_edge_ratio"] = edge.get("income_edge_ratio")

@@ -917,7 +917,67 @@ def validate_execution_quality_decision(rec: dict, *, pilot_id: str) -> dict:
     ):
         if _finite_number(row[key]) is None:
             return {"ok": False, "reason": "quality_decision_mismatch"}
+    # 저장된 총점/PASS도 신뢰하지 않는다 — dispatch 직전 재계산 대조 (fail-closed)
+    if not _quality_scores_verified(
+            row, row["score_total"], str(row["decision_bucket"] or ""),
+            row["rr_ratio"]):
+        return {"ok": False, "reason": "quality_decision_recompute_mismatch"}
     return {"ok": True, "reason": "quality_decision_exact", "id": int(row["id"])}
+
+
+_RECOMPUTE_COMPONENT_KEYS = (
+    "score_momentum", "score_liquidity", "score_risk_reward",
+    "score_reliability", "score_market_regime", "score_supply_demand",
+    "penalty_overheat", "penalty_duplicate", "penalty_event_risk",
+)
+# 저장 시 컴포넌트별 round(…,1) 누적 오차 허용치 (9필드 × 0.05 + 여유)
+_RECOMPUTE_TOLERANCE = 0.75
+
+
+def _recompute_score_total(source) -> float | None:
+    """저장된 컴포넌트(가중치 적용 완료)+페널티 합으로 총점을 재계산한다.
+
+    호출자가 주장한 score_total을 신뢰하지 않기 위한 fail-closed 기준값.
+    필드가 하나라도 비유한(non-finite)이면 None (→ 검증 실패 처리).
+    """
+    total = 0.0
+    for key in _RECOMPUTE_COMPONENT_KEYS:
+        try:
+            value = _finite_number(source[key])
+        except (KeyError, IndexError, TypeError):
+            value = None
+        if value is None:
+            return None
+        total += float(value)
+    return max(0.0, min(100.0, total))
+
+
+def _bucket_consistent_with_scores(bucket: str, score_total: float, rr: float) -> bool:
+    """실행 bucket이 재계산 총점·RR과 모순되지 않는지 검사.
+
+    _decide_bucket에서 역산 가능한 하한 불변식만 강제한다 (fail-closed):
+    - PASS_EXECUTE ⇒ 총점 ≥ 45 그리고 RR ≥ 1.8
+    - SMALL_PASS   ⇒ RR ≥ 1.2 그리고 (RR ≥ 1.8 또는 총점 ≥ 45)
+    """
+    if bucket == PASS_EXECUTE:
+        return score_total >= 45.0 and rr >= 1.8
+    if bucket == SMALL_PASS:
+        return rr >= 1.2 and (rr >= 1.8 or score_total >= 45.0)
+    return False
+
+
+def _quality_scores_verified(source, claimed_total, bucket: str, rr) -> bool:
+    """호출자/저장소가 주장한 총점·bucket을 내부 재계산과 대조한다."""
+    claimed = _finite_number(claimed_total)
+    rr_value = _finite_number(rr)
+    if claimed is None or rr_value is None:
+        return False
+    recomputed = _recompute_score_total(source)
+    if recomputed is None:
+        return False
+    if abs(recomputed - float(claimed)) > _RECOMPUTE_TOLERANCE:
+        return False
+    return _bucket_consistent_with_scores(bucket, recomputed, float(rr_value))
 
 
 def record_execution_quality_decision(
@@ -993,6 +1053,11 @@ def record_execution_quality_decision(
         "target_price": float(target),
         "quantity": float(quantity),
     }
+
+    # 호출자가 주장한 총점/PASS를 신뢰하지 않는다 — 기록 시점 재계산 대조 (fail-closed)
+    if not _quality_scores_verified(
+            immutable_payload, immutable_payload["score_total"], bucket, rr):
+        return {"ok": False, "reason": "quality_recompute_mismatch"}
 
     def payload_matches(row: sqlite3.Row) -> bool:
         for key, expected in immutable_payload.items():

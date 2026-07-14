@@ -980,7 +980,7 @@ def toss_eligible_new_candidates(
 
     items = _rotate_candidate_groups(items)
 
-    executable_count = sum(1 for i in items if i.get("executable_now"))
+    executable_count = sum(1 for i in items if i.get("executable_now") is True)
     conditional_count = sum(1 for i in items if i.get("execution_status") == "conditional_small_entry")
     scan_summary["pass_count"] = len(items)
     scan_summary["executable_count"] = executable_count

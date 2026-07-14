@@ -681,3 +681,36 @@ def test_select_ready_candidates_sorts_by_expected_income():
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestExactBoolReadiness(unittest.TestCase):
+    """실행 진입 게이트는 exact bool만 신뢰한다 — 문자열 'false'/'true' 거부."""
+
+    def _select(self, items):
+        with patch("core.dashboard_data.toss_buy_candidates_data",
+                   return_value={"items": items}):
+            ready, not_ready = tap.select_ready_candidates()
+        return ready, not_ready
+
+    def test_string_false_ready_is_rejected(self):
+        ready, not_ready = self._select([_candidate("A.KS", stock_agent_ready="false")])
+        self.assertEqual(ready, [])
+
+    def test_string_true_ready_is_rejected(self):
+        # 문자열 "true"도 신뢰하지 않는다 — 직렬화 경로 오염 신호
+        ready, _ = self._select([_candidate("A.KS", stock_agent_ready="true")])
+        self.assertEqual(ready, [])
+
+    def test_int_one_ready_is_rejected(self):
+        ready, _ = self._select([_candidate("A.KS", stock_agent_ready=1)])
+        self.assertEqual(ready, [])
+
+    def test_string_income_pass_is_rejected(self):
+        item = _candidate("A.KS")
+        item["income_strategy"] = {"income_pass": "false"}
+        ready, _ = self._select([item])
+        self.assertEqual(ready, [])
+
+    def test_exact_true_still_ready(self):
+        ready, _ = self._select([_candidate("A.KS", stock_agent_ready=True)])
+        self.assertEqual([r["symbol"] for r in ready], ["A.KS"])

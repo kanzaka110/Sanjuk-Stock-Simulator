@@ -597,9 +597,9 @@ class TestExactExecutionQualityDecision:
             "decision_bucket": PASS_EXECUTE,
             "decision_reason": "quality pass",
             "quantity": 2,
-            "quality_score": 82.0,
+            "quality_score": 87.0,
             "quality_breakdown": {
-                "score_total": 82.0,
+                "score_total": 87.0,
                 "score_momentum": 20.0,
                 "score_liquidity": 18.0,
                 "score_risk_reward": 17.0,
@@ -750,6 +750,9 @@ class TestExactExecutionQualityDecision:
         )
         changed_supply = self._candidate()
         changed_supply["quality_breakdown"]["score_supply_demand"] = 9.0
+        # 내부 정합(합=91)은 유지하되 기존 기록과 다른 변조 — payload conflict 경로 검증
+        changed_supply["quality_breakdown"]["score_total"] = 91.0
+        changed_supply["quality_score"] = 91.0
         supply_conflict = qg.record_execution_quality_decision(
             changed_supply, pilot_id=pilot_id, decision_ref=ref
         )
@@ -854,3 +857,104 @@ class TestExactExecutionQualityDecision:
         assert qg._outcomes_schema_created is True
         assert "idx_qg_decision_ref_exact" in indexes
         assert "idx_qg_pilot_id_exact" in indexes
+
+
+class TestFailClosedRecompute:
+    """실행 계약 fail-closed: 호출자가 만든 총점·PASS를 신뢰하지 않고 재계산."""
+
+    def _consistent_candidate(self, **overrides):
+        # 컴포넌트 합 = 20+18+17+13+14+5 = 87, 페널티 0 → total 87
+        breakdown = {
+            "score_total": 87.0,
+            "score_momentum": 20.0,
+            "score_liquidity": 18.0,
+            "score_risk_reward": 17.0,
+            "score_reliability": 13.0,
+            "score_market_regime": 14.0,
+            "score_supply_demand": 5.0,
+            "penalty_overheat": 0.0,
+            "penalty_duplicate": 0.0,
+            "penalty_event_risk": 0.0,
+            "rr_ratio": 2.0,
+            "regime": "강세장",
+        }
+        breakdown.update(overrides.pop("breakdown", {}))
+        cand = {
+            "symbol": "316140.KS",
+            "side": "buy",
+            "decision_bucket": PASS_EXECUTE,
+            "decision_reason": "quality pass",
+            "quantity": 2,
+            "quality_score": breakdown["score_total"],
+            "quality_breakdown": breakdown,
+            "limit_price": 28_750,
+            "stop_loss": 27_025,
+            "target_price": 34_000,
+        }
+        cand.update(overrides)
+        return cand
+
+    def _setup(self, qg, tmp_path, monkeypatch, name):
+        monkeypatch.setattr(qg, "_outcomes_db_path", lambda: tmp_path / name)
+        qg._outcomes_schema_created = False
+
+    def test_record_rejects_forged_score_total(self, tmp_path, monkeypatch):
+        from core import toss_quality_gate as qg
+        self._setup(qg, tmp_path, monkeypatch, "forge1.db")
+        cand = self._consistent_candidate(
+            breakdown={"score_total": 95.0})  # 합 87인데 95 주장
+        out = qg.record_execution_quality_decision(
+            cand, pilot_id="tlive_20260714_100000_0001",
+            decision_ref="execution_decision:tlive_forge_0001")
+        assert out["ok"] is False
+        assert "recompute" in out["reason"]
+
+    def test_record_rejects_pass_bucket_with_low_rr(self, tmp_path, monkeypatch):
+        from core import toss_quality_gate as qg
+        self._setup(qg, tmp_path, monkeypatch, "forge2.db")
+        cand = self._consistent_candidate(breakdown={"rr_ratio": 1.5})
+        # PASS는 rr>=1.8 필요 — 1.5로 위조된 PASS는 기록 거부
+        out = qg.record_execution_quality_decision(
+            cand, pilot_id="tlive_20260714_100001_0001",
+            decision_ref="execution_decision:tlive_forge_0002")
+        assert out["ok"] is False
+        assert "recompute" in out["reason"]
+
+    def test_validate_rejects_tampered_stored_row(self, tmp_path, monkeypatch):
+        from core import toss_quality_gate as qg
+        self._setup(qg, tmp_path, monkeypatch, "forge3.db")
+        pilot_id = "tlive_20260714_100002_0001"
+        ref = "execution_decision:tlive_forge_0003"
+        created = qg.record_execution_quality_decision(
+            self._consistent_candidate(), pilot_id=pilot_id, decision_ref=ref)
+        assert created["ok"] is True
+        # 저장 후 DB에서 총점만 직접 위조 (호출자 위조 시나리오 재현)
+        conn = qg._outcomes_conn()
+        conn.execute(
+            "UPDATE quality_gate_decisions SET score_total=20.0 WHERE decision_ref=?",
+            (ref,))
+        conn.commit(); conn.close()
+        rec = {
+            "side": "buy", "pilot_id": pilot_id, "decision_ref": ref,
+            "symbol": "316140.KS", "quantity": 2,
+            "limit_price": 28_750, "stop_loss": 27_025, "target_price": 34_000,
+        }
+        out = qg.validate_execution_quality_decision(rec, pilot_id=pilot_id)
+        assert out["ok"] is False
+        assert "recompute" in out["reason"]
+
+    def test_consistent_decision_passes_end_to_end(self, tmp_path, monkeypatch):
+        from core import toss_quality_gate as qg
+        self._setup(qg, tmp_path, monkeypatch, "ok1.db")
+        pilot_id = "tlive_20260714_100003_0001"
+        ref = "execution_decision:tlive_ok_0001"
+        assert qg.record_execution_quality_decision(
+            self._consistent_candidate(), pilot_id=pilot_id, decision_ref=ref,
+        )["ok"] is True
+        rec = {
+            "side": "buy", "pilot_id": pilot_id, "decision_ref": ref,
+            "symbol": "316140.KS", "quantity": 2,
+            "limit_price": 28_750, "stop_loss": 27_025, "target_price": 34_000,
+        }
+        out = qg.validate_execution_quality_decision(rec, pilot_id=pilot_id)
+        assert out["ok"] is True

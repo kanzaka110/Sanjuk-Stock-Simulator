@@ -129,8 +129,9 @@ def select_ready_candidates(limit: int = 10, market: str = "KR") -> tuple[list[d
     for item in items:
         income = item.get("income_strategy") or {}
         side = str(item.get("side") or "buy").lower()
-        income_ok = side != "buy" or bool(income.get("income_pass"))
-        if item.get("stock_agent_ready") and income_ok:
+        # exact bool만 신뢰 — 문자열 "false"/"true"·정수 1은 직렬화 오염 신호 (fail-closed)
+        income_ok = side != "buy" or income.get("income_pass") is True
+        if item.get("stock_agent_ready") is True and income_ok:
             ready.append(item)
         else:
             reason = str(

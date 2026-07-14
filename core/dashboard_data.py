@@ -2863,15 +2863,19 @@ def _recent_toss_risk_sell_symbols(limit: int = 100) -> dict[str, dict]:
     return out
 
 
-def _pending_toss_order_symbols(limit: int = 150) -> dict[str, dict]:
-    """신규 BUY 차단용 same-symbol pending/live_sent 주문 맵. Read-only."""
+def _pending_toss_order_symbols(limit: int = 150) -> dict[str, dict] | None:
+    """신규 BUY 차단용 same-symbol pending/live_sent 주문 맵. Read-only.
+
+    조회 실패 시 None을 반환한다 — '모름'을 빈 맵('없음')으로 위장하지 않는다.
+    소비자(income gate)는 None을 fail-closed(신규 BUY 차단)로 처리한다.
+    """
     out: dict[str, dict] = {}
     try:
         from core.toss_live_pilot_ledger import list_live_pilot_records
         records = list_live_pilot_records(limit=limit)
     except Exception as e:
-        log.debug("pending order lookup unavailable: %s", e)
-        records = []
+        log.warning("pending order lookup unavailable (fail-closed): %s", e)
+        return None
     pending_statuses = {
         "previewed", "reviewed", "payload_validated", "confirmed_but_not_sent",
         "live_send_retryable", "live_sent",
@@ -2892,6 +2896,8 @@ def _pending_toss_order_symbols(limit: int = 150) -> dict[str, dict]:
             "status": status or "pending",
             "created_at": r.get("created_at") or r.get("sent_at") or "",
             "pilot_id": r.get("pilot_id") or "",
+            # provenance: 이 pending 판단의 출처 (broker truth 아님을 명시)
+            "source": "internal_ledger",
         }
         if symbol.endswith((".KS", ".KQ")):
             out[symbol.split(".", 1)[0]] = out[symbol]
@@ -3314,7 +3320,8 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
         try:
             pending_order_symbols = _pending_toss_order_symbols()
         except Exception:
-            pending_order_symbols = {}
+            # '모름'을 '없음'으로 위장하지 않는다 — income gate가 fail-closed 처리
+            pending_order_symbols = None
         blocked_items = []
         wrong_market_items = []
         already_held_items = []
@@ -3826,7 +3833,7 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
             holdings_count_for_cap = int(account_for_cash_gate.get("holdings_count") or 0)
         except Exception:
             holdings_count_for_cap = 0
-        ready_items = [i for i in items if i.get("stock_agent_ready")]
+        ready_items = [i for i in items if i.get("stock_agent_ready") is True]
         portfolio_cap_block_count = 0
         if holdings_count_for_cap > 20:
             for item in ready_items:
@@ -3872,7 +3879,7 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
         income_block_count = sum(1 for i in items if not (i.get("income_strategy") or {}).get("income_pass"))
         scan_summary["income_pass_count"] = income_pass_count
         scan_summary["income_block_count"] = income_block_count
-        scan_summary["income_ready_count"] = sum(1 for i in items if i.get("stock_agent_ready"))
+        scan_summary["income_ready_count"] = sum(1 for i in items if i.get("stock_agent_ready") is True)
         scan_summary["income_gate_version"] = "income_v1"
         scan_summary["ai_berkshire_gate_version"] = _AI_BERKSHIRE_BUY_GATE_VERSION
         scan_summary["ai_berkshire_buy_block_count"] = sum(
@@ -4144,7 +4151,7 @@ def stock_agent_activity_data(limit: int = 20) -> dict:
             items = cands.get("items") or []
             excluded = cands.get("excluded") or []
             scan = cands.get("scan_summary") or {}
-            ready = [i for i in items if i.get("stock_agent_ready")]
+            ready = [i for i in items if i.get("stock_agent_ready") is True]
             missing = [i for i in items if i.get("missing_fields")]
             out["summary"].update({
                 "candidate_count": len(items),
@@ -4170,7 +4177,7 @@ def stock_agent_activity_data(limit: int = 20) -> dict:
                 name = item.get("name") or item.get("symbol") or item.get("ticker") or "—"
                 symbol = item.get("symbol") or item.get("ticker") or ""
                 missing_fields = item.get("missing_fields") or []
-                status = "PASS-ready" if item.get("stock_agent_ready") else ("HOLD · 정보부족" if missing_fields else item.get("execution_status", "검토"))
+                status = "PASS-ready" if item.get("stock_agent_ready") is True else ("HOLD · 정보부족" if missing_fields else item.get("execution_status", "검토"))
                 gap = item.get("current_vs_limit_gap_pct")
                 detail_bits = [item.get("fill_risk_note") or "체결위험 미확인"]
                 if gap is not None:

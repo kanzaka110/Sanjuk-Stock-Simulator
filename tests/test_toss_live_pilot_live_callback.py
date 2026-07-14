@@ -338,7 +338,7 @@ class TestConfirmExactQualityLastMile(unittest.TestCase):
             "limit_price": rec["limit_price"],
             "stop_loss": rec["stop_loss"],
             "target_price": rec["target_price"],
-            "risk_reward": 1.5,
+            "risk_reward": 2.0,
             "decision_bucket": "PASS_EXECUTE",
             "decision_reason": "quality pass",
             "quality_score": 82.0,
@@ -353,7 +353,7 @@ class TestConfirmExactQualityLastMile(unittest.TestCase):
                 "penalty_overheat": 0.0,
                 "penalty_duplicate": 0.0,
                 "penalty_event_risk": 0.0,
-                "rr_ratio": 1.5,
+                "rr_ratio": 2.0,
                 "regime": "neutral",
             },
         }

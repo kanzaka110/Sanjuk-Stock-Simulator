@@ -29,7 +29,7 @@ def _candidate(symbol="000111.KS", price=50_000, target=56_000, stop=48_000, qty
 
 
 def test_positive_expected_pnl_is_income_pass():
-    out = compute_income_edge(_candidate())
+    out = compute_income_edge(_candidate(), pending_orders={})
 
     assert out["income_pass"] is True
     assert out["income_grade"] in {"INCOME_PASS", "SMALL_INCOME_PASS"}
@@ -38,7 +38,7 @@ def test_positive_expected_pnl_is_income_pass():
 
 
 def test_negative_expected_pnl_blocks_even_if_quality_bucket_passes():
-    out = compute_income_edge(_candidate(target=50_750, stop=48_000, score=65, rr=2.0))
+    out = compute_income_edge(_candidate(target=50_750, stop=48_000, score=65, rr=2.0), pending_orders={})
 
     assert out["income_pass"] is False
     assert out["income_grade"] == "BLOCK"
@@ -46,7 +46,7 @@ def test_negative_expected_pnl_blocks_even_if_quality_bucket_passes():
 
 
 def test_high_rr_but_deep_stop_risk_blocks():
-    out = compute_income_edge(_candidate(target=70_000, stop=44_000, score=90, rr=4.0))
+    out = compute_income_edge(_candidate(target=70_000, stop=44_000, score=90, rr=4.0), pending_orders={})
 
     assert out["income_pass"] is False
     assert out["income_grade"] == "BLOCK"
@@ -68,6 +68,7 @@ def test_same_symbol_pending_blocks_new_buy():
 def test_recent_risk_sell_cooldown_blocks_reentry():
     out = compute_income_edge(
         _candidate(symbol="403870.KS"),
+        pending_orders={},
         recent_risk_sells={"403870.KS": {"reason": "position_review_sell"}},
     )
 
@@ -79,7 +80,7 @@ def test_recent_risk_sell_cooldown_blocks_reentry():
 def test_low_sample_reliability_does_not_zero_win_probability():
     c = _candidate(symbol="SAMPLE.KS", score=82)
     win_prob = estimate_win_prob(c, reliability_stats={"SAMPLE.KS": {"count": 1, "win_rate": 0.0}})
-    out = compute_income_edge(c, reliability_stats={"SAMPLE.KS": {"count": 1, "win_rate": 0.0}})
+    out = compute_income_edge(c, pending_orders={}, reliability_stats={"SAMPLE.KS": {"count": 1, "win_rate": 0.0}})
 
     assert win_prob >= 0.5
     assert out["win_prob"] >= 0.5
@@ -91,7 +92,7 @@ def test_prepare_income_buy_plan_tightens_six_pct_stop_and_recomputes_rr():
     c = _candidate(price=50_000, target=58_000, stop=47_000, qty=4, score=88, rr=2.6)
 
     planned = prepare_income_buy_plan(c)
-    out = compute_income_edge(planned)
+    out = compute_income_edge(planned, pending_orders={})
 
     assert planned["original_stop_loss"] == 47_000.0
     assert planned["stop_loss"] > 47_000.0
@@ -464,3 +465,18 @@ def test_rebalance_plan_rows_carry_ai_berkshire_fields():
         by_symbol["AAA"]["weakness_score"] - 3.5, 4)
     assert by_symbol["BBB"]["auto_sell_eligible"] is True
     assert by_symbol["BBB"]["auto_sell_block_reason"] is None
+
+
+# ── pending 상태 불명 fail-closed ─────────────────────────────────
+
+def test_pending_orders_unavailable_blocks_buy():
+    """pending 맵 producer 실패(None) = '모름' → 신규 BUY 차단 (fail-closed)."""
+    out = compute_income_edge(_candidate(), pending_orders=None)
+    assert out["income_pass"] is False
+    assert out["income_block_reason"] == "pending_state_unavailable"
+
+
+def test_pending_orders_empty_dict_still_allows():
+    """정상 조회 결과 pending 0건(빈 dict)은 차단 사유가 아니다."""
+    out = compute_income_edge(_candidate(), pending_orders={})
+    assert out["income_pass"] is True
