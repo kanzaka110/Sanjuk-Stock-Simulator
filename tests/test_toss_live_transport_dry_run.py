@@ -42,6 +42,7 @@ def _payload(**kw) -> dict:
 _POLICY = {
     "live_pilot_enabled": True,
     "live_order_allowed": True,
+    "autonomous_mode": False,
     "adapter_status": "enabled",
     "max_order_krw": 100_000,
 }

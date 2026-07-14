@@ -163,6 +163,16 @@ def can_send_live_pilot_order(
     """
     reasons: list[str] = []
 
+    # 0. 경계 객체 타입 계약 — 비-dict/None은 raise 없이 typed fail-closed
+    boundary_violations = [
+        f"{name}_schema_invalid: not_a_dict ({type(obj).__name__})"
+        for name, obj in (
+            ("policy", policy), ("preview", preview), ("payload", payload_result))
+        if not isinstance(obj, dict)
+    ]
+    if boundary_violations:
+        return False, boundary_violations
+
     # 1. policy gate — exact bool 계약: type is bool 필수, 허용은 is True만
     for key in ("live_pilot_enabled", "live_order_allowed", "autonomous_mode"):
         if not _is_exact_bool(policy.get(key)):
@@ -411,7 +421,63 @@ def dispatch_toss_order_live(
     Returns:
         {"ok": bool, "live_order_sent": bool, "reason": str, ...}
     """
+    # 0. 경계 객체 타입 계약 — 비-dict/None은 raise 없이 typed fail-closed
+    if not isinstance(payload, dict) or not isinstance(policy, dict):
+        return {
+            "ok": False,
+            "blocked": True,
+            "reason": "dispatch_contract_invalid",
+            "live_order_sent": False,
+            "failure_reason": (
+                "dispatch_contract_invalid: "
+                f"payload={type(payload).__name__}, policy={type(policy).__name__}"
+            ),
+            "symbol": "unknown",
+            "message": "dispatch 입력 계약 위반 — 전송 안 함\nlive_order_sent=false",
+        }
+
     symbol = payload.get("symbol", "unknown")
+
+    # 0.5 transport 호출 전 독립 계약 검증 — 빈/불량 policy·payload는
+    # can_send 선행 여부와 무관하게 여기서 한 번 더 차단한다 (defense in depth).
+    contract_violations: list[str] = []
+    for key in ("live_pilot_enabled", "live_order_allowed", "autonomous_mode"):
+        if not _is_exact_bool(policy.get(key)):
+            contract_violations.append(f"policy.{key}_not_exact_bool")
+    if not _exact_true(policy.get("live_pilot_enabled")):
+        contract_violations.append("policy.live_pilot_enabled_not_true")
+    if not _exact_true(policy.get("live_order_allowed")):
+        contract_violations.append("policy.live_order_allowed_not_true")
+    if policy.get("adapter_status") != "enabled":
+        contract_violations.append("policy.adapter_status_not_enabled")
+    sym_text = str(payload.get("symbol") or "").strip()
+    if not sym_text or sym_text.isdigit():
+        contract_violations.append("payload.symbol_invalid")
+    try:
+        qty_value = float(payload.get("quantity"))
+    except (TypeError, ValueError):
+        qty_value = 0.0
+    if qty_value <= 0:
+        contract_violations.append("payload.quantity_invalid")
+    try:
+        price_value = float(payload.get("limit_price"))
+    except (TypeError, ValueError):
+        price_value = 0.0
+    if price_value <= 0:
+        contract_violations.append("payload.limit_price_invalid")
+    if contract_violations:
+        log.warning(
+            "live dispatch blocked before transport (contract): %s",
+            contract_violations)
+        return {
+            "ok": False,
+            "blocked": True,
+            "reason": "dispatch_contract_invalid",
+            "live_order_sent": False,
+            "failure_reason": "dispatch_contract_invalid: " + ", ".join(contract_violations),
+            "symbol": symbol,
+            "message": "dispatch 계약 위반 — transport 미호출\nlive_order_sent=false",
+        }
 
     # transport 없으면 항상 차단
     if transport is None:
@@ -454,8 +520,27 @@ def dispatch_toss_order_live(
             "message": f"주문 전송 실패: {e}\n주문 전송 비활성",
         }
 
-    # transport 결과도 신뢰하지 않는다 — ok/live_order_sent/broker_confirmed는
-    # exact bool 계약. 타입 위반은 transport_schema_invalid + live_order_sent=False.
+    # transport 결과도 신뢰하지 않는다 — 비-dict/None은 raise 없이 fail-closed
+    if not isinstance(transport_result, dict):
+        log.error(
+            "transport returned non-dict (fail-closed): %s",
+            type(transport_result).__name__)
+        return {
+            "ok": False,
+            "blocked": False,
+            "reason": "transport_schema_invalid",
+            "live_order_sent": False,
+            "broker_confirmed": False,
+            "failure_reason": (
+                f"transport_schema_invalid: result={type(transport_result).__name__}"
+            ),
+            "symbol": symbol,
+            "payload_hash": payload_hash,
+            "message": "transport 응답이 dict가 아님 — 전송 여부 불명, fail-closed\n"
+                       "live_order_sent=false",
+        }
+    # ok/live_order_sent/broker_confirmed는 exact bool 계약.
+    # 타입 위반은 transport_schema_invalid + live_order_sent=False.
     schema_violations = [
         key for key in ("ok", "live_order_sent", "broker_confirmed")
         if not _is_exact_bool(transport_result.get(key, False))

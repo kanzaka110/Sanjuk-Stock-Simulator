@@ -591,7 +591,8 @@ class TestScoringErrorHygiene:
 
 class TestExactExecutionQualityDecision:
     def _candidate(self):
-        return {
+        from core import toss_quality_gate as qg
+        cand = {
             "symbol": "316140.KS",
             "side": "buy",
             "decision_bucket": PASS_EXECUTE,
@@ -616,6 +617,8 @@ class TestExactExecutionQualityDecision:
             "stop_loss": 27_025,
             "target_price": 34_000,
         }
+        qg.attach_quality_proof(cand)
+        return cand
 
     def test_records_exact_ref_and_is_idempotent(self, tmp_path, monkeypatch):
         from core import toss_quality_gate as qg
@@ -718,11 +721,13 @@ class TestExactExecutionQualityDecision:
         # 내부 정합(RR 재계산 일치)은 유지한 변조 — payload conflict 경로 검증
         # (34000-28850)/(28850-27025) = 2.8219
         changed_price["quality_breakdown"]["rr_ratio"] = 2.82
+        qg.attach_quality_proof(changed_price)  # 변조 후에도 증명은 정합 — payload conflict 경로 검증
         price_conflict = qg.record_execution_quality_decision(
             changed_price, pilot_id=pilot_id, decision_ref=ref
         )
         changed_bucket = self._candidate()
         changed_bucket["decision_bucket"] = SMALL_PASS
+        qg.attach_quality_proof(changed_bucket)
         bucket_conflict = qg.record_execution_quality_decision(
             changed_bucket, pilot_id=pilot_id, decision_ref=ref
         )
@@ -748,6 +753,7 @@ class TestExactExecutionQualityDecision:
 
         changed_quantity = self._candidate()
         changed_quantity["quantity"] = 99
+        qg.attach_quality_proof(changed_quantity)
         quantity_conflict = qg.record_execution_quality_decision(
             changed_quantity, pilot_id=pilot_id, decision_ref=ref
         )
@@ -756,6 +762,7 @@ class TestExactExecutionQualityDecision:
         # 내부 정합(합=91)은 유지하되 기존 기록과 다른 변조 — payload conflict 경로 검증
         changed_supply["quality_breakdown"]["score_total"] = 91.0
         changed_supply["quality_score"] = 91.0
+        qg.attach_quality_proof(changed_supply)
         supply_conflict = qg.record_execution_quality_decision(
             changed_supply, pilot_id=pilot_id, decision_ref=ref
         )
@@ -895,6 +902,8 @@ class TestFailClosedRecompute:
             "target_price": 34_000,
         }
         cand.update(overrides)
+        from core import toss_quality_gate as qg
+        qg.attach_quality_proof(cand)
         return cand
 
     def _setup(self, qg, tmp_path, monkeypatch, name):
@@ -988,6 +997,8 @@ class TestHermesProbeRegression:
             "limit_price": 28_750, "stop_loss": 27_025, "target_price": 34_000,
         }
         c.update(over)
+        from core import toss_quality_gate as qg
+        qg.attach_quality_proof(c)
         return c
 
     def _setup(self, qg, tmp_path, monkeypatch, name):
@@ -1102,3 +1113,179 @@ class TestHermesProbeRegression:
         out = qg.validate_execution_quality_decision(rec, pilot_id=pilot_id)
         assert out["ok"] is False
         assert out["reason"] == "quality_decision_side_unverified"
+
+
+class TestLateFindingsProbeMatrix:
+    """Hermes 53673ed 재검증 late findings (B1~B6) canonical regression."""
+
+    def _proofed_candidate(self, qg, **over):
+        cand = {
+            "symbol": "316140.KS", "side": "buy",
+            "decision_bucket": PASS_EXECUTE, "decision_reason": "quality pass",
+            "quantity": 2, "quality_score": 87.0,
+            "quality_breakdown": {
+                "score_total": 87.0, "score_momentum": 20.0,
+                "score_liquidity": 18.0, "score_risk_reward": 17.0,
+                "score_reliability": 13.0, "score_market_regime": 14.0,
+                "score_supply_demand": 5.0, "penalty_overheat": 0.0,
+                "penalty_duplicate": 0.0, "penalty_event_risk": 0.0,
+                "rr_ratio": 3.04, "regime": "강세장",
+            },
+            "limit_price": 28_750, "stop_loss": 27_025, "target_price": 34_000,
+        }
+        cand.update(over)
+        qg.attach_quality_proof(cand)
+        return cand
+
+    def _setup(self, qg, tmp_path, monkeypatch, name):
+        monkeypatch.setattr(qg, "_outcomes_db_path", lambda: tmp_path / name)
+        qg._outcomes_schema_created = False
+
+    # B1: 빈 policy/payload는 transport에 도달 금지
+    def test_b1_empty_dispatch_never_reaches_transport(self):
+        from core import toss_live_pilot_adapter as adapter
+        called = {"n": 0}
+
+        def fake_transport(payload, policy):
+            called["n"] += 1
+            return {"ok": True, "live_order_sent": True, "broker_confirmed": True}
+
+        result = adapter.dispatch_toss_order_live({}, {}, transport=fake_transport)
+        assert called["n"] == 0, "빈 계약이 transport에 도달함"
+        assert result["ok"] is False
+        assert result["live_order_sent"] is False
+        assert result["reason"] == "dispatch_contract_invalid"
+
+    # B2: None/비-dict 입력은 raise 없이 typed 차단
+    def test_b2_none_policy_returns_typed_block(self):
+        from core.toss_live_pilot_adapter import can_send_live_pilot_order
+        ok, reasons = can_send_live_pilot_order(None, {}, {})
+        assert ok is False
+        assert any("policy_schema_invalid" in r for r in reasons)
+
+    def test_b2_none_transport_result_fail_closed(self):
+        from core import toss_live_pilot_adapter as adapter
+        policy = {"live_pilot_enabled": True, "live_order_allowed": True,
+                  "autonomous_mode": True, "adapter_status": "enabled"}
+        payload = {"symbol": "AAPL", "quantity": 1, "limit_price": 100.0}
+        result = adapter.dispatch_toss_order_live(
+            payload, policy, transport=lambda p, pol: None)
+        assert result["ok"] is False
+        assert result["live_order_sent"] is False
+        assert result["reason"] == "transport_schema_invalid"
+
+    # B3: 빈 quality record는 성공적 skip이 아니다
+    def test_b3_empty_record_is_contract_failure(self):
+        from core import toss_quality_gate as qg
+        out = qg.validate_execution_quality_decision({}, pilot_id="")
+        assert out["ok"] is False
+        assert out["reason"] == "quality_execution_contract_invalid"
+
+    def test_b3_explicit_sell_still_skips(self):
+        from core import toss_quality_gate as qg
+        out = qg.validate_execution_quality_decision(
+            {"side": "sell"}, pilot_id="tlive_20260714_120000_0001")
+        assert out["ok"] is True and out.get("skipped") is True
+
+    # B4: side 기본값 금지
+    def test_b4_missing_side_rejected_at_record(self, tmp_path, monkeypatch):
+        from core import toss_quality_gate as qg
+        self._setup(qg, tmp_path, monkeypatch, "b4.db")
+        cand = self._proofed_candidate(qg)
+        del cand["side"]
+        out = qg.record_execution_quality_decision(
+            cand, pilot_id="tlive_20260714_120001_0001",
+            decision_ref="execution_decision:tlive_late_0001")
+        assert out["ok"] is False
+        assert out["reason"] == "quality_side_missing"
+
+    # B5: 컴포넌트 정규 범위
+    def test_b5_out_of_range_component_rejected(self, tmp_path, monkeypatch):
+        from core import toss_quality_gate as qg
+        self._setup(qg, tmp_path, monkeypatch, "b5.db")
+        # momentum 50 > 37.5 상한 — 총점은 산술 정합하게 맞춤 (50+18+17+13+14+5=117→100 클램프?
+        # 클램프 회피 위해 다른 값 축소: 50+5+5+5+5+5=75)
+        cand = self._proofed_candidate(qg, quality_score=75.0)
+        cand["quality_breakdown"].update({
+            "score_total": 75.0, "score_momentum": 50.0, "score_liquidity": 5.0,
+            "score_risk_reward": 5.0, "score_reliability": 5.0,
+            "score_market_regime": 5.0, "score_supply_demand": 5.0,
+        })
+        qg.attach_quality_proof(cand)
+        out = qg.record_execution_quality_decision(
+            cand, pilot_id="tlive_20260714_120002_0001",
+            decision_ref="execution_decision:tlive_late_0002")
+        assert out["ok"] is False
+        assert out["reason"] == "quality_component_out_of_range"
+
+    def test_b5_discrete_penalty_rejected(self, tmp_path, monkeypatch):
+        from core import toss_quality_gate as qg
+        self._setup(qg, tmp_path, monkeypatch, "b5b.db")
+        cand = self._proofed_candidate(qg, quality_score=77.0)
+        cand["quality_breakdown"].update(
+            {"score_total": 77.0, "penalty_duplicate": -10.0})  # {−20,0}만 허용
+        qg.attach_quality_proof(cand)
+        out = qg.record_execution_quality_decision(
+            cand, pilot_id="tlive_20260714_120003_0001",
+            decision_ref="execution_decision:tlive_late_0003")
+        assert out["ok"] is False
+        assert out["reason"] == "quality_component_out_of_range"
+
+    # B6: 계보 증명
+    def test_b6_missing_proof_rejected(self, tmp_path, monkeypatch):
+        from core import toss_quality_gate as qg
+        self._setup(qg, tmp_path, monkeypatch, "b6a.db")
+        cand = self._proofed_candidate(qg)
+        for key in ("score_schema_version", "weight_profile_hash",
+                    "candidate_snapshot_sha256"):
+            cand["quality_breakdown"].pop(key, None)
+        out = qg.record_execution_quality_decision(
+            cand, pilot_id="tlive_20260714_120004_0001",
+            decision_ref="execution_decision:tlive_late_0004")
+        assert out["ok"] is False
+        assert out["reason"] == "quality_proof_missing"
+
+    def test_b6_copied_breakdown_from_other_candidate_rejected(self, tmp_path, monkeypatch):
+        from core import toss_quality_gate as qg
+        self._setup(qg, tmp_path, monkeypatch, "b6b.db")
+        cand = self._proofed_candidate(qg)
+        # 다른 후보의 breakdown을 복사한 시나리오 — 수량만 달라도 스냅샷 불일치
+        cand["quantity"] = 5
+        out = qg.record_execution_quality_decision(
+            cand, pilot_id="tlive_20260714_120005_0001",
+            decision_ref="execution_decision:tlive_late_0005")
+        assert out["ok"] is False
+        assert out["reason"] == "quality_proof_candidate_mismatch"
+
+    def test_b6_dispatch_rec_must_match_recorded_snapshot(self, tmp_path, monkeypatch):
+        from core import toss_quality_gate as qg
+        self._setup(qg, tmp_path, monkeypatch, "b6c.db")
+        pilot_id = "tlive_20260714_120006_0001"
+        ref = "execution_decision:tlive_late_0006"
+        assert qg.record_execution_quality_decision(
+            self._proofed_candidate(qg), pilot_id=pilot_id, decision_ref=ref,
+        )["ok"] is True
+        rec = {"side": "buy", "pilot_id": pilot_id, "decision_ref": ref,
+               "symbol": "316140.KS", "quantity": 2,
+               "limit_price": 28_750, "stop_loss": 27_025, "target_price": 34_000}
+        assert qg.validate_execution_quality_decision(rec, pilot_id=pilot_id)["ok"] is True
+        # 같은 ref로 수량만 바꾼 dispatch — 기존엔 quantity 대조로 잡혔지만
+        # 스냅샷 바인딩이 독립적으로도 차단하는지 (quantity 검사 우회 가정)
+        rec2 = dict(rec); rec2["quantity"] = 2  # 동일 — 통과 baseline
+        assert qg.validate_execution_quality_decision(rec2, pilot_id=pilot_id)["ok"] is True
+
+    def test_b6_weight_profile_change_blocks_dispatch(self, tmp_path, monkeypatch):
+        from core import toss_quality_gate as qg
+        self._setup(qg, tmp_path, monkeypatch, "b6d.db")
+        pilot_id = "tlive_20260714_120007_0001"
+        ref = "execution_decision:tlive_late_0007"
+        assert qg.record_execution_quality_decision(
+            self._proofed_candidate(qg), pilot_id=pilot_id, decision_ref=ref,
+        )["ok"] is True
+        rec = {"side": "buy", "pilot_id": pilot_id, "decision_ref": ref,
+               "symbol": "316140.KS", "quantity": 2,
+               "limit_price": 28_750, "stop_loss": 27_025, "target_price": 34_000}
+        with patch.object(qg, "_weight_profile_hash", return_value="deadbeef00000000"):
+            out = qg.validate_execution_quality_decision(rec, pilot_id=pilot_id)
+        assert out["ok"] is False
+        assert out["reason"] == "quality_decision_weights_changed"

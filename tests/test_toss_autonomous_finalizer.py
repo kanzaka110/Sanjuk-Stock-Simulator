@@ -245,6 +245,7 @@ class TestExactQualityLastMile:
                 "regime": "neutral",
             },
         }
+        qg.attach_quality_proof(candidate)
         created = qg.record_execution_quality_decision(
             candidate,
             pilot_id=rec["pilot_id"],

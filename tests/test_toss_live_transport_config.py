@@ -162,7 +162,7 @@ class TestDispatchWithNotConfiguredTransport(unittest.TestCase):
         }
         policy = {
             "live_order_allowed": True, "adapter_status": "enabled",
-            "live_pilot_enabled": True,
+            "live_pilot_enabled": True, "autonomous_mode": False,
         }
         result = dispatch_toss_order_live(payload, policy, transport=transport_callable)
         self.assertFalse(result["live_order_sent"])
@@ -182,7 +182,8 @@ class TestDispatchWithNotConfiguredTransport(unittest.TestCase):
             "symbol": "091180.KS", "side": "buy", "quantity": 1,
             "limit_price": 30000.0, "estimated_amount_krw": 30000.0,
         }
-        policy = {"live_order_allowed": True, "adapter_status": "enabled"}
+        policy = {"live_order_allowed": True, "adapter_status": "enabled",
+                  "live_pilot_enabled": True, "autonomous_mode": False}
         result = dispatch_toss_order_live(payload, policy, transport=transport_callable)
         # transport의 message 또는 failure_reason에 not_configured 반영
         combined = str(result)

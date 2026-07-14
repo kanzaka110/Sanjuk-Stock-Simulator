@@ -484,6 +484,8 @@ def _candidate(symbol=_AVOID_SYM, side="buy", **kw):
                             "expected_pnl_krw": 12_000, "income_edge_ratio": 0.02},
     }
     base.update(kw)
+    from core import toss_quality_gate as _qg
+    _qg.attach_quality_proof(base)
     return base
 
 

@@ -3795,6 +3795,14 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
                     )
 
             _apply_ai_berkshire_buy_gate(out, berkshire_scores)
+            # 계보 증명 재부착: quality batch는 quantity 확정 전에 돌므로,
+            # 최종 실행 필드(수량·가격) 확정 후 snapshot을 최종 상태에 바인딩.
+            # 이 재부착이 없으면 record가 proof mismatch로 전량 fail-closed.
+            try:
+                from core.toss_quality_gate import attach_quality_proof
+                attach_quality_proof(out)
+            except Exception as exc:
+                log.debug("quality proof attach failed: %s", type(exc).__name__)
             return out
 
         items = [
