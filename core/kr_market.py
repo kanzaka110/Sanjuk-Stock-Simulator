@@ -49,17 +49,88 @@ def _name_for(code: str) -> str:
 # 네이버 frgn 페이지 일별 시리즈 캐시 (프로세스 수명 동안 — 브리핑은 단명 프로세스)
 _FRGN_CACHE: dict[str, list[dict]] = {}
 
+# 파일 캐시: 배치 사전수집(tools/supply_demand_warm_cache.py)이 채우고
+# bot/dashboard 등 다른 프로세스가 소비한다. 일별 데이터라 26시간 유효.
+_FRGN_FILE_TTL_HOURS = 26.0
 
-def _fetch_naver_frgn(code: str) -> list[dict]:
+
+def _frgn_file_cache_path():
+    from pathlib import Path
+    return Path(__file__).resolve().parent.parent / "db" / "data" / "kr_frgn_cache.json"
+
+
+def _load_frgn_file_entry(code: str) -> list[dict] | None:
+    """파일 캐시에서 fresh 항목 조회. 없거나 만료/파손이면 None."""
+    import json as _json
+    from datetime import datetime, timezone
+    try:
+        p = _frgn_file_cache_path()
+        if not p.exists():
+            return None
+        data = _json.loads(p.read_text(encoding="utf-8"))
+        entry = data.get(code)
+        if not isinstance(entry, dict):
+            return None
+        fetched_at = datetime.fromisoformat(str(entry.get("fetched_at")))
+        age_hours = (datetime.now(timezone.utc) - fetched_at).total_seconds() / 3600.0
+        if age_hours > _FRGN_FILE_TTL_HOURS:
+            return None   # stale — '모름'을 신선한 척 반환하지 않는다
+        rows = entry.get("rows")
+        return rows if isinstance(rows, list) and rows else None
+    except Exception as e:
+        log.debug("frgn 파일 캐시 읽기 실패 (%s): %s", code, e)
+        return None
+
+
+def _save_frgn_file_entry(code: str, rows: list[dict]) -> None:
+    """파일 캐시에 항목 기록 (atomic replace, 실패 무해)."""
+    import json as _json
+    import os as _os
+    import tempfile
+    from datetime import datetime, timezone
+    if not rows:
+        return   # 실패 결과로 정상 캐시를 덮지 않는다
+    try:
+        p = _frgn_file_cache_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        data: dict = {}
+        if p.exists():
+            try:
+                data = _json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+        if not isinstance(data, dict):
+            data = {}
+        data[code] = {
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "rows": rows,
+        }
+        fd, tmp = tempfile.mkstemp(dir=str(p.parent), suffix=".tmp")
+        with _os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(_json.dumps(data, ensure_ascii=False))
+        _os.replace(tmp, p)
+    except Exception as e:
+        log.debug("frgn 파일 캐시 쓰기 실패 (%s): %s", code, e)
+
+
+def _fetch_naver_frgn(code: str, *, force_refresh: bool = False) -> list[dict]:
     """네이버 금융 외국인·기관 순매매 일별 시리즈 조회.
+
+    조회 순서: 메모리 캐시 → 파일 캐시(배치 사전수집분, 26h TTL) → 네트워크.
+    force_refresh=True(배치 수집기 전용)면 캐시를 건너뛰고 네트워크 후 기록.
 
     Returns:
         최신순 dict 리스트: [{"date": "YYYYMMDD", "close": float,
         "inst_shares": float, "foreign_shares": float}, ...]
         실패 시 빈 리스트.
     """
-    if code in _FRGN_CACHE:
-        return _FRGN_CACHE[code]
+    if not force_refresh:
+        if code in _FRGN_CACHE:
+            return _FRGN_CACHE[code]
+        cached = _load_frgn_file_entry(code)
+        if cached is not None:
+            _FRGN_CACHE[code] = cached
+            return cached
 
     import io
 
@@ -108,6 +179,7 @@ def _fetch_naver_frgn(code: str) -> list[dict]:
         return []
 
     _FRGN_CACHE[code] = result
+    _save_frgn_file_entry(code, result)   # 성공분만 파일 캐시에 기록
     return result
 
 

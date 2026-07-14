@@ -50,7 +50,7 @@ def _seal_quality_proof_for_test(qg, candidate):
 def _no_network_supply(monkeypatch):
     """수급 조회가 테스트에서 네트워크를 타지 않게 기본 차단."""
     import core.kr_market as km
-    monkeypatch.setattr(km, "_fetch_naver_frgn", lambda code: [])
+    monkeypatch.setattr(km, "_fetch_naver_frgn", lambda code, **kw: [])
     monkeypatch.setattr(km, "_FRGN_CACHE", {})
 
 
@@ -367,7 +367,8 @@ class TestSupplyDemand:
         from core.toss_quality_gate import _score_supply_demand
         with patch("core.kr_market._fetch_naver_frgn",
                    return_value=rows if rows is not None else []) as mock_fetch, \
-             patch("core.kr_market._FRGN_CACHE", cache if cache is not None else {}):
+             patch("core.kr_market._FRGN_CACHE", cache if cache is not None else {}), \
+             patch("core.kr_market._load_frgn_file_entry", return_value=None):
             score = _score_supply_demand(ticker, pre_score, fetch_budget=budget)
         return score, mock_fetch
 
@@ -379,9 +380,10 @@ class TestSupplyDemand:
         score, _ = self._score(rows=_frgn_rows(inst=-100, frgn=-200))
         assert score == -10.0
 
-    def test_mixed_zero(self):
+    def test_mixed_follows_dominant(self):
+        # 상쇄 설계 폐기(2026-07-14): 엇갈림은 주도 주체 방향 ±3
         score, _ = self._score(rows=_frgn_rows(inst=-100, frgn=100))
-        assert score == 0.0
+        assert score == 3.0 or score == -3.0
 
     def test_us_ticker_skipped(self):
         score, mock_fetch = self._score(ticker="NVDA",
@@ -1319,3 +1321,37 @@ class TestLateFindingsProbeMatrix:
             out = qg.validate_execution_quality_decision(rec, pilot_id=pilot_id)
         assert out["ok"] is False
         assert out["reason"] == "quality_decision_weights_changed"
+
+
+class TestSupplyDemandFormula:
+    """수급 산식 계약 — 자기상쇄 설계 결함(2026-07) 재발 방지."""
+
+    def _score_with_rows(self, rows, monkeypatch):
+        from core import toss_quality_gate as qg
+        import core.kr_market as km
+        # 파일 전역 autouse stub(빈 fetch)을 이 테스트 데이터로 재override
+        monkeypatch.setattr(km, "_fetch_naver_frgn", lambda code, **kw: rows)
+        return qg._score_supply_demand("005930.KS", pre_score=50.0)
+
+    def _row(self, frgn, inst):
+        return {"date": "20260714", "close": 100.0,
+                "inst_shares": inst, "foreign_shares": frgn}
+
+    def test_both_buying_strong_positive(self, monkeypatch):
+        assert self._score_with_rows([self._row(100, 200)], monkeypatch) == 10.0
+
+    def test_both_selling_strong_negative(self, monkeypatch):
+        assert self._score_with_rows([self._row(-100, -200)], monkeypatch) == -10.0
+
+    def test_split_follows_dominant_side_not_cancel(self, monkeypatch):
+        # 외국인 -100 vs 기관 +30 → 주도(외국인) 방향 -3, 상쇄 0 금지
+        assert self._score_with_rows([self._row(-100, 30)], monkeypatch) == -3.0
+        assert self._score_with_rows([self._row(200, -50)], monkeypatch) == 3.0
+
+    def test_score_stays_within_canonical_bounds(self, monkeypatch):
+        from core.toss_quality_gate import _COMPONENT_BOUNDS
+        lo, hi = _COMPONENT_BOUNDS["score_supply_demand"]
+        for rows in ([self._row(1e9, 1e9)], [self._row(-1e9, -1e9)]):
+            v = self._score_with_rows(rows, monkeypatch)
+            assert lo <= v * 1.5 <= hi  # 최대 가중치 1.5 적용 후에도 범위 내
+

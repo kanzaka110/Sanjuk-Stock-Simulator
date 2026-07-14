@@ -411,12 +411,19 @@ def _score_supply_demand(
 
     code = ticker.split(".")[0]
     try:
-        from core.kr_market import _FRGN_CACHE, _fetch_naver_frgn
+        from core.kr_market import (
+            _FRGN_CACHE,
+            _fetch_naver_frgn,
+            _load_frgn_file_entry,
+        )
 
+        # budget은 실제 네트워크 조회에만 적용 — 배치 사전수집 파일 캐시
+        # (tools/supply_demand_warm_cache.py) 히트는 예산을 소모하지 않는다.
         if code not in _FRGN_CACHE and fetch_budget is not None:
-            if fetch_budget.get("remaining", 0) <= 0:
-                return 0.0
-            fetch_budget["remaining"] -= 1
+            if _load_frgn_file_entry(code) is None:
+                if fetch_budget.get("remaining", 0) <= 0:
+                    return 0.0
+                fetch_budget["remaining"] -= 1
 
         rows = _fetch_naver_frgn(code)
     except Exception as exc:
@@ -433,16 +440,19 @@ def _score_supply_demand(
     except Exception:
         return 0.0
 
-    score = 0.0
-    if frgn_net > 0:
-        score += 5.0
-    elif frgn_net < 0:
-        score -= 5.0
-    if inst_net > 0:
-        score += 5.0
-    elif inst_net < 0:
-        score -= 5.0
-    return score
+    # 외국인·기관은 서로 유동성 상대방인 경우가 많아 ±5/±5 단순 합산은
+    # 구조적으로 상쇄돼 거의 항상 0이었다 (2026-07 실측: win/loss 모두 0.0).
+    # 동반 매매(합의 신호)는 강하게, 엇갈림은 주도 주체 방향으로 약하게 반영한다.
+    if frgn_net > 0 and inst_net > 0:
+        return 10.0            # 동반 순매수 — 가장 강한 수급 신호
+    if frgn_net < 0 and inst_net < 0:
+        return -10.0           # 동반 순매도
+    dominant = frgn_net if abs(frgn_net) >= abs(inst_net) else inst_net
+    if dominant > 0:
+        return 3.0             # 엇갈림 — 주도 주체 순매수
+    if dominant < 0:
+        return -3.0
+    return 0.0
 
 
 # ── Decision 엔진 ────────────────────────────────────────────────
