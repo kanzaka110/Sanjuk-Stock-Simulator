@@ -154,8 +154,22 @@ def print_env_status(env: dict[str, str]) -> bool:
 
 
 # ─── OAuth2 토큰 발급 ───────────────────────────────
+def _probe_role_allowed() -> bool:
+    """직접 OAuth/Broker 진단은 명시 broker_owner만 허용한다.
+
+    (2026-07-15 Task 4.1A2) bot/monitor argv만으로는 probe owner가 되지
+    않는다 — 진단 도구가 운영 bot의 토큰을 회전시키는 사고를 차단.
+    """
+    return str(os.environ.get("TOSS_PROCESS_ROLE", "")).strip().lower() == "broker_owner"
+
+
 def get_access_token(base_url: str, app_key: str, app_secret: str) -> tuple[str | None, dict]:
-    """OAuth2 client_credentials로 토큰 발급. 토큰은 절대 출력하지 않음."""
+    """OAuth2 client_credentials로 토큰 발급. 토큰은 절대 출력하지 않음.
+
+    명시 TOSS_PROCESS_ROLE=broker_owner 없이는 네트워크에 도달하지 않는다.
+    """
+    if not _probe_role_allowed():
+        return None, {"error": "broker_owner_role_required"}
     cred = base64.b64encode(f"{app_key}:{app_secret}".encode()).decode()
     try:
         resp = requests.post(
@@ -193,7 +207,12 @@ def probe_endpoint(
     account_no: str = "", needs_account: bool = False,
     extra_params: dict | None = None,
 ) -> dict:
-    """GET-only read 엔드포인트 probe."""
+    """GET-only read 엔드포인트 probe.
+
+    명시 TOSS_PROCESS_ROLE=broker_owner 없이는 네트워크에 도달하지 않는다.
+    """
+    if not _probe_role_allowed():
+        return {"error": "broker_owner_role_required"}
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -246,6 +265,11 @@ def _print_error(result: dict) -> None:
 
 # ─── 메인 ───────────────────────────────────────────
 def main() -> None:
+    if not _probe_role_allowed():
+        print("DENY: broker_owner_role_required — "
+              "TOSS_PROCESS_ROLE=broker_owner 명시 후 실행하세요.",
+              file=sys.stderr)
+        sys.exit(2)
     env = check_env()
     env_ok = print_env_status(env)
     print()

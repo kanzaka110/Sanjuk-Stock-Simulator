@@ -86,13 +86,19 @@ def _env_truthy(name: str, default: bool = False) -> bool:
 def _dashboard_toss_broker_reads_isolated() -> bool:
     """Return True when this process must consume the stock-bot snapshot.
 
-    In autonomous mode the long-running bot/monitor process is the sole Toss GET
-    owner. Dashboard and scheduled briefing processes read a sanitized atomic
-    snapshot so they cannot rotate the broker token under an in-flight order.
+    Role-only invariant (운영 모드 무관): the long-running bot/monitor process
+    (or explicit TOSS_PROCESS_ROLE=broker_owner) is the sole Toss GET owner.
+    Dashboard, scheduled briefings and tools read a sanitized atomic snapshot
+    so they cannot rotate the broker token under an in-flight order. 정책
+    모듈 실패·비-bool 반환 시에도 role 계약으로 fail-closed한다.
     """
     try:
         from core.toss_readonly_snapshot import should_consume_snapshot
-        return should_consume_snapshot()
+        decision = should_consume_snapshot()
+        if type(decision) is not bool:
+            # 비-bool 정책 반환은 신뢰 불가 — role fallback으로
+            raise RuntimeError("invalid_snapshot_policy_decision")
+        return decision
     except Exception:
         # (2026-07-15 Task 4.1A) 정책 모듈이 깨져도 fail-open 금지 —
         # role 계약(명시 role → argv bot/monitor → consumer)으로 판정.

@@ -269,6 +269,14 @@ class TestForbiddenKeywords:
 # ═══ token 발급 함수 네트워크 실패 안전 ═══
 
 class TestAuthSafety:
+    @pytest.fixture(autouse=True)
+    def _auth_tests_run_as_owner(self, monkeypatch):
+        """이 클래스는 발급 응답 처리 로직 검증 — owner를 클래스 범위로만 명시.
+
+        (파일 전체 autouse 금지 — deny 계약 테스트를 가리지 않기 위함)
+        """
+        monkeypatch.setenv("TOSS_PROCESS_ROLE", "broker_owner")
+
     def test_network_error_returns_none(self):
         import requests as req_lib
         with patch("tools.probe_toss_account.requests.post", side_effect=req_lib.ConnectionError("timeout")):
@@ -302,3 +310,74 @@ class TestAuthSafety:
             assert token == "test_token_abc"
             assert info["status"] == 200
             assert info["token_type"] == "Bearer"
+
+
+# ── Task 4.1A2-B: 직접 probe는 명시 broker_owner만 네트워크 허용 ──
+
+class TestProbeOwnerContract:
+    def _clean(self, monkeypatch, role=None, argv=None):
+        monkeypatch.delenv("TOSS_PROCESS_ROLE", raising=False)
+        if role is not None:
+            monkeypatch.setenv("TOSS_PROCESS_ROLE", role)
+        if argv is not None:
+            monkeypatch.setattr(sys, "argv", argv)
+
+    @pytest.mark.parametrize("role", [None, "snapshot_consumer", "weird_role"])
+    def test_get_access_token_denied_without_owner(self, monkeypatch, role):
+        import tools.probe_toss_account as probe
+        self._clean(monkeypatch, role=role)
+        with patch.object(probe.requests, "post",
+                          side_effect=AssertionError("OAuth POST")) as post_mock:
+            token, info = probe.get_access_token("https://x", "k", "s")
+        assert token is None
+        assert info.get("error") == "broker_owner_role_required"
+        assert post_mock.call_count == 0
+
+    @pytest.mark.parametrize("role", [None, "snapshot_consumer", "weird_role"])
+    def test_probe_endpoint_denied_without_owner(self, monkeypatch, role):
+        import tools.probe_toss_account as probe
+        self._clean(monkeypatch, role=role)
+        with patch.object(probe.requests, "get",
+                          side_effect=AssertionError("Broker GET")) as get_mock:
+            result = probe.probe_endpoint("https://x", "/api/v1/accounts", "tkn")
+        assert result.get("error") == "broker_owner_role_required"
+        assert get_mock.call_count == 0
+
+    def test_bot_argv_alone_is_not_probe_owner(self, monkeypatch):
+        import tools.probe_toss_account as probe
+        self._clean(monkeypatch, argv=["main.py", "bot"])
+        with patch.object(probe.requests, "post",
+                          side_effect=AssertionError("OAuth POST")) as post_mock:
+            token, info = probe.get_access_token("https://x", "k", "s")
+        assert token is None
+        assert info.get("error") == "broker_owner_role_required"
+        assert post_mock.call_count == 0
+
+    def test_main_exits_2_before_env_output(self, monkeypatch, capsys):
+        import tools.probe_toss_account as probe
+        self._clean(monkeypatch)
+        with pytest.raises(SystemExit) as exc, \
+             patch.object(probe.requests, "post",
+                          side_effect=AssertionError("net")), \
+             patch.object(probe.requests, "get",
+                          side_effect=AssertionError("net")):
+            probe.main()
+        assert exc.value.code == 2
+        out = capsys.readouterr().out
+        assert "TOSS_APP_KEY" not in out   # env 상태 출력 전 종료
+        assert "Auth" not in out           # 인증 시도 전 종료
+
+    def test_explicit_owner_allows_mocked_network(self, monkeypatch):
+        import tools.probe_toss_account as probe
+        self._clean(monkeypatch, role="broker_owner")
+
+        class _Resp:
+            status_code = 200
+            headers = {"content-type": "application/json"}
+            def json(self):
+                return {"access_token": "x", "token_type": "Bearer",
+                        "expires_in": 3600}
+        with patch.object(probe.requests, "post", return_value=_Resp()) as post_mock:
+            token, info = probe.get_access_token("https://x", "k", "s")
+        assert post_mock.call_count == 1
+        assert info.get("error") != "broker_owner_role_required"

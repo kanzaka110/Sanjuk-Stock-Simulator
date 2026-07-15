@@ -133,3 +133,81 @@ def test_autonomous_mode_irrelevant(_policy_import_broken, _clean_role_env, mode
     assert _isolated_via_client() is True
     _clean_role_env.setattr(sys, "argv", ["main.py", "bot"])
     assert _isolated_via_client() is False
+
+
+# ── Task 4.1A2-A: 정책 반환 비-bool → typed fallback ──────────────
+
+_NON_BOOL_VALUES = [None, 0, 1, "", "false", [], {}]
+
+
+@pytest.fixture()
+def _policy_returns(monkeypatch):
+    """정상 import 경로에서 should_consume_snapshot 반환값을 주입."""
+    import core.toss_readonly_snapshot as trs
+
+    def set_value(value):
+        monkeypatch.setattr(trs, "should_consume_snapshot", lambda: value)
+    return set_value
+
+
+@pytest.mark.parametrize("bad", _NON_BOOL_VALUES)
+def test_non_bool_policy_falls_back_briefing_consumer(
+        _policy_returns, _clean_role_env, bad):
+    _policy_returns(bad)
+    _clean_role_env.setattr(sys, "argv", ["main.py", "briefing"])
+    assert _isolated_via_client() is True
+    assert _isolated_via_dashboard() is True
+
+
+@pytest.mark.parametrize("bad", _NON_BOOL_VALUES)
+def test_non_bool_policy_explicit_consumer(_policy_returns, _clean_role_env, bad):
+    _policy_returns(bad)
+    _clean_role_env.setenv("TOSS_PROCESS_ROLE", "snapshot_consumer")
+    _clean_role_env.setattr(sys, "argv", ["main.py", "bot"])
+    assert _isolated_via_client() is True
+    assert _isolated_via_dashboard() is True
+
+
+@pytest.mark.parametrize("bad", _NON_BOOL_VALUES)
+def test_non_bool_policy_explicit_owner(_policy_returns, _clean_role_env, bad):
+    _policy_returns(bad)
+    _clean_role_env.setenv("TOSS_PROCESS_ROLE", "broker_owner")
+    _clean_role_env.setattr(sys, "argv", ["some_tool.py"])
+    assert _isolated_via_client() is False
+    assert _isolated_via_dashboard() is False
+
+
+@pytest.mark.parametrize("argv", [["main.py", "bot"], ["main.py", "monitor"]])
+def test_non_bool_policy_bot_monitor_owner(_policy_returns, _clean_role_env, argv):
+    _policy_returns("false")   # 문자열 'false' — truthy 오판 방지의 핵심 케이스
+    _clean_role_env.setattr(sys, "argv", argv)
+    assert _isolated_via_client() is False
+    assert _isolated_via_dashboard() is False
+
+
+def test_non_bool_consumer_no_oauth_and_no_broker(_policy_returns, _clean_role_env):
+    import core.toss_client as tc
+    _policy_returns(1)   # truthy 정수 — bool 아님
+    _clean_role_env.setattr(sys, "argv", ["main.py", "briefing"])
+    _clean_role_env.setattr(tc, "_mem_token", "stale", raising=False)
+    _clean_role_env.setattr(tc, "_mem_expires", 9e12, raising=False)
+    with patch.object(tc.requests, "post",
+                      side_effect=AssertionError("OAuth POST")) as post_mock, \
+         patch.object(tc.requests, "get",
+                      side_effect=AssertionError("Broker GET")) as get_mock:
+        assert tc._get_access_token() is None
+        assert tc.get_accounts() in (None, [], {})
+    assert post_mock.call_count == 0
+    assert get_mock.call_count == 0
+
+
+@pytest.mark.parametrize("mode", [None, "false", "true"])
+def test_non_bool_policy_autonomous_irrelevant(
+        _policy_returns, _clean_role_env, mode):
+    _policy_returns(None)
+    if mode is not None:
+        _clean_role_env.setenv("TOSS_AUTONOMOUS_MODE", mode)
+    _clean_role_env.setattr(sys, "argv", ["main.py", "briefing"])
+    assert _isolated_via_client() is True
+    _clean_role_env.setattr(sys, "argv", ["main.py", "bot"])
+    assert _isolated_via_client() is False

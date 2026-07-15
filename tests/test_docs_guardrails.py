@@ -27,6 +27,7 @@ ALLOWED_TOSS_FILES = {
     "config/toss_automation.py",
     "tools/probe_toss_account.py",
     "tests/test_toss_probe.py",
+    "tests/test_toss_role_fallback.py",
     "tests/test_toss_client.py",
     "tests/test_toss_dashboard.py",
     "tests/test_toss_broker_order_visibility.py",
