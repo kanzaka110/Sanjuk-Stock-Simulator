@@ -12,7 +12,9 @@
 
 from __future__ import annotations
 
+import copy
 import json
+import logging
 import sys
 import tempfile
 import unittest
@@ -106,8 +108,188 @@ class TestSelect(unittest.TestCase):
         self.assertEqual([r["symbol"] for r in ready], ["A.KS"])
         self.assertEqual(not_ready, [{"symbol": "B.KS", "reason": "RR 부족"}])
 
+    def test_consumer_receives_bounded_original_order_before_ready_split(self):
+        captured_at = datetime(2026, 7, 15, 1, 2, 3, tzinfo=timezone.utc)
+        items = [
+            _candidate(
+                f"{index:06d}.KS",
+                stock_agent_ready=index != 1,
+                block_reason="blocked" if index == 1 else "",
+                income_strategy={
+                    "income_pass": index != 1,
+                    "expected_pnl_krw": index * 1_000,
+                    "income_edge_ratio": index / 100,
+                },
+            )
+            for index in range(12)
+        ]
+        consumed = []
 
-# ── 2. process_candidate ─────────────────────────────────────────
+        def consumer(cohort, *, market_scope, captured_at_utc, fallback_used):
+            consumed.append(
+                (
+                    [item["symbol"] for item in cohort],
+                    market_scope,
+                    captured_at_utc,
+                    fallback_used,
+                )
+            )
+
+        with patch(
+            "core.dashboard_data.toss_buy_candidates_data",
+            return_value={
+                "items": items,
+                "scan_summary": {"dependency_fallback_used": True},
+            },
+        ) as feed, patch.object(tap, "_utc_now", return_value=captured_at):
+            ready, not_ready = tap.select_ready_candidates(
+                limit=99,
+                market="KR",
+                cohort_consumer=consumer,
+            )
+
+        expected_order = [f"{index:06d}.KS" for index in range(10)]
+        self.assertEqual(feed.call_args.kwargs["limit"], 10)
+        self.assertEqual(consumed, [(expected_order, "KR", captured_at, True)])
+        self.assertEqual(
+            [item["symbol"] for item in ready],
+            list(reversed(expected_order[2:])) + [expected_order[0]],
+        )
+        self.assertEqual(
+            not_ready, [{"symbol": "000001.KS", "reason": "blocked"}]
+        )
+
+    def test_consumer_failure_cannot_change_split_sort_or_outputs(self):
+        items = [
+            _candidate(
+                "LOW.KS",
+                income_strategy={
+                    "income_pass": True,
+                    "expected_pnl_krw": 1_000,
+                    "income_edge_ratio": 0.01,
+                },
+            ),
+            _candidate(
+                "HIGH.KS",
+                income_strategy={
+                    "income_pass": True,
+                    "expected_pnl_krw": 9_000,
+                    "income_edge_ratio": 0.09,
+                },
+            ),
+            _candidate("BLOCKED.KS", stock_agent_ready=False, block_reason="blocked"),
+        ]
+        original = copy.deepcopy(items)
+
+        with patch(
+            "core.dashboard_data.toss_buy_candidates_data",
+            return_value={"items": copy.deepcopy(items)},
+        ):
+            expected = tap.select_ready_candidates()
+
+        def failing_consumer(cohort, **_kwargs):
+            cohort[0]["stock_agent_ready"] = False
+            cohort.reverse()
+            raise RuntimeError("consumer-secret-must-not-escape")
+
+        with self.assertLogs(tap.log, level=logging.WARNING) as captured_logs:
+            with patch(
+                "core.dashboard_data.toss_buy_candidates_data",
+                return_value={"items": items},
+            ):
+                observed = tap.select_ready_candidates(
+                    cohort_consumer=failing_consumer
+                )
+
+        self.assertEqual(observed, expected)
+        self.assertEqual(items, original)
+        log_output = "\n".join(captured_logs.output)
+        self.assertIn("RuntimeError", log_output)
+        self.assertNotIn("consumer-secret-must-not-escape", log_output)
+
+    def test_provider_limit_is_bounded_from_zero_through_ten(self):
+        for requested, expected in ((-7, 0), (0, 0), (4, 4), (99, 10)):
+            with self.subTest(requested=requested), patch(
+                "core.dashboard_data.toss_buy_candidates_data",
+                return_value={"items": []},
+            ) as feed:
+                tap.select_ready_candidates(limit=requested)
+            self.assertEqual(feed.call_args.kwargs["limit"], expected)
+
+    def test_clock_is_captured_immediately_after_provider_returns(self):
+        events = []
+        captured_at = datetime(2026, 7, 15, 1, 2, 3, tzinfo=timezone.utc)
+
+        def provider(**_kwargs):
+            events.append("provider_return")
+            return {"items": [_candidate()]}
+
+        def clock():
+            events.append("clock")
+            return captured_at
+
+        def consumer(_cohort, **_kwargs):
+            events.append("consumer")
+
+        with patch(
+            "core.dashboard_data.toss_buy_candidates_data", side_effect=provider
+        ), patch.object(tap, "_utc_now", side_effect=clock):
+            tap.select_ready_candidates(cohort_consumer=consumer)
+
+        self.assertEqual(events, ["provider_return", "clock", "consumer"])
+
+    def test_malformed_fallback_metadata_is_unknown_without_blocking_ready(self):
+        malformed_values = [None, "true", 1, {}, {"dependency_fallback_used": "true"}]
+        for scan_summary in malformed_values:
+            consumed = []
+
+            def consumer(_cohort, **kwargs):
+                consumed.append(kwargs["fallback_used"])
+
+            with self.subTest(scan_summary=scan_summary), patch(
+                "core.dashboard_data.toss_buy_candidates_data",
+                return_value={"items": [_candidate()], "scan_summary": scan_summary},
+            ):
+                ready, not_ready = tap.select_ready_candidates(
+                    cohort_consumer=consumer
+                )
+
+            self.assertEqual([item["symbol"] for item in ready], ["091180.KS"])
+            self.assertEqual(not_ready, [])
+            self.assertEqual(consumed, [None])
+
+    def test_unknown_fallback_skips_real_shadow_worker_without_blocking_ready(self):
+        import core.shadow_measurement_producer as producer
+
+        with patch(
+            "core.dashboard_data.toss_buy_candidates_data",
+            return_value={
+                "items": [_candidate(market="KR", currency="KRW")],
+                "scan_summary": {"dependency_fallback_used": "true"},
+            },
+        ), patch.object(producer.threading, "Thread") as thread, self.assertLogs(
+            tap.log, level=logging.WARNING
+        ) as captured_logs:
+            ready, not_ready = tap.select_ready_candidates(
+                cohort_consumer=producer.enqueue_final_candidate_cohort
+            )
+
+        self.assertEqual([item["symbol"] for item in ready], ["091180.KS"])
+        self.assertEqual(not_ready, [])
+        thread.assert_not_called()
+        self.assertIn("ValueError", "\n".join(captured_logs.output))
+
+    def test_utc_now_uses_actual_timezone_aware_utc_clock(self):
+        before = datetime.now(timezone.utc)
+        observed = tap._utc_now()
+        after = datetime.now(timezone.utc)
+
+        self.assertEqual(observed.utcoffset(), timedelta(0))
+        self.assertLessEqual(before, observed)
+        self.assertLessEqual(observed, after)
+
+
+# ── 2. process_candidate ──────────────────────────────────────────
 
 class TestProcessCandidate(unittest.TestCase):
     def _run(self, candidate, policy=None, verdict_status="PASS"):
@@ -285,6 +467,138 @@ class TestRun(unittest.TestCase):
             r = self._run(tmp)
             self.assertEqual(r["attempted"], 1)
             self.assertEqual(r["pass_count"], 1)
+
+    def test_production_run_injects_bounded_shadow_enqueue_consumer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.json"
+            with patch.object(tap, "_state_path", return_value=state_path), \
+                 patch("core.market_hours.is_kr_market_open", return_value=True), \
+                 patch("core.toss_live_pilot_policy.compute_toss_live_pilot_policy",
+                       return_value=dict(_POLICY_ON)), \
+                 patch.object(tap, "select_ready_candidates", return_value=([], [])) as select, \
+                 patch.object(tap, "retry_retryable_orders",
+                              return_value={"retried": 0, "sent": 0, "exhausted": 0}), \
+                 patch("core.shadow_measurement_producer.enqueue_final_candidate_cohort") as enqueue:
+                tap.run_toss_autonomous_pipeline(now=_NOW, force=True)
+
+        self.assertIs(select.call_args.kwargs["cohort_consumer"], enqueue)
+        self.assertEqual(select.call_args.kwargs["market"], "KR")
+
+    def test_shadow_consumer_failure_preserves_pipeline_candidate_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.json"
+            items = [
+                _candidate(
+                    "LOW.KS",
+                    income_strategy={"income_pass": True, "expected_pnl_krw": 1_000},
+                ),
+                _candidate(
+                    "HIGH.KS",
+                    income_strategy={"income_pass": True, "expected_pnl_krw": 9_000},
+                ),
+                _candidate(
+                    "MID.KS",
+                    income_strategy={"income_pass": True, "expected_pnl_krw": 5_000},
+                ),
+            ]
+            original = copy.deepcopy(items)
+            processed = []
+
+            def failing_consumer(cohort, **_kwargs):
+                cohort[0]["symbol"] = "MUTATED.KS"
+                cohort.reverse()
+                raise RuntimeError("consumer-order-secret")
+
+            def process(candidate, _policy):
+                processed.append(candidate["symbol"])
+                return {"symbol": candidate["symbol"], "stage": "verdict_recorded"}
+
+            with patch.object(tap, "_state_path", return_value=state_path), patch(
+                "core.market_hours.is_kr_market_open", return_value=True
+            ), patch(
+                "core.market_hours.get_market_session",
+                return_value={"kr": "KR_REGULAR", "us": "CLOSED"},
+            ), patch(
+                "core.toss_live_pilot_policy.compute_toss_live_pilot_policy",
+                return_value=dict(_POLICY_ON),
+            ), patch(
+                "core.dashboard_data.toss_buy_candidates_data",
+                return_value={"items": items},
+            ), patch.object(
+                tap,
+                "retry_retryable_orders",
+                return_value={"retried": 0, "sent": 0, "exhausted": 0},
+            ), patch.object(
+                tap, "process_candidate", side_effect=process
+            ), patch(
+                "core.shadow_measurement_producer.enqueue_final_candidate_cohort",
+                side_effect=failing_consumer,
+            ):
+                result = tap.run_toss_autonomous_pipeline(now=_NOW, force=True)
+
+        self.assertEqual(result["attempted"], 3)
+        self.assertEqual(processed, ["HIGH.KS", "MID.KS", "LOW.KS"])
+        self.assertEqual(items, original)
+
+    def test_shadow_producer_import_failure_preserves_pipeline_candidate_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.json"
+            items = [
+                _candidate(
+                    "LOW.KS",
+                    income_strategy={"income_pass": True, "expected_pnl_krw": 1_000},
+                ),
+                _candidate(
+                    "HIGH.KS",
+                    income_strategy={"income_pass": True, "expected_pnl_krw": 9_000},
+                ),
+                _candidate(
+                    "MID.KS",
+                    income_strategy={"income_pass": True, "expected_pnl_krw": 5_000},
+                ),
+            ]
+            processed = []
+            real_import = __import__
+
+            def import_without_producer(name, *args, **kwargs):
+                if name == "core.shadow_measurement_producer":
+                    raise ImportError("producer-import-secret")
+                return real_import(name, *args, **kwargs)
+
+            def process(candidate, _policy):
+                processed.append(candidate["symbol"])
+                return {"symbol": candidate["symbol"], "stage": "verdict_recorded"}
+
+            with self.assertLogs(tap.log, level=logging.WARNING) as captured_logs:
+                with patch.object(
+                    tap, "_state_path", return_value=state_path
+                ), patch(
+                    "core.market_hours.is_kr_market_open", return_value=True
+                ), patch(
+                    "core.market_hours.get_market_session",
+                    return_value={"kr": "KR_REGULAR", "us": "CLOSED"},
+                ), patch(
+                    "core.toss_live_pilot_policy.compute_toss_live_pilot_policy",
+                    return_value=dict(_POLICY_ON),
+                ), patch(
+                    "core.dashboard_data.toss_buy_candidates_data",
+                    return_value={"items": items},
+                ), patch.object(
+                    tap,
+                    "retry_retryable_orders",
+                    return_value={"retried": 0, "sent": 0, "exhausted": 0},
+                ), patch.object(
+                    tap, "process_candidate", side_effect=process
+                ), patch(
+                    "builtins.__import__", side_effect=import_without_producer
+                ):
+                    result = tap.run_toss_autonomous_pipeline(now=_NOW, force=True)
+
+        self.assertEqual(result["attempted"], 3)
+        self.assertEqual(processed, ["HIGH.KS", "MID.KS", "LOW.KS"])
+        log_output = "\n".join(captured_logs.output)
+        self.assertIn("ImportError", log_output)
+        self.assertNotIn("producer-import-secret", log_output)
 
     def test_throttled(self):
         with tempfile.TemporaryDirectory() as tmp:

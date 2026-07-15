@@ -31,6 +31,7 @@ verification DB에 남으므로 사후 검증 가능.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -45,6 +46,11 @@ _DEFAULT_THROTTLE_MINUTES = 10  # 파이프라인 실행 최소 간격 (기본 1
 _MIN_THROTTLE_MINUTES = 5       # 과도 단축 방지 하한
 _MAX_ATTEMPTS_PER_RUN = 3       # 1회 실행당 최대 후보 처리 수
 _STATE_FILE = "toss_auto_pipeline_state.json"
+
+
+def _utc_now() -> datetime:
+    """Return the actual timezone-aware UTC clock value."""
+    return datetime.now(timezone.utc)
 
 
 def _throttle_minutes() -> int:
@@ -111,19 +117,56 @@ def _save_state(state: dict) -> None:
 
 # ── 후보 선별 ────────────────────────────────────────────────────
 
-def select_ready_candidates(limit: int = 10, market: str = "KR") -> tuple[list[dict], list[dict]]:
+def select_ready_candidates(
+    limit: int = 10,
+    market: str = "KR",
+    *,
+    cohort_consumer=None,
+) -> tuple[list[dict], list[dict]]:
     """stock_agent_ready 후보와 미달 후보(사유 포함)를 분리 반환.
 
     market: "KR" | "US" | "ALL". 자동 파이프라인은 현재 거래 가능 세션의
     시장만 후보로 가져와 KR 원화 소진이 US 달러 후보를 밀어내지 않게 한다.
+
+    cohort_consumer는 provider가 반환한 최대 10건의 deep-copy만 받는다.
+    consumer의 변조·예외는 기존 후보 분리/정렬/주문 경로에 영향을 주지 않는다.
 
     Returns:
         (ready, not_ready) — not_ready 항목은 진단용 {symbol, reason}
     """
     from core.dashboard_data import toss_buy_candidates_data
 
-    data = toss_buy_candidates_data(limit=limit, market=market) or {}
-    items = data.get("items") or []
+    try:
+        bounded_limit = max(0, min(int(limit), 10))
+    except (TypeError, ValueError):
+        bounded_limit = 10
+
+    data = toss_buy_candidates_data(limit=bounded_limit, market=market) or {}
+    captured_at_utc = _utc_now()
+    raw_items = data.get("items") or []
+    items = list(raw_items[:10]) if isinstance(raw_items, (list, tuple)) else []
+    scan_summary = data.get("scan_summary")
+    raw_fallback = (
+        scan_summary.get("dependency_fallback_used")
+        if isinstance(scan_summary, dict)
+        else None
+    )
+    fallback_used = raw_fallback if type(raw_fallback) is bool else None
+
+    if cohort_consumer is not None:
+        try:
+            cohort_consumer(
+                copy.deepcopy(items),
+                market_scope=market,
+                captured_at_utc=captured_at_utc,
+                fallback_used=fallback_used,
+            )
+        except Exception as exc:
+            log.warning(
+                "shadow cohort consumer failed: error_type=%s",
+                type(exc).__name__,
+            )
+
     ready: list[dict] = []
     not_ready: list[dict] = []
     for item in items:
@@ -677,9 +720,23 @@ def run_toss_autonomous_pipeline(
     if state.get("attempted_date") != today:
         attempted_map = {}
 
-    # 후보 선별
+    # 후보 선별. Shadow producer는 best-effort 관측 계층이며 import 실패도
+    # 기존 주문 후보/정렬/실행 경로를 바꾸지 않는다.
     try:
-        ready, not_ready = select_ready_candidates(market=active_market)
+        from core.shadow_measurement_producer import enqueue_final_candidate_cohort
+        cohort_consumer = enqueue_final_candidate_cohort
+    except Exception as exc:
+        log.warning(
+            "shadow cohort producer unavailable: error_type=%s",
+            type(exc).__name__,
+        )
+        cohort_consumer = None
+
+    try:
+        ready, not_ready = select_ready_candidates(
+            market=active_market,
+            cohort_consumer=cohort_consumer,
+        )
     except Exception as e:
         log.warning("auto pipeline candidate fetch failed: %s", e)
         ready, not_ready = [], [{"symbol": "", "reason": f"candidate_fetch_failed: {e}"}]
