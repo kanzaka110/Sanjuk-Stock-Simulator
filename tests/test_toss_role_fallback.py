@@ -211,3 +211,105 @@ def test_non_bool_policy_autonomous_irrelevant(
     assert _isolated_via_client() is True
     _clean_role_env.setattr(sys, "argv", ["main.py", "bot"])
     assert _isolated_via_client() is False
+
+
+# ── Task 4.1A3-1: 정책 '호출 예외' parity matrix ──────────────────
+
+@pytest.fixture()
+def _policy_call_raises(monkeypatch):
+    """import는 성공하지만 호출 시 예외가 나는 정책 함수."""
+    import core.toss_readonly_snapshot as trs
+
+    def broken():
+        raise RuntimeError("policy call failed")
+    monkeypatch.setattr(trs, "should_consume_snapshot", broken)
+    yield
+
+
+_CALL_EXC_MATRIX = [
+    # (role, argv, expect_consumer)
+    (None, ["main.py", "briefing"], True),
+    ("snapshot_consumer", ["main.py", "bot"], True),
+    ("broker_owner", ["some_tool.py"], False),
+    (None, ["main.py", "bot"], False),
+    (None, ["main.py", "monitor"], False),
+    ("weird_role", ["main.py", "bot"], False),      # unknown → argv fallback
+    ("weird_role", ["main.py", "briefing"], True),
+]
+
+
+@pytest.mark.parametrize("role,argv,expect_consumer", _CALL_EXC_MATRIX)
+def test_policy_call_exception_parity(_policy_call_raises, _clean_role_env,
+                                      role, argv, expect_consumer):
+    if role is not None:
+        _clean_role_env.setenv("TOSS_PROCESS_ROLE", role)
+    _clean_role_env.setattr(sys, "argv", argv)
+    assert _isolated_via_client() is expect_consumer
+    assert _isolated_via_dashboard() is expect_consumer
+
+
+@pytest.mark.parametrize("mode", ["true", "false"])
+def test_policy_call_exception_autonomous_irrelevant(
+        _policy_call_raises, _clean_role_env, mode):
+    _clean_role_env.setenv("TOSS_AUTONOMOUS_MODE", mode)
+    _clean_role_env.setattr(sys, "argv", ["main.py", "briefing"])
+    assert _isolated_via_client() is True
+    assert _isolated_via_dashboard() is True
+    _clean_role_env.setattr(sys, "argv", ["main.py", "bot"])
+    assert _isolated_via_client() is False
+    assert _isolated_via_dashboard() is False
+
+
+# ── Task 4.1A3-2: consumer 실주문 submit sink POST=0 ─────────────
+
+_FAKE_BUY_BODY = {
+    "symbol": "AAPL", "side": "BUY", "quantity": 1,
+    "order_type": "limit", "limit_price": 100.0,
+}
+
+
+def _submit_with_sinks(monkeypatch, argv):
+    """submit_order를 consumer 상태에서 호출 — 전 네트워크는 AssertionError sink."""
+    import requests as requests_lib
+    import core.toss_client as tc
+    import core.toss_live_order_http as http_mod
+
+    monkeypatch.setattr(sys, "argv", argv)
+    # stale memory token 주입 — 사용되면 안 됨
+    monkeypatch.setattr(tc, "_mem_token", "stale-token-must-not-be-used",
+                        raising=False)
+    monkeypatch.setattr(tc, "_mem_expires", 9e12, raising=False)
+    # account seq는 fake로 통과시켜 token gate까지 확실히 도달
+    monkeypatch.setattr(http_mod, "_resolve_account_seq", lambda seq=None: "1")
+
+    with patch.object(requests_lib, "post",
+                      side_effect=AssertionError("order/OAuth POST")) as post_sink, \
+         patch.object(requests_lib, "get",
+                      side_effect=AssertionError("broker/reconciliation GET")) as get_sink:
+        result = http_mod.submit_order(dict(_FAKE_BUY_BODY))
+    return result, post_sink, get_sink
+
+
+def _assert_submit_blocked(result, post_sink, get_sink):
+    assert result.get("blocked") is True
+    assert result.get("live_order_sent") is False
+    assert result.get("reason") == "token_unavailable"
+    assert post_sink.call_count == 0
+    assert get_sink.call_count == 0
+    assert "stale-token-must-not-be-used" not in str(result)
+
+
+@pytest.mark.parametrize("bad", _NON_BOOL_VALUES)
+@pytest.mark.parametrize("argv", [["main.py", "briefing"], ["plain_tool.py"]])
+def test_submit_order_sink_non_bool_policy(
+        _policy_returns, _clean_role_env, monkeypatch, bad, argv):
+    _policy_returns(bad)
+    result, post_sink, get_sink = _submit_with_sinks(monkeypatch, argv)
+    _assert_submit_blocked(result, post_sink, get_sink)
+
+
+@pytest.mark.parametrize("argv", [["main.py", "briefing"], ["plain_tool.py"]])
+def test_submit_order_sink_policy_call_exception(
+        _policy_call_raises, _clean_role_env, monkeypatch, argv):
+    result, post_sink, get_sink = _submit_with_sinks(monkeypatch, argv)
+    _assert_submit_blocked(result, post_sink, get_sink)
