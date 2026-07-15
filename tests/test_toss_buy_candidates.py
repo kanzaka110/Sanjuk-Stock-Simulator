@@ -1089,9 +1089,6 @@ class TestPendingSymbolLifecycle:
 
     def test_repeat_calls_do_not_mutate_db(self, tmp_path):
         import sqlite3
-        from pathlib import Path as _P
-        if not _P("db/data/toss_live_pilot.db").exists():
-            pytest.skip("운영 DB 없는 환경(worktree) — live 전용 검증")
         # 실제 운영 DB 행 수가 반복 호출로 변하지 않음 (read-only 계약)
         def count():
             c = sqlite3.connect(
