@@ -79,12 +79,18 @@ def _broker_access_isolated_for_process() -> bool:
         from core.toss_readonly_snapshot import should_consume_snapshot
         return should_consume_snapshot()
     except Exception:
-        # Snapshot 정책 import가 깨지면 기존 dashboard 격리는 최소한 유지한다.
+        # (2026-07-15 Task 4.1A) 정책 모듈이 깨져도 fail-open 금지 —
+        # process_role과 동일한 role 계약으로 판정한다. AUTONOMOUS_MODE는
+        # 판정에서 제거 (env 누락 프로세스가 구멍이 되던 원인).
+        role = str(os.environ.get("TOSS_PROCESS_ROLE", "")).strip().lower()
+        if role == "broker_owner":
+            return False
+        if role == "snapshot_consumer":
+            return True
         args = {str(arg).strip().lower() for arg in sys.argv[1:]}
-        autonomous = str(os.environ.get("TOSS_AUTONOMOUS_MODE", "")).strip().lower() in {
-            "1", "true", "yes", "on", "y",
-        }
-        return "dashboard" in args and autonomous
+        if args & {"bot", "monitor"}:
+            return False   # 소유 프로세스는 fallback에서도 owner 유지
+        return True        # 그 외 전부 consumer (fail-closed)
 
 
 # ─── 민감정보 마스킹 ────────────────────────────────

@@ -94,8 +94,17 @@ def _dashboard_toss_broker_reads_isolated() -> bool:
         from core.toss_readonly_snapshot import should_consume_snapshot
         return should_consume_snapshot()
     except Exception:
-        args = [str(arg).strip().lower() for arg in sys.argv[1:]]
-        return "dashboard" in args and _env_truthy("TOSS_AUTONOMOUS_MODE")
+        # (2026-07-15 Task 4.1A) 정책 모듈이 깨져도 fail-open 금지 —
+        # role 계약(명시 role → argv bot/monitor → consumer)으로 판정.
+        role = str(os.environ.get("TOSS_PROCESS_ROLE", "")).strip().lower()
+        if role == "broker_owner":
+            return False
+        if role == "snapshot_consumer":
+            return True
+        args = {str(arg).strip().lower() for arg in sys.argv[1:]}
+        if args & {"bot", "monitor"}:
+            return False
+        return True
 
 
 def _csv_env(name: str) -> list[str]:
