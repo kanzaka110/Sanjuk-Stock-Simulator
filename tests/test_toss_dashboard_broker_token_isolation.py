@@ -187,9 +187,13 @@ def test_bot_process_token_path_not_blocked(monkeypatch, _restore_token_state):
     assert post_mock.call_count == 1
 
 
-def test_dashboard_without_autonomous_mode_not_isolated(monkeypatch, _restore_token_state):
-    "자율모드 꺼진 dashboard는 격리 대상 아님 (조건 AND)."
+def test_dashboard_isolated_even_without_autonomous_mode(monkeypatch, _restore_token_state):
+    """(2026-07-15 계약 반전) 자율모드 여부와 무관하게 비소유는 항상 격리.
+
+    구계약(조건 AND)은 env 미로드 크론 브리핑이 토큰을 발급해 bot 토큰을
+    무효화하는 401 경쟁의 원인이었다 — 토큰 단일 소유는 불변식이다.
+    """
     tc = _restore_token_state
     monkeypatch.setenv("TOSS_AUTONOMOUS_MODE", "false")
     monkeypatch.setattr(sys, "argv", ["main.py", "dashboard"])
-    assert tc._broker_access_isolated_for_process() is False
+    assert tc._broker_access_isolated_for_process() is True

@@ -22,6 +22,16 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 
+@pytest.fixture(autouse=True)
+def _summary_tests_run_as_owner(monkeypatch):
+    """(2026-07-15 계약) 비소유 프로세스는 브로커 직접 조회가 차단된다.
+
+    이 파일은 브로커 응답 → 요약 가공 로직 자체를 검증하므로 owner를
+    명시한다. 운영 dashboard는 consumer로서 snapshot을 소비한다.
+    """
+    monkeypatch.setenv("TOSS_PROCESS_ROLE", "broker_owner")
+
+
 # ═══ dashboard_data.toss_account_summary 테스트 ═══
 
 class TestTossAccountSummary:

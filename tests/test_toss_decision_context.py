@@ -16,6 +16,18 @@ from unittest.mock import patch, MagicMock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _context_tests_run_as_owner(monkeypatch):
+    """(2026-07-15 계약) 비소유 프로세스는 브로커 직접 조회가 차단된다.
+
+    이 파일은 브로커 응답 → decision context 가공 로직을 검증하므로
+    owner를 명시한다. 운영 경로는 consumer로서 snapshot을 소비한다.
+    """
+    monkeypatch.setenv("TOSS_PROCESS_ROLE", "broker_owner")
+
 from core.toss_decision_context import get_toss_decision_context, context_to_briefing_text, format_toss_live_pilot_briefing_lessons
 
 

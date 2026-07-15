@@ -29,6 +29,16 @@ if str(_ROOT) not in sys.path:
 
 
 @pytest.fixture(autouse=True)
+def _issuer_tests_run_as_owner(monkeypatch):
+    """(2026-07-15 계약) 비소유 프로세스는 토큰 발급이 차단된다.
+
+    이 파일은 발급·동시성·401 무효화 로직 자체를 검증하므로
+    owner role을 명시해 발급 경로를 연다.
+    """
+    monkeypatch.setenv("TOSS_PROCESS_ROLE", "broker_owner")
+
+
+@pytest.fixture(autouse=True)
 def _clear_toss_account_seq_cache():
     import core.toss_live_order_http as oh
     if hasattr(oh, "_clear_account_seq_cache"):

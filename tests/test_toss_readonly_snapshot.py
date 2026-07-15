@@ -442,3 +442,43 @@ def test_snapshot_import_smoke_has_no_cycle():
     importlib.import_module("core.dashboard_data")
     importlib.import_module("core.toss_client")
     importlib.import_module("core.toss_decision_context")
+
+
+class TestConsumerBlockWithoutAutonomousEnv:
+    """토큰 단일 소유 완성형 — autonomous env 없어도 비소유는 consumer.
+
+    2026-07-15 실측: 크론 브리핑(.env만 로드, TOSS_AUTONOMOUS_MODE 미설정)이
+    consumer 차단을 우회해 토큰을 발급 → bot 토큰 무효화 → 401 경쟁 재발.
+    비소유 프로세스는 env와 무관하게 항상 snapshot consumer여야 한다.
+    """
+
+    def test_briefing_without_autonomous_env_is_consumer(self, monkeypatch):
+        import sys
+        from core import toss_readonly_snapshot as trs
+        monkeypatch.delenv("TOSS_AUTONOMOUS_MODE", raising=False)
+        monkeypatch.delenv("TOSS_PROCESS_ROLE", raising=False)
+        monkeypatch.setattr(sys, "argv", ["main.py", "briefing"])
+        assert trs.should_consume_snapshot() is True
+
+    def test_plain_tool_without_env_is_consumer(self, monkeypatch):
+        import sys
+        from core import toss_readonly_snapshot as trs
+        monkeypatch.delenv("TOSS_AUTONOMOUS_MODE", raising=False)
+        monkeypatch.delenv("TOSS_PROCESS_ROLE", raising=False)
+        monkeypatch.setattr(sys, "argv", ["some_tool.py"])
+        assert trs.should_consume_snapshot() is True
+
+    def test_bot_is_still_owner(self, monkeypatch):
+        import sys
+        from core import toss_readonly_snapshot as trs
+        monkeypatch.delenv("TOSS_AUTONOMOUS_MODE", raising=False)
+        monkeypatch.delenv("TOSS_PROCESS_ROLE", raising=False)
+        monkeypatch.setattr(sys, "argv", ["main.py", "bot"])
+        assert trs.should_consume_snapshot() is False
+
+    def test_explicit_owner_role_respected(self, monkeypatch):
+        import sys
+        from core import toss_readonly_snapshot as trs
+        monkeypatch.setenv("TOSS_PROCESS_ROLE", "broker_owner")
+        monkeypatch.setattr(sys, "argv", ["some_tool.py"])
+        assert trs.should_consume_snapshot() is False

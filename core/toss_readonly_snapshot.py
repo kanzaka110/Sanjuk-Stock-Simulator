@@ -109,7 +109,15 @@ def is_broker_owner_process() -> bool:
 
 
 def should_consume_snapshot() -> bool:
-    return _truthy("TOSS_AUTONOMOUS_MODE") and process_role() != ROLE_OWNER
+    """비소유 프로세스는 env와 무관하게 항상 snapshot consumer다.
+
+    (2026-07-15 계약 변경) 기존 'TOSS_AUTONOMOUS_MODE AND 비소유' 조건은
+    env를 로드하지 않는 크론 브리핑·도구가 차단을 우회해 토큰을 발급하고
+    bot 토큰을 무효화하는 401 경쟁을 낳았다. 토큰 단일 소유는 운영 모드와
+    무관한 불변식이므로 role만으로 판정한다. 예외가 필요한 도구는
+    TOSS_PROCESS_ROLE=broker_owner를 명시해야 한다.
+    """
+    return process_role() != ROLE_OWNER
 
 
 def _snapshot_path() -> Path:
