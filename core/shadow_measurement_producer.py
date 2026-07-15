@@ -14,12 +14,17 @@ import re
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 
 FEATURE_SET_VERSION = "toss_final_candidate_v1"
 SOURCE_NAME = "toss_final_candidate"
 _MAX_COHORT_SIZE = 10
+_MAX_TEXT_CHARS = 2048
+_MAX_LIST_ITEMS = 64
+_MAX_CANDIDATE_BYTES = 64 * 1024
+_MAX_COHORT_BYTES = 256 * 1024
+_MAX_INTEGER_BITS = 63
 _SOURCE_SNAPSHOT_RE = re.compile(r"^srcobs_[0-9a-f]{64}$")
 log = logging.getLogger(__name__)
 _WORKER_LOCK = threading.Lock()
@@ -137,8 +142,10 @@ def candidate_snapshot_sha256(projection: Mapping[str, Any]) -> str:
 
 
 def _finite_number(name: str, value: Any) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if type(value) not in (int, float):
         raise ValueError(f"{name}_invalid")
+    if type(value) is int and value.bit_length() > _MAX_INTEGER_BITS:
+        raise ValueError(f"{name}_out_of_range")
     number = float(value)
     if not math.isfinite(number):
         raise ValueError(f"{name}_non_finite")
@@ -148,6 +155,8 @@ def _finite_number(name: str, value: Any) -> float:
 def _text(name: str, value: Any) -> str:
     if type(value) is not str:
         raise ValueError(f"{name}_invalid")
+    if len(value) > _MAX_TEXT_CHARS:
+        raise ValueError(f"{name}_too_long")
     if value.strip().lower() in _STRING_BOOL_VALUES:
         raise ValueError(f"{name}_string_boolean")
     return value
@@ -160,8 +169,10 @@ def _bool(name: str, value: Any) -> bool:
 
 
 def _string_list(name: str, value: Any) -> list[str]:
-    if not isinstance(value, (list, tuple)):
+    if type(value) not in (list, tuple):
         raise ValueError(f"{name}_invalid")
+    if len(value) > _MAX_LIST_ITEMS:
+        raise ValueError(f"{name}_too_many_items")
     return [_text(name, item) for item in value]
 
 
@@ -193,7 +204,7 @@ def _score_proof(candidate: Mapping[str, Any]) -> dict[str, Any]:
     raw = candidate.get("quality_breakdown")
     if raw is None:
         return {}
-    if not isinstance(raw, Mapping):
+    if type(raw) is not dict:
         raise ValueError("quality_breakdown_invalid")
     proof: dict[str, Any] = {}
     for name in _SCORE_NUMERIC_FIELDS:
@@ -202,7 +213,7 @@ def _score_proof(candidate: Mapping[str, Any]) -> dict[str, Any]:
     for name in _SCORE_INTEGER_FIELDS:
         if name in raw:
             value = raw[name]
-            if type(value) is not int:
+            if type(value) is not int or value.bit_length() > _MAX_INTEGER_BITS:
                 raise ValueError(f"{name}_invalid")
             proof[name] = value
     for name in _SCORE_BOOL_FIELDS:
@@ -232,7 +243,7 @@ def _final_state(candidate: Mapping[str, Any]) -> dict[str, Any]:
 
     raw_income = candidate.get("income_strategy")
     if raw_income is not None:
-        if not isinstance(raw_income, Mapping):
+        if type(raw_income) is not dict:
             raise ValueError("income_strategy_invalid")
         income: dict[str, Any] = {}
         for name in _INCOME_BOOL_FIELDS:
@@ -260,7 +271,7 @@ def project_final_candidate(
     fallback_used: bool = False,
 ) -> dict[str, Any]:
     """Return the deterministic, allowlisted projection of one final candidate."""
-    if not isinstance(candidate, Mapping):
+    if type(candidate) is not dict:
         raise ValueError("candidate_invalid")
     if type(cohort_size) is not int or not 1 <= cohort_size <= 10:
         raise ValueError("cohort_size_invalid")
@@ -270,31 +281,43 @@ def project_final_candidate(
         or cohort_position >= cohort_size
     ):
         raise ValueError("cohort_position_invalid")
-    if type(market_scope) is not str or market_scope not in _MARKET_SCOPES:
+    if (
+        type(market_scope) is not str
+        or len(market_scope) > 3
+        or market_scope not in _MARKET_SCOPES
+    ):
         raise ValueError("market_scope_invalid")
     fallback = _bool("fallback_used", fallback_used)
 
     raw_symbol = candidate.get("symbol")
-    if type(raw_symbol) is not str:
+    if type(raw_symbol) is not str or len(raw_symbol) > 32:
         raise ValueError("symbol_invalid")
     symbol = raw_symbol.strip().upper()
     if not _SYMBOL_RE.fullmatch(symbol):
         raise ValueError("symbol_invalid")
 
     raw_side = candidate.get("side")
-    if type(raw_side) is not str or raw_side.strip().lower() not in {"buy", "sell"}:
+    if (
+        type(raw_side) is not str
+        or len(raw_side) > 16
+        or raw_side.strip().lower() not in {"buy", "sell"}
+    ):
         raise ValueError("side_invalid")
     side = raw_side.strip().upper()
 
     raw_market = candidate.get("market")
-    if type(raw_market) is not str or raw_market not in _MARKETS:
+    if type(raw_market) is not str or len(raw_market) > 3 or raw_market not in _MARKETS:
         raise ValueError("market_invalid")
     market = raw_market
     if market_scope != "ALL" and market != market_scope:
         raise ValueError("market_scope_mismatch")
 
     raw_currency = candidate.get("currency")
-    if type(raw_currency) is not str or raw_currency not in {"KRW", "USD"}:
+    if (
+        type(raw_currency) is not str
+        or len(raw_currency) > 3
+        or raw_currency not in {"KRW", "USD"}
+    ):
         raise ValueError("currency_invalid")
     currency = raw_currency
     if currency != {"KR": "KRW", "US": "USD"}[market]:
@@ -306,7 +329,7 @@ def project_final_candidate(
         raise ValueError("symbol_market_mismatch")
 
     bucket = candidate.get("decision_bucket")
-    if type(bucket) is not str or bucket not in _BUCKETS:
+    if type(bucket) is not str or len(bucket) > 32 or bucket not in _BUCKETS:
         raise ValueError("decision_bucket_invalid")
 
     proof = _score_proof(candidate)
@@ -352,10 +375,14 @@ def sanitize_final_candidate_cohort(
     fallback_used: bool,
 ) -> SanitizedFinalCandidateCohort:
     """Project at most ten candidates into immutable canonical-JSON records."""
-    if not isinstance(candidates, (list, tuple)):
+    if type(candidates) not in (list, tuple):
         raise ValueError("candidates_invalid")
     captured = _utc_datetime("captured_at_utc", captured_at_utc)
-    if type(market_scope) is not str or market_scope not in _MARKET_SCOPES:
+    if (
+        type(market_scope) is not str
+        or len(market_scope) > 3
+        or market_scope not in _MARKET_SCOPES
+    ):
         raise ValueError("market_scope_invalid")
     fallback = _bool("fallback_used", fallback_used)
 
@@ -365,6 +392,7 @@ def sanitize_final_candidate_cohort(
 
     sanitized: list[SanitizedFinalCandidate] = []
     rejected = 0
+    cohort_bytes = 0
     for position, candidate in enumerate(bounded):
         try:
             projection = project_final_candidate(
@@ -375,13 +403,19 @@ def sanitize_final_candidate_cohort(
                 fallback_used=fallback,
             )
             payload_json = canonical_json(projection)
-            payload_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+            payload_bytes = payload_json.encode("utf-8")
+            if len(payload_bytes) > _MAX_CANDIDATE_BYTES:
+                raise ValueError("candidate_payload_too_large")
+            if cohort_bytes + len(payload_bytes) > _MAX_COHORT_BYTES:
+                raise ValueError("cohort_payload_too_large")
+            payload_hash = hashlib.sha256(payload_bytes).hexdigest()
             sanitized.append(
                 SanitizedFinalCandidate(
                     payload_json=payload_json,
                     candidate_snapshot_sha256=payload_hash,
                 )
             )
+            cohort_bytes += len(payload_bytes)
         except Exception as exc:
             rejected += 1
             log.warning(
@@ -535,39 +569,53 @@ def _persist_worker(
     batch: SanitizedFinalCandidateCohort,
     source_store,
     shadow_store,
+    observation_consumer: Callable[[tuple[str, ...]], Any] | None,
 ) -> None:
     try:
-        persist_final_candidate_cohort(
-            batch,
-            source_store=source_store,
-            shadow_store=shadow_store,
-        )
-    except Exception as exc:
-        log.warning(
-            "final cohort worker failed: error_type=%s failed_count=%d",
-            type(exc).__name__,
-            len(batch.candidates),
-        )
+        try:
+            persist_final_candidate_cohort(
+                batch,
+                source_store=source_store,
+                shadow_store=shadow_store,
+            )
+        except Exception as exc:
+            log.warning(
+                "final cohort worker failed: error_type=%s failed_count=%d",
+                type(exc).__name__,
+                len(batch.candidates),
+            )
+        if observation_consumer is not None:
+            try:
+                symbols = tuple(
+                    dict.fromkeys(
+                        payload["symbol"]
+                        for candidate in batch.candidates
+                        for payload in (json.loads(candidate.payload_json),)
+                        if payload.get("market") == "KR"
+                    )
+                )
+                if symbols:
+                    observation_consumer(symbols)
+            except Exception as exc:
+                log.warning(
+                    "market observation consumer failed: error_type=%s failed_count=%d",
+                    type(exc).__name__,
+                    len(batch.candidates),
+                )
     finally:
         _WORKER_LOCK.release()
 
 
-def enqueue_final_candidate_cohort(
-    candidates: Sequence[Mapping[str, Any]],
+def enqueue_sanitized_final_candidate_cohort(
+    batch: SanitizedFinalCandidateCohort,
     *,
-    market_scope: str,
-    captured_at_utc: datetime,
-    fallback_used: bool,
     source_store=None,
     shadow_store=None,
+    observation_consumer: Callable[[tuple[str, ...]], Any] | None = None,
 ) -> bool:
-    """Start one best-effort daemon worker, or immediately drop while busy."""
-    batch = sanitize_final_candidate_cohort(
-        candidates,
-        market_scope=market_scope,
-        captured_at_utc=captured_at_utc,
-        fallback_used=fallback_used,
-    )
+    """Enqueue an already bounded immutable batch without touching raw candidates."""
+    if type(batch) is not SanitizedFinalCandidateCohort:
+        raise ValueError("sanitized_cohort_invalid")
     if not batch.candidates:
         return False
     if not _WORKER_LOCK.acquire(blocking=False):
@@ -575,7 +623,7 @@ def enqueue_final_candidate_cohort(
     try:
         worker = threading.Thread(
             target=_persist_worker,
-            args=(batch, source_store, shadow_store),
+            args=(batch, source_store, shadow_store, observation_consumer),
             daemon=True,
             name="toss-final-cohort-shadow",
         )
@@ -589,3 +637,79 @@ def enqueue_final_candidate_cohort(
         )
         return False
     return True
+
+
+def enqueue_final_candidate_cohort(
+    candidates: Sequence[Mapping[str, Any]],
+    *,
+    market_scope: str,
+    captured_at_utc: datetime,
+    fallback_used: bool,
+    source_store=None,
+    shadow_store=None,
+    observation_consumer: Callable[[tuple[str, ...]], Any] | None = None,
+) -> bool:
+    """Compatibility wrapper that sanitizes raw input before enqueueing."""
+    batch = sanitize_final_candidate_cohort(
+        candidates,
+        market_scope=market_scope,
+        captured_at_utc=captured_at_utc,
+        fallback_used=fallback_used,
+    )
+    return enqueue_sanitized_final_candidate_cohort(
+        batch,
+        source_store=source_store,
+        shadow_store=shadow_store,
+        observation_consumer=observation_consumer,
+    )
+
+
+def _market_observation_consumer():
+    try:
+        from core.kr_market_observation_collector import (
+            enqueue_candidate_observation_cycle,
+        )
+
+        return enqueue_candidate_observation_cycle
+    except Exception as exc:
+        log.warning(
+            "market observation consumer import failed: error_type=%s",
+            type(exc).__name__,
+        )
+        return None
+
+
+def enqueue_sanitized_final_candidate_cohort_with_market_observations(
+    batch: SanitizedFinalCandidateCohort,
+    *,
+    source_store=None,
+    shadow_store=None,
+) -> bool:
+    """Production adapter for a provider-boundary sanitized immutable batch."""
+    return enqueue_sanitized_final_candidate_cohort(
+        batch,
+        source_store=source_store,
+        shadow_store=shadow_store,
+        observation_consumer=_market_observation_consumer(),
+    )
+
+
+def enqueue_final_candidate_cohort_with_market_observations(
+    candidates: Sequence[Mapping[str, Any]],
+    *,
+    market_scope: str,
+    captured_at_utc: datetime,
+    fallback_used: bool,
+    source_store=None,
+    shadow_store=None,
+) -> bool:
+    """Compatibility adapter for callers that still supply raw candidates."""
+    return enqueue_final_candidate_cohort(
+        candidates,
+        market_scope=market_scope,
+        captured_at_utc=captured_at_utc,
+        fallback_used=fallback_used,
+        source_store=source_store,
+        shadow_store=shadow_store,
+        observation_consumer=_market_observation_consumer(),
+    )

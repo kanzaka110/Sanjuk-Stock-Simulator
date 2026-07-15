@@ -10,6 +10,7 @@ import math
 import sqlite3
 import sys
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -359,6 +360,106 @@ def test_direct_sanitize_rejects_string_fallback_boolean():
         )
 
 
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        _candidate(decision_reason="x" * 2049),
+        _candidate(missing_fields=["x"] * 65),
+        _candidate(missing_fields=["x" * 1024] * 64),
+    ],
+    ids=["text-cap", "list-count-cap", "payload-byte-cap"],
+)
+def test_sanitize_rejects_candidates_outside_bounded_projection_caps(candidate):
+    from core.shadow_measurement_producer import sanitize_final_candidate_cohort
+
+    batch = sanitize_final_candidate_cohort(
+        [candidate],
+        market_scope="KR",
+        captured_at_utc=_CAPTURED_AT,
+        fallback_used=False,
+    )
+
+    assert batch.candidates == ()
+    assert batch.rejected_count == 1
+
+
+def test_oversized_known_text_is_rejected_before_linear_normalization():
+    from core.shadow_measurement_producer import sanitize_final_candidate_cohort
+
+    candidate = _candidate(decision_reason="x" * (32 * 1024 * 1024))
+    started = time.perf_counter()
+    batch = sanitize_final_candidate_cohort(
+        [candidate],
+        market_scope="KR",
+        captured_at_utc=_CAPTURED_AT,
+        fallback_used=False,
+    )
+    elapsed = time.perf_counter() - started
+
+    assert batch.candidates == ()
+    assert batch.rejected_count == 1
+    assert elapsed < 0.02
+
+
+def test_identity_scope_and_integer_caps_precede_linear_conversion():
+    from core.shadow_measurement_producer import sanitize_final_candidate_cohort
+
+    huge_text = "x" * (32 * 1024 * 1024)
+    for field in ("symbol", "side", "market", "currency", "decision_bucket"):
+        candidate = _candidate(**{field: huge_text})
+        started = time.perf_counter()
+        batch = sanitize_final_candidate_cohort(
+            [candidate],
+            market_scope="KR",
+            captured_at_utc=_CAPTURED_AT,
+            fallback_used=False,
+        )
+        assert time.perf_counter() - started < 0.02
+        assert batch.candidates == () and batch.rejected_count == 1
+
+    started = time.perf_counter()
+    with pytest.raises(ValueError, match="market_scope_invalid"):
+        sanitize_final_candidate_cohort(
+            [_candidate()],
+            market_scope=huge_text,
+            captured_at_utc=_CAPTURED_AT,
+            fallback_used=False,
+        )
+    assert time.perf_counter() - started < 0.02
+
+    started = time.perf_counter()
+    batch = sanitize_final_candidate_cohort(
+        [_candidate(quality_score=1 << 1_000_000)],
+        market_scope="KR",
+        captured_at_utc=_CAPTURED_AT,
+        fallback_used=False,
+    )
+    assert time.perf_counter() - started < 0.02
+    assert batch.candidates == () and batch.rejected_count == 1
+
+
+def test_sanitize_rejects_dict_subclass_without_invoking_overridden_accessors():
+    from core.shadow_measurement_producer import sanitize_final_candidate_cohort
+
+    calls = []
+
+    class HostileDict(dict):
+        def get(self, *_args, **_kwargs):
+            calls.append(True)
+            raise AssertionError("subclass accessor must not run")
+
+    batch = sanitize_final_candidate_cohort(
+        [HostileDict(_candidate())],
+        market_scope="KR",
+        captured_at_utc=_CAPTURED_AT,
+        fallback_used=False,
+    )
+
+    assert calls == []
+    assert batch.candidates == ()
+    assert batch.rejected_count == 1
+
+
 def test_secret_candidate_is_rejected_before_worker_batch_boundary():
     from core.shadow_measurement_producer import sanitize_final_candidate_cohort
 
@@ -656,6 +757,176 @@ def test_enqueue_starts_one_daemon_with_only_an_immutable_sanitized_batch(
     assert source.count(source="toss_final_candidate", symbol="005930.KS") == 1
 
 
+def test_worker_enqueues_only_sanitized_kr_symbols_after_shadow_persistence(
+    tmp_path, monkeypatch
+):
+    import core.shadow_measurement_producer as producer
+
+    source, shadow = _real_stores(tmp_path)
+    observed = []
+
+    class InlineThread:
+        def __init__(self, *, target, args, daemon, name):
+            assert daemon is True
+            self.target = target
+            self.args = args
+
+        def start(self):
+            self.target(*self.args)
+
+    monkeypatch.setattr(producer.threading, "Thread", InlineThread)
+    accepted = producer.enqueue_final_candidate_cohort(
+        [
+            _candidate(raw_candidate_secret="must-not-reach-observer"),
+            _candidate("AAPL", market="US", currency="USD"),
+        ],
+        market_scope="ALL",
+        captured_at_utc=_CAPTURED_AT,
+        fallback_used=False,
+        source_store=source,
+        shadow_store=shadow,
+        observation_consumer=lambda symbols: observed.append(symbols),
+    )
+
+    assert accepted is True
+    assert observed == [("005930.KS",)]
+    assert "must-not-reach-observer" not in repr(observed)
+    with sqlite3.connect(source.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM source_observations").fetchone()[0] == 2
+
+
+def test_observation_consumer_failure_does_not_rollback_shadow_or_leak_text(
+    tmp_path, monkeypatch, caplog
+):
+    import core.shadow_measurement_producer as producer
+
+    source, shadow = _real_stores(tmp_path)
+    batch = producer.sanitize_final_candidate_cohort(
+        [_candidate()],
+        market_scope="KR",
+        captured_at_utc=_CAPTURED_AT,
+        fallback_used=False,
+    )
+
+    class InlineThread:
+        def __init__(self, *, target, args, daemon, name):
+            self.target = target
+            self.args = args
+
+        def start(self):
+            self.target(*self.args)
+
+    def fail(_symbols):
+        raise RuntimeError("observer-secret-must-not-be-logged")
+
+    monkeypatch.setattr(producer.threading, "Thread", InlineThread)
+    with caplog.at_level(logging.WARNING):
+        accepted = producer.enqueue_sanitized_final_candidate_cohort(
+            batch,
+            source_store=source,
+            shadow_store=shadow,
+            observation_consumer=fail,
+        )
+
+    assert accepted is True
+    with sqlite3.connect(source.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM source_observations").fetchone()[0] == 1
+    with sqlite3.connect(shadow.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM shadow_decisions").fetchone()[0] == 1
+    assert producer._WORKER_LOCK.acquire(blocking=False) is True
+    producer._WORKER_LOCK.release()
+    assert "RuntimeError" in caplog.text
+    assert "observer-secret-must-not-be-logged" not in caplog.text
+
+
+def test_production_adapter_import_failure_keeps_p2_persistence(
+    tmp_path, monkeypatch, caplog
+):
+    import builtins
+    import core.shadow_measurement_producer as producer
+
+    source, shadow = _real_stores(tmp_path)
+    batch = producer.sanitize_final_candidate_cohort(
+        [_candidate()],
+        market_scope="KR",
+        captured_at_utc=_CAPTURED_AT,
+        fallback_used=False,
+    )
+    real_import = builtins.__import__
+
+    class InlineThread:
+        def __init__(self, *, target, args, daemon, name):
+            self.target = target
+            self.args = args
+
+        def start(self):
+            self.target(*self.args)
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "core.kr_market_observation_collector":
+            raise ImportError("collector-import-secret")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(producer.threading, "Thread", InlineThread)
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    with caplog.at_level(logging.WARNING):
+        accepted = producer.enqueue_sanitized_final_candidate_cohort_with_market_observations(
+            batch,
+            source_store=source,
+            shadow_store=shadow,
+        )
+
+    assert accepted is True
+    with sqlite3.connect(source.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM source_observations").fetchone()[0] == 1
+    with sqlite3.connect(shadow.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM shadow_decisions").fetchone()[0] == 1
+    assert "ImportError" in caplog.text
+    assert "collector-import-secret" not in caplog.text
+
+
+def test_production_adapter_enqueues_real_collector_entrypoint_after_p2(
+    tmp_path, monkeypatch
+):
+    import core.kr_market_observation_collector as collector
+    import core.shadow_measurement_producer as producer
+
+    source, shadow = _real_stores(tmp_path)
+    batch = producer.sanitize_final_candidate_cohort(
+        [_candidate()],
+        market_scope="KR",
+        captured_at_utc=_CAPTURED_AT,
+        fallback_used=False,
+    )
+    observed = []
+
+    class InlineThread:
+        def __init__(self, *, target, args, daemon, name):
+            self.target = target
+            self.args = args
+
+        def start(self):
+            self.target(*self.args)
+
+    monkeypatch.setattr(producer.threading, "Thread", InlineThread)
+    monkeypatch.setattr(
+        collector,
+        "enqueue_candidate_observation_cycle",
+        lambda symbols: observed.append(symbols) or True,
+    )
+
+    accepted = producer.enqueue_sanitized_final_candidate_cohort_with_market_observations(
+        batch,
+        source_store=source,
+        shadow_store=shadow,
+    )
+
+    assert accepted is True
+    assert observed == [("005930.KS",)]
+    with sqlite3.connect(shadow.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM shadow_decisions").fetchone()[0] == 1
+
+
 def test_real_thread_returns_before_db_completion_and_never_writes_on_main_thread():
     import core.shadow_measurement_producer as producer
 
@@ -682,11 +953,14 @@ def test_real_thread_returns_before_db_completion_and_never_writes_on_main_threa
             observed["shadow_features"] = kwargs["features"]
             shadow_finished.set()
 
-    accepted = producer.enqueue_final_candidate_cohort(
+    batch = producer.sanitize_final_candidate_cohort(
         [_candidate(raw_account="must-not-reach-worker")],
         market_scope="KR",
         captured_at_utc=_CAPTURED_AT,
         fallback_used=False,
+    )
+    accepted = producer.enqueue_sanitized_final_candidate_cohort(
+        batch,
         source_store=BlockingSource(),
         shadow_store=RecordingShadow(),
     )
@@ -715,14 +989,15 @@ def test_enqueue_thread_start_failure_releases_lock_without_logging_exception_te
             raise RuntimeError("secret-start-error-must-not-be-logged")
 
     monkeypatch.setattr(producer.threading, "Thread", FailingThread)
+    batch = producer.sanitize_final_candidate_cohort(
+        [_candidate()],
+        market_scope="KR",
+        captured_at_utc=_CAPTURED_AT,
+        fallback_used=False,
+    )
 
     with caplog.at_level(logging.WARNING):
-        accepted = producer.enqueue_final_candidate_cohort(
-            [_candidate()],
-            market_scope="KR",
-            captured_at_utc=_CAPTURED_AT,
-            fallback_used=False,
-        )
+        accepted = producer.enqueue_sanitized_final_candidate_cohort(batch)
 
     assert accepted is False
     assert producer._WORKER_LOCK.acquire(blocking=False) is True

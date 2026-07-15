@@ -31,7 +31,6 @@ verification DB에 남으므로 사후 검증 가능.
 
 from __future__ import annotations
 
-import copy
 import json
 import logging
 import os
@@ -128,8 +127,9 @@ def select_ready_candidates(
     market: "KR" | "US" | "ALL". 자동 파이프라인은 현재 거래 가능 세션의
     시장만 후보로 가져와 KR 원화 소진이 US 달러 후보를 밀어내지 않게 한다.
 
-    cohort_consumer는 provider가 반환한 최대 10건의 deep-copy만 받는다.
-    consumer의 변조·예외는 기존 후보 분리/정렬/주문 경로에 영향을 주지 않는다.
+    cohort_consumer는 provider-return 경계에서 고정 상한으로 정제된 immutable
+    batch만 받는다. consumer의 예외는 기존 후보 분리/정렬/주문 경로에 영향을
+    주지 않는다.
 
     Returns:
         (ready, not_ready) — not_ready 항목은 진단용 {symbol, reason}
@@ -141,26 +141,37 @@ def select_ready_candidates(
     except (TypeError, ValueError):
         bounded_limit = 10
 
-    data = toss_buy_candidates_data(limit=bounded_limit, market=market) or {}
+    raw_data = toss_buy_candidates_data(limit=bounded_limit, market=market)
+    data = raw_data if type(raw_data) is dict else {}
     captured_at_utc = _utc_now()
-    raw_items = data.get("items") or []
-    items = list(raw_items[:10]) if isinstance(raw_items, (list, tuple)) else []
+    raw_items = data.get("items")
+    if type(raw_items) is list:
+        items = raw_items[:10]
+    elif type(raw_items) is tuple:
+        items = list(raw_items[:10])
+    else:
+        items = []
     scan_summary = data.get("scan_summary")
     raw_fallback = (
         scan_summary.get("dependency_fallback_used")
-        if isinstance(scan_summary, dict)
+        if type(scan_summary) is dict
         else None
     )
     fallback_used = raw_fallback if type(raw_fallback) is bool else None
 
     if cohort_consumer is not None:
         try:
-            cohort_consumer(
-                copy.deepcopy(items),
+            from core.shadow_measurement_producer import sanitize_final_candidate_cohort
+
+            if fallback_used is None:
+                raise ValueError("fallback_used_unknown")
+            batch = sanitize_final_candidate_cohort(
+                items,
                 market_scope=market,
                 captured_at_utc=captured_at_utc,
                 fallback_used=fallback_used,
             )
+            cohort_consumer(batch)
         except Exception as exc:
             log.warning(
                 "shadow cohort consumer failed: error_type=%s",
@@ -723,8 +734,10 @@ def run_toss_autonomous_pipeline(
     # 후보 선별. Shadow producer는 best-effort 관측 계층이며 import 실패도
     # 기존 주문 후보/정렬/실행 경로를 바꾸지 않는다.
     try:
-        from core.shadow_measurement_producer import enqueue_final_candidate_cohort
-        cohort_consumer = enqueue_final_candidate_cohort
+        from core.shadow_measurement_producer import (
+            enqueue_sanitized_final_candidate_cohort_with_market_observations,
+        )
+        cohort_consumer = enqueue_sanitized_final_candidate_cohort_with_market_observations
     except Exception as exc:
         log.warning(
             "shadow cohort producer unavailable: error_type=%s",

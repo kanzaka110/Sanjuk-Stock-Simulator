@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import threading
 import time
-from pathlib import Path
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 
 import requests
 
@@ -21,9 +23,9 @@ from config.settings import (
     KIS_APP_KEY,
     KIS_APP_SECRET,
     KIS_BASE_URL,
-    KRW_TICKERS,
     PORTFOLIO,
 )
+from core.market_data_fetch import CacheSource, FetchErrorType, FetchResult, FetchStatus
 from core.models import Quote
 
 logger = logging.getLogger(__name__)
@@ -38,6 +40,28 @@ _mem_expires: float = 0.0
 # 대시보드 GET 전체가 타임아웃 되는 것을 방지 (fail-fast)
 _TOKEN_FAIL_COOLDOWN_SEC = 60.0
 _mem_token_fail_until: float = 0.0
+_mem_token_fail_error_type: FetchErrorType | None = None
+
+
+class _KISTokenFetchError(RuntimeError):
+    """Typed token failure marker carrying only a safe classification."""
+
+    def __init__(self, error_type: FetchErrorType) -> None:
+        super().__init__("typed token fetch failed")
+        self.error_type = error_type
+
+
+class _KISTokenNetworkError(_KISTokenFetchError):
+    """Backward-compatible typed marker for token transport failures."""
+
+    def __init__(self) -> None:
+        super().__init__(FetchErrorType.NETWORK)
+
+
+def _raise_typed_token_failure(error_type: FetchErrorType) -> None:
+    if error_type is FetchErrorType.NETWORK:
+        raise _KISTokenNetworkError from None
+    raise _KISTokenFetchError(error_type) from None
 
 
 def _is_kis_configured() -> bool:
@@ -64,17 +88,21 @@ def _save_token_to_file(token: str, expires_at: float) -> None:
             json.dumps({"token": token, "expires_at": expires_at}),
             encoding="utf-8",
         )
-    except OSError as e:
-        logger.warning("KIS 토큰 파일 저장 실패: %s", e)
+    except OSError as exc:
+        logger.warning(
+            "KIS 토큰 파일 저장 실패: exception_class=%s",
+            type(exc).__name__,
+        )
 
 
-def _get_access_token() -> str | None:
+def _get_access_token(*, raise_on_network: bool = False) -> str | None:
     """OAuth 접근 토큰 발급 (메모리 → 파일 → API 순서로 조회).
 
     토큰 유효기간: 약 24시간. 만료 1시간 전에 갱신.
     KIS는 토큰 발급을 분당 1회로 제한하므로 파일 캐시 필수.
     """
     global _mem_token, _mem_expires, _mem_token_fail_until
+    global _mem_token_fail_error_type
 
     now = time.time()
 
@@ -83,7 +111,9 @@ def _get_access_token() -> str | None:
         if _mem_token and now < _mem_expires:
             return _mem_token
         if now < _mem_token_fail_until:
-            # 최근 발급 실패 — 쿨다운 동안 즉시 None (호출측 yfinance 폴백)
+            # 최근 발급 실패 — 쿨다운 동안 분류를 보존해 즉시 반환한다.
+            if raise_on_network and _mem_token_fail_error_type is not None:
+                _raise_typed_token_failure(_mem_token_fail_error_type)
             return None
 
     # 2) 파일 캐시 확인
@@ -115,6 +145,7 @@ def _get_access_token() -> str | None:
             logger.warning("KIS 토큰 발급 실패: 응답에 access_token 없음")
             with _TOKEN_LOCK:
                 _mem_token_fail_until = time.time() + _TOKEN_FAIL_COOLDOWN_SEC
+                _mem_token_fail_error_type = FetchErrorType.AUTH
             return None
 
         expires_at = now + expires_in - 3600  # 만료 1시간 전 갱신
@@ -122,16 +153,46 @@ def _get_access_token() -> str | None:
         with _TOKEN_LOCK:
             _mem_token = token
             _mem_expires = expires_at
+            _mem_token_fail_until = 0.0
+            _mem_token_fail_error_type = None
 
         _save_token_to_file(token, expires_at)
         logger.info("KIS 접근 토큰 발급 성공 (만료: %ds)", expires_in)
         return token
 
-    except requests.RequestException as e:
-        logger.warning("KIS 토큰 발급 실패: %s", e)
+    except requests.HTTPError as exc:
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        error_type = (
+            FetchErrorType.AUTH
+            if status_code in {401, 403}
+            else FetchErrorType.HTTP
+        )
+        logger.warning(
+            "KIS 토큰 발급 실패: error_type=%s exception_class=%s",
+            error_type.value,
+            type(exc).__name__,
+        )
         with _TOKEN_LOCK:
             _mem_token_fail_until = time.time() + _TOKEN_FAIL_COOLDOWN_SEC
+            _mem_token_fail_error_type = error_type
+        if raise_on_network:
+            _raise_typed_token_failure(error_type)
         return None
+    except requests.RequestException as exc:
+        logger.warning(
+            "KIS 토큰 발급 실패: error_type=network exception_class=%s",
+            type(exc).__name__,
+        )
+        with _TOKEN_LOCK:
+            _mem_token_fail_until = time.time() + _TOKEN_FAIL_COOLDOWN_SEC
+            _mem_token_fail_error_type = FetchErrorType.NETWORK
+        if raise_on_network:
+            _raise_typed_token_failure(FetchErrorType.NETWORK)
+        return None
+
+
+def _get_typed_access_token() -> str | None:
+    return _get_access_token(raise_on_network=True)
 
 
 def _ticker_to_kis_code(ticker: str) -> str:
@@ -140,6 +201,281 @@ def _ticker_to_kis_code(ticker: str) -> str:
     005930.KS → 005930
     """
     return ticker.replace(".KS", "").replace(".KQ", "")
+
+
+class _KISParseError(ValueError):
+    """원문을 노출하지 않고 typed fetcher가 분류할 수 있는 파싱 오류."""
+
+    def __init__(self, error_type: str) -> None:
+        super().__init__(error_type)
+        self.error_type = error_type
+
+
+def _payload_number(container: dict, key: str, *, nonnegative: bool = False) -> int | float:
+    if key not in container:
+        raise _KISParseError("malformed")
+    raw = container[key]
+    if isinstance(raw, bool) or raw is None:
+        raise _KISParseError("numeric")
+    text = str(raw).replace(",", "").strip()
+    if not text:
+        raise _KISParseError("numeric")
+    try:
+        number = Decimal(text)
+    except (InvalidOperation, ValueError):
+        raise _KISParseError("numeric") from None
+    if not number.is_finite() or (nonnegative and number < 0):
+        raise _KISParseError("numeric")
+    return int(number) if number == number.to_integral_value() else float(number)
+
+
+def _payload_share_count(
+    container: dict, key: str, *, nonnegative: bool = False
+) -> int:
+    number = _payload_number(container, key, nonnegative=nonnegative)
+    if not isinstance(number, int):
+        raise _KISParseError("numeric")
+    return number
+
+
+def _aware_utc(value: datetime) -> datetime:
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("fetch_completed_at_utc must be timezone-aware")
+    return value.astimezone(timezone.utc)
+
+
+def parse_kis_orderbook_payload(
+    payload: dict, ticker: str, venue: str, fetch_completed_at_utc: datetime
+) -> dict:
+    """KIS 호가 payload를 10단계 typed 관측값으로 순수 변환한다."""
+    if not isinstance(payload, dict):
+        raise _KISParseError("malformed")
+    output1 = payload.get("output1")
+    if not isinstance(output1, dict) or not output1:
+        raise _KISParseError("malformed")
+    output2 = payload.get("output2")
+    if output2 is None:
+        output2 = {}
+    if not isinstance(output2, dict):
+        raise _KISParseError("malformed")
+
+    levels: list[dict] = []
+    for level in range(1, 11):
+        levels.append(
+            {
+                "level": level,
+                "ask_price": _payload_number(output1, f"askp{level}", nonnegative=True),
+                "ask_size": _payload_share_count(
+                    output1, f"askp_rsqn{level}", nonnegative=True
+                ),
+                "bid_price": _payload_number(output1, f"bidp{level}", nonnegative=True),
+                "bid_size": _payload_share_count(
+                    output1, f"bidp_rsqn{level}", nonnegative=True
+                ),
+            }
+        )
+
+    positive_asks = [row["ask_price"] for row in levels if row["ask_price"] > 0]
+    positive_bids = [row["bid_price"] for row in levels if row["bid_price"] > 0]
+    best_ask = positive_asks[0] if positive_asks else None
+    best_bid = positive_bids[0] if positive_bids else None
+    spread = best_ask - best_bid if best_ask is not None and best_bid is not None else None
+    mid_price = (
+        (best_ask + best_bid) / 2
+        if best_ask is not None and best_bid is not None
+        else None
+    )
+    spread_pct = (
+        round(spread / mid_price * 100, 3)
+        if spread is not None and mid_price not in (None, 0)
+        else None
+    )
+    ask_depth = sum(
+        row["ask_size"] for row in levels if row["ask_price"] > 0
+    )
+    bid_depth = sum(
+        row["bid_size"] for row in levels if row["bid_price"] > 0
+    )
+    total_depth = ask_depth + bid_depth
+    imbalance = (bid_depth - ask_depth) / total_depth if total_depth else None
+
+    raw_total_keys = (
+        "total_askp_rsqn",
+        "total_bidp_rsqn",
+        "ovtm_total_askp_rsqn",
+        "ovtm_total_bidp_rsqn",
+        "total_askp_rsqn_icdc",
+        "total_bidp_rsqn_icdc",
+    )
+    raw_totals = {key: output1.get(key) for key in raw_total_keys}
+    completed = _aware_utc(fetch_completed_at_utc)
+
+    return {
+        "ticker": ticker,
+        "symbol": _ticker_to_kis_code(ticker),
+        "venue": venue,
+        "source_as_of": completed.isoformat(),
+        "source_as_of_precision": "fetch_completion",
+        "provider_time_hhmmss": output1.get("aspr_acpt_hour"),
+        "intraday": True,
+        "levels": levels,
+        "raw_totals": raw_totals,
+        "expected_execution": dict(output2),
+        "best_ask": best_ask,
+        "best_bid": best_bid,
+        "best_ask_price_krw_per_share": best_ask,
+        "best_bid_price_krw_per_share": best_bid,
+        "spread": spread,
+        "spread_krw_per_share": spread,
+        "spread_pct": spread_pct,
+        "mid_price": mid_price,
+        "mid_price_krw_per_share": mid_price,
+        "depth_ask_shares": ask_depth,
+        "depth_bid_shares": bid_depth,
+        "depth_total_shares": total_depth,
+        "imbalance": imbalance,
+        "imbalance_pct": round(imbalance * 100, 1) if imbalance is not None else None,
+        "depth_status": "zero_depth" if total_depth == 0 else "available",
+        "units": {
+            "levels.ask_price": "KRW/share",
+            "levels.bid_price": "KRW/share",
+            "levels.ask_size": "shares",
+            "levels.bid_size": "shares",
+            "spread": "KRW/share",
+            "mid_price": "KRW/share",
+            "depth_ask_shares": "shares",
+            "depth_bid_shares": "shares",
+            "depth_total_shares": "shares",
+            "imbalance": "ratio",
+            "imbalance_pct": "percent",
+            **{f"raw_totals.{key}": "provider_raw" for key in raw_total_keys},
+        },
+        "derived_schema_version": "1",
+    }
+
+
+_INVESTOR_NUMERIC_FIELDS = (
+    "stck_clpr",
+    "prdy_vrss",
+    "prsn_ntby_qty",
+    "frgn_ntby_qty",
+    "orgn_ntby_qty",
+    "prsn_ntby_tr_pbmn",
+    "frgn_ntby_tr_pbmn",
+    "orgn_ntby_tr_pbmn",
+    "prsn_shnu_vol",
+    "frgn_shnu_vol",
+    "orgn_shnu_vol",
+    "prsn_shnu_tr_pbmn",
+    "frgn_shnu_tr_pbmn",
+    "orgn_shnu_tr_pbmn",
+    "prsn_seln_vol",
+    "frgn_seln_vol",
+    "orgn_seln_vol",
+    "prsn_seln_tr_pbmn",
+    "frgn_seln_tr_pbmn",
+    "orgn_seln_tr_pbmn",
+)
+
+_INVESTOR_SEMANTIC_FIELDS = {
+    "stck_clpr": "close",
+    "prdy_vrss": "previous_day_change",
+    "prsn_ntby_qty": "personal_net_qty",
+    "frgn_ntby_qty": "foreign_net_qty",
+    "orgn_ntby_qty": "institution_net_qty",
+    "prsn_ntby_tr_pbmn": "personal_net_trade_amount",
+    "frgn_ntby_tr_pbmn": "foreign_net_trade_amount",
+    "orgn_ntby_tr_pbmn": "institution_net_trade_amount",
+    "prsn_shnu_vol": "personal_buy_volume",
+    "frgn_shnu_vol": "foreign_buy_volume",
+    "orgn_shnu_vol": "institution_buy_volume",
+    "prsn_shnu_tr_pbmn": "personal_buy_trade_amount",
+    "frgn_shnu_tr_pbmn": "foreign_buy_trade_amount",
+    "orgn_shnu_tr_pbmn": "institution_buy_trade_amount",
+    "prsn_seln_vol": "personal_sell_volume",
+    "frgn_seln_vol": "foreign_sell_volume",
+    "orgn_seln_vol": "institution_sell_volume",
+    "prsn_seln_tr_pbmn": "personal_sell_trade_amount",
+    "frgn_seln_tr_pbmn": "foreign_sell_trade_amount",
+    "orgn_seln_tr_pbmn": "institution_sell_trade_amount",
+}
+
+
+def parse_kis_investor_payload(payload: dict, ticker: str, venue: str) -> list[dict]:
+    """KIS 일별 투자자 매매동향의 공식 필드를 typed 행으로 변환한다."""
+    if not isinstance(payload, dict) or "output" not in payload:
+        raise _KISParseError("malformed")
+    output = payload["output"]
+    if not isinstance(output, list):
+        raise _KISParseError("malformed")
+
+    kst = timezone(timedelta(hours=9))
+    rows: list[dict] = []
+    for raw_row in output:
+        if not isinstance(raw_row, dict):
+            raise _KISParseError("malformed")
+        raw_date = raw_row.get("stck_bsop_date")
+        sign = raw_row.get("prdy_vrss_sign")
+        if not isinstance(raw_date, str) or len(raw_date) != 8 or not raw_date.isdigit():
+            raise _KISParseError("malformed")
+        if sign is None:
+            raise _KISParseError("malformed")
+        try:
+            business_close = datetime.strptime(raw_date, "%Y%m%d").replace(
+                hour=15, minute=30, tzinfo=kst
+            )
+        except ValueError:
+            raise _KISParseError("malformed") from None
+
+        official: dict[str, object] = {
+            "stck_bsop_date": raw_date,
+            "prdy_vrss_sign": str(sign),
+        }
+        for field in _INVESTOR_NUMERIC_FIELDS:
+            parser = (
+                _payload_share_count
+                if field.endswith(("_qty", "_vol"))
+                else _payload_number
+            )
+            official[field] = parser(raw_row, field)
+
+        semantic = {
+            semantic_name: official[official_name]
+            for official_name, semantic_name in _INVESTOR_SEMANTIC_FIELDS.items()
+        }
+        volume_fields = {
+            name: "shares"
+            for name in semantic
+            if name.endswith("_qty") or name.endswith("_volume")
+        }
+        amount_fields = {
+            name: "KRW million"
+            for name in semantic
+            if name.endswith("_trade_amount")
+        }
+        rows.append(
+            {
+                "ticker": ticker,
+                "symbol": _ticker_to_kis_code(ticker),
+                "venue": venue,
+                "date": raw_date,
+                **semantic,
+                "previous_day_sign": str(sign),
+                "source_as_of": business_close.astimezone(timezone.utc).isoformat(),
+                "source_as_of_precision": "business_date",
+                "availability_as_of": None,
+                "intraday": False,
+                "official_fields": official,
+                "units": {
+                    "close": "KRW/share",
+                    "previous_day_change": "KRW/share",
+                    **volume_fields,
+                    **amount_fields,
+                },
+                "derived_schema_version": "1",
+            }
+        )
+    return rows
 
 
 # ─── 국내주식 현재가 조회 ──────────────────────────
@@ -595,104 +931,609 @@ def _fetch_domestic_daily_chart(
 
 
 # ─── 국내주식 호가 (read-only) ─────────────────────
-def get_domestic_orderbook(ticker: str) -> dict | None:
-    """KIS API 국내주식 호가 조회 (FHKST01010200). read-only 판단 보조용.
+_KIS_ORDERBOOK_ENDPOINT = (
+    "/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn"
+)
+_KIS_ORDERBOOK_TR_ID = "FHKST01010200"
+_KIS_INVESTOR_ENDPOINT = "/uapi/domestic-stock/v1/quotations/inquire-investor"
+_KIS_INVESTOR_TR_ID = "FHKST01010900"
 
-    실패 시 None. 실제 주문/자동매매에 사용 금지.
-    """
-    if not _is_kis_configured():
-        return None
 
-    token = _get_access_token()
-    if not token:
-        return None
+def _clock_now_utc(clock) -> datetime:
+    value = clock()
+    return _aware_utc(value)
 
-    stock_code = _ticker_to_kis_code(ticker)
+
+def _system_utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _configured_value(configured) -> bool:
+    return bool(configured() if callable(configured) else configured)
+
+
+def _typed_result(
+    *,
+    status: FetchStatus,
+    endpoint: str,
+    tr_id: str | None,
+    venue: str,
+    symbol: str,
+    started: datetime,
+    completed: datetime,
+    error_type: FetchErrorType,
+    cache_source: CacheSource,
+    value,
+    fallback_used: bool = False,
+) -> FetchResult:
+    return FetchResult(
+        status=status,
+        provider="KIS",
+        endpoint=endpoint,
+        tr_id=tr_id,
+        venue=venue,
+        symbol=symbol,
+        started_at_utc=started,
+        completed_at_utc=completed,
+        error_type=error_type,
+        cache_source=cache_source,
+        fallback_used=fallback_used,
+        value=value,
+    )
+
+
+def fetch_domestic_orderbook_result(
+    ticker: str,
+    venue: str = "J",
+    clock=None,
+    http_get=None,
+    token_provider=None,
+    configured=None,
+) -> FetchResult[dict]:
+    """공식 KIS 10단계 국내 호가를 안전한 typed 결과로 조회한다."""
+    if clock is None:
+        clock = _system_utc_now
+    if http_get is None:
+        http_get = requests.get
+    if token_provider is None:
+        token_provider = _get_typed_access_token
+    if configured is None:
+        configured = _is_kis_configured
+
+    started = _clock_now_utc(clock)
+    symbol = _ticker_to_kis_code(ticker)
+    if not _configured_value(configured):
+        return _typed_result(
+            status=FetchStatus.SKIPPED,
+            endpoint=_KIS_ORDERBOOK_ENDPOINT,
+            tr_id=_KIS_ORDERBOOK_TR_ID,
+            venue=venue,
+            symbol=symbol,
+            started=started,
+            completed=_clock_now_utc(clock),
+            error_type=FetchErrorType.NOT_CONFIGURED,
+            cache_source=CacheSource.NONE,
+            value=None,
+        )
 
     try:
-        resp = requests.get(
-            f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn",
+        token = token_provider()
+    except _KISTokenFetchError as exc:
+        logger.warning(
+            "KIS typed 호가 토큰 실패: error_type=%s exception_class=%s",
+            exc.error_type.value,
+            type(exc).__name__,
+        )
+        return _typed_result(
+            status=FetchStatus.FAILED,
+            endpoint=_KIS_ORDERBOOK_ENDPOINT,
+            tr_id=_KIS_ORDERBOOK_TR_ID,
+            venue=venue,
+            symbol=symbol,
+            started=started,
+            completed=_clock_now_utc(clock),
+            error_type=exc.error_type,
+            cache_source=(
+                CacheSource.NONE
+                if exc.error_type is FetchErrorType.AUTH
+                else CacheSource.NETWORK
+            ),
+            value=None,
+        )
+    except requests.RequestException as exc:
+        logger.warning(
+            "KIS typed 호가 토큰 네트워크 실패: "
+            "error_type=network exception_class=%s",
+            type(exc).__name__,
+        )
+        return _typed_result(
+            status=FetchStatus.FAILED,
+            endpoint=_KIS_ORDERBOOK_ENDPOINT,
+            tr_id=_KIS_ORDERBOOK_TR_ID,
+            venue=venue,
+            symbol=symbol,
+            started=started,
+            completed=_clock_now_utc(clock),
+            error_type=FetchErrorType.NETWORK,
+            cache_source=CacheSource.NETWORK,
+            value=None,
+        )
+    except Exception as exc:
+        logger.warning(
+            "KIS typed 호가 인증 실패: error_type=auth exception_class=%s",
+            type(exc).__name__,
+        )
+        return _typed_result(
+            status=FetchStatus.FAILED,
+            endpoint=_KIS_ORDERBOOK_ENDPOINT,
+            tr_id=_KIS_ORDERBOOK_TR_ID,
+            venue=venue,
+            symbol=symbol,
+            started=started,
+            completed=_clock_now_utc(clock),
+            error_type=FetchErrorType.AUTH,
+            cache_source=CacheSource.NONE,
+            value=None,
+        )
+    if not token:
+        return _typed_result(
+            status=FetchStatus.FAILED,
+            endpoint=_KIS_ORDERBOOK_ENDPOINT,
+            tr_id=_KIS_ORDERBOOK_TR_ID,
+            venue=venue,
+            symbol=symbol,
+            started=started,
+            completed=_clock_now_utc(clock),
+            error_type=FetchErrorType.AUTH,
+            cache_source=CacheSource.NONE,
+            value=None,
+        )
+
+    url = f"{KIS_BASE_URL}{_KIS_ORDERBOOK_ENDPOINT}"
+    try:
+        response = http_get(
+            url,
             headers={
                 "authorization": f"Bearer {token}",
                 "appkey": KIS_APP_KEY,
                 "appsecret": KIS_APP_SECRET,
-                "tr_id": "FHKST01010200",
+                "tr_id": _KIS_ORDERBOOK_TR_ID,
                 "content-type": "application/json; charset=utf-8",
             },
             params={
-                "FID_COND_MRKT_DIV_CODE": "J",
-                "FID_INPUT_ISCD": stock_code,
+                "FID_COND_MRKT_DIV_CODE": venue,
+                "FID_INPUT_ISCD": symbol,
             },
             timeout=10,
         )
-        resp.raise_for_status()
-        data = resp.json()
+    except Exception as exc:
+        logger.warning(
+            "KIS typed 호가 네트워크 실패: error_type=network exception_class=%s",
+            type(exc).__name__,
+        )
+        return _typed_result(
+            status=FetchStatus.FAILED,
+            endpoint=_KIS_ORDERBOOK_ENDPOINT,
+            tr_id=_KIS_ORDERBOOK_TR_ID,
+            venue=venue,
+            symbol=symbol,
+            started=started,
+            completed=_clock_now_utc(clock),
+            error_type=FetchErrorType.NETWORK,
+            cache_source=CacheSource.NETWORK,
+            value=None,
+        )
 
-        if data.get("rt_cd") != "0":
-            return None
+    try:
+        response.raise_for_status()
+        if not 200 <= int(getattr(response, "status_code", 200)) < 300:
+            raise RuntimeError("http status")
+    except Exception as exc:
+        logger.warning(
+            "KIS typed 호가 HTTP 실패: error_type=http exception_class=%s",
+            type(exc).__name__,
+        )
+        return _typed_result(
+            status=FetchStatus.FAILED,
+            endpoint=_KIS_ORDERBOOK_ENDPOINT,
+            tr_id=_KIS_ORDERBOOK_TR_ID,
+            venue=venue,
+            symbol=symbol,
+            started=started,
+            completed=_clock_now_utc(clock),
+            error_type=FetchErrorType.HTTP,
+            cache_source=CacheSource.NETWORK,
+            value=None,
+        )
 
-        output = data.get("output1", {})
-        if not output:
-            return None
+    try:
+        payload = response.json()
+    except Exception as exc:
+        logger.warning(
+            "KIS typed 호가 payload 실패: error_type=malformed exception_class=%s",
+            type(exc).__name__,
+        )
+        return _typed_result(
+            status=FetchStatus.FAILED,
+            endpoint=_KIS_ORDERBOOK_ENDPOINT,
+            tr_id=_KIS_ORDERBOOK_TR_ID,
+            venue=venue,
+            symbol=symbol,
+            started=started,
+            completed=_clock_now_utc(clock),
+            error_type=FetchErrorType.MALFORMED,
+            cache_source=CacheSource.NETWORK,
+            value=None,
+        )
 
-        asks = []
-        for i in range(1, 6):
-            p = float(output.get(f"askp{i}", 0))
-            s = int(output.get(f"askp_rsqn{i}", 0))
-            if p > 0:
-                asks.append({"price": round(p), "size": s})
+    completed = _clock_now_utc(clock)
+    if not isinstance(payload, dict):
+        return _typed_result(
+            status=FetchStatus.FAILED,
+            endpoint=_KIS_ORDERBOOK_ENDPOINT,
+            tr_id=_KIS_ORDERBOOK_TR_ID,
+            venue=venue,
+            symbol=symbol,
+            started=started,
+            completed=completed,
+            error_type=FetchErrorType.MALFORMED,
+            cache_source=CacheSource.NETWORK,
+            value=None,
+        )
+    if payload.get("rt_cd") != "0":
+        return _typed_result(
+            status=FetchStatus.FAILED,
+            endpoint=_KIS_ORDERBOOK_ENDPOINT,
+            tr_id=_KIS_ORDERBOOK_TR_ID,
+            venue=venue,
+            symbol=symbol,
+            started=started,
+            completed=completed,
+            error_type=FetchErrorType.PROVIDER,
+            cache_source=CacheSource.NETWORK,
+            value=None,
+        )
+    try:
+        value = parse_kis_orderbook_payload(payload, ticker, venue, completed)
+    except _KISParseError as exc:
+        error_type = (
+            FetchErrorType.NUMERIC
+            if exc.error_type == "numeric"
+            else FetchErrorType.MALFORMED
+        )
+        return _typed_result(
+            status=FetchStatus.FAILED,
+            endpoint=_KIS_ORDERBOOK_ENDPOINT,
+            tr_id=_KIS_ORDERBOOK_TR_ID,
+            venue=venue,
+            symbol=symbol,
+            started=started,
+            completed=completed,
+            error_type=error_type,
+            cache_source=CacheSource.NETWORK,
+            value=None,
+        )
+    if value["depth_status"] == "zero_depth":
+        return _typed_result(
+            status=FetchStatus.INCOMPLETE,
+            endpoint=_KIS_ORDERBOOK_ENDPOINT,
+            tr_id=_KIS_ORDERBOOK_TR_ID,
+            venue=venue,
+            symbol=symbol,
+            started=started,
+            completed=completed,
+            error_type=FetchErrorType.ZERO_DEPTH,
+            cache_source=CacheSource.NETWORK,
+            value=value,
+        )
+    return _typed_result(
+        status=FetchStatus.SUCCESS,
+        endpoint=_KIS_ORDERBOOK_ENDPOINT,
+        tr_id=_KIS_ORDERBOOK_TR_ID,
+        venue=venue,
+        symbol=symbol,
+        started=started,
+        completed=completed,
+        error_type=FetchErrorType.NONE,
+        cache_source=CacheSource.NETWORK,
+        value=value,
+    )
 
-        bids = []
-        for i in range(1, 6):
-            p = float(output.get(f"bidp{i}", 0))
-            s = int(output.get(f"bidp_rsqn{i}", 0))
-            if p > 0:
-                bids.append({"price": round(p), "size": s})
 
-        best_ask = asks[0]["price"] if asks else 0
-        best_bid = bids[0]["price"] if bids else 0
-        spread = best_ask - best_bid if best_ask and best_bid else 0
-        mid_price = (best_ask + best_bid) / 2 if best_ask and best_bid else 0
-        spread_pct = round(spread / mid_price * 100, 3) if mid_price else 0
+def fetch_domestic_investor_result(
+    ticker: str,
+    venue: str = "J",
+    clock=None,
+    http_get=None,
+    token_provider=None,
+    configured=None,
+) -> FetchResult[list[dict]]:
+    """장 종료 후 제공되는 KIS 일별 투자자 매매동향을 typed 조회한다."""
+    if clock is None:
+        clock = _system_utc_now
+    if http_get is None:
+        http_get = requests.get
+    if token_provider is None:
+        token_provider = _get_typed_access_token
+    if configured is None:
+        configured = _is_kis_configured
 
-        total_bid = sum(b["size"] for b in bids)
-        total_ask = sum(a["size"] for a in asks)
-        total = total_bid + total_ask
-        imbalance_pct = round((total_bid - total_ask) / total * 100, 1) if total else 0
+    started = _clock_now_utc(clock)
+    symbol = _ticker_to_kis_code(ticker)
+    common = {
+        "endpoint": _KIS_INVESTOR_ENDPOINT,
+        "tr_id": _KIS_INVESTOR_TR_ID,
+        "venue": venue,
+        "symbol": symbol,
+        "started": started,
+    }
+    if not _configured_value(configured):
+        return _typed_result(
+            **common,
+            status=FetchStatus.SKIPPED,
+            completed=_clock_now_utc(clock),
+            error_type=FetchErrorType.NOT_CONFIGURED,
+            cache_source=CacheSource.NONE,
+            value=None,
+        )
 
-        if spread_pct <= 0.2:
-            exec_label = "체결 리스크 낮음"
-            liq_label = "유동성 양호"
-        elif spread_pct <= 0.7:
-            exec_label = "스프레드 주의"
-            liq_label = "유동성 보통"
-        else:
-            exec_label = "유동성 주의"
-            liq_label = "호가 얇음"
+    try:
+        token = token_provider()
+    except _KISTokenFetchError as exc:
+        logger.warning(
+            "KIS typed 투자자 토큰 실패: error_type=%s exception_class=%s",
+            exc.error_type.value,
+            type(exc).__name__,
+        )
+        return _typed_result(
+            **common,
+            status=FetchStatus.FAILED,
+            completed=_clock_now_utc(clock),
+            error_type=exc.error_type,
+            cache_source=(
+                CacheSource.NONE
+                if exc.error_type is FetchErrorType.AUTH
+                else CacheSource.NETWORK
+            ),
+            value=None,
+        )
+    except requests.RequestException as exc:
+        logger.warning(
+            "KIS typed 투자자 토큰 네트워크 실패: "
+            "error_type=network exception_class=%s",
+            type(exc).__name__,
+        )
+        return _typed_result(
+            **common,
+            status=FetchStatus.FAILED,
+            completed=_clock_now_utc(clock),
+            error_type=FetchErrorType.NETWORK,
+            cache_source=CacheSource.NETWORK,
+            value=None,
+        )
+    except Exception as exc:
+        logger.warning(
+            "KIS typed 투자자 인증 실패: error_type=auth exception_class=%s",
+            type(exc).__name__,
+        )
+        return _typed_result(
+            **common,
+            status=FetchStatus.FAILED,
+            completed=_clock_now_utc(clock),
+            error_type=FetchErrorType.AUTH,
+            cache_source=CacheSource.NONE,
+            value=None,
+        )
+    if not token:
+        return _typed_result(
+            **common,
+            status=FetchStatus.FAILED,
+            completed=_clock_now_utc(clock),
+            error_type=FetchErrorType.AUTH,
+            cache_source=CacheSource.NONE,
+            value=None,
+        )
 
-        from datetime import datetime, timezone, timedelta
-        KST = timezone(timedelta(hours=9))
+    try:
+        response = http_get(
+            f"{KIS_BASE_URL}{_KIS_INVESTOR_ENDPOINT}",
+            headers={
+                "authorization": f"Bearer {token}",
+                "appkey": KIS_APP_KEY,
+                "appsecret": KIS_APP_SECRET,
+                "tr_id": _KIS_INVESTOR_TR_ID,
+                "content-type": "application/json; charset=utf-8",
+            },
+            params={
+                "FID_COND_MRKT_DIV_CODE": venue,
+                "FID_INPUT_ISCD": symbol,
+            },
+            timeout=10,
+        )
+    except Exception as exc:
+        logger.warning(
+            "KIS typed 투자자 네트워크 실패: error_type=network exception_class=%s",
+            type(exc).__name__,
+        )
+        return _typed_result(
+            **common,
+            status=FetchStatus.FAILED,
+            completed=_clock_now_utc(clock),
+            error_type=FetchErrorType.NETWORK,
+            cache_source=CacheSource.NETWORK,
+            value=None,
+        )
 
-        return {
-            "ticker": ticker,
-            "source": "KIS",
-            "updated_at": datetime.now(KST).strftime("%Y-%m-%dT%H:%M:%S"),
-            "bids": bids,
-            "asks": asks,
-            "spread": spread,
-            "spread_pct": spread_pct,
-            "mid_price": round(mid_price),
-            "total_bid_size": total_bid,
-            "total_ask_size": total_ask,
-            "imbalance_pct": imbalance_pct,
-            "liquidity_label": liq_label,
-            "execution_risk_label": exec_label,
-            "error": "",
-        }
+    try:
+        response.raise_for_status()
+        if not 200 <= int(getattr(response, "status_code", 200)) < 300:
+            raise RuntimeError("http status")
+    except Exception as exc:
+        logger.warning(
+            "KIS typed 투자자 HTTP 실패: error_type=http exception_class=%s",
+            type(exc).__name__,
+        )
+        return _typed_result(
+            **common,
+            status=FetchStatus.FAILED,
+            completed=_clock_now_utc(clock),
+            error_type=FetchErrorType.HTTP,
+            cache_source=CacheSource.NETWORK,
+            value=None,
+        )
 
-    except requests.RequestException as e:
-        logger.warning("KIS 호가 조회 실패 [%s]: %s", ticker, e)
+    try:
+        payload = response.json()
+    except Exception as exc:
+        logger.warning(
+            "KIS typed 투자자 payload 실패: error_type=malformed exception_class=%s",
+            type(exc).__name__,
+        )
+        return _typed_result(
+            **common,
+            status=FetchStatus.FAILED,
+            completed=_clock_now_utc(clock),
+            error_type=FetchErrorType.MALFORMED,
+            cache_source=CacheSource.NETWORK,
+            value=None,
+        )
+
+    completed = _clock_now_utc(clock)
+    if not isinstance(payload, dict):
+        return _typed_result(
+            **common,
+            status=FetchStatus.FAILED,
+            completed=completed,
+            error_type=FetchErrorType.MALFORMED,
+            cache_source=CacheSource.NETWORK,
+            value=None,
+        )
+    if payload.get("rt_cd") != "0":
+        return _typed_result(
+            **common,
+            status=FetchStatus.FAILED,
+            completed=completed,
+            error_type=FetchErrorType.PROVIDER,
+            cache_source=CacheSource.NETWORK,
+            value=None,
+        )
+    try:
+        rows = parse_kis_investor_payload(payload, ticker, venue)
+    except _KISParseError as exc:
+        error_type = (
+            FetchErrorType.NUMERIC
+            if exc.error_type == "numeric"
+            else FetchErrorType.MALFORMED
+        )
+        return _typed_result(
+            **common,
+            status=FetchStatus.FAILED,
+            completed=completed,
+            error_type=error_type,
+            cache_source=CacheSource.NETWORK,
+            value=None,
+        )
+
+    for row in rows:
+        row["availability_as_of"] = completed.isoformat()
+    return _typed_result(
+        **common,
+        status=FetchStatus.SUCCESS if rows else FetchStatus.EMPTY,
+        completed=completed,
+        error_type=FetchErrorType.NONE,
+        cache_source=CacheSource.NETWORK,
+        value=rows,
+    )
+
+
+def _valid_legacy_orderbook_level(row: object, expected_level: int) -> bool:
+    if not isinstance(row, dict) or row.get("level") != expected_level:
+        return False
+    for price_key in ("ask_price", "bid_price"):
+        value = row.get(price_key)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value < 0
+        ):
+            return False
+    for size_key in ("ask_size", "bid_size"):
+        value = row.get(size_key)
+        if type(value) is not int or value < 0:
+            return False
+    return True
+
+
+def get_domestic_orderbook(ticker: str) -> dict | None:
+    """typed 성공 호가만 기존 5단계 dashboard 계약으로 투영한다."""
+    result = fetch_domestic_orderbook_result(ticker)
+    if result.status is not FetchStatus.SUCCESS or not isinstance(result.value, dict):
         return None
+
+    levels = result.value.get("levels")
+    if (
+        not isinstance(levels, list)
+        or len(levels) != 10
+        or not all(
+            _valid_legacy_orderbook_level(row, level)
+            for level, row in enumerate(levels, start=1)
+        )
+    ):
+        return None
+    first_five = levels[:5]
+    asks = [
+        {"price": round(row["ask_price"]), "size": int(row["ask_size"])}
+        for row in first_five
+        if row.get("ask_price", 0) > 0
+    ]
+    bids = [
+        {"price": round(row["bid_price"]), "size": int(row["bid_size"])}
+        for row in first_five
+        if row.get("bid_price", 0) > 0
+    ]
+
+    best_ask = asks[0]["price"] if asks else 0
+    best_bid = bids[0]["price"] if bids else 0
+    spread = best_ask - best_bid if best_ask and best_bid else 0
+    mid_price = (best_ask + best_bid) / 2 if best_ask and best_bid else 0
+    spread_pct = round(spread / mid_price * 100, 3) if mid_price else 0
+    total_bid = sum(row["size"] for row in bids)
+    total_ask = sum(row["size"] for row in asks)
+    total = total_bid + total_ask
+    imbalance_pct = (
+        round((total_bid - total_ask) / total * 100, 1) if total else 0
+    )
+
+    if spread_pct <= 0.2:
+        exec_label = "체결 리스크 낮음"
+        liq_label = "유동성 양호"
+    elif spread_pct <= 0.7:
+        exec_label = "스프레드 주의"
+        liq_label = "유동성 보통"
+    else:
+        exec_label = "유동성 주의"
+        liq_label = "호가 얇음"
+
+    kst = timezone(timedelta(hours=9))
+    return {
+        "ticker": ticker,
+        "source": "KIS",
+        "updated_at": result.completed_at_utc.astimezone(kst).strftime(
+            "%Y-%m-%dT%H:%M:%S"
+        ),
+        "bids": bids,
+        "asks": asks,
+        "spread": spread,
+        "spread_pct": spread_pct,
+        "mid_price": round(mid_price),
+        "total_bid_size": total_bid,
+        "total_ask_size": total_ask,
+        "imbalance_pct": imbalance_pct,
+        "liquidity_label": liq_label,
+        "execution_risk_label": exec_label,
+        "error": "",
+    }
 
 
 def get_domestic_short_sale(

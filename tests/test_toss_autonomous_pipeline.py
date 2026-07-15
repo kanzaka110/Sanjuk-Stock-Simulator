@@ -60,6 +60,8 @@ def _candidate(symbol="091180.KS", **kw) -> dict:
     base = {
         "symbol": symbol,
         "side": "buy",
+        "market": "KR",
+        "currency": "KRW",
         "quantity": 10,
         "limit_price": 30000.0,
         "stop_loss": 28000,
@@ -109,6 +111,8 @@ class TestSelect(unittest.TestCase):
         self.assertEqual(not_ready, [{"symbol": "B.KS", "reason": "RR 부족"}])
 
     def test_consumer_receives_bounded_original_order_before_ready_split(self):
+        import core.shadow_measurement_producer as producer
+
         captured_at = datetime(2026, 7, 15, 1, 2, 3, tzinfo=timezone.utc)
         items = [
             _candidate(
@@ -125,13 +129,15 @@ class TestSelect(unittest.TestCase):
         ]
         consumed = []
 
-        def consumer(cohort, *, market_scope, captured_at_utc, fallback_used):
+        def consumer(cohort):
+            self.assertIsInstance(cohort, producer.SanitizedFinalCandidateCohort)
+            payloads = [json.loads(item.payload_json) for item in cohort.candidates]
             consumed.append(
                 (
-                    [item["symbol"] for item in cohort],
-                    market_scope,
-                    captured_at_utc,
-                    fallback_used,
+                    [item["symbol"] for item in payloads],
+                    cohort.market_scope,
+                    cohort.captured_at_utc,
+                    cohort.fallback_used,
                 )
             )
 
@@ -187,15 +193,17 @@ class TestSelect(unittest.TestCase):
         ):
             expected = tap.select_ready_candidates()
 
-        def failing_consumer(cohort, **_kwargs):
-            cohort[0]["stock_agent_ready"] = False
-            cohort.reverse()
+        def failing_consumer(cohort):
+            self.assertIsInstance(cohort.candidates, tuple)
             raise RuntimeError("consumer-secret-must-not-escape")
 
         with self.assertLogs(tap.log, level=logging.WARNING) as captured_logs:
             with patch(
                 "core.dashboard_data.toss_buy_candidates_data",
-                return_value={"items": items},
+                return_value={
+                    "items": items,
+                    "scan_summary": {"dependency_fallback_used": False},
+                },
             ):
                 observed = tap.select_ready_candidates(
                     cohort_consumer=failing_consumer
@@ -222,13 +230,16 @@ class TestSelect(unittest.TestCase):
 
         def provider(**_kwargs):
             events.append("provider_return")
-            return {"items": [_candidate()]}
+            return {
+                "items": [_candidate()],
+                "scan_summary": {"dependency_fallback_used": False},
+            }
 
         def clock():
             events.append("clock")
             return captured_at
 
-        def consumer(_cohort, **_kwargs):
+        def consumer(_cohort):
             events.append("consumer")
 
         with patch(
@@ -243,8 +254,8 @@ class TestSelect(unittest.TestCase):
         for scan_summary in malformed_values:
             consumed = []
 
-            def consumer(_cohort, **kwargs):
-                consumed.append(kwargs["fallback_used"])
+            def consumer(cohort):
+                consumed.append(cohort.fallback_used)
 
             with self.subTest(scan_summary=scan_summary), patch(
                 "core.dashboard_data.toss_buy_candidates_data",
@@ -256,7 +267,106 @@ class TestSelect(unittest.TestCase):
 
             self.assertEqual([item["symbol"] for item in ready], ["091180.KS"])
             self.assertEqual(not_ready, [])
-            self.assertEqual(consumed, [None])
+            self.assertEqual(consumed, [])
+
+    def test_provider_boundary_never_deepcopies_or_traverses_unknown_raw_fields(self):
+        import core.shadow_measurement_producer as producer
+
+        deepcopy_calls = []
+        consumed = []
+
+        class UnknownRawValue:
+            def __deepcopy__(self, _memo):
+                deepcopy_calls.append(True)
+                raise AssertionError("unknown raw field must not be copied")
+
+        item = _candidate(raw_unknown=UnknownRawValue())
+
+        def consumer(batch):
+            self.assertIsInstance(batch, producer.SanitizedFinalCandidateCohort)
+            consumed.append(batch)
+
+        with patch(
+            "core.dashboard_data.toss_buy_candidates_data",
+            return_value={
+                "items": [item],
+                "scan_summary": {"dependency_fallback_used": False},
+            },
+        ):
+            ready, not_ready = tap.select_ready_candidates(cohort_consumer=consumer)
+
+        self.assertEqual(deepcopy_calls, [])
+        self.assertEqual(len(consumed), 1)
+        self.assertIsInstance(consumed[0].candidates, tuple)
+        self.assertNotIn("raw_unknown", consumed[0].candidates[0].payload_json)
+        self.assertEqual([candidate["symbol"] for candidate in ready], ["091180.KS"])
+        self.assertEqual(not_ready, [])
+
+    def test_provider_boundary_rejects_scan_summary_subclass_without_access(self):
+        calls = []
+        consumed = []
+
+        class HostileSummary(dict):
+            def get(self, *_args, **_kwargs):
+                calls.append(True)
+                raise AssertionError("subclass accessor must not run")
+
+        with patch(
+            "core.dashboard_data.toss_buy_candidates_data",
+            return_value={"items": [_candidate()], "scan_summary": HostileSummary()},
+        ):
+            ready, not_ready = tap.select_ready_candidates(
+                cohort_consumer=lambda batch: consumed.append(batch)
+            )
+
+        self.assertEqual(calls, [])
+        self.assertEqual(consumed, [])
+        self.assertEqual([candidate["symbol"] for candidate in ready], ["091180.KS"])
+        self.assertEqual(not_ready, [])
+
+    def test_provider_boundary_rejects_envelope_and_items_subclasses_without_access(self):
+        calls = []
+
+        class HostileEnvelope(dict):
+            def get(self, *_args, **_kwargs):
+                calls.append("envelope_get")
+                raise AssertionError("envelope accessor must not run")
+
+            def __len__(self):
+                calls.append("envelope_len")
+                raise AssertionError("envelope length must not run")
+
+        class HostileItems(list):
+            def __len__(self):
+                calls.append("items_len")
+                raise AssertionError("items length must not run")
+
+            def __getitem__(self, _key):
+                calls.append("items_getitem")
+                raise AssertionError("items accessor must not run")
+
+        with patch(
+            "core.dashboard_data.toss_buy_candidates_data",
+            return_value=HostileEnvelope(items=[_candidate()]),
+        ):
+            ready, blocked = tap.select_ready_candidates(cohort_consumer=lambda _batch: None)
+        self.assertEqual((ready, blocked), ([], []))
+
+        consumed = []
+        with patch(
+            "core.dashboard_data.toss_buy_candidates_data",
+            return_value={
+                "items": HostileItems([_candidate()]),
+                "scan_summary": {"dependency_fallback_used": False},
+            },
+        ):
+            ready, blocked = tap.select_ready_candidates(
+                cohort_consumer=lambda batch: consumed.append(batch)
+            )
+        self.assertEqual((ready, blocked), ([], []))
+        self.assertEqual(len(consumed), 1)
+        self.assertEqual(consumed[0].candidates, ())
+        self.assertEqual(calls, [])
 
     def test_unknown_fallback_skips_real_shadow_worker_without_blocking_ready(self):
         import core.shadow_measurement_producer as producer
@@ -271,7 +381,7 @@ class TestSelect(unittest.TestCase):
             tap.log, level=logging.WARNING
         ) as captured_logs:
             ready, not_ready = tap.select_ready_candidates(
-                cohort_consumer=producer.enqueue_final_candidate_cohort
+                cohort_consumer=producer.enqueue_sanitized_final_candidate_cohort
             )
 
         self.assertEqual([item["symbol"] for item in ready], ["091180.KS"])
@@ -478,7 +588,7 @@ class TestRun(unittest.TestCase):
                  patch.object(tap, "select_ready_candidates", return_value=([], [])) as select, \
                  patch.object(tap, "retry_retryable_orders",
                               return_value={"retried": 0, "sent": 0, "exhausted": 0}), \
-                 patch("core.shadow_measurement_producer.enqueue_final_candidate_cohort") as enqueue:
+                 patch("core.shadow_measurement_producer.enqueue_sanitized_final_candidate_cohort_with_market_observations") as enqueue:
                 tap.run_toss_autonomous_pipeline(now=_NOW, force=True)
 
         self.assertIs(select.call_args.kwargs["cohort_consumer"], enqueue)
@@ -504,9 +614,13 @@ class TestRun(unittest.TestCase):
             original = copy.deepcopy(items)
             processed = []
 
-            def failing_consumer(cohort, **_kwargs):
-                cohort[0]["symbol"] = "MUTATED.KS"
-                cohort.reverse()
+            def failing_consumer(cohort):
+                from core.shadow_measurement_producer import (
+                    SanitizedFinalCandidateCohort,
+                )
+
+                self.assertIs(type(cohort), SanitizedFinalCandidateCohort)
+                self.assertIs(type(cohort.candidates), tuple)
                 raise RuntimeError("consumer-order-secret")
 
             def process(candidate, _policy):
@@ -523,7 +637,10 @@ class TestRun(unittest.TestCase):
                 return_value=dict(_POLICY_ON),
             ), patch(
                 "core.dashboard_data.toss_buy_candidates_data",
-                return_value={"items": items},
+                return_value={
+                    "items": items,
+                    "scan_summary": {"dependency_fallback_used": False},
+                },
             ), patch.object(
                 tap,
                 "retry_retryable_orders",
@@ -531,7 +648,7 @@ class TestRun(unittest.TestCase):
             ), patch.object(
                 tap, "process_candidate", side_effect=process
             ), patch(
-                "core.shadow_measurement_producer.enqueue_final_candidate_cohort",
+                "core.shadow_measurement_producer.enqueue_sanitized_final_candidate_cohort_with_market_observations",
                 side_effect=failing_consumer,
             ):
                 result = tap.run_toss_autonomous_pipeline(now=_NOW, force=True)
