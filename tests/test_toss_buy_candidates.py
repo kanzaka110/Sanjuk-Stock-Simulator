@@ -7,7 +7,9 @@
 """
 
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -1003,3 +1005,98 @@ def test_toss_buy_candidates_explicit_fixed_cap_still_blocks_expensive_share(mon
     assert result["max_order_krw"] == 500_000
     assert item["limit_exceeded"] is True
     assert item["stock_agent_ready"] is False
+
+
+# ── pending 차단 정밀화: stale 이력이 신규 후보를 영구 차단하지 않는다 ──
+
+class TestPendingSymbolLifecycle:
+    KST = timezone(timedelta(hours=9))
+
+    def _now(self):
+        return datetime.now(self.KST)
+
+    def _rec(self, symbol="DELL", status="previewed", side="buy",
+             pilot_id="tlive_x_1", created_delta_min=-5):
+        return {
+            "symbol": symbol, "status": status, "side": side,
+            "pilot_id": pilot_id,
+            "created_at": (self._now() + timedelta(minutes=created_delta_min)).isoformat(),
+        }
+
+    def _pending(self, records, snapshot=None, verification=None):
+        import core.dashboard_data as dd
+        snap = snapshot if snapshot is not None else {
+            "ok": True, "status": "fresh", "broker_orders": []}
+        with patch("core.toss_live_pilot_ledger.list_live_pilot_records",
+                   return_value=records), \
+             patch("core.toss_readonly_snapshot.load_snapshot",
+                   return_value=snap), \
+             patch("core.toss_live_pilot_verification.get_verification_for_pilot",
+                   return_value=verification):
+            return dd._pending_toss_order_symbols()
+
+    def test_expired_pass_previewed_no_open_allows(self):
+        v = {"status": "PASS",
+             "expires_at": (self._now() - timedelta(hours=2)).isoformat()}
+        out = self._pending([self._rec()], verification=v)
+        assert out == {}   # expired PASS — 신규 후보 허용
+
+    def test_fresh_pass_and_pending_block(self):
+        for st in ("PASS", "PENDING"):
+            v = {"status": st,
+                 "expires_at": (self._now() + timedelta(minutes=5)).isoformat()}
+            out = self._pending([self._rec()], verification=v)
+            assert "DELL" in out, st
+
+    def test_live_sent_with_matching_open_blocks(self):
+        snap = {"ok": True, "status": "fresh", "broker_orders": [
+            {"symbol": "DELL", "side": "BUY", "broker_order_status": "OPEN"}]}
+        out = self._pending([self._rec(status="live_sent")], snapshot=snap)
+        assert "DELL" in out
+        assert out["DELL"]["source"] == "internal_ledger+broker_snapshot"
+
+    def test_live_sent_terminal_or_absent_broker_allows(self):
+        for orders in ([{"symbol": "DELL", "side": "BUY",
+                         "broker_order_status": "FILLED"}], []):
+            snap = {"ok": True, "status": "fresh", "broker_orders": orders}
+            out = self._pending([self._rec(status="live_sent")], snapshot=snap)
+            assert out == {}, orders
+
+    def test_broker_unavailable_fails_closed(self):
+        for snap in ({"ok": False, "status": "expired"},
+                     {"ok": False, "status": "missing"}):
+            out = self._pending([self._rec(status="live_sent")], snapshot=snap)
+            assert "DELL" in out, snap
+
+    def test_newest_row_wins_per_symbol(self):
+        # 최신 행이 terminal(blocked)이면 그 아래 옛 live_sent는 무시
+        records = [
+            self._rec(status="blocked", created_delta_min=-1),
+            self._rec(status="live_sent", created_delta_min=-60,
+                      pilot_id="tlive_x_0"),
+        ]
+        snap = {"ok": True, "status": "fresh", "broker_orders": [
+            {"symbol": "DELL", "side": "BUY", "broker_order_status": "OPEN"}]}
+        out = self._pending(records, snapshot=snap)
+        assert out == {}   # 최신 상태(terminal) 기준 — stale live_sent 무시
+
+    def test_no_verification_preview_ttl(self):
+        # verification 없음: TTL 이내 차단, 초과 허용
+        fresh = self._pending([self._rec(created_delta_min=-10)], verification=None)
+        assert "DELL" in fresh
+        old = self._pending([self._rec(created_delta_min=-120)], verification=None)
+        assert old == {}
+
+    def test_repeat_calls_do_not_mutate_db(self, tmp_path):
+        import sqlite3
+        # 실제 운영 DB 행 수가 반복 호출로 변하지 않음 (read-only 계약)
+        def count():
+            c = sqlite3.connect(
+                "file:db/data/toss_live_pilot.db?mode=ro", uri=True)
+            n = c.execute("SELECT COUNT(*) FROM live_pilot_ledger").fetchone()[0]
+            c.close()
+            return n
+        before = count()
+        for _ in range(3):
+            self._pending([self._rec()])
+        assert count() == before

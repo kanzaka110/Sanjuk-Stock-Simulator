@@ -283,19 +283,19 @@ class TestSaveIntegration:
     _TEST_BUY_TICKER = "ZZTEST_BUY.KS"
     _TEST_SELL_TICKER = "ZZTEST_SELL"
 
-    def _cleanup(self, tickers):
-        from core.memory import _get_conn
-        conn = _get_conn()
-        for tk in tickers:
-            conn.execute(
-                "DELETE FROM predictions WHERE ticker=?", (tk,))
-        conn.commit()
-
-    def setup_method(self):
-        self._cleanup([self._TEST_BUY_TICKER, self._TEST_SELL_TICKER])
-
-    def teardown_method(self):
-        self._cleanup([self._TEST_BUY_TICKER, self._TEST_SELL_TICKER])
+    @pytest.fixture(autouse=True)
+    def _isolated_memory_db(self, tmp_path, monkeypatch):
+        """운영 memory.db 절대 접촉 금지 — 장중 bot lock 경합·오염 방지."""
+        import core.memory as mem
+        monkeypatch.setattr(mem, "DB_PATH", tmp_path / "memory.db")
+        monkeypatch.setattr(mem, "_conn", None)
+        yield
+        try:
+            if mem._conn is not None:
+                mem._conn.close()
+        except Exception:
+            pass
+        monkeypatch.setattr(mem, "_conn", None)
 
     def test_save_fills_required_fields(self):
         from core.action_normalizer import normalize_actions

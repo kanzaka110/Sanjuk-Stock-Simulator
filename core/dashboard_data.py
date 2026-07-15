@@ -2863,44 +2863,131 @@ def _recent_toss_risk_sell_symbols(limit: int = 100) -> dict[str, dict]:
     return out
 
 
-def _pending_toss_order_symbols(limit: int = 150) -> dict[str, dict] | None:
-    """신규 BUY 차단용 same-symbol pending/live_sent 주문 맵. Read-only.
+_PREVIEW_TTL_MINUTES = 60   # verification 없는 preview의 차단 유효시간
 
-    조회 실패 시 None을 반환한다 — '모름'을 빈 맵('없음')으로 위장하지 않는다.
-    소비자(income gate)는 None을 fail-closed(신규 BUY 차단)로 처리한다.
+
+def _pending_toss_order_symbols(limit: int = 150) -> dict[str, dict] | None:
+    """신규 BUY 차단용 same-symbol pending 주문 맵. Read-only.
+
+    stale 이력(만료 verification·종결된 broker 주문)이 신규 후보를 영구
+    차단하지 않도록, 심볼별 최신 행만 보고 상태별로 살아있는 것만 차단한다.
+
+    - preview류(previewed/reviewed/payload_validated/confirmed_but_not_sent):
+      연결된 최신 verification이 fresh PENDING 또는 미만료 PASS일 때만 차단.
+      expired PASS/EXPIRED/HOLD/BLOCK/ERROR는 제외. verification이 없으면
+      preview 생성 후 _PREVIEW_TTL_MINUTES 이내에만 차단.
+    - live_sent(및 live_send_retryable): stock-bot sanitized snapshot의
+      broker OPEN 주문과 symbol+side가 일치할 때만 차단. FILLED/CANCELLED/
+      REJECTED거나 OPEN 매칭이 없으면 제외. broker truth(fresh snapshot)
+      unavailable이면 fail-closed(차단 유지).
+    - Toss OAuth/API 직접 호출 없음(스냅샷만 소비). ledger/verification DB
+      행은 읽기만 하며 삭제·수정하지 않는다.
+    - 조회 실패 시 None 반환 — '모름'을 빈 맵('없음')으로 위장하지 않는다.
     """
-    out: dict[str, dict] = {}
     try:
         from core.toss_live_pilot_ledger import list_live_pilot_records
-        records = list_live_pilot_records(limit=limit)
+        records = list_live_pilot_records(limit=limit)   # created_at DESC
     except Exception as e:
         log.warning("pending order lookup unavailable (fail-closed): %s", e)
         return None
-    pending_statuses = {
+
+    # broker truth: fresh snapshot의 broker_orders만 신뢰
+    broker_open: set | None = None
+    try:
+        from core.toss_readonly_snapshot import load_snapshot
+        snap = load_snapshot()
+        if snap.get("ok") is True and snap.get("status") == "fresh":
+            terminal_broker = {
+                "FILLED", "CANCELLED", "CANCELED", "REJECTED", "EXPIRED", "FAILED",
+            }
+            broker_open = {
+                (str(o.get("symbol") or "").upper().strip(),
+                 str(o.get("side") or "").lower().strip())
+                for o in (snap.get("broker_orders") or [])
+                if str(o.get("broker_order_status") or "").upper().strip()
+                not in terminal_broker
+            }
+    except Exception as e:
+        log.debug("broker snapshot unavailable for pending check: %s", e)
+        broker_open = None   # unavailable → live_sent fail-closed
+
+    def _parse_ts(text) -> datetime | None:
+        try:
+            dt = datetime.fromisoformat(str(text))
+            return dt if dt.tzinfo else dt.replace(tzinfo=KST)
+        except (TypeError, ValueError):
+            return None
+
+    now = datetime.now(KST)
+    preview_statuses = {
         "previewed", "reviewed", "payload_validated", "confirmed_but_not_sent",
-        "live_send_retryable", "live_sent",
     }
-    terminal_statuses = {"cancelled", "canceled", "blocked", "live_send_blocked", "live_send_failed", "filled", "rejected"}
+    sent_statuses = {"live_sent", "live_send_retryable"}
+
+    def _verification_blocks(pilot_id: str) -> bool | None:
+        """True=차단, False=제외, None=verification 없음."""
+        try:
+            from core.toss_live_pilot_verification import get_verification_for_pilot
+            v = get_verification_for_pilot(pilot_id)
+        except Exception as e:
+            log.debug("verification lookup failed (fail-closed): %s", e)
+            return True   # 조회 실패는 '모름' — 중복 방지 우선
+        if not isinstance(v, dict):
+            return None
+        status = str(v.get("status") or "").upper().strip()
+        if status not in ("PENDING", "PASS"):
+            return False   # EXPIRED/HOLD/BLOCK/ERROR — 죽은 이력은 차단 안 함
+        expires = _parse_ts(v.get("expires_at"))
+        if expires is None:
+            return True    # 만료시각 불명 — fail-closed
+        return expires > now   # fresh PENDING / 미만료 PASS만 차단
+
+    out: dict[str, dict] = {}
+    seen: set[str] = set()
     for r in records:
         side = str(r.get("side") or "buy").lower()
         status = str(r.get("status") or "").lower()
         symbol = str(r.get("symbol") or "").upper().strip()
         if side != "buy" or not symbol:
             continue
-        if status in terminal_statuses:
+        if symbol in seen:
+            continue   # DESC 조회 — 최신 행이 그 심볼의 진실 (newest wins)
+        seen.add(symbol)
+
+        blocks = False
+        if status in preview_statuses:
+            verdict = _verification_blocks(str(r.get("pilot_id") or ""))
+            if verdict is None:
+                created = _parse_ts(r.get("created_at") or r.get("sent_at"))
+                blocks = (
+                    created is None   # 시각 불명 — fail-closed
+                    or (now - created).total_seconds() < _PREVIEW_TTL_MINUTES * 60
+                )
+            else:
+                blocks = verdict
+        elif status in sent_statuses:
+            if broker_open is None:
+                blocks = True   # broker truth unavailable — fail-closed
+            else:
+                blocks = (symbol, side) in broker_open
+        # terminal(cancelled/filled/blocked/…)·기타 상태는 차단하지 않음
+
+        if not blocks:
             continue
-        if status not in pending_statuses and "pending" not in status:
-            continue
-        out[symbol] = {
+        entry = {
             "side": side,
             "status": status or "pending",
             "created_at": r.get("created_at") or r.get("sent_at") or "",
             "pilot_id": r.get("pilot_id") or "",
-            # provenance: 이 pending 판단의 출처 (broker truth 아님을 명시)
-            "source": "internal_ledger",
+            # provenance: 이 pending 판단의 출처
+            "source": (
+                "internal_ledger+broker_snapshot" if status in sent_statuses
+                else "internal_ledger+verification"
+            ),
         }
+        out[symbol] = entry
         if symbol.endswith((".KS", ".KQ")):
-            out[symbol.split(".", 1)[0]] = out[symbol]
+            out[symbol.split(".", 1)[0]] = entry
     return out
 
 
