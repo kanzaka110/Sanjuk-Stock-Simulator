@@ -32,11 +32,11 @@ _SENSITIVE_ALIASES = frozenset(
     }
 )
 _SENSITIVE_FIELD = re.compile(
-    r"(?:account[\s_.-]*(?:no|number)|api[\s_.-]*key|"
-    r"app[\s_.-]*(?:key|secret)|authorization|"
-    r"client[\s_.-]*secret|crtfc[\s_.-]*key|"
-    r"data[\s_.-]*go(?:[\s_.-]*(?:kr|api|service))*[\s_.-]*key|"
-    r"password|private[\s_.-]*key|service[\s_.-]*key|secret|token)"
+    r"(?:account[\s_.+-]*(?:no|number)|api[\s_.+-]*key|"
+    r"app[\s_.+-]*(?:key|secret)|authorization|"
+    r"client[\s_.+-]*secret|crtfc[\s_.+-]*key|"
+    r"data[\s_.+-]*go(?:[\s_.+-]*(?:kr|api|service))*[\s_.+-]*key|"
+    r"password|private[\s_.+-]*key|service[\s_.+-]*key|secret|token)"
     r"(?=[\s\"'<>\[\]{}=:;&?])",
     re.IGNORECASE,
 )
@@ -147,19 +147,34 @@ def decoded_text_variants(value: str | bytes) -> set[str]:
     for _ in range(3):
         next_frontier: set[str] = set()
         for text in frontier:
-            transformed_values = (
-                html.unescape(text),
-                parse.unquote(text),
-                parse.unquote_plus(text),
+            full_base64_match = _BASE64_TOKEN.fullmatch(text)
+            full_decoded_values = (
+                _base64_texts(full_base64_match.group(0))
+                if full_base64_match is not None
+                else set()
             )
+            canonical_base64 = bool(full_decoded_values)
+            transformed_values = [html.unescape(text), parse.unquote(text)]
+            if not canonical_base64:
+                transformed_values.append(parse.unquote_plus(text))
             for transformed in transformed_values:
                 if transformed not in variants:
                     variants.add(transformed)
                     next_frontier.add(transformed)
                     if len(variants) >= _MAX_VARIANTS:
                         raise ValueError("sensitive_scan_complexity")
-            for match in _BASE64_TOKEN.finditer(text):
-                decoded_values = _base64_texts(match.group(0))
+            if full_base64_match is not None:
+                decoded_matches = ((full_base64_match, full_decoded_values),)
+            else:
+                decoded_matches = (
+                    (match, None) for match in _BASE64_TOKEN.finditer(text)
+                )
+            for match, cached_values in decoded_matches:
+                decoded_values = (
+                    cached_values
+                    if cached_values is not None
+                    else _base64_texts(match.group(0))
+                )
                 if not decoded_values:
                     continue
                 if decoded_tokens >= _MAX_BASE64_TOKENS:

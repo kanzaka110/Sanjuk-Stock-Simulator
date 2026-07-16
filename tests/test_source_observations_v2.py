@@ -325,6 +325,7 @@ def test_sensitive_key_collapsed_aliases_are_rejected(tmp_path, key):
         "ACCOUNT_NO: 12345678-01",
         "client-secret = must-not-persist",
         "private key: must-not-persist",
+        "private+key: must-not-persist",
         "Authorization: Bearer abcdefghijklmnop",
         "token=must-not-persist",
         "password : must-not-persist",
@@ -383,6 +384,47 @@ def test_oversized_payload_fails_before_sensitive_scan(monkeypatch):
     assert scan_calls == []
 
 
+def test_base64_token_budget_stops_decoding_immediately(monkeypatch):
+    from core import sensitive_text as scanner
+
+    tokens = [
+        base64.b64encode(f"Benign-value-{index:02d}".encode()).decode("ascii")
+        for index in range(40)
+    ]
+    decode_calls = []
+    original = scanner._base64_texts
+
+    def counted(token):
+        decode_calls.append(token)
+        return original(token)
+
+    monkeypatch.setattr(scanner, "_base64_texts", counted)
+    with pytest.raises(ValueError, match="sensitive_scan_complexity"):
+        scanner.decoded_text_variants(" ".join(tokens))
+    assert len(decode_calls) == scanner._MAX_BASE64_TOKENS + 1
+
+
+def test_variant_budget_stops_decoding_immediately(monkeypatch):
+    from core import sensitive_text as scanner
+
+    tokens = [
+        base64.b64encode(f"Benign-value-{index:02d}".encode()).decode("ascii")
+        for index in range(40)
+    ]
+    decode_calls = []
+    original = scanner._base64_texts
+
+    def counted(token):
+        decode_calls.append(token)
+        return original(token)
+
+    monkeypatch.setattr(scanner, "_base64_texts", counted)
+    monkeypatch.setattr(scanner, "_MAX_VARIANTS", 2)
+    with pytest.raises(ValueError, match="sensitive_scan_complexity"):
+        scanner.decoded_text_variants(" ".join(tokens))
+    assert len(decode_calls) == 1
+
+
 def test_encoded_sensitive_value_cannot_hide_after_variant_budget(tmp_path):
     benign = [
         base64.b64encode(f"Benign-value-{index:02d}".encode()).decode("ascii")
@@ -410,6 +452,31 @@ def test_base64_sensitive_metadata_is_rejected(tmp_path):
         store.append(**_observation(source_record_id=encoded))
     with pytest.raises(ValueError, match="collection_run_id_sensitive"):
         store.record_collection_run(**_collection_run(run_id=encoded))
+
+
+def test_benign_base64_plus_artifact_is_not_treated_as_form_encoding(
+    tmp_path, monkeypatch
+):
+    from core import sensitive_text as scanner
+
+    raw = f"<response><message>{'>' * 256}</message></response>".encode()
+    encoded = base64.b64encode(raw).decode("ascii")
+    assert encoded.count("+") > 32
+    original_unquote_plus = scanner.parse.unquote_plus
+    artifact_form_decode_calls = []
+
+    def guarded_unquote_plus(value, *args, **kwargs):
+        if value == encoded:
+            artifact_form_decode_calls.append(True)
+            raise AssertionError("canonical Base64 must not be treated as form data")
+        return original_unquote_plus(value, *args, **kwargs)
+
+    monkeypatch.setattr(scanner.parse, "unquote_plus", guarded_unquote_plus)
+    store = SourceObservationStoreV2(tmp_path / "benign-base64-plus.sqlite3")
+    result = store.append(**_observation(payload={"raw_xml_base64": encoded}))
+
+    assert result.inserted is True
+    assert artifact_form_decode_calls == []
 
 
 def test_sensitive_guard_allows_benign_near_misses(tmp_path):
