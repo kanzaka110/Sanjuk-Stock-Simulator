@@ -14,8 +14,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
+from core.sensitive_text import contains_sensitive_text, sensitive_key_name
+
 
 MAX_PAYLOAD_BYTES = 1_048_576
+_MAX_PAYLOAD_DEPTH = 64
 _MARKETS = frozenset({"KR", "US", "GLOBAL"})
 _UNITS = frozenset({"KRW", "USD", "SHARES", "PERCENT", "UNITLESS", "MIXED"})
 _RUN_STATUSES = frozenset({"success", "partial", "failed", "skipped"})
@@ -151,49 +154,86 @@ _UTC_TEXT_RE = re.compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z$"
 )
 _T = TypeVar("_T")
-_SENSITIVE_ALIASES = frozenset(
-    {
-        "accountno",
-        "accountnumber",
-        "apikey",
-        "appkey",
-        "appsecret",
-        "authorization",
-        "clientsecret",
-        "crtfcKey".lower(),
-        "password",
-        "privatekey",
-        "secret",
-        "token",
-    }
-)
-_KNOWN_SECRET_RE = re.compile(
-    r"(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|"
-    r"sk-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|"
-    r"AIza[A-Za-z0-9_-]{20,}|Bearer\s+[A-Za-z0-9._~+/-]{12,}|"
-    r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|"
-    r"-----BEGIN(?: [A-Z]+)* PRIVATE KEY-----)",
-    re.IGNORECASE,
-)
-
-
-def _collapsed(value: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", value.lower())
-
-
 def _sensitive_key(value: str) -> bool:
-    collapsed = _collapsed(value)
-    return any(collapsed == alias or collapsed.endswith(alias) for alias in _SENSITIVE_ALIASES)
+    return sensitive_key_name(value)
 
 
 def _sensitive_text(value: str) -> bool:
-    if _KNOWN_SECRET_RE.search(value):
-        return True
-    assignment_text = re.sub(r"[\s_-]+", "", value.lower())
-    return any(
-        f"{alias}=" in assignment_text or f"{alias}:" in assignment_text
-        for alias in _SENSITIVE_ALIASES
-    )
+    return contains_sensitive_text(value)
+
+
+def _json_string_size(value: str, path: str) -> int:
+    try:
+        encoded_size = len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise ValueError(f"payload_string_invalid:{path}") from None
+    escaped_extra = 0
+    for character in value:
+        if character in {'"', "\\"} or character in "\b\f\n\r\t":
+            escaped_extra += 1
+        elif ord(character) < 0x20:
+            escaped_extra += 5
+    return encoded_size + escaped_extra + 2
+
+
+def _payload_size_preflight(
+    value: Any,
+    path: str = "$",
+    *,
+    depth: int = 0,
+    ancestors: frozenset[int] = frozenset(),
+) -> int:
+    if depth > _MAX_PAYLOAD_DEPTH:
+        raise ValueError(f"payload_too_deep:{path}")
+    if value is None:
+        return 4
+    if type(value) is bool:
+        return 4 if value else 5
+    if type(value) is int:
+        return len(str(value))
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ValueError(f"payload_non_finite:{path}")
+        return len(repr(value))
+    if type(value) is str:
+        return _json_string_size(value, path)
+    if type(value) not in {dict, list}:
+        raise ValueError(f"payload_type_unsupported:{path}")
+
+    identity = id(value)
+    if identity in ancestors:
+        raise ValueError(f"payload_cycle:{path}")
+    nested_ancestors = ancestors | {identity}
+    size = 2
+    if type(value) is dict:
+        for index, (key, nested) in enumerate(value.items()):
+            if type(key) is not str:
+                raise ValueError(f"payload_key_not_string:{path}")
+            if index:
+                size += 1
+            size += _json_string_size(key, f"{path}.<key>") + 1
+            size += _payload_size_preflight(
+                nested,
+                f"{path}.*",
+                depth=depth + 1,
+                ancestors=nested_ancestors,
+            )
+            if size > MAX_PAYLOAD_BYTES:
+                raise ValueError("payload_too_large")
+        return size
+
+    for index, nested in enumerate(value):
+        if index:
+            size += 1
+        size += _payload_size_preflight(
+            nested,
+            f"{path}[{index}]",
+            depth=depth + 1,
+            ancestors=nested_ancestors,
+        )
+        if size > MAX_PAYLOAD_BYTES:
+            raise ValueError("payload_too_large")
+    return size
 
 
 def _normalized_schema_sql_sha256(value: str | None) -> str | None:
@@ -632,9 +672,9 @@ class SourceObservationStoreV2:
             for key, nested in value.items():
                 if type(key) is not str:
                     raise ValueError(f"payload_key_not_string:{path}")
-                if _sensitive_key(key):
-                    raise ValueError(f"payload_sensitive_key:{path}.{key}")
-                cls._validate_payload(nested, f"{path}.{key}")
+                if _sensitive_key(key) or _sensitive_text(key):
+                    raise ValueError(f"payload_sensitive_key:{path}")
+                cls._validate_payload(nested, f"{path}.*")
             return
         if type(value) is list:
             for index, nested in enumerate(value):
@@ -652,6 +692,8 @@ class SourceObservationStoreV2:
     def _canonical_payload(cls, payload: dict[str, Any]) -> tuple[str, str]:
         if type(payload) is not dict:
             raise ValueError("payload_must_be_object")
+        if _payload_size_preflight(payload) > MAX_PAYLOAD_BYTES:
+            raise ValueError("payload_too_large")
         cls._validate_payload(payload)
         payload_json = json.dumps(
             payload,
@@ -982,7 +1024,7 @@ class SourceObservationStoreV2:
                 """
                 SELECT * FROM collection_runs
                 WHERE source = ? AND dataset = ?
-                ORDER BY completed_at DESC, id DESC
+                ORDER BY id DESC
                 LIMIT 1
                 """,
                 (source, dataset),

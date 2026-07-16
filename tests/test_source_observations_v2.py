@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
@@ -307,6 +308,8 @@ def test_strict_observation_validators(tmp_path, overrides, reason):
         "authorization",
         "access_token",
         "dbPassword",
+        "serviceKey",
+        "DATA_GO_KR_SERVICE_KEY",
     ],
 )
 def test_sensitive_key_collapsed_aliases_are_rejected(tmp_path, key):
@@ -325,6 +328,7 @@ def test_sensitive_key_collapsed_aliases_are_rejected(tmp_path, key):
         "Authorization: Bearer abcdefghijklmnop",
         "token=must-not-persist",
         "password : must-not-persist",
+        "serviceKey=must-not-persist",
         "ghp_" + "A" * 36,
         "-----BEGIN PRIVATE KEY-----",
     ],
@@ -333,6 +337,79 @@ def test_sensitive_values_and_assignments_are_rejected(tmp_path, value):
     store = SourceObservationStoreV2(tmp_path / "sensitive-value.sqlite3")
     with pytest.raises(ValueError, match="payload_sensitive_value"):
         store.append(**_observation(payload={"description": value}))
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "serviceKey%3Dsynthetic-encoded-value",
+        "serviceKey&#61;synthetic-encoded-value",
+        base64.b64encode(b"serviceKey=synthetic-encoded-value").decode("ascii"),
+        base64.urlsafe_b64encode(b"serviceKey=synthetic-encoded-value")
+        .decode("ascii")
+        .rstrip("="),
+    ),
+)
+def test_encoded_sensitive_payload_values_are_rejected(tmp_path, value, monkeypatch):
+    from core import source_observations_v2 as observations
+
+    store = SourceObservationStoreV2(tmp_path / "encoded-sensitive-value.sqlite3")
+    dump_calls = []
+
+    def forbidden_dump(*_args, **_kwargs):
+        dump_calls.append(True)
+        raise AssertionError("sensitive payload must fail before JSON generation")
+
+    monkeypatch.setattr(observations.json, "dumps", forbidden_dump)
+    with pytest.raises(ValueError, match="payload_sensitive_value"):
+        store.append(**_observation(payload={"description": value}))
+    assert dump_calls == []
+
+
+def test_oversized_payload_fails_before_sensitive_scan(monkeypatch):
+    from core import source_observations_v2 as observations
+
+    scan_calls = []
+
+    def forbidden_scan(*_args, **_kwargs):
+        scan_calls.append(True)
+        raise AssertionError("oversized payload must fail before sensitive scan")
+
+    monkeypatch.setattr(observations, "contains_sensitive_text", forbidden_scan)
+    with pytest.raises(ValueError, match="payload_too_large"):
+        SourceObservationStoreV2._canonical_payload(
+            {"description": "x" * observations.MAX_PAYLOAD_BYTES}
+        )
+    assert scan_calls == []
+
+
+def test_encoded_sensitive_value_cannot_hide_after_variant_budget(tmp_path):
+    benign = [
+        base64.b64encode(f"Benign-value-{index:02d}".encode()).decode("ascii")
+        for index in range(32)
+    ]
+    encoded_secret = base64.b64encode(
+        b"serviceKey=synthetic-hidden-value"
+    ).decode("ascii")
+    value = " ".join([*benign, encoded_secret])
+    store = SourceObservationStoreV2(tmp_path / "encoded-sensitive-budget.sqlite3")
+
+    with pytest.raises(ValueError, match="payload_sensitive_value"):
+        store.append(**_observation(payload={"description": value}))
+
+
+def test_base64_sensitive_metadata_is_rejected(tmp_path):
+    encoded = (
+        base64.urlsafe_b64encode(b"serviceKey=synthetic-encoded-value")
+        .decode("ascii")
+        .rstrip("=")
+    )
+    store = SourceObservationStoreV2(tmp_path / "encoded-sensitive-metadata.sqlite3")
+
+    with pytest.raises(ValueError, match="source_record_id_sensitive"):
+        store.append(**_observation(source_record_id=encoded))
+    with pytest.raises(ValueError, match="collection_run_id_sensitive"):
+        store.record_collection_run(**_collection_run(run_id=encoded))
 
 
 def test_sensitive_guard_allows_benign_near_misses(tmp_path):
@@ -367,6 +444,17 @@ def test_observation_rejects_naked_synthetic_pat_in_every_free_text_sink(
 
     with pytest.raises(ValueError, match="sensitive"):
         store.append(**_observation(**{field: synthetic_pat}))
+
+
+@pytest.mark.parametrize(
+    "run_id",
+    ("serviceKey=must-not-persist", "DATA_GO_KR_SERVICE_KEY:must-not-persist"),
+)
+def test_collection_run_rejects_data_go_service_key_aliases(tmp_path, run_id):
+    store = SourceObservationStoreV2(tmp_path / "collection-run-service-key.sqlite3")
+
+    with pytest.raises(ValueError, match="collection_run_id_sensitive"):
+        store.record_collection_run(**_collection_run(run_id=run_id))
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
@@ -662,6 +750,28 @@ def test_collection_run_exact_retry_conflict_and_latest(tmp_path):
         "error_type",
         "fingerprint",
     ]
+
+
+def test_latest_collection_run_uses_append_order_not_external_clock(tmp_path):
+    store = SourceObservationStoreV2(tmp_path / "collection-run-append-order.sqlite3")
+    store.record_collection_run(
+        **_collection_run(
+            run_id="clock-first",
+            started_at=_at(20),
+            completed_at=_at(21),
+        )
+    )
+    store.record_collection_run(
+        **_collection_run(
+            run_id="clock-second-regressed",
+            started_at=_at(18),
+            completed_at=_at(19),
+        )
+    )
+
+    latest = store.latest_collection_run("sec_companyfacts", "company_facts")
+    assert latest is not None
+    assert latest.run_id == "clock-second-regressed"
 
 
 @pytest.mark.parametrize(

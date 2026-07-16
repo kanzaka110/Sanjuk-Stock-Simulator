@@ -22,6 +22,7 @@ KST = timezone(timedelta(hours=9))
 
 # ─── API 키 (환경변수) ──────────────────────────────
 GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "")
+DATA_GO_KR_SERVICE_KEY: str = os.environ.get("DATA_GO_KR_SERVICE_KEY", "")
 # ─── 한국투자증권 KIS API ──────────────────────────
 KIS_APP_KEY: str = os.environ.get("KIS_APP_KEY", "")
 KIS_APP_SECRET: str = os.environ.get("KIS_APP_SECRET", "")
