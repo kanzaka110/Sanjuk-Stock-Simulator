@@ -397,6 +397,32 @@ def test_partial_broker_order_query_is_not_published_as_complete_snapshot(monkey
             snap._raw_account_summary_from_broker()
 
 
+def test_snapshot_open_and_closed_orders_share_one_deadline(monkeypatch):
+    from core import toss_client as tc
+
+    monkeypatch.setattr(tc, "get_accounts", lambda: [{
+        "accountSeq": "safe-seq", "accountType": "BROKERAGE",
+    }])
+    monkeypatch.setattr(tc, "get_holdings", lambda _seq: {"items": [], "marketValue": {}})
+    monkeypatch.setattr(tc, "get_buying_power", lambda _seq, _currency: {})
+    monkeypatch.setattr(tc, "get_exchange_rate", lambda _base, _quote: {})
+    monkeypatch.setattr(tc, "get_market_calendar", lambda _market: {})
+    monkeypatch.setattr(tc, "is_configured", lambda: True)
+    calls = []
+
+    def list_orders(status, *, account_seq, deadline=None):
+        calls.append((status, account_seq, deadline))
+        return {"ok": True, "orders": [], "complete": True}
+
+    with patch("core.toss_live_order_http.list_orders", side_effect=list_orders):
+        snap._raw_account_summary_from_broker()
+
+    assert [status for status, _, _ in calls] == ["OPEN", "CLOSED"]
+    assert all(account_seq == "safe-seq" for _, account_seq, _ in calls)
+    assert calls[0][2] is not None
+    assert calls[0][2] == calls[1][2]
+
+
 def test_owner_refresh_uses_direct_projection_without_dashboard_import(snapshot_path, monkeypatch):
     monkeypatch.setenv("TOSS_AUTONOMOUS_MODE", "true")
     monkeypatch.setattr(sys, "argv", ["main.py", "bot"])

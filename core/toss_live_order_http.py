@@ -17,8 +17,11 @@ Toss 주문 생성 HTTP 위임 모듈 (LiveTossTransport 전용).
 from __future__ import annotations
 
 import logging
+import math
 import os
+import queue
 import re
+import threading
 import time
 
 from core import toss_client as tc
@@ -38,6 +41,12 @@ _H_AUTH = "Authorization"
 _H_ACCOUNT = "X-Tossinvest-Account"
 _H_CT = "Content-Type"
 _AUTH_SCHEME = "Bearer"
+_ORDER_PAGE_LIMIT = 100
+_ORDER_MAX_PAGES = 10
+_ORDER_LIST_DEADLINE_SEC = 20.0
+_ORDER_JOB_QUEUE: queue.Queue = queue.Queue(maxsize=1)
+_ORDER_JOB_LOCK = threading.Lock()
+_ORDER_JOB_INFLIGHT: dict | None = None
 
 # broker order id 마스킹 패턴
 _ACCOUNT_RE = re.compile(r"\d{8}-\d{2}")
@@ -219,7 +228,13 @@ def _sanitize_order_row(row) -> dict:
     }
 
 
-def _safe_get(path: str, *, account_seq: str, params: dict | None = None) -> dict:
+def _safe_get(
+    path: str,
+    *,
+    account_seq: str,
+    params: dict | None = None,
+    timeout: float | None = None,
+) -> dict:
     """Toss GET helper for post-order confirmation. No secrets in return."""
     import requests
     token = tc._get_access_token()
@@ -227,7 +242,15 @@ def _safe_get(path: str, *, account_seq: str, params: dict | None = None) -> dic
         return {"ok": False, "reason": "token_or_account_unavailable"}
     headers = {_H_AUTH: f"{_AUTH_SCHEME} {token}", _H_ACCOUNT: str(account_seq), _H_CT: "application/json"}
     try:
-        resp = requests.get(f"{tc.TOSS_BASE_URL}{path}", headers=headers, params=params or {}, timeout=tc.TIMEOUT)
+        request_timeout = tc.TIMEOUT if timeout is None else min(float(timeout), tc.TIMEOUT)
+        if request_timeout <= 0:
+            return {"ok": False, "reason": "request_timeout"}
+        resp = requests.get(
+            f"{tc.TOSS_BASE_URL}{path}",
+            headers=headers,
+            params=params or {},
+            timeout=request_timeout,
+        )
     except requests.RequestException as e:
         return {"ok": False, "reason": "network_error", "message": _mask(str(e))[:160]}
     if resp.status_code != 200:
@@ -241,49 +264,170 @@ def _safe_get(path: str, *, account_seq: str, params: dict | None = None) -> dic
     return {"ok": True, "body": tc.sanitize_dict(body)}
 
 
-def list_orders(status: str = "OPEN", *, account_seq: str | None = None) -> dict:
-    """List Toss orders by status: OPEN or CLOSED. Safe read-only confirmation."""
-    if type(status) is not str or status not in {"OPEN", "CLOSED"}:
-        return {"ok": False, "reason": "invalid_order_status", "orders": [], "complete": False}
+def _order_job_worker() -> None:
+    while True:
+        slot = _ORDER_JOB_QUEUE.get()
+        try:
+            try:
+                result = slot["call"]()
+                slot["result"] = result if type(result) is dict else {
+                    "ok": False, "reason": "malformed_request_result",
+                }
+            except Exception:
+                slot["result"] = {"ok": False, "reason": "request_exception"}
+        finally:
+            slot["done"].set()
+            _ORDER_JOB_QUEUE.task_done()
+
+
+_ORDER_JOB_THREAD = threading.Thread(
+    target=_order_job_worker,
+    name="toss-order-history-worker",
+    daemon=True,
+)
+_ORDER_JOB_THREAD.start()
+
+
+def _run_order_job_bounded(call, deadline: float) -> dict:
+    global _ORDER_JOB_INFLIGHT
+    remaining = deadline - time.monotonic()
+    if remaining <= 0 or not _ORDER_JOB_LOCK.acquire(timeout=remaining):
+        return {"ok": False, "reason": "orders_request_deadline"}
+    try:
+        if _ORDER_JOB_INFLIGHT and not _ORDER_JOB_INFLIGHT["done"].is_set():
+            return {"ok": False, "reason": "orders_request_inflight"}
+        slot = {"call": call, "done": threading.Event(), "result": None}
+        _ORDER_JOB_INFLIGHT = slot
+        try:
+            _ORDER_JOB_QUEUE.put_nowait(slot)
+        except queue.Full:
+            slot["result"] = {"ok": False, "reason": "orders_request_inflight"}
+            slot["done"].set()
+    finally:
+        _ORDER_JOB_LOCK.release()
+
+    remaining = deadline - time.monotonic()
+    if remaining <= 0 or not slot["done"].wait(timeout=remaining):
+        return {"ok": False, "reason": "orders_request_deadline"}
+    return slot["result"] if type(slot["result"]) is dict else {
+        "ok": False, "reason": "malformed_request_result",
+    }
+
+
+def _list_orders_sync(status: str, account_seq: str | None, deadline: float) -> dict:
     seq = _resolve_account_seq(account_seq)
     if not seq:
         return {"ok": False, "reason": "account_unavailable", "orders": [], "complete": False}
-    res = _safe_get(_ORDER_PATH, account_seq=seq, params={"status": status})
-    if res.get("ok") is not True:
-        return {**res, "status": status, "orders": [], "complete": False}
-    body = res.get("body")
-    if type(body) is not dict or "result" not in body:
-        return {"ok": False, "reason": "malformed_orders_body", "status": status,
-                "orders": [], "complete": False}
-    result = body["result"]
-    if type(result) is dict:
-        containers = [key for key in ("items", "orders", "content") if key in result]
-        if len(containers) != 1 or type(result[containers[0]]) is not list:
+    params: dict = {"status": status}
+    if status == "CLOSED":
+        params["limit"] = _ORDER_PAGE_LIMIT
+    all_orders: list[dict] = []
+    seen_cursors: set[str] = set()
+
+    for _ in range(_ORDER_MAX_PAGES):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return {"ok": False, "reason": "orders_pagination_deadline", "status": status,
+                    "orders": [], "complete": False}
+        res = _safe_get(_ORDER_PATH, account_seq=seq, params=params, timeout=remaining)
+        if time.monotonic() >= deadline:
+            return {"ok": False, "reason": "orders_pagination_deadline", "status": status,
+                    "orders": [], "complete": False}
+        if res.get("ok") is not True:
+            return {**res, "status": status, "orders": [], "complete": False}
+        body = res.get("body")
+        if type(body) is not dict or "result" not in body:
+            return {"ok": False, "reason": "malformed_orders_body", "status": status,
+                    "orders": [], "complete": False}
+        result = body["result"]
+        if type(result) is list:
+            if status == "CLOSED":
+                return {"ok": False, "reason": "malformed_orders_result", "status": status,
+                        "orders": [], "complete": False}
+            page_orders = result
+            has_next = False
+            next_cursor = None
+        elif type(result) is dict:
+            containers = [key for key in ("items", "orders", "content") if key in result]
+            if len(containers) != 1 or type(result[containers[0]]) is not list:
+                return {"ok": False, "reason": "malformed_orders_result", "status": status,
+                        "orders": [], "complete": False}
+            page_orders = result[containers[0]]
+            if status == "CLOSED":
+                if "hasNext" not in result or "nextCursor" not in result:
+                    return {"ok": False, "reason": "malformed_orders_pagination", "status": status,
+                            "orders": [], "complete": False}
+                has_next = result["hasNext"]
+                next_cursor = result["nextCursor"]
+                if type(has_next) is not bool or next_cursor is not None and type(next_cursor) is not str:
+                    return {"ok": False, "reason": "malformed_orders_pagination", "status": status,
+                            "orders": [], "complete": False}
+            else:
+                has_next = result.get("hasNext", result.get("has_next", False))
+                next_cursor = result.get("nextCursor", result.get("next_cursor"))
+            if type(has_next) is not bool:
+                return {"ok": False, "reason": "orders_pagination_incomplete", "status": status,
+                        "orders": [], "complete": False}
+            if any(result.get(key) not in (None, "") for key in ("nextPage", "next_page")):
+                return {"ok": False, "reason": "orders_pagination_incomplete", "status": status,
+                        "orders": [], "complete": False}
+        else:
             return {"ok": False, "reason": "malformed_orders_result", "status": status,
                     "orders": [], "complete": False}
-        for key in ("hasNext", "has_next"):
-            if key in result and result[key] is not False:
+        if any(type(row) is not dict for row in page_orders):
+            return {"ok": False, "reason": "malformed_order_row", "status": status,
+                    "orders": [], "complete": False}
+        all_orders.extend(page_orders)
+        if not has_next:
+            if next_cursor not in (None, ""):
                 return {"ok": False, "reason": "orders_pagination_incomplete", "status": status,
                         "orders": [], "complete": False}
-        for key in ("nextCursor", "next_cursor", "nextPage", "next_page"):
-            if key in result and result[key] not in (None, ""):
-                return {"ok": False, "reason": "orders_pagination_incomplete", "status": status,
-                        "orders": [], "complete": False}
-        orders = result[containers[0]]
-    elif type(result) is list:
-        orders = result
+            return {
+                "ok": True,
+                "status": status,
+                "orders": [_sanitize_order_row(row) for row in all_orders],
+                "complete": True,
+            }
+        if status != "CLOSED" or type(next_cursor) is not str or not next_cursor:
+            return {"ok": False, "reason": "orders_pagination_incomplete", "status": status,
+                    "orders": [], "complete": False}
+        if next_cursor in seen_cursors:
+            return {"ok": False, "reason": "orders_pagination_cycle", "status": status,
+                    "orders": [], "complete": False}
+        seen_cursors.add(next_cursor)
+        params = {"status": status, "limit": _ORDER_PAGE_LIMIT, "cursor": next_cursor}
+
+    return {"ok": False, "reason": "orders_pagination_limit", "status": status,
+            "orders": [], "complete": False}
+
+
+def list_orders(
+    status: str = "OPEN",
+    *,
+    account_seq: str | None = None,
+    deadline: float | None = None,
+) -> dict:
+    """List Toss orders within one hard wall-clock and single-inflight worker."""
+    if type(status) is not str or status not in {"OPEN", "CLOSED"}:
+        return {"ok": False, "reason": "invalid_order_status", "orders": [], "complete": False}
+    now = time.monotonic()
+    if deadline is None:
+        absolute_deadline = now + _ORDER_LIST_DEADLINE_SEC
+    elif type(deadline) not in (int, float) or not math.isfinite(deadline):
+        return {"ok": False, "reason": "invalid_order_deadline", "status": status,
+                "orders": [], "complete": False}
     else:
-        return {"ok": False, "reason": "malformed_orders_result", "status": status,
-                "orders": [], "complete": False}
-    if any(type(row) is not dict for row in orders):
-        return {"ok": False, "reason": "malformed_order_row", "status": status,
-                "orders": [], "complete": False}
-    return {
-        "ok": True,
-        "status": status,
-        "orders": [_sanitize_order_row(row) for row in orders],
-        "complete": True,
-    }
+        absolute_deadline = float(deadline)
+    result = _run_order_job_bounded(
+        lambda: _list_orders_sync(status, account_seq, absolute_deadline),
+        absolute_deadline,
+    )
+    if result.get("ok") is not True:
+        reason = result.get("reason", "order_query_failed")
+        if reason == "orders_request_deadline":
+            reason = "orders_pagination_deadline"
+        return {**result, "reason": reason, "status": status, "orders": [], "complete": False}
+    return result
 
 
 def get_order(order_id: str, *, account_seq: str | None = None) -> dict:

@@ -28,6 +28,7 @@ REFRESH_INTERVAL_SEC = 300
 FRESH_TTL_SEC = 900
 DISPLAY_STALE_TTL_SEC = 3600
 MAX_FUTURE_SKEW_SEC = 120
+BROKER_ORDERS_DEADLINE_SEC = 20.0
 
 ROLE_OWNER = "broker_owner"
 ROLE_CONSUMER = "snapshot_consumer"
@@ -643,8 +644,9 @@ def _raw_account_summary_from_broker() -> tuple[dict, dict, list[dict]]:
     calendars = {"KR": tc.get_market_calendar("KR"), "US": tc.get_market_calendar("US")}
     broker_orders: list[dict] = []
     from core.toss_live_order_http import list_orders
+    orders_deadline = time.monotonic() + BROKER_ORDERS_DEADLINE_SEC
     for status in ("OPEN", "CLOSED"):
-        result = list_orders(status, account_seq=seq)
+        result = list_orders(status, account_seq=seq, deadline=orders_deadline)
         if not isinstance(result, dict) or result.get("ok") is not True:
             raise RuntimeError(f"broker_orders_incomplete:{status}")
         rows = result.get("orders")

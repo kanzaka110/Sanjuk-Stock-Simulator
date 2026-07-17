@@ -7,9 +7,10 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -291,6 +292,343 @@ def test_list_orders_marks_only_exact_complete_result_authoritative():
     with patch.object(order_http, "_safe_get", return_value={"ok": True, "body": body}):
         result = order_http.list_orders("OPEN", account_seq="safe-seq")
     assert result == {"ok": True, "status": "OPEN", "orders": [], "complete": True}
+
+
+@pytest.mark.parametrize(
+    ("body", "reason"),
+    [
+        ({"result": []}, "malformed_orders_result"),
+        ({"result": {"orders": []}}, "malformed_orders_pagination"),
+        ({"result": {"orders": [], "hasNext": False}}, "malformed_orders_pagination"),
+        ({"result": {"orders": [], "nextCursor": None}}, "malformed_orders_pagination"),
+        ({"result": {"orders": [], "hasNext": 0, "nextCursor": None}},
+         "malformed_orders_pagination"),
+    ],
+)
+def test_list_orders_requires_official_closed_pagination_envelope(body, reason):
+    from core import toss_live_order_http as order_http
+
+    with patch.object(order_http, "_safe_get", return_value={"ok": True, "body": body}):
+        result = order_http.list_orders("CLOSED", account_seq="safe-seq")
+
+    assert result == {
+        "ok": False,
+        "reason": reason,
+        "status": "CLOSED",
+        "orders": [],
+        "complete": False,
+    }
+
+
+def test_list_orders_keeps_legacy_list_result_for_open_only():
+    from core import toss_live_order_http as order_http
+
+    with patch.object(order_http, "_safe_get", return_value={"ok": True, "body": {"result": []}}):
+        result = order_http.list_orders("OPEN", account_seq="safe-seq")
+
+    assert result == {"ok": True, "status": "OPEN", "orders": [], "complete": True}
+
+
+def test_list_orders_collects_every_closed_cursor_page_before_authoritative_success():
+    from core import toss_live_order_http as order_http
+
+    pages = [
+        {"ok": True, "body": {"result": {
+            "orders": [{"orderId": "order-a", "status": "FILLED"}],
+            "nextCursor": "cursor-2", "hasNext": True,
+        }}},
+        {"ok": True, "body": {"result": {
+            "orders": [{"orderId": "order-b", "status": "CANCELED"}],
+            "nextCursor": None, "hasNext": False,
+        }}},
+    ]
+    with patch.object(order_http, "_safe_get", side_effect=pages) as fetch:
+        result = order_http.list_orders("CLOSED", account_seq="safe-seq")
+
+    assert result["ok"] is True
+    assert result["complete"] is True
+    assert [row["broker_order_id"] for row in result["orders"]] == ["order-a", "order-b"]
+    assert [call.kwargs["params"] for call in fetch.call_args_list] == [
+        {"status": "CLOSED", "limit": 100},
+        {"status": "CLOSED", "limit": 100, "cursor": "cursor-2"},
+    ]
+
+
+def test_list_orders_discards_partial_closed_pages_when_later_page_fails():
+    from core import toss_live_order_http as order_http
+
+    pages = [
+        {"ok": True, "body": {"result": {
+            "orders": [{"orderId": "order-a", "status": "FILLED"}],
+            "nextCursor": "cursor-2", "hasNext": True,
+        }}},
+        {"ok": False, "reason": "http_429"},
+    ]
+    with patch.object(order_http, "_safe_get", side_effect=pages):
+        result = order_http.list_orders("CLOSED", account_seq="safe-seq")
+
+    assert result["ok"] is False
+    assert result["complete"] is False
+    assert result["orders"] == []
+    assert result["reason"] == "http_429"
+
+
+def test_list_orders_rejects_repeated_closed_cursor_without_partial_truth():
+    from core import toss_live_order_http as order_http
+
+    repeated = {"ok": True, "body": {"result": {
+        "orders": [{"orderId": "order-a", "status": "FILLED"}],
+        "nextCursor": "same-cursor", "hasNext": True,
+    }}}
+    with patch.object(order_http, "_safe_get", side_effect=[repeated, repeated]):
+        result = order_http.list_orders("CLOSED", account_seq="safe-seq")
+
+    assert result == {
+        "ok": False,
+        "reason": "orders_pagination_cycle",
+        "status": "CLOSED",
+        "orders": [],
+        "complete": False,
+    }
+
+
+def test_list_orders_rejects_multi_cursor_cycle_without_partial_truth():
+    from core import toss_live_order_http as order_http
+
+    def page(order_id, cursor):
+        return {"ok": True, "body": {"result": {
+            "orders": [{"orderId": order_id, "status": "FILLED"}],
+            "nextCursor": cursor, "hasNext": True,
+        }}}
+
+    with patch.object(order_http, "_safe_get", side_effect=[
+        page("order-a", "cursor-a"),
+        page("order-b", "cursor-b"),
+        page("order-c", "cursor-a"),
+    ]):
+        result = order_http.list_orders("CLOSED", account_seq="safe-seq")
+
+    assert result == {
+        "ok": False,
+        "reason": "orders_pagination_cycle",
+        "status": "CLOSED",
+        "orders": [],
+        "complete": False,
+    }
+
+
+def test_list_orders_discards_partial_pages_at_total_deadline(monkeypatch):
+    from core import toss_live_order_http as order_http
+
+    pages = [
+        {"ok": True, "body": {"result": {
+            "orders": [{"orderId": "order-a", "status": "FILLED"}],
+            "nextCursor": "cursor-2", "hasNext": True,
+        }}},
+        {"ok": True, "body": {"result": {
+            "orders": [{"orderId": "order-b", "status": "FILLED"}],
+            "nextCursor": None, "hasNext": False,
+        }}},
+    ]
+    monkeypatch.setattr(order_http, "_ORDER_LIST_DEADLINE_SEC", 20.0, raising=False)
+    real_monotonic = time.monotonic
+    base = real_monotonic()
+    worker_times = iter([base + 1.0, base + 10.0, base + 21.0])
+
+    def monotonic():
+        if threading.current_thread().name == "toss-order-history-worker":
+            return next(worker_times, base + 21.0)
+        return real_monotonic()
+
+    monkeypatch.setattr(order_http.time, "monotonic", monotonic)
+    with patch.object(order_http, "_safe_get", side_effect=pages) as fetch:
+        result = order_http.list_orders("CLOSED", account_seq="safe-seq")
+
+    assert result == {
+        "ok": False,
+        "reason": "orders_pagination_deadline",
+        "status": "CLOSED",
+        "orders": [],
+        "complete": False,
+    }
+    assert fetch.call_count == 1
+    assert 0 < fetch.call_args.kwargs["timeout"] <= 20.0
+
+
+def test_list_orders_discards_terminal_page_that_returns_after_total_deadline(monkeypatch):
+    from core import toss_live_order_http as order_http
+
+    terminal_page = {"ok": True, "body": {"result": {
+        "orders": [], "nextCursor": None, "hasNext": False,
+    }}}
+    real_monotonic = time.monotonic
+    base = real_monotonic()
+    worker_times = iter([base, base + 21.0])
+
+    def monotonic():
+        if threading.current_thread().name == "toss-order-history-worker":
+            return next(worker_times, base + 21.0)
+        return real_monotonic()
+
+    monkeypatch.setattr(order_http.time, "monotonic", monotonic)
+    with patch.object(order_http, "_safe_get", return_value=terminal_page) as fetch:
+        result = order_http.list_orders("CLOSED", account_seq="safe-seq")
+
+    assert result == {
+        "ok": False,
+        "reason": "orders_pagination_deadline",
+        "status": "CLOSED",
+        "orders": [],
+        "complete": False,
+    }
+    assert fetch.call_count == 1
+
+
+def test_safe_get_never_expands_callers_remaining_timeout():
+    from core import toss_live_order_http as order_http
+
+    response = Mock(status_code=200)
+    response.json.return_value = {"result": []}
+    with patch.object(order_http.tc, "_get_access_token", return_value="test-token"), \
+            patch("requests.get", return_value=response) as request:
+        result = order_http._safe_get(
+            "/api/v1/orders",
+            account_seq="safe-seq",
+            params={"status": "CLOSED"},
+            timeout=0.05,
+        )
+
+    assert result["ok"] is True
+    assert request.call_args.kwargs["timeout"] == 0.05
+
+
+def test_list_orders_hard_deadline_keeps_one_inflight_get(monkeypatch):
+    from core import toss_live_order_http as order_http
+
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def blocked_get(*args, **kwargs):
+        started.set()
+        release.wait(timeout=0.3)
+        finished.set()
+        return {"ok": True, "body": {"result": {
+            "orders": [], "nextCursor": None, "hasNext": False,
+        }}}
+
+    monkeypatch.setattr(order_http, "_ORDER_LIST_DEADLINE_SEC", 0.03)
+    try:
+        with patch.object(order_http, "_safe_get", side_effect=blocked_get) as fetch:
+            began = time.monotonic()
+            first = order_http.list_orders("CLOSED", account_seq="safe-seq")
+            elapsed = time.monotonic() - began
+            assert started.wait(timeout=0.1)
+            second = order_http.list_orders("CLOSED", account_seq="safe-seq")
+
+        assert elapsed < 0.15
+        assert first["reason"] == "orders_pagination_deadline"
+        assert first["orders"] == [] and first["complete"] is False
+        assert second["reason"] == "orders_request_inflight"
+        assert second["orders"] == [] and second["complete"] is False
+        assert fetch.call_count == 1
+    finally:
+        release.set()
+        assert finished.wait(timeout=1)
+        slot = getattr(order_http, "_ORDER_JOB_INFLIGHT", None)
+        if slot:
+            assert slot["done"].wait(timeout=1)
+
+
+def test_list_orders_hard_deadline_includes_account_resolution(monkeypatch):
+    from core import toss_live_order_http as order_http
+
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def blocked_resolution(_account_seq):
+        started.set()
+        release.wait(timeout=0.3)
+        finished.set()
+        return "safe-seq"
+
+    terminal = {"ok": True, "body": {"result": {
+        "orders": [], "nextCursor": None, "hasNext": False,
+    }}}
+    monkeypatch.setattr(order_http, "_ORDER_LIST_DEADLINE_SEC", 0.03)
+    try:
+        with patch.object(order_http, "_resolve_account_seq", side_effect=blocked_resolution), \
+                patch.object(order_http, "_safe_get", return_value=terminal):
+            began = time.monotonic()
+            first = order_http.list_orders("CLOSED")
+            elapsed = time.monotonic() - began
+            assert started.wait(timeout=0.1)
+            second = order_http.list_orders("CLOSED")
+
+        assert elapsed < 0.15
+        assert first["reason"] == "orders_pagination_deadline"
+        assert first["orders"] == [] and first["complete"] is False
+        assert second["reason"] == "orders_request_inflight"
+        assert second["orders"] == [] and second["complete"] is False
+    finally:
+        release.set()
+        assert finished.wait(timeout=1)
+
+
+def test_order_job_worker_is_prestarted_daemon():
+    from core import toss_live_order_http as order_http
+
+    assert order_http._ORDER_JOB_THREAD.daemon is True
+    assert order_http._ORDER_JOB_THREAD.is_alive() is True
+
+
+def test_list_orders_worker_exception_and_wrong_result_fail_closed():
+    from core import toss_live_order_http as order_http
+
+    with patch.object(order_http, "_resolve_account_seq", side_effect=RuntimeError("safe")):
+        raised = order_http.list_orders("CLOSED")
+    with patch.object(order_http, "_list_orders_sync", return_value=None):
+        malformed = order_http.list_orders("CLOSED", account_seq="safe-seq")
+
+    assert raised["reason"] == "request_exception"
+    assert raised["orders"] == [] and raised["complete"] is False
+    assert malformed["reason"] == "malformed_request_result"
+    assert malformed["orders"] == [] and malformed["complete"] is False
+
+
+def test_list_orders_concurrent_caller_reuses_single_inflight_worker():
+    from core import toss_live_order_http as order_http
+
+    started = threading.Event()
+    release = threading.Event()
+    first = {}
+
+    def blocked_get(*args, **kwargs):
+        started.set()
+        release.wait(timeout=1)
+        return {"ok": True, "body": {"result": {
+            "orders": [], "nextCursor": None, "hasNext": False,
+        }}}
+
+    def call_first():
+        first.update(order_http.list_orders("CLOSED", account_seq="safe-seq"))
+
+    with patch.object(order_http, "_safe_get", side_effect=blocked_get) as fetch:
+        caller = threading.Thread(target=call_first)
+        caller.start()
+        try:
+            assert started.wait(timeout=1)
+            second = order_http.list_orders("CLOSED", account_seq="safe-seq")
+            assert second["reason"] == "orders_request_inflight"
+            assert second["orders"] == [] and second["complete"] is False
+            assert fetch.call_count == 1
+        finally:
+            release.set()
+            caller.join(timeout=1)
+
+    assert caller.is_alive() is False
+    assert first["ok"] is True and first["complete"] is True
 
 
 def test_dispatch_lock_is_process_wide_and_released_on_process_death(monkeypatch, tmp_path):
