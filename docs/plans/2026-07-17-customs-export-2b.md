@@ -93,6 +93,6 @@
 - HS30 uses the official UN Comtrade H6 Chapter 30 taxonomy, explicitly labels it `Pharmaceutical products`, records the HS2022 effective interval as `202201..None`, and never treats precision instruments as biotechnology.
 - The Itemtrade provider rejects pre-HS2022 periods, future periods, incomplete requested month ranges, hostile taxonomy objects, deep JSON recursion, and secret-bearing transport/cleanup failures. It remains unimported by scheduler/scorer/order paths.
 - Focused Customs evidence: `314 passed`; scheduler subset: `69 passed`; compile-surviving mutations: `12/12 KILLED`.
-- Whole-repository candidate evidence: `3644 passed`, with the same 14 unrelated failures as the clean baseline (`candidate-only=0`, `baseline-only=0`).
+- Source-only Customs commit `d213ed03d49f39f9aa2f57fd560ff17317d51466` whole-repository evidence: `3644 passed`, with the same 14 unrelated failures as its clean baseline (`candidate-only=0`, `baseline-only=0`). This is historical source-only evidence, not the r4-integrated HEAD result.
 - Independent reviews: KCS lineage/pagination PASS; taxonomy/HS blocker re-review PASS; production non-interference PASS.
 - Release constraint: Itemtrade returned authenticated HTTP 403 as documented above. Do not schedule, persist, score, backtest, or deploy HS30 until a real HTTP 200 XML response passes the parser and a new reviewed artifact is issued.
