@@ -51,6 +51,7 @@ def test_cli_passes_decoding_key_without_printing_it(monkeypatch, capsys, tmp_pa
         "store": store,
         "run_id": "customs-cli-1",
         "service_key": "decoding-secret-value",
+        "workday_fetcher": None,
         "collection_mode": "research_backfill",
     }
     assert payload["ok"] is True
@@ -88,6 +89,7 @@ def test_cli_implicit_default_range_is_scheduled_live(monkeypatch, capsys, tmp_p
     assert observed["start"] == "202506"
     assert observed["end"] == "202607"
     assert observed["collection_mode"] == "scheduled_live"
+    assert observed["workday_fetcher"] is cli.fetch_kcs_workday_observations
     assert "scheduled-secret-value" not in captured.out
     assert "scheduled-secret-value" not in captured.err
 

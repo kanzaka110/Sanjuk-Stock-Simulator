@@ -92,6 +92,7 @@ def _assert_latest_run_statuses(store, *, status, error_type):
         "ten_day_product_export_requests",
         "ten_day_product_exports_raw",
         "ten_day_product_exports",
+        "ten_day_export_workdays",
         "ten_day_export_industry_features",
     ):
         run = store.latest_collection_run("korea_customs", dataset)
@@ -586,6 +587,11 @@ def test_success_atomically_persists_period_and_collection_run(tmp_path):
         "rows_skipped": 0,
         "rows_invalid": 0,
         "error_type": "",
+        "workday_status": "skipped",
+        "workday_rows_seen": 0,
+        "workday_rows_inserted": 0,
+        "workday_rows_duplicate": 0,
+        "workday_error_type": "",
         "feature_rows_seen": 10,
         "feature_rows_inserted": 10,
         "feature_rows_duplicate": 0,
@@ -606,6 +612,13 @@ def test_success_atomically_persists_period_and_collection_run(tmp_path):
     assert observation.payload["amounts_thousand_usd"]["semiconductors"] == 100
     assert observation.payload["units"] == {"amounts_thousand_usd": "thousand_USD"}
     assert observation.payload["provisional"] is True
+    assert observation.payload["scheduled_release_date_kst"] == "2026-07-11"
+    assert observation.payload["next_cutoff_release_date_kst"] == "2026-07-21"
+    assert observation.payload["source_published_at_utc"] is None
+    assert observation.payload["publication_precision"] == "date_only"
+    assert observation.payload["available_at_field"] == "observation.ingested_at"
+    assert "nominal_publication_at_utc" not in observation.payload
+    assert "next_cutoff_publication_at_utc" not in observation.payload
     expected_raw = _fixture_raw([_period()])
     assert observation.payload["snapshot_group_id"] == hashlib.sha256(
         expected_raw
@@ -1120,7 +1133,7 @@ def test_terminal_run_ledger_transient_failure_retries_as_persistence_failure(
         store, status="failed", error_type="persistence.operationalerror"
     )
     with sqlite3.connect(store.db_path) as connection:
-        assert connection.execute("SELECT COUNT(*) FROM collection_runs").fetchone()[0] == 8
+        assert connection.execute("SELECT COUNT(*) FROM collection_runs").fetchone()[0] == 10
 
 
 def test_terminal_run_ledger_permanent_failure_is_explicitly_fatal(tmp_path):
@@ -1393,3 +1406,327 @@ def test_historical_rows_are_revised_references_not_realtime_vintages(tmp_path):
     assert payloads["20260710"]["vintage_policy"] == "realtime_as_observed"
     assert payloads["20250710"]["historical_backtest_eligible"] is False
     assert payloads["20260710"]["eligible_for_production_score"] is False
+
+
+def _workday_payload(year, tenths, *, available_at):
+    return {
+        "source_record_id": f"{year}0710:workdays",
+        "period_year": year,
+        "period_month": 7,
+        "period_end_day": 10,
+        "period_kind": "day_10",
+        "workdays_mtd_tenths": tenths,
+        "calendar_domain": "KCS_REPORTED_OPERATING_DAYS",
+        "method_version": "korea-kr-kcs-press-release-v1",
+        "source_document_id": "156800001",
+        "source_uri": (
+            "https://m.korea.kr/briefing/pressReleaseView.do?newsId=156800001"
+        ),
+        "source_title": "’26년 7월 1일 ~ 7월 10일 수출입 현황",
+        "source_agency": "관세청",
+        "detail_header_title": "’26년 7월 1일 ~ 7월 10일 수출입 현황",
+        "detail_header_release_date_kst": "2026-07-11",
+        "detail_header_verified": True,
+        "source_document_sha256": "a" * 64,
+        "scheduled_release_date_kst": "2026-07-11",
+        "source_published_at_utc": None,
+        "publication_precision": "date_only",
+        "first_seen_at_utc": available_at,
+        "available_at_utc": available_at,
+        "revision_policy": "append_only_content_hash",
+        "supersedes_snapshot_id": None,
+        "shadow_only": True,
+        "eligible_for_production_score": False,
+    }
+
+
+def test_workday_success_is_appended_before_ready_feature(tmp_path):
+    from core.customs_export_observation_collector import (
+        collect_customs_export_observations,
+    )
+    from core.customs_export_workdays import WorkdayFetchResult
+
+    amount_received = COMPLETED
+    workday_started = amount_received + timedelta(seconds=1)
+    workday_completed = amount_received + timedelta(seconds=2)
+    batch_completed = amount_received + timedelta(seconds=3)
+    available = workday_completed.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    workday_result = WorkdayFetchResult(
+        status="success",
+        error_type="none",
+        rows=(
+            _workday_payload(2025, 70, available_at=available),
+            _workday_payload(2026, 80, available_at=available),
+        ),
+        started_at_utc=workday_started,
+        completed_at_utc=workday_completed,
+    )
+    store = SourceObservationStoreV2(tmp_path / "workday-success.db")
+    seen_periods = []
+
+    def workday_fetcher(periods):
+        seen_periods.extend(periods)
+        return workday_result
+
+    summary = collect_customs_export_observations(
+        "202507",
+        "202607",
+        store=store,
+        run_id="customs-workday-success",
+        fetcher=lambda *_args, **_kwargs: _result(
+            [
+                _period(year=2025, month=7, day=10, total=900, semiconductors=90),
+                _period(year=2026, month=7, day=10, total=1000, semiconductors=100),
+            ]
+        ),
+        workday_fetcher=workday_fetcher,
+        clock=_clock(STARTED, amount_received, batch_completed),
+    )
+
+    assert len(seen_periods) == 2
+    assert summary["status"] == "success"
+    assert summary["workday_status"] == "success"
+    assert summary["workday_rows_seen"] == 2
+    assert summary["workday_rows_inserted"] == 2
+    assert summary["feature_rows_ready"] == 10
+    workday = store.latest_as_of(
+        decision_at=batch_completed,
+        source="korea_customs",
+        dataset="ten_day_export_workdays",
+        symbol="KR_EXPORTS",
+        market="KR",
+    )
+    assert workday is not None
+    assert workday.ingested_at == available
+    assert workday.payload["source_published_at_utc"] is None
+    assert workday.payload["publication_precision"] == "date_only"
+    assert workday.payload["available_at_field"] == "observation.ingested_at"
+    assert "available_at_utc" not in workday.payload
+    assert "first_seen_at_utc" not in workday.payload
+    feature = store.latest_as_of(
+        decision_at=batch_completed,
+        source="korea_customs",
+        dataset="ten_day_export_industry_features",
+        symbol="KCS:SEMI",
+        market="KR",
+    )
+    assert feature is not None
+    assert feature.ingested_at == batch_completed.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    assert feature.payload["workday_feature_ready"] is True
+    assert feature.payload["feature_ready"] is True
+    assert feature.payload["eligible_for_production_score"] is False
+    run = store.latest_collection_run("korea_customs", "ten_day_export_workdays")
+    assert run is not None
+    assert run.status == "success"
+
+
+def test_workday_failure_keeps_amounts_but_returns_partial(tmp_path):
+    from core.customs_export_observation_collector import (
+        collect_customs_export_observations,
+    )
+    from core.customs_export_workdays import WorkdayFetchResult
+
+    amount_received = COMPLETED
+    workday_started = amount_received + timedelta(seconds=1)
+    workday_completed = amount_received + timedelta(seconds=2)
+    batch_completed = amount_received + timedelta(seconds=3)
+    store = SourceObservationStoreV2(tmp_path / "workday-failure.db")
+    result = WorkdayFetchResult(
+        status="failed",
+        error_type="network",
+        rows=(),
+        started_at_utc=workday_started,
+        completed_at_utc=workday_completed,
+    )
+
+    summary = collect_customs_export_observations(
+        "202607",
+        "202607",
+        store=store,
+        run_id="customs-workday-failure",
+        fetcher=lambda *_args, **_kwargs: _result(
+            [_period()],
+            start_yymm="202607",
+        ),
+        workday_fetcher=lambda _periods: result,
+        clock=_clock(STARTED, amount_received, batch_completed),
+    )
+
+    assert summary["status"] == "partial"
+    assert summary["error_type"] == "workday.network"
+    assert summary["rows_inserted"] == 1
+    assert summary["workday_status"] == "failed"
+    assert store.latest_as_of(
+        decision_at=batch_completed,
+        source="korea_customs",
+        dataset="ten_day_product_exports",
+        symbol="KR_EXPORTS",
+        market="KR",
+    ) is not None
+    feature = store.latest_as_of(
+        decision_at=batch_completed,
+        source="korea_customs",
+        dataset="ten_day_export_industry_features",
+        symbol="KCS:SEMI",
+        market="KR",
+    )
+    assert feature is not None
+    assert feature.payload["workday_feature_ready"] is False
+    run = store.latest_collection_run("korea_customs", "ten_day_export_workdays")
+    assert run is not None
+    assert run.status == "failed"
+    assert run.error_type == "network"
+
+
+def test_collector_rejects_forged_detail_metadata_before_storage(tmp_path):
+    from core.customs_export_observation_collector import (
+        collect_customs_export_observations,
+    )
+    from core.customs_export_workdays import WorkdayFetchResult
+
+    amount_received = COMPLETED
+    workday_started = amount_received + timedelta(seconds=1)
+    workday_completed = amount_received + timedelta(seconds=2)
+    batch_completed = amount_received + timedelta(seconds=3)
+    available = workday_completed.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    forged = _workday_payload(2026, 80, available_at=available)
+    forged["source_agency"] = "한국거래소"
+    result = WorkdayFetchResult(
+        status="success",
+        error_type="none",
+        rows=(forged,),
+        started_at_utc=workday_started,
+        completed_at_utc=workday_completed,
+    )
+    store = SourceObservationStoreV2(tmp_path / "workday-forged-detail.db")
+
+    summary = collect_customs_export_observations(
+        "202607",
+        "202607",
+        store=store,
+        run_id="customs-workday-forged-detail",
+        fetcher=lambda *_args, **_kwargs: _result(
+            [_period()],
+            start_yymm="202607",
+        ),
+        workday_fetcher=lambda _periods: result,
+        clock=_clock(STARTED, amount_received, batch_completed),
+    )
+
+    assert summary["status"] == "partial"
+    assert summary["error_type"] == "workday.lineage.invalid"
+    assert summary["workday_status"] == "failed"
+    assert summary["workday_rows_inserted"] == 0
+    assert summary["feature_rows_ready"] == 0
+    assert store.latest_as_of(
+        decision_at=batch_completed,
+        source="korea_customs",
+        dataset="ten_day_export_workdays",
+        symbol="KR_EXPORTS",
+        market="KR",
+    ) is None
+
+
+def _collect_workday_revision(store, *, run_id, offset_hours, sha_char="a", current=80):
+    from core.customs_export_observation_collector import (
+        collect_customs_export_observations,
+    )
+    from core.customs_export_workdays import WorkdayFetchResult
+
+    amount_started = STARTED + timedelta(hours=offset_hours)
+    amount_completed = amount_started + timedelta(seconds=2)
+    workday_started = amount_completed + timedelta(seconds=1)
+    workday_completed = amount_completed + timedelta(seconds=2)
+    batch_completed = amount_completed + timedelta(seconds=3)
+    available = workday_completed.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    rows = [
+        _workday_payload(2025, 70, available_at=available),
+        _workday_payload(2026, current, available_at=available),
+    ]
+    for row in rows:
+        row["source_document_sha256"] = sha_char * 64
+    result = WorkdayFetchResult(
+        status="success",
+        error_type="none",
+        rows=tuple(rows),
+        started_at_utc=workday_started,
+        completed_at_utc=workday_completed,
+    )
+    summary = collect_customs_export_observations(
+        "202507",
+        "202607",
+        store=store,
+        run_id=run_id,
+        fetcher=lambda *_args, **_kwargs: _result(
+            [
+                _period(year=2025, month=7, day=10, total=900, semiconductors=90),
+                _period(year=2026, month=7, day=10, total=1000, semiconductors=100),
+            ],
+            started=amount_started,
+            completed=amount_completed,
+        ),
+        workday_fetcher=lambda _periods: result,
+        clock=_clock(amount_started, amount_completed, batch_completed),
+    )
+    return summary
+
+
+def test_workday_rerun_converges_and_revision_supersedes_once(tmp_path):
+    store = SourceObservationStoreV2(tmp_path / "workday-revision.db")
+
+    first = _collect_workday_revision(
+        store,
+        run_id="customs-workday-revision-1",
+        offset_hours=0,
+    )
+    duplicate = _collect_workday_revision(
+        store,
+        run_id="customs-workday-revision-2",
+        offset_hours=1,
+    )
+    corrected = _collect_workday_revision(
+        store,
+        run_id="customs-workday-revision-3",
+        offset_hours=2,
+        sha_char="b",
+        current=85,
+    )
+    corrected_duplicate = _collect_workday_revision(
+        store,
+        run_id="customs-workday-revision-4",
+        offset_hours=3,
+        sha_char="b",
+        current=85,
+    )
+
+    assert first["workday_rows_inserted"] == 2
+    assert duplicate["workday_rows_inserted"] == 0
+    assert duplicate["workday_rows_duplicate"] == 2
+    assert corrected["workday_rows_inserted"] == 2
+    assert corrected_duplicate["workday_rows_inserted"] == 0
+    assert corrected_duplicate["workday_rows_duplicate"] == 2
+    with sqlite3.connect(store.db_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT snapshot_id, payload_json
+            FROM observations
+            WHERE dataset = 'ten_day_export_workdays'
+              AND source_record_id = '20260710:workdays'
+            ORDER BY id
+            """
+        ).fetchall()
+        total = connection.execute(
+            """
+            SELECT COUNT(*) FROM observations
+            WHERE dataset = 'ten_day_export_workdays'
+            """
+        ).fetchone()[0]
+    assert total == 4
+    assert len(rows) == 2
+    initial_snapshot = rows[0][0]
+    initial_payload = json.loads(rows[0][1])
+    corrected_payload = json.loads(rows[1][1])
+    assert initial_payload["revision_seq"] == 0
+    assert initial_payload["supersedes_snapshot_id"] is None
+    assert corrected_payload["revision_seq"] == 1
+    assert corrected_payload["supersedes_snapshot_id"] == initial_snapshot

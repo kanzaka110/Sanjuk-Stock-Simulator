@@ -5,8 +5,9 @@ from __future__ import annotations
 import base64
 from calendar import monthrange
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 import hashlib
+import json
 import re
 from typing import Any, Callable
 
@@ -17,6 +18,7 @@ from core.customs_export import (
     normalize_xml_content_type,
 )
 from core.customs_export_features import derive_industry_features
+from core.customs_export_workdays import WorkdayFetchResult
 from core.market_data_fetch import FetchResult, FetchStatus
 from core.sensitive_text import contains_sensitive_text
 
@@ -25,7 +27,14 @@ DATASET = "ten_day_product_exports"
 RAW_DATASET = "ten_day_product_exports_raw"
 REQUEST_DATASET = "ten_day_product_export_requests"
 FEATURE_DATASET = "ten_day_export_industry_features"
-_ALL_DATASETS = (REQUEST_DATASET, RAW_DATASET, DATASET, FEATURE_DATASET)
+WORKDAY_DATASET = "ten_day_export_workdays"
+_ALL_DATASETS = (
+    REQUEST_DATASET,
+    RAW_DATASET,
+    DATASET,
+    WORKDAY_DATASET,
+    FEATURE_DATASET,
+)
 _COLLECTION_MODES = frozenset({"scheduled_live", "research_backfill", "manual_replay"})
 _BASE64_ALPHABET = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -151,21 +160,21 @@ def _next_month(year: int, month: int) -> tuple[int, int]:
     return (year + 1, 1) if month == 12 else (year, month + 1)
 
 
-def _publication_window(year: int, month: int, day: int) -> tuple[datetime, datetime]:
+def _publication_dates(year: int, month: int, day: int) -> tuple[date, date]:
     if day == 10:
-        published = datetime(year, month, 11, tzinfo=_KST)
-        next_cutoff = datetime(year, month, 21, tzinfo=_KST)
+        scheduled = date(year, month, 11)
+        next_cutoff = date(year, month, 21)
     elif day == 20:
         next_year, next_month = _next_month(year, month)
-        published = datetime(year, month, 21, tzinfo=_KST)
-        next_cutoff = datetime(next_year, next_month, 1, tzinfo=_KST)
+        scheduled = date(year, month, 21)
+        next_cutoff = date(next_year, next_month, 1)
     elif day == monthrange(year, month)[1]:
         next_year, next_month = _next_month(year, month)
-        published = datetime(next_year, next_month, 1, tzinfo=_KST)
-        next_cutoff = datetime(next_year, next_month, 11, tzinfo=_KST)
+        scheduled = date(next_year, next_month, 1)
+        next_cutoff = date(next_year, next_month, 11)
     else:
         raise ValueError("customs_period_invalid")
-    return published.astimezone(timezone.utc), next_cutoff.astimezone(timezone.utc)
+    return scheduled, next_cutoff
 
 
 def _validate_result_lineage(result: Any) -> FetchResult:
@@ -210,6 +219,7 @@ def _record_failed_runs(
         REQUEST_DATASET: request_rows_seen,
         RAW_DATASET: raw_rows_seen,
         DATASET: normalized_rows_seen,
+        WORKDAY_DATASET: 0,
         FEATURE_DATASET: 0,
     }
 
@@ -315,6 +325,102 @@ def _validate_result_timestamps(result: FetchResult, received_at: datetime) -> N
         )
     ):
         raise ValueError("timestamp.future")
+
+
+def _validate_workday_fetch_result(
+    result: Any,
+    *,
+    amount_received_at: datetime,
+    batch_completed_at: datetime,
+) -> WorkdayFetchResult:
+    if not isinstance(result, WorkdayFetchResult):
+        raise ValueError("customs_workday_fetch_contract_invalid")
+    started = _utc(result.started_at_utc, "workday_started_at_utc")
+    completed = _utc(result.completed_at_utc, "workday_completed_at_utc")
+    if not amount_received_at <= started <= completed <= batch_completed_at:
+        raise ValueError("customs_workday_fetch_timestamp_invalid")
+    if result.status == "success":
+        if result.error_type != "none" or not result.rows:
+            raise ValueError("customs_workday_fetch_contract_invalid")
+    elif result.status == "failed":
+        if (
+            result.rows
+            or type(result.error_type) is not str
+            or re.fullmatch(r"[a-z0-9_.]+", result.error_type) is None
+            or result.error_type == "none"
+        ):
+            raise ValueError("customs_workday_fetch_contract_invalid")
+    else:
+        raise ValueError("customs_workday_fetch_contract_invalid")
+    completed_text = _utc_text(completed)
+    for row in result.rows:
+        if (
+            type(row) is not dict
+            or row.get("available_at_utc") != completed_text
+            or row.get("first_seen_at_utc") != completed_text
+            or row.get("source_published_at_utc") is not None
+            or row.get("publication_precision") != "date_only"
+            or row.get("source_agency") != "관세청"
+            or row.get("detail_header_title") != row.get("source_title")
+            or row.get("detail_header_release_date_kst")
+            != row.get("scheduled_release_date_kst")
+            or row.get("detail_header_verified") is not True
+        ):
+            raise ValueError("customs_workday_fetch_contract_invalid")
+    return result
+
+
+def _workday_storage_payload(conn, row: dict[str, Any]) -> dict[str, Any]:
+    candidate = {
+        key: value
+        for key, value in row.items()
+        if key
+        not in {
+            "first_seen_at_utc",
+            "available_at_utc",
+            "supersedes_snapshot_id",
+            "revision_seq",
+        }
+    }
+    candidate["available_at_field"] = "observation.ingested_at"
+    prior = conn.execute(
+        """
+        SELECT snapshot_id, payload_json
+        FROM observations
+        WHERE source = ? AND dataset = ? AND source_record_id = ?
+          AND symbol = ? AND market = ?
+        ORDER BY source_as_of DESC, source_event_sequence DESC,
+                 ingested_at DESC, id DESC
+        LIMIT 1
+        """,
+        (
+            SOURCE,
+            WORKDAY_DATASET,
+            row["source_record_id"],
+            "KR_EXPORTS",
+            "KR",
+        ),
+    ).fetchone()
+    if prior is None:
+        candidate["revision_seq"] = 0
+        candidate["supersedes_snapshot_id"] = None
+        return candidate
+    prior_snapshot_id = str(prior["snapshot_id"])
+    prior_payload = json.loads(str(prior["payload_json"]))
+    prior_core = {
+        key: value
+        for key, value in prior_payload.items()
+        if key not in {"revision_seq", "supersedes_snapshot_id"}
+    }
+    if candidate == prior_core:
+        candidate["revision_seq"] = int(prior_payload.get("revision_seq", 0))
+        candidate["supersedes_snapshot_id"] = prior_payload.get(
+            "supersedes_snapshot_id"
+        )
+    else:
+        candidate["revision_seq"] = int(prior_payload.get("revision_seq", 0)) + 1
+        candidate["supersedes_snapshot_id"] = prior_snapshot_id
+    return candidate
 
 
 def _decode_raw_artifact(encoded: str) -> bytes:
@@ -489,7 +595,7 @@ def _normalize_items(
         source_as_of = _period_source_as_of(year, month, day)
         if source_as_of > ingested_at:
             raise ValueError("customs_period_not_available")
-        nominal_publication_at, next_cutoff_publication_at = _publication_window(
+        scheduled_release_date, next_cutoff_release_date = _publication_dates(
             year, month, day
         )
         normalized.append(
@@ -507,27 +613,32 @@ def _normalize_items(
                     "provisional": (year, month) == (current_kst.year, current_kst.month),
                     "snapshot_group_id": snapshot_group_id,
                     "collection_mode": collection_mode,
-                    "nominal_publication_at_utc": nominal_publication_at.isoformat(),
-                    "next_cutoff_publication_at_utc": next_cutoff_publication_at.isoformat(),
+                    "scheduled_release_date_kst": scheduled_release_date.isoformat(),
+                    "next_cutoff_release_date_kst": next_cutoff_release_date.isoformat(),
+                    "source_published_at_utc": None,
+                    "publication_precision": "date_only",
+                    "available_at_field": "observation.ingested_at",
                     "vintage_policy": "research_backfill_current_vintage",
                     "official_dataset_id": "15157908",
                 },
             )
         )
     latest_source_as_of = max(item.source_as_of for item in normalized)
-    current_yymm = ingested_at.astimezone(_KST).strftime("%Y%m")
+    current_local = ingested_at.astimezone(_KST)
+    current_yymm = current_local.strftime("%Y%m")
+    current_date = current_local.date()
     for item in normalized:
         if item.source_as_of == latest_source_as_of:
-            nominal_publication_at = datetime.fromisoformat(
-                item.payload["nominal_publication_at_utc"]
+            scheduled_release_date = date.fromisoformat(
+                item.payload["scheduled_release_date_kst"]
             )
-            next_cutoff_publication_at = datetime.fromisoformat(
-                item.payload["next_cutoff_publication_at_utc"]
+            next_cutoff_release_date = date.fromisoformat(
+                item.payload["next_cutoff_release_date_kst"]
             )
             if (
                 collection_mode == "scheduled_live"
                 and end_yymm == current_yymm
-                and nominal_publication_at <= ingested_at < next_cutoff_publication_at
+                and scheduled_release_date <= current_date < next_cutoff_release_date
             ):
                 item.payload["vintage_policy"] = "realtime_as_observed"
         else:
@@ -548,6 +659,7 @@ def collect_customs_export_observations(
     run_id: str,
     service_key: str = "",
     fetcher: Callable[..., FetchResult] | None = None,
+    workday_fetcher: Callable[[list[dict[str, Any]]], WorkdayFetchResult] | None = None,
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     collection_mode: str = "research_backfill",
 ) -> dict[str, Any]:
@@ -730,7 +842,7 @@ def collect_customs_export_observations(
                 error_type="",
                 _conn=conn,
             )
-            for dataset in (DATASET, FEATURE_DATASET):
+            for dataset in (DATASET, WORKDAY_DATASET, FEATURE_DATASET):
                 store.record_collection_run(
                     source=SOURCE,
                     dataset=dataset,
@@ -844,6 +956,93 @@ def collect_customs_export_observations(
             raw_rows_seen=1,
         )
 
+    workday_status = "skipped"
+    workday_error_type = ""
+    workday_rows: list[dict[str, Any]] = []
+    if workday_fetcher is not None:
+        fetched_workdays: Any = None
+        try:
+            fetched_workdays = workday_fetcher(
+                [dict(item.payload) for item in observations]
+            )
+        except Exception as exc:
+            workday_status = "failed"
+            workday_error_type = f"fetch_exception.{type(exc).__name__.lower()}"
+        try:
+            batch_completed_at = _utc(clock(), "clock")
+        except (TypeError, ValueError):
+            return _record_failed_runs(
+                store=store,
+                run_id=run_id,
+                started_at=started_at,
+                completed_at=completed_at,
+                error_type="timestamp.invalid",
+                normalized_rows_seen=len(observations),
+                raw_rows_seen=1,
+                request_rows_seen=1,
+            )
+        if batch_completed_at < completed_at:
+            return _record_failed_runs(
+                store=store,
+                run_id=run_id,
+                started_at=started_at,
+                completed_at=completed_at,
+                error_type="timestamp.clock_regression",
+                normalized_rows_seen=len(observations),
+                raw_rows_seen=1,
+                request_rows_seen=1,
+            )
+        completed_at = batch_completed_at
+        if fetched_workdays is not None:
+            try:
+                validated_workdays = _validate_workday_fetch_result(
+                    fetched_workdays,
+                    amount_received_at=received_at,
+                    batch_completed_at=completed_at,
+                )
+            except (TypeError, ValueError):
+                workday_status = "failed"
+                workday_error_type = "lineage.invalid"
+            else:
+                workday_status = validated_workdays.status
+                workday_error_type = (
+                    ""
+                    if validated_workdays.error_type == "none"
+                    else validated_workdays.error_type
+                )
+                workday_rows = [dict(row) for row in validated_workdays.rows]
+        if workday_status == "success":
+            validation_periods = [
+                {**item.payload, "snapshot_id": f"amount-{index}"}
+                for index, item in enumerate(observations)
+            ]
+            validation_workdays = [
+                {
+                    **row,
+                    "available_at_field": "observation.ingested_at",
+                    "revision_seq": 0,
+                    "supersedes_snapshot_id": None,
+                    "snapshot_id": hashlib.sha256(
+                        (
+                            row["source_record_id"]
+                            + ":"
+                            + row["source_document_sha256"]
+                        ).encode("utf-8")
+                    ).hexdigest(),
+                }
+                for row in workday_rows
+            ]
+            try:
+                derive_industry_features(
+                    validation_periods,
+                    workdays=validation_workdays,
+                    decision_at_utc=completed_at,
+                )
+            except (TypeError, ValueError, KeyError):
+                workday_status = "failed"
+                workday_error_type = "lineage.invalid"
+                workday_rows = []
+
     def write(conn):
         _assert_persistence_clock(conn, completed_at)
         request_append = store.append(
@@ -853,9 +1052,9 @@ def collect_customs_export_observations(
             symbol="KR_EXPORT_REQUEST",
             market="KR",
             currency_or_unit="UNITLESS",
-            source_as_of=completed_at,
+            source_as_of=received_at,
             source_event_sequence=0,
-            ingested_at=completed_at,
+            ingested_at=received_at,
             schema_version=_SCHEMA_VERSION,
             transform_version=_TRANSFORM_VERSION,
             fallback_used=False,
@@ -873,7 +1072,7 @@ def collect_customs_export_observations(
             currency_or_unit="UNITLESS",
             source_as_of=raw_source_as_of,
             source_event_sequence=0,
-            ingested_at=completed_at,
+            ingested_at=received_at,
             schema_version=_SCHEMA_VERSION,
             transform_version=_TRANSFORM_VERSION,
             fallback_used=False,
@@ -936,7 +1135,49 @@ def collect_customs_export_observations(
             else:
                 duplicate += 1
 
-        all_features = derive_industry_features(feature_inputs)
+        workday_inserted = 0
+        workday_duplicate = 0
+        workday_feature_inputs: list[dict[str, Any]] = []
+        for row in workday_rows:
+            available_at = datetime.fromisoformat(
+                row["available_at_utc"][:-1] + "+00:00"
+            )
+            stored_workday_payload = _workday_storage_payload(conn, row)
+            workday_result = store.append(
+                source=SOURCE,
+                dataset=WORKDAY_DATASET,
+                source_record_id=row["source_record_id"],
+                symbol="KR_EXPORTS",
+                market="KR",
+                currency_or_unit="UNITLESS",
+                source_as_of=_period_source_as_of(
+                    row["period_year"],
+                    row["period_month"],
+                    row["period_end_day"],
+                ),
+                source_event_sequence=0,
+                ingested_at=available_at,
+                schema_version=_SCHEMA_VERSION,
+                transform_version=_TRANSFORM_VERSION,
+                fallback_used=False,
+                payload=stored_workday_payload,
+                _conn=conn,
+            )
+            workday_feature_inputs.append(
+                {
+                    **stored_workday_payload,
+                    "available_at_utc": row["available_at_utc"],
+                    "snapshot_id": workday_result.snapshot_id,
+                }
+            )
+            workday_inserted += int(workday_result.inserted)
+            workday_duplicate += int(not workday_result.inserted)
+
+        all_features = derive_industry_features(
+            feature_inputs,
+            workdays=workday_feature_inputs,
+            decision_at_utc=completed_at,
+        )
         latest_period = max(
             (item.source_as_of, item.source_record_id) for item in observations
         )[1]
@@ -1005,6 +1246,21 @@ def collect_customs_export_observations(
         )
         store.record_collection_run(
             source=SOURCE,
+            dataset=WORKDAY_DATASET,
+            run_id=run_id,
+            started_at=started_at,
+            completed_at=completed_at,
+            status=workday_status,
+            rows_seen=len(workday_rows),
+            rows_inserted=workday_inserted,
+            rows_duplicate=workday_duplicate,
+            rows_skipped=0,
+            rows_invalid=0,
+            error_type=workday_error_type,
+            _conn=conn,
+        )
+        store.record_collection_run(
+            source=SOURCE,
             dataset=FEATURE_DATASET,
             run_id=run_id,
             started_at=started_at,
@@ -1018,16 +1274,25 @@ def collect_customs_export_observations(
             error_type="",
             _conn=conn,
         )
+        overall_status = "partial" if workday_status == "failed" else "success"
+        overall_error_type = (
+            f"workday.{workday_error_type}" if workday_status == "failed" else ""
+        )
         return {
             "source": SOURCE,
             "dataset": DATASET,
-            "status": "success",
+            "status": overall_status,
             "rows_seen": len(observations),
             "rows_inserted": inserted,
             "rows_duplicate": duplicate,
             "rows_skipped": 0,
             "rows_invalid": 0,
-            "error_type": "",
+            "error_type": overall_error_type,
+            "workday_status": workday_status,
+            "workday_rows_seen": len(workday_rows),
+            "workday_rows_inserted": workday_inserted,
+            "workday_rows_duplicate": workday_duplicate,
+            "workday_error_type": workday_error_type,
             "feature_rows_seen": len(feature_rows),
             "feature_rows_inserted": feature_inserted,
             "feature_rows_duplicate": feature_duplicate,

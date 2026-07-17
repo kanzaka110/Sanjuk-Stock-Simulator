@@ -17,6 +17,9 @@ if str(ROOT) not in sys.path:
 from core.customs_export_observation_collector import (  # noqa: E402
     collect_customs_export_observations,
 )
+from core.customs_export_workdays import (  # noqa: E402
+    fetch_kcs_workday_observations,
+)
 
 _KST = timezone(timedelta(hours=9))
 
@@ -92,6 +95,11 @@ def main(argv: list[str] | None = None) -> int:
             store=store,
             run_id=run_id,
             service_key=_load_service_key(),
+            workday_fetcher=(
+                fetch_kcs_workday_observations
+                if collection_mode == "scheduled_live"
+                else None
+            ),
             collection_mode=collection_mode,
         )
     except Exception as exc:
