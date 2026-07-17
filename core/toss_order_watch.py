@@ -20,16 +20,21 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 KST = timezone(timedelta(hours=9))
+US_EASTERN = ZoneInfo("America/New_York")
 log = logging.getLogger(__name__)
 
 # 미체결 판정 기준 (분)
 STALE_OPEN_ORDER_MINUTES = 60
 # 감시 주기 (분) — monitor 루프에서 매 사이클 호출돼도 이 간격으로 스로틀
 WATCH_INTERVAL_MINUTES = 30
+EXIT_RESERVATION_LEASE_MINUTES = 5
 # exit 감시 대상: 최근 N일 내 live_sent 기록만
 EXIT_WATCH_LOOKBACK_DAYS = 14
 
@@ -45,18 +50,59 @@ def _state_path() -> Path:
 def _load_state() -> dict:
     p = _state_path()
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
+        state = json.loads(p.read_text(encoding="utf-8"))
+        if type(state) is not dict:
+            raise ValueError("state_not_object")
+        for bucket in ("alerted", "reservations"):
+            rows = state.get(bucket, {})
+            if type(rows) is not dict:
+                raise ValueError(f"{bucket}_not_object")
+            for key, value in rows.items():
+                if type(key) is not str or _parse_ts(value) is None:
+                    raise ValueError(f"{bucket}_entry_invalid")
+        if state.get("last_run") and _parse_ts(state["last_run"]) is None:
+            raise ValueError("last_run_invalid")
+        if "last_market_open" in state and type(state["last_market_open"]) is not bool:
+            raise ValueError("last_market_open_invalid")
+        return state
+    except FileNotFoundError:
         return {}
+    except Exception as e:
+        log.error("toss_order_watch state load failed: %s", e)
+        return {"_state_load_failed": True}
 
 
-def _save_state(state: dict) -> None:
+def _save_state(state: dict) -> bool:
+    """상태를 원자적으로 저장. 실패하면 주문 경로가 fail-closed할 수 있게 False 반환."""
     p = _state_path()
+    tmp_name = ""
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{p.name}.", suffix=".tmp", dir=str(p.parent),
+        )
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, ensure_ascii=False, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, p)
+        tmp_name = ""
+        dir_fd = os.open(str(p.parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+        return True
     except Exception as e:
         log.warning("toss_order_watch state save failed: %s", e)
+        return False
+    finally:
+        if tmp_name:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
 
 
 def _now_kst() -> datetime:
@@ -91,6 +137,60 @@ def _mark_alerted(state: dict, key: str, now: datetime) -> None:
         k: v for k, v in state["alerted"].items()
         if (_parse_ts(v) or now) >= cutoff
     }
+
+
+def _exit_completion_key(alert: dict) -> str:
+    """구버전의 감지-only `exit:` 키와 분리한 실제 전송 완료 키."""
+    return f"exit_sent:{alert['symbol']}:{alert['type']}"
+
+
+def _exit_reservation_key(alert: dict) -> str:
+    return f"exit_reserved:{alert['symbol']}:{alert['type']}"
+
+
+def _market_day(symbol: str, value: datetime):
+    tz = KST if symbol.endswith((".KS", ".KQ")) or symbol.isdigit() else US_EASTERN
+    return value.astimezone(tz).date()
+
+
+def _exit_completed(state: dict, key: str, symbol: str, now: datetime) -> bool:
+    ts = _parse_ts(state.get("alerted", {}).get(key, ""))
+    return bool(ts and _market_day(symbol, ts) == _market_day(symbol, now))
+
+
+def _exit_reserved(state: dict, key: str, symbol: str, now: datetime) -> bool:
+    reservations = state.get("reservations")
+    if not isinstance(reservations, dict):
+        return False
+    ts = _parse_ts(reservations.get(key, ""))
+    if ts is None or _market_day(symbol, ts) != _market_day(symbol, now):
+        return False
+    age = now.astimezone(KST) - ts
+    return age < timedelta(minutes=EXIT_RESERVATION_LEASE_MINUTES)
+
+
+def _reserve_exit(state: dict, key: str, now: datetime) -> None:
+    reservations = state.setdefault("reservations", {})
+    reservations[key] = now.strftime("%Y-%m-%dT%H:%M:%S+09:00")
+    cutoff = now - timedelta(days=7)
+    state["reservations"] = {
+        k: v for k, v in reservations.items()
+        if (_parse_ts(v) or now) >= cutoff
+    }
+
+
+def _release_exit_reservation(state: dict, key: str) -> None:
+    reservations = state.get("reservations")
+    if isinstance(reservations, dict):
+        reservations.pop(key, None)
+
+
+def _promotion_sent(result: dict | None) -> bool:
+    return bool(
+        type(result) is dict
+        and result.get("ok") is True
+        and result.get("live_order_sent") is True
+    )
 
 
 # ── A-1: 미체결 주문 감시 ─────────────────────────────────────────
@@ -236,8 +336,8 @@ def compute_exit_sell_quantity(alert: dict, held_qty: float) -> int:
 def _market_open_for_symbol(symbol: str, now: datetime) -> bool:
     from core.market_hours import is_kr_market_open, is_us_market_open
     if symbol.endswith((".KS", ".KQ")) or symbol.isdigit():
-        return is_kr_market_open(now)
-    return is_us_market_open(now)
+        return is_kr_market_open(now) is True
+    return is_us_market_open(now) is True
 
 
 def promote_exit_to_sell(alert: dict, policy: dict, now: datetime | None = None) -> dict:
@@ -274,6 +374,8 @@ def promote_exit_to_sell(alert: dict, policy: dict, now: datetime | None = None)
         }
 
     exit_type = str(alert.get("type", ""))
+    from core.toss_exit_execution_intent import build_exit_decision_ref
+    intent_class = "full_exit" if qty >= int(held) else "partial_exit"
     candidate = {
         "symbol": symbol,
         "side": "sell",
@@ -281,6 +383,7 @@ def promote_exit_to_sell(alert: dict, policy: dict, now: datetime | None = None)
         "limit_price": float(alert.get("current_price") or 0),
         "stop_loss": alert.get("stop_loss"),
         "target_price": alert.get("target_price"),
+        "decision_ref": build_exit_decision_ref(symbol, intent_class, now),
     }
     from core.toss_autonomous_pipeline import process_candidate
     result = process_candidate(
@@ -337,11 +440,10 @@ def format_watch_message(
             )
             promo = promotions.get(f"{a['symbol']}:{a['type']}")
             if promo:
-                verdict = promo.get("verdict", "")
-                if verdict == "PASS":
+                if _promotion_sent(promo):
                     kind = "전량 손절" if a["type"] == "stop_loss_hit" else "분할 익절"
                     lines.append(
-                        f"  → 🤖 자동 매도 발동 ({kind} {promo.get('sell_quantity', 0)}주, 검증 PASS)"
+                        f"  → 🤖 자동 매도 전송 완료 ({kind} {promo.get('sell_quantity', 0)}주)"
                     )
                 elif promo.get("stage") == "skipped":
                     lines.append(f"  → 자동 매도 스킵: {promo.get('reason', '')}")
@@ -364,15 +466,43 @@ def run_toss_order_watch(
     send: bool = True,
     force: bool = False,
 ) -> dict:
-    """감시 사이클 실행. monitor 루프에서 호출 — 내부 스로틀 적용."""
+    """감시 사이클 실행. exit는 durable reservation 후에만 finalizer로 보낸다."""
     now = now or _now_kst()
     state = _load_state()
+    if type(state) is not dict or state.get("_state_load_failed") is True:
+        return {
+            "ok": False,
+            "reason": "state_load_failed",
+            "stale_count": 0,
+            "exit_count": 0,
+            "deferred_exit_count": 0,
+            "promotions": {},
+            "message": "",
+            "sent": False,
+        }
+
+    try:
+        from core.market_hours import is_any_market_open
+        market_open_now = is_any_market_open(now) is True
+    except Exception as e:
+        log.warning("watch market transition gate 실패: %s", e)
+        market_open_now = False
 
     last_run = _parse_ts(state.get("last_run", ""))
-    if not force and last_run and (now - last_run) < timedelta(minutes=WATCH_INTERVAL_MINUTES):
+    opening_transition = (
+        market_open_now
+        and state.get("last_market_open") is not True
+    )
+    if (
+        not force
+        and not opening_transition
+        and last_run
+        and (now - last_run) < timedelta(minutes=WATCH_INTERVAL_MINUTES)
+    ):
         return {"ok": True, "skipped": "throttled"}
 
     state["last_run"] = now.strftime("%Y-%m-%dT%H:%M:%S+09:00")
+    state["last_market_open"] = market_open_now
 
     try:
         stale = check_stale_open_orders(now=now)
@@ -385,39 +515,95 @@ def run_toss_order_watch(
         log.warning("exit level check 실패: %s", e)
         exits = []
 
-    # 중복 알림 제거 (키별 1일 1회)
+    # 장외 stop/target은 감지만 남기고 reservation/completion dedup을 소비하지 않는다.
+    deferred_exits = []
+    market_open_exits = []
+    for alert in exits:
+        try:
+            if _market_open_for_symbol(str(alert.get("symbol") or ""), now):
+                market_open_exits.append(alert)
+            else:
+                deferred_exits.append(alert)
+        except Exception as e:
+            log.warning("exit market gate 실패 %s: %s", alert.get("symbol"), e)
+            deferred_exits.append(alert)
+
     new_stale = []
-    for a in stale:
-        key = f"stale:{a['broker_order_id'] or a['symbol']}"
+    for alert in stale:
+        key = f"stale:{alert['broker_order_id'] or alert['symbol']}"
         if not _already_alerted(state, key, now):
             _mark_alerted(state, key, now)
-            new_stale.append(a)
+            new_stale.append(alert)
+
     new_exits = []
-    for a in exits:
-        key = f"exit:{a['symbol']}:{a['type']}"
-        if not _already_alerted(state, key, now):
-            _mark_alerted(state, key, now)
-            new_exits.append(a)
+    for alert in market_open_exits:
+        completion_key = _exit_completion_key(alert)
+        reservation_key = _exit_reservation_key(alert)
+        if _exit_completed(state, completion_key, alert["symbol"], now):
+            continue
+        if _exit_reserved(state, reservation_key, alert["symbol"], now):
+            continue
+        _reserve_exit(state, reservation_key, now)
+        new_exits.append(alert)
 
-    _save_state(state)
+    # 주문 경로 진입 전 reservation이 durable해야 한다. 실패 시 submit 0.
+    if not _save_state(state):
+        return {
+            "ok": False,
+            "reason": "state_reservation_failed" if new_exits else "state_save_failed",
+            "stale_count": len(new_stale),
+            "exit_count": 0,
+            "deferred_exit_count": len(deferred_exits),
+            "promotions": {},
+            "message": "",
+            "sent": False,
+        }
 
-    # exit 도달 → 자동 매도 승격 (autonomous mode + sell 허용 시)
     promotions: dict[str, dict] = {}
     if new_exits:
         try:
             from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
             policy = compute_toss_live_pilot_policy()
-            for a in new_exits:
-                key = f"{a['symbol']}:{a['type']}"
+        except Exception as e:
+            log.warning("exit 자동 매도 policy 조회 실패: %s", e)
+            policy = None
+            for alert in new_exits:
+                key = f"{alert['symbol']}:{alert['type']}"
+                promotions[key] = {
+                    "ok": False,
+                    "live_order_sent": False,
+                    "symbol": alert["symbol"],
+                    "stage": "error",
+                    "reason": f"policy_unavailable:{type(e).__name__}",
+                }
+
+        if policy is not None:
+            for alert in new_exits:
+                key = f"{alert['symbol']}:{alert['type']}"
                 try:
-                    promotions[key] = promote_exit_to_sell(a, policy, now=now)
+                    promotions[key] = promote_exit_to_sell(alert, policy, now=now)
                 except Exception as e:
                     log.warning("exit 자동 매도 승격 실패 %s: %s", key, e)
                     promotions[key] = {
-                        "symbol": a["symbol"], "stage": "error", "reason": str(e)[:200],
+                        "ok": False,
+                        "live_order_sent": False,
+                        "symbol": alert["symbol"],
+                        "stage": "error",
+                        "reason": str(e)[:200],
                     }
-        except Exception as e:
-            log.warning("exit 자동 매도 policy 조회 실패: %s", e)
+
+    # 실제 live send만 completion dedup으로 승격한다. 실패는 reservation을 해제해 재시도한다.
+    for alert in new_exits:
+        key = f"{alert['symbol']}:{alert['type']}"
+        result = promotions.get(key)
+        if _promotion_sent(result):
+            _mark_alerted(state, _exit_completion_key(alert), now)
+        _release_exit_reservation(state, _exit_reservation_key(alert))
+
+    state_saved = _save_state(state)
+    if not state_saved:
+        # 직전 durable reservation이 디스크에 남으므로 다음 사이클 중복 submit은 차단된다.
+        log.error("exit 결과 state finalize 실패 — durable reservation 유지")
 
     message = format_watch_message(new_stale, new_exits, promotions)
     sent = False
@@ -429,9 +615,11 @@ def run_toss_order_watch(
             log.warning("toss watch 알림 전송 실패: %s", e)
 
     return {
-        "ok": True,
+        "ok": state_saved,
+        "reason": "" if state_saved else "state_finalize_failed",
         "stale_count": len(new_stale),
         "exit_count": len(new_exits),
+        "deferred_exit_count": len(deferred_exits),
         "promotions": promotions,
         "message": message,
         "sent": sent,

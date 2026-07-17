@@ -38,12 +38,14 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from core.toss_income_strategy import validate_executable_income_contract
 
 log = logging.getLogger(__name__)
 
 KST = timezone(timedelta(hours=9))
+US_EASTERN = ZoneInfo("America/New_York")
 
 _DEFAULT_THROTTLE_MINUTES = 10  # 파이프라인 실행 최소 간격 (기본 10분, env로 조정)
 _MIN_THROTTLE_MINUTES = 5       # 과도 단축 방지 하한
@@ -88,7 +90,7 @@ def _active_execution_market(now: datetime | None = None) -> str:
     """
     from core.market_hours import get_market_session, is_kr_market_open
 
-    kr_open = is_kr_market_open(now)
+    kr_open = is_kr_market_open(now) is True
     session = get_market_session(now)
     us_tradeable = session.get("us") in {"US_PREMARKET", "US_REGULAR", "US_AFTERMARKET"}
     if kr_open and us_tradeable:
@@ -541,13 +543,23 @@ def process_candidate(
         hermes_message=f"auto_verifier({reason}): {quality_note}",
     )
 
+    verification_recorded = result.get("ok") is True
+    finalizer_ok = result.get("finalizer_ok") is True
+    live_order_sent = bool(
+        verification_recorded
+        and finalizer_ok
+        and result.get("live_order_sent") is True
+    )
     return {
+        "ok": verification_recorded,
         "symbol": symbol,
-        "stage": "verdict_recorded" if result.get("ok") else "verdict_record_failed",
+        "stage": "verdict_recorded" if verification_recorded else "verdict_record_failed",
         "verdict": status,
         "pilot_id": pilot_id,
         "verification_id": verification_id,
         "decision_ref": preview.get("decision_ref", ""),
+        "finalizer_ok": finalizer_ok,
+        "live_order_sent": live_order_sent,
         "reason": "; ".join(verdict.get("reasons") or []),
     }
 
@@ -593,6 +605,20 @@ def _retry_record_market(record: dict) -> str:
     return ""
 
 
+def _retry_record_matches_market_day(record: dict, market: str, now: datetime) -> bool:
+    raw = record.get("created_at")
+    if type(raw) is not str or not raw:
+        return False
+    try:
+        created = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if created.tzinfo is None:
+        return False
+    zone = KST if market == "KR" else US_EASTERN
+    return created.astimezone(zone).date() == now.astimezone(zone).date()
+
+
 def retry_retryable_orders(
     now: datetime | None = None,
     state: dict | None = None,
@@ -607,6 +633,9 @@ def retry_retryable_orders(
       2. PASS면 try_autonomous_finalize(allow_retry=True) 직접 호출
       3. 재시도 횟수(state 기록) 초과 시 terminal failed로 전환
 
+    호출자가 시장/BUY 범위를 생략하면 현재 열린 시장의 SELL만 허용한다.
+    정상 메인 파이프라인은 두 범위를 명시해 BUY retry를 별도로 제어한다.
+
     Returns:
         {"retried": int, "sent": int, "exhausted": int}
     """
@@ -617,7 +646,7 @@ def retry_retryable_orders(
 
     today = now.strftime("%Y-%m-%d")
     retry_counts = state.get("retry_counts", {})
-    if state.get("retry_date") != today:
+    if type(retry_counts) is not dict:
         retry_counts = {}
 
     from core.toss_live_pilot_ledger import (
@@ -645,13 +674,20 @@ def retry_retryable_orders(
             "exhausted": 0,
             "policy_blocked": policy_reason,
         }
-    allowed = (
-        {str(market).upper() for market in allowed_markets}
-        if allowed_markets is not None else None
+    if allowed_markets is None:
+        active_market = _active_execution_market(now)
+        allowed = (
+            {"KR", "US"} if active_market == "ALL"
+            else {active_market} if active_market in {"KR", "US"}
+            else set()
+        )
+    else:
+        allowed = {str(market).upper() for market in allowed_markets}
+    blocked_buys = (
+        {"KR", "US"}
+        if blocked_buy_markets is None
+        else {str(market).upper() for market in blocked_buy_markets}
     )
-    blocked_buys = {
-        str(market).upper() for market in (blocked_buy_markets or set())
-    }
     retried = sent = exhausted = 0
     skipped_market = skipped_buy_safety = skipped_invalid = 0
 
@@ -664,18 +700,18 @@ def retry_retryable_orders(
     for rec in records:
         if rec.get("status") != "live_send_retryable":
             continue
-        if not str(rec.get("created_at", "")).startswith(today):
-            continue
         side = str(rec.get("side") or "").lower().strip()
         market = _retry_record_market(rec)
         if side not in {"buy", "sell"} or not market:
             skipped_invalid += 1
             continue
+        if not _retry_record_matches_market_day(rec, market, now):
+            continue
         side_allowed, _ = validate_autonomous_execution_policy(policy, side=side)
         if not side_allowed:
             skipped_invalid += 1
             continue
-        if allowed is not None and market not in allowed:
+        if market not in allowed:
             skipped_market += 1
             continue
         if side == "buy" and market in blocked_buys:
@@ -685,8 +721,14 @@ def retry_retryable_orders(
         if not pilot_id:
             continue
 
+        reconcile_required = bool(
+            side == "sell"
+            and str(rec.get("failure_reason") or "").lower().startswith(
+                "reconcile_required:"
+            )
+        )
         count = int(retry_counts.get(pilot_id, 0))
-        if count >= _MAX_RETRIES:
+        if not reconcile_required and count >= _MAX_RETRIES:
             try:
                 record_live_send_failed(
                     pilot_id,
@@ -697,7 +739,12 @@ def retry_retryable_orders(
                 log.warning("retry exhausted record failed: %s", e)
             continue
 
-        retry_counts[pilot_id] = count + 1
+        if reconcile_required:
+            # 이전 retry 횟수가 ambiguous broker truth 확인을 terminal로 만들면
+            # 안 된다. claim/lease가 blind resend를 막는 동안 횟수를 초기화한다.
+            retry_counts.pop(pilot_id, None)
+        else:
+            retry_counts[pilot_id] = count + 1
         retried += 1
         try:
             preview_stub = {
@@ -726,7 +773,10 @@ def retry_retryable_orders(
             )
             if verdict.get("status") == "PASS":
                 result = try_autonomous_finalize(pilot_id, allow_retry=True)
-                if result.get("live_order_sent"):
+                if (
+                    result.get("ok") is True
+                    and result.get("live_order_sent") is True
+                ):
                     sent += 1
         except Exception as e:
             log.warning("retry sweep pilot=%s failed: %s", pilot_id, e)

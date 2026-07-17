@@ -157,11 +157,12 @@ class TestMessage(unittest.TestCase):
             now=_NOW, records=[_ledger_record()], price_fn=lambda s: 27000.0
         )
         promos = {"091180.KS:stop_loss_hit": {
+            "ok": True, "live_order_sent": True,
             "symbol": "091180.KS", "stage": "verdict_recorded",
             "verdict": "PASS", "sell_quantity": 3, "exit_type": "stop_loss_hit",
         }}
         msg = tow.format_watch_message([], exits, promos)
-        self.assertIn("자동 매도 발동", msg)
+        self.assertIn("자동 매도 전송 완료", msg)
         self.assertIn("전량 손절 3주", msg)
         self.assertNotIn("매도 여부 직접 판단 필요", msg)
 
@@ -221,6 +222,371 @@ class TestRunWatch(unittest.TestCase):
             r2 = self._run(tmp, now=_NOW + timedelta(days=1))
             self.assertEqual(r2["exit_count"], 1)
 
+    def test_market_closed_exit_does_not_consume_daily_dedup(self):
+        alert = {
+            "pilot_id": "p-us", "symbol": "LRCX", "type": "stop_loss_hit",
+            "current_price": 302.0, "entry_price": 328.62,
+            "stop_loss": 314.818, "target_price": 361.48, "quantity": 1,
+        }
+        policy = {
+            "autonomous_mode": True,
+            "autonomous_kill_switch": False,
+            "autonomous_allowed_sides": ["buy", "sell"],
+        }
+        process_result = {
+            "ok": True, "live_order_sent": True,
+            "symbol": "LRCX", "stage": "verdict_recorded", "verdict": "PASS",
+            "pilot_id": "tlive_sell_lrcx",
+        }
+        closed_at = datetime(2026, 7, 2, 22, 29, tzinfo=KST)
+        opened_at = closed_at + timedelta(minutes=1)
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.json"
+            with patch.object(tow, "_state_path", return_value=state_path), \
+                 patch.object(tow, "check_stale_open_orders", return_value=[]), \
+                 patch.object(tow, "check_exit_levels", return_value=[alert]), \
+                 patch("core.toss_live_pilot_policy.compute_toss_live_pilot_policy",
+                       return_value=policy):
+                closed = tow.run_toss_order_watch(now=closed_at, send=False)
+            self.assertEqual(closed["exit_count"], 0)
+            self.assertEqual(closed["deferred_exit_count"], 1)
+
+            with patch.object(tow, "_state_path", return_value=state_path), \
+                 patch.object(tow, "check_stale_open_orders", return_value=[]), \
+                 patch.object(tow, "check_exit_levels", return_value=[alert]), \
+                 patch.object(tow, "_held_quantity", return_value=1.0), \
+                 patch("core.toss_live_pilot_policy.compute_toss_live_pilot_policy",
+                       return_value=policy), \
+                 patch("core.toss_autonomous_pipeline.process_candidate",
+                       return_value=process_result) as process:
+                opened = tow.run_toss_order_watch(now=opened_at, send=False)
+            self.assertEqual(opened["exit_count"], 1)
+            self.assertTrue(
+                opened["promotions"]["LRCX:stop_loss_hit"]["live_order_sent"],
+            )
+            process.assert_called_once()
+
+    def test_transient_holding_lookup_failure_retries_same_day(self):
+        alert = {
+            "pilot_id": "p-us", "symbol": "LRCX", "type": "stop_loss_hit",
+            "current_price": 302.0, "entry_price": 328.62,
+            "stop_loss": 314.818, "target_price": 361.48, "quantity": 1,
+        }
+        policy = {
+            "autonomous_mode": True,
+            "autonomous_kill_switch": False,
+            "autonomous_allowed_sides": ["buy", "sell"],
+        }
+        now = datetime(2026, 7, 2, 22, 30, tzinfo=KST)
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.json"
+            common = (
+                patch.object(tow, "_state_path", return_value=state_path),
+                patch.object(tow, "check_stale_open_orders", return_value=[]),
+                patch.object(tow, "check_exit_levels", return_value=[alert]),
+                patch("core.toss_live_pilot_policy.compute_toss_live_pilot_policy",
+                      return_value=policy),
+            )
+            with common[0], common[1], common[2], common[3], \
+                 patch.object(tow, "_held_quantity", return_value=0.0), \
+                 patch("core.toss_autonomous_pipeline.process_candidate") as process:
+                failed = tow.run_toss_order_watch(now=now, send=False)
+            self.assertFalse(
+                failed["promotions"]["LRCX:stop_loss_hit"].get("live_order_sent", False),
+            )
+            process.assert_not_called()
+
+            sent_result = {
+                "ok": True, "live_order_sent": True, "verdict": "PASS",
+                "stage": "verdict_recorded", "pilot_id": "tlive_sell_retry",
+            }
+            with patch.object(tow, "_state_path", return_value=state_path), \
+                 patch.object(tow, "check_stale_open_orders", return_value=[]), \
+                 patch.object(tow, "check_exit_levels", return_value=[alert]), \
+                 patch.object(tow, "_held_quantity", return_value=1.0), \
+                 patch("core.toss_live_pilot_policy.compute_toss_live_pilot_policy",
+                       return_value=policy), \
+                 patch("core.toss_autonomous_pipeline.process_candidate",
+                       return_value=sent_result) as process:
+                retried = tow.run_toss_order_watch(
+                    now=now + timedelta(minutes=31), send=False,
+                )
+            self.assertEqual(retried["exit_count"], 1)
+            self.assertTrue(
+                retried["promotions"]["LRCX:stop_loss_hit"]["live_order_sent"],
+            )
+            process.assert_called_once()
+
+    def test_verdict_pass_without_live_send_does_not_consume_dedup(self):
+        alert = {
+            "pilot_id": "p-us", "symbol": "LRCX", "type": "stop_loss_hit",
+            "current_price": 302.0, "entry_price": 328.62,
+            "stop_loss": 314.818, "target_price": 361.48, "quantity": 1,
+        }
+        policy = {
+            "autonomous_mode": True,
+            "autonomous_kill_switch": False,
+            "autonomous_allowed_sides": ["buy", "sell"],
+        }
+        now = datetime(2026, 7, 2, 22, 30, tzinfo=KST)
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.json"
+            results = [
+                {"ok": True, "live_order_sent": False, "verdict": "PASS",
+                 "stage": "verdict_recorded", "pilot_id": "tlive_not_sent"},
+                {"ok": True, "live_order_sent": True, "verdict": "PASS",
+                 "stage": "verdict_recorded", "pilot_id": "tlive_sent"},
+            ]
+            with patch.object(tow, "_state_path", return_value=state_path), \
+                 patch.object(tow, "check_stale_open_orders", return_value=[]), \
+                 patch.object(tow, "check_exit_levels", return_value=[alert]), \
+                 patch.object(tow, "_held_quantity", return_value=1.0), \
+                 patch("core.toss_live_pilot_policy.compute_toss_live_pilot_policy",
+                       return_value=policy), \
+                 patch("core.toss_autonomous_pipeline.process_candidate",
+                       side_effect=results) as process:
+                first = tow.run_toss_order_watch(now=now, send=False)
+                second = tow.run_toss_order_watch(
+                    now=now + timedelta(minutes=31), send=False,
+                )
+            self.assertFalse(
+                first["promotions"]["LRCX:stop_loss_hit"]["live_order_sent"],
+            )
+            self.assertTrue(
+                second["promotions"]["LRCX:stop_loss_hit"]["live_order_sent"],
+            )
+            self.assertEqual(process.call_count, 2)
+
+    def test_us_completion_dedup_survives_kst_midnight(self):
+        alert = {
+            "pilot_id": "p-us", "symbol": "LRCX", "type": "stop_loss_hit",
+            "current_price": 302.0, "entry_price": 328.62,
+            "stop_loss": 314.818, "target_price": 361.48, "quantity": 1,
+        }
+        policy = {
+            "autonomous_mode": True,
+            "autonomous_kill_switch": False,
+            "autonomous_allowed_sides": ["buy", "sell"],
+        }
+        sent_result = {
+            "ok": True, "live_order_sent": True, "verdict": "PASS",
+            "stage": "verdict_recorded", "pilot_id": "tlive_sent",
+        }
+        before_midnight = datetime(2026, 7, 2, 23, 50, tzinfo=KST)
+        after_midnight = datetime(2026, 7, 3, 0, 21, tzinfo=KST)
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(tow, "_state_path", return_value=Path(tmp) / "state.json"), \
+             patch.object(tow, "check_stale_open_orders", return_value=[]), \
+             patch.object(tow, "check_exit_levels", return_value=[alert]), \
+             patch.object(tow, "_held_quantity", return_value=1.0), \
+             patch("core.toss_live_pilot_policy.compute_toss_live_pilot_policy",
+                   return_value=policy), \
+             patch("core.toss_autonomous_pipeline.process_candidate",
+                   return_value=sent_result) as process:
+            first = tow.run_toss_order_watch(now=before_midnight, send=False)
+            second = tow.run_toss_order_watch(now=after_midnight, send=False)
+        self.assertTrue(first["promotions"]["LRCX:stop_loss_hit"]["live_order_sent"])
+        self.assertEqual(second["exit_count"], 0)
+        self.assertEqual(process.call_count, 1)
+
+    def test_us_next_market_day_can_retry_within_24_hours(self):
+        alert = {
+            "pilot_id": "p-us", "symbol": "LRCX", "type": "stop_loss_hit",
+            "current_price": 302.0, "entry_price": 328.62,
+            "stop_loss": 314.818, "target_price": 361.48, "quantity": 1,
+        }
+        policy = {
+            "autonomous_mode": True,
+            "autonomous_kill_switch": False,
+            "autonomous_allowed_sides": ["buy", "sell"],
+        }
+        sent_result = {
+            "ok": True, "live_order_sent": True, "verdict": "PASS",
+            "stage": "verdict_recorded", "pilot_id": "tlive_sent",
+        }
+        first_day = datetime(2026, 7, 7, 23, 50, tzinfo=KST)
+        next_day = datetime(2026, 7, 8, 22, 30, tzinfo=KST)
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(tow, "_state_path", return_value=Path(tmp) / "state.json"), \
+             patch.object(tow, "check_stale_open_orders", return_value=[]), \
+             patch.object(tow, "check_exit_levels", return_value=[alert]), \
+             patch.object(tow, "_held_quantity", return_value=1.0), \
+             patch("core.toss_live_pilot_policy.compute_toss_live_pilot_policy",
+                   return_value=policy), \
+             patch("core.toss_autonomous_pipeline.process_candidate",
+                   return_value=sent_result) as process:
+            first = tow.run_toss_order_watch(now=first_day, send=False)
+            second = tow.run_toss_order_watch(now=next_day, send=False)
+        self.assertEqual(first["exit_count"], 1)
+        self.assertEqual(second["exit_count"], 1)
+        self.assertEqual(process.call_count, 2)
+
+    def test_digit_only_kr_symbol_uses_kst_market_day(self):
+        morning = datetime(2026, 7, 2, 9, 30, tzinfo=KST)
+        afternoon = datetime(2026, 7, 2, 14, 0, tzinfo=KST)
+        self.assertEqual(
+            tow._market_day("005930", morning),
+            tow._market_day("005930", afternoon),
+        )
+
+    def test_nested_state_corruption_blocks_submit(self):
+        now = datetime(2026, 7, 2, 22, 30, tzinfo=KST)
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.json"
+            state_path.write_text('{"alerted":"truthy","reservations":{}}', encoding="utf-8")
+            with patch.object(tow, "_state_path", return_value=state_path), \
+                 patch("core.toss_autonomous_pipeline.process_candidate") as process:
+                result = tow.run_toss_order_watch(now=now, send=False)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "state_load_failed")
+        process.assert_not_called()
+
+    def test_abandoned_reservation_retries_after_lease(self):
+        alert = {
+            "pilot_id": "p-us", "symbol": "LRCX", "type": "stop_loss_hit",
+            "current_price": 302.0, "entry_price": 328.62,
+            "stop_loss": 314.818, "target_price": 361.48, "quantity": 1,
+        }
+        policy = {
+            "autonomous_mode": True,
+            "autonomous_kill_switch": False,
+            "autonomous_allowed_sides": ["buy", "sell"],
+        }
+        now = datetime(2026, 7, 2, 23, 1, tzinfo=KST)
+        reserved_at = now - timedelta(minutes=31)
+        state = {
+            "last_run": reserved_at.isoformat(),
+            "last_market_open": True,
+            "alerted": {},
+            "reservations": {
+                "exit_reserved:LRCX:stop_loss_hit": reserved_at.isoformat(),
+            },
+        }
+        sent_result = {
+            "ok": True, "live_order_sent": True, "verdict": "PASS",
+            "stage": "verdict_recorded", "pilot_id": "tlive_retry",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.json"
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            with patch.object(tow, "_state_path", return_value=state_path), \
+                 patch.object(tow, "check_stale_open_orders", return_value=[]), \
+                 patch.object(tow, "check_exit_levels", return_value=[alert]), \
+                 patch.object(tow, "_held_quantity", return_value=1.0), \
+                 patch("core.toss_live_pilot_policy.compute_toss_live_pilot_policy",
+                       return_value=policy), \
+                 patch("core.toss_autonomous_pipeline.process_candidate",
+                       return_value=sent_result) as process:
+                result = tow.run_toss_order_watch(now=now, send=False)
+        self.assertEqual(result["exit_count"], 1)
+        process.assert_called_once()
+
+    def test_corrupt_state_blocks_submit(self):
+        alert = {
+            "pilot_id": "p-us", "symbol": "LRCX", "type": "stop_loss_hit",
+            "current_price": 302.0, "entry_price": 328.62,
+            "stop_loss": 314.818, "target_price": 361.48, "quantity": 1,
+        }
+        policy = {
+            "autonomous_mode": True,
+            "autonomous_kill_switch": False,
+            "autonomous_allowed_sides": ["buy", "sell"],
+        }
+        now = datetime(2026, 7, 2, 22, 30, tzinfo=KST)
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.json"
+            state_path.write_text("{broken", encoding="utf-8")
+            with patch.object(tow, "_state_path", return_value=state_path), \
+                 patch.object(tow, "check_stale_open_orders", return_value=[]), \
+                 patch.object(tow, "check_exit_levels", return_value=[alert]), \
+                 patch.object(tow, "_held_quantity", return_value=1.0), \
+                 patch("core.toss_live_pilot_policy.compute_toss_live_pilot_policy",
+                       return_value=policy), \
+                 patch("core.toss_autonomous_pipeline.process_candidate") as process:
+                result = tow.run_toss_order_watch(now=now, send=False)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "state_load_failed")
+        process.assert_not_called()
+
+    def test_finalize_save_failure_retries_after_lease(self):
+        import copy
+
+        alert = {
+            "pilot_id": "p-us", "symbol": "LRCX", "type": "stop_loss_hit",
+            "current_price": 302.0, "entry_price": 328.62,
+            "stop_loss": 314.818, "target_price": 361.48, "quantity": 1,
+        }
+        policy = {
+            "autonomous_mode": True,
+            "autonomous_kill_switch": False,
+            "autonomous_allowed_sides": ["buy", "sell"],
+        }
+        sent_result = {
+            "ok": True, "live_order_sent": True, "verdict": "PASS",
+            "stage": "verdict_recorded", "pilot_id": "tlive_sent",
+        }
+        now = datetime(2026, 7, 2, 22, 30, tzinfo=KST)
+        durable = {}
+        save_calls = 0
+
+        def fake_save(state):
+            nonlocal save_calls, durable
+            save_calls += 1
+            if save_calls == 1:
+                durable = copy.deepcopy(state)
+                return True
+            if save_calls == 2:
+                return False
+            durable = copy.deepcopy(state)
+            return True
+
+        def fake_load():
+            return copy.deepcopy(durable)
+
+        with patch.object(tow, "_load_state", side_effect=fake_load), \
+             patch.object(tow, "_save_state", side_effect=fake_save), \
+             patch.object(tow, "check_stale_open_orders", return_value=[]), \
+             patch.object(tow, "check_exit_levels", return_value=[alert]), \
+             patch.object(tow, "_held_quantity", return_value=1.0), \
+             patch("core.toss_live_pilot_policy.compute_toss_live_pilot_policy",
+                   return_value=policy), \
+             patch("core.toss_autonomous_pipeline.process_candidate",
+                   return_value=sent_result) as process:
+            first = tow.run_toss_order_watch(now=now, send=False)
+            second = tow.run_toss_order_watch(
+                now=now + timedelta(minutes=31), send=False,
+            )
+        self.assertFalse(first["ok"])
+        self.assertEqual(first["reason"], "state_finalize_failed")
+        self.assertEqual(second["exit_count"], 1)
+        self.assertEqual(process.call_count, 2)
+
+    def test_state_reservation_save_failure_blocks_submit(self):
+        alert = {
+            "pilot_id": "p-us", "symbol": "LRCX", "type": "stop_loss_hit",
+            "current_price": 302.0, "entry_price": 328.62,
+            "stop_loss": 314.818, "target_price": 361.48, "quantity": 1,
+        }
+        policy = {
+            "autonomous_mode": True,
+            "autonomous_kill_switch": False,
+            "autonomous_allowed_sides": ["buy", "sell"],
+        }
+        now = datetime(2026, 7, 2, 22, 30, tzinfo=KST)
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(tow, "_state_path", return_value=Path(tmp) / "state.json"), \
+             patch.object(tow, "check_stale_open_orders", return_value=[]), \
+             patch.object(tow, "check_exit_levels", return_value=[alert]), \
+             patch.object(tow, "_held_quantity", return_value=1.0), \
+             patch.object(tow, "_save_state", return_value=False), \
+             patch("core.toss_live_pilot_policy.compute_toss_live_pilot_policy",
+                   return_value=policy), \
+             patch("core.toss_autonomous_pipeline.process_candidate") as process:
+            result = tow.run_toss_order_watch(now=now, send=False)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "state_reservation_failed")
+        process.assert_not_called()
+
 
 # ── 4.5 자동 매도 승격 ───────────────────────────────────────────
 
@@ -275,6 +641,7 @@ class TestPromoteExitToSell(unittest.TestCase):
         self.assertEqual(cand["side"], "sell")
         self.assertEqual(cand["quantity"], 10)
         self.assertEqual(cand["limit_price"], 27000)
+        self.assertIn(".full_exit", cand["decision_ref"])
         self.assertEqual(mock_pc.call_args.kwargs.get("reason"), "auto_exit_sell")
 
     def test_target_hit_partial_sell(self):
@@ -282,6 +649,14 @@ class TestPromoteExitToSell(unittest.TestCase):
         r, mock_pc = self._promote(alert=alert)
         self.assertEqual(r["sell_quantity"], 5)
         self.assertEqual(mock_pc.call_args[0][0]["quantity"], 5)
+        self.assertIn(".partial_exit", mock_pc.call_args[0][0]["decision_ref"])
+
+    def test_one_share_target_is_full_exit_intent(self):
+        alert = dict(
+            _ALERT_STOP, type="target_hit", current_price=35000, quantity=1,
+        )
+        _, mock_pc = self._promote(alert=alert, held=1.0)
+        self.assertIn(".full_exit", mock_pc.call_args[0][0]["decision_ref"])
 
     def test_autonomous_off_skips(self):
         policy = dict(_POLICY_AUTO_SELL, autonomous_mode=False)

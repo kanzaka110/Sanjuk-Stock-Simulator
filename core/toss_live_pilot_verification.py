@@ -232,11 +232,19 @@ def record_hermes_verification(
         "verified_at": verified_at,
         "expires_at": expires_at,
         "live_order_allowed": False,  # 항상 False — gate only
+        "finalizer_ok": False,
+        "live_order_sent": False,
     }
 
     # PASS → autonomous finalizer 트리거 (fail-safe)
     if status == _PASS_STATUS and pilot_id:
-        _try_trigger_autonomous_finalize(pilot_id)
+        finalizer = _try_trigger_autonomous_finalize(pilot_id)
+        result["finalizer_ok"] = finalizer.get("ok") is True
+        result["live_order_sent"] = bool(
+            result["finalizer_ok"]
+            and finalizer.get("live_order_sent") is True
+        )
+        result["finalizer_reason"] = str(finalizer.get("reason") or "")[:160]
 
     return result
 
@@ -607,19 +615,31 @@ def verification_summary() -> dict:
 
 # ── Autonomous finalizer 트리거 ──────────────────────────────────
 
-def _try_trigger_autonomous_finalize(pilot_id: str) -> None:
+def _try_trigger_autonomous_finalize(pilot_id: str) -> dict:
     """Hermes PASS 기록 후 autonomous finalizer 호출 (fail-safe).
 
-    autonomous mode가 아니면 no-op. 모든 예외 무시.
+    autonomous mode가 아니면 no-op. 예외는 canonical 미전송 결과로 축약한다.
     """
     try:
         from core.toss_autonomous_finalizer import try_autonomous_finalize
         result = try_autonomous_finalize(pilot_id)
+        if type(result) is not dict:
+            return {
+                "ok": False,
+                "live_order_sent": False,
+                "reason": "invalid_finalizer_result",
+            }
         if result.get("skipped"):
             log.debug("autonomous finalize skipped: %s", result.get("reason"))
         elif result.get("ok"):
             log.info("autonomous finalize success: pilot_id=%s", pilot_id)
         else:
             log.info("autonomous finalize blocked: pilot_id=%s reason=%s", pilot_id, result.get("reason"))
+        return result
     except Exception as e:
         log.warning("autonomous finalize trigger error: %s", e)
+        return {
+            "ok": False,
+            "live_order_sent": False,
+            "reason": f"finalizer_exception:{type(e).__name__}",
+        }

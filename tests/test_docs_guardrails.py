@@ -99,6 +99,8 @@ ALLOWED_TOSS_FILES = {
     "tests/test_toss_buy_candidates.py",
     "core/toss_autonomous_finalizer.py",
     "tests/test_toss_autonomous_finalizer.py",
+    "core/toss_exit_execution_intent.py",
+    "tests/test_toss_exit_execution_intent.py",
     "tests/test_toss_autonomous_duplicate_guard.py",
     "tests/test_toss_autonomous_policy.py",
     "tests/test_toss_autonomous_sell_guard.py",

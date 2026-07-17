@@ -69,6 +69,101 @@ _PILOT_REC = {
 }
 
 
+def test_sell_with_invalid_exit_ref_blocks_before_transport(monkeypatch, tmp_path):
+    rec = {
+        **_PILOT_REC,
+        "pilot_id": "sell-invalid-ref",
+        "decision_ref": "",
+        "side": "sell",
+    }
+    monkeypatch.setenv("TOSS_EXIT_INTENT_STATE_PATH", str(tmp_path / "intents.json"))
+    with patch.dict(os.environ, _AUTO_ENV, clear=False), \
+         patch("core.toss_live_pilot_ledger.list_live_pilot_records", return_value=[rec]), \
+         patch("core.toss_live_pilot_verification.is_verification_passed", _mock_verif_pass), \
+         patch("core.toss_live_pilot_adapter.can_send_live_pilot_order", return_value=(True, [])), \
+         patch("core.toss_live_pilot_telegram.resolve_live_transport_for_confirm") as resolver, \
+         patch("core.toss_live_pilot_adapter.dispatch_toss_order_live") as dispatch, \
+         patch("core.toss_autonomous_finalizer._record_event"):
+        from core.toss_autonomous_finalizer import try_autonomous_finalize
+        result = try_autonomous_finalize(rec["pilot_id"])
+
+    assert result["ok"] is False
+    assert result["reason"] == "invalid_exit_decision_ref"
+    resolver.assert_not_called()
+    dispatch.assert_not_called()
+
+
+def test_sell_ref_bound_to_other_symbol_blocks_before_transport(monkeypatch, tmp_path):
+    from core import toss_exit_execution_intent as intent
+
+    rec = {
+        **_PILOT_REC,
+        "pilot_id": "sell-wrong-symbol-ref",
+        "decision_ref": intent.build_exit_decision_ref(
+            "MU", "full_exit", datetime.now(KST),
+        ),
+        "symbol": "LRCX",
+        "side": "sell",
+    }
+    monkeypatch.setenv("TOSS_EXIT_INTENT_STATE_PATH", str(tmp_path / "intents.json"))
+    with patch.dict(os.environ, _AUTO_ENV, clear=False), \
+         patch("core.toss_live_pilot_ledger.list_live_pilot_records", return_value=[rec]), \
+         patch("core.toss_live_pilot_verification.is_verification_passed", _mock_verif_pass), \
+         patch("core.toss_live_pilot_adapter.can_send_live_pilot_order", return_value=(True, [])), \
+         patch("core.toss_live_pilot_telegram.resolve_live_transport_for_confirm") as resolver, \
+         patch("core.toss_live_pilot_adapter.dispatch_toss_order_live") as dispatch, \
+         patch("core.toss_autonomous_finalizer._record_event"):
+        from core.toss_autonomous_finalizer import try_autonomous_finalize
+        result = try_autonomous_finalize(rec["pilot_id"])
+
+    assert result["ok"] is False
+    assert result["reason"] == "invalid_exit_decision_ref"
+    resolver.assert_not_called()
+    dispatch.assert_not_called()
+
+
+def test_transport_resolution_failure_releases_unattempted_sell_claim(
+    monkeypatch, tmp_path,
+):
+    from core import toss_exit_execution_intent as intent
+
+    decision_ref = intent.build_exit_decision_ref(
+        "LRCX", "full_exit", datetime.now(KST),
+    )
+    rec = {
+        **_PILOT_REC,
+        "pilot_id": "sell-resolver-fail",
+        "decision_ref": decision_ref,
+        "symbol": "LRCX",
+        "side": "sell",
+    }
+    monkeypatch.setenv("TOSS_EXIT_INTENT_STATE_PATH", str(tmp_path / "intents.json"))
+    with patch.dict(os.environ, _AUTO_ENV, clear=False), \
+         patch("core.toss_live_pilot_ledger.list_live_pilot_records", return_value=[rec]), \
+         patch("core.toss_live_pilot_verification.is_verification_passed", _mock_verif_pass), \
+         patch("core.toss_live_pilot_adapter.can_send_live_pilot_order", return_value=(True, [])), \
+         patch("core.toss_live_pilot_telegram.resolve_live_transport_for_confirm",
+               side_effect=RuntimeError("synthetic")), \
+         patch("core.toss_live_pilot_adapter.dispatch_toss_order_live") as dispatch, \
+         patch("core.toss_live_pilot_ledger.record_live_send_failed") as record_failed, \
+         patch("core.toss_live_pilot_ledger.record_live_send_retryable") as record_retryable, \
+         patch("core.toss_autonomous_finalizer._record_event"):
+        from core.toss_autonomous_finalizer import try_autonomous_finalize
+        result = try_autonomous_finalize(rec["pilot_id"])
+
+    assert result["ok"] is False
+    assert result["reason"] == "transport_resolution_failed"
+    dispatch.assert_not_called()
+    record_failed.assert_not_called()
+    record_retryable.assert_called_once()
+    assert record_retryable.call_args.kwargs["failure_reason"].startswith(
+        "transport_resolution_failed"
+    )
+    reclaimed = intent.claim_exit_intent(decision_ref, "pilot-b")
+    assert reclaimed["ok"] is True
+    assert reclaimed["reason"] == "exit_intent_claimed"
+
+
 def _mock_verif_pass(pilot_id, now=None):
     """Hermes PASS 반환 mock."""
     return (True, [], {"verification_id": "hv_mock", "status": "PASS"})

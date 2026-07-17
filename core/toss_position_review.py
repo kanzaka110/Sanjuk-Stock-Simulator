@@ -28,12 +28,15 @@ import json
 import logging
 import math
 import os
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 log = logging.getLogger(__name__)
 
 KST = timezone(timedelta(hours=9))
+US_EASTERN = ZoneInfo("America/New_York")
 
 _STATE_FILE = "toss_position_review_state.json"
 _DEFAULT_STOP_LOSS_PCT = -8.0    # 이하 → 전량 매도
@@ -140,20 +143,96 @@ def _state_path() -> Path:
 def _load_state() -> dict:
     p = _state_path()
     try:
-        if p.exists():
-            return json.loads(p.read_text(encoding="utf-8"))
+        state = json.loads(p.read_text(encoding="utf-8"))
+        if type(state) is not dict:
+            raise ValueError("state_not_object")
+        attempted = state.get("attempted", {})
+        if type(attempted) is not dict:
+            raise ValueError("attempted_not_object")
+        for entry in attempted.values():
+            if type(entry) is not dict:
+                raise ValueError("attempt_entry_not_object")
+            if "live_order_sent" in entry and type(entry["live_order_sent"]) is not bool:
+                raise ValueError("attempt_live_order_sent_not_bool")
+            at_iso = entry.get("at_iso")
+            if at_iso:
+                parsed = datetime.fromisoformat(str(at_iso).replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    raise ValueError("attempt_timestamp_naive")
+        last_review_at = state.get("last_review_at")
+        if last_review_at:
+            parsed = datetime.fromisoformat(str(last_review_at).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                raise ValueError("review_timestamp_naive")
+        return state
+    except FileNotFoundError:
+        return {}
     except Exception as e:
         log.warning("position review state load failed: %s", e)
-    return {}
+        return {"_state_load_failed": True}
 
 
-def _save_state(state: dict) -> None:
+def _save_state(state: dict) -> bool:
     p = _state_path()
+    tmp_name = ""
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{p.name}.", suffix=".tmp", dir=str(p.parent),
+        )
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, ensure_ascii=False, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, p)
+        tmp_name = ""
+        dir_fd = os.open(str(p.parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+        return True
     except Exception as e:
         log.warning("position review state save failed: %s", e)
+        return False
+    finally:
+        if tmp_name:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+
+
+def _position_market_day(symbol: str, value: datetime):
+    is_kr = symbol.endswith((".KS", ".KQ")) or symbol.isdigit()
+    return value.astimezone(KST if is_kr else US_EASTERN).date()
+
+
+def _attempted_for_market_day(state: dict, now: datetime) -> dict:
+    attempted = state.get("attempted")
+    if not isinstance(attempted, dict):
+        return {}
+    current: dict = {}
+    legacy_date = str(state.get("attempted_date") or "")
+    for symbol, entry in attempted.items():
+        if not isinstance(entry, dict):
+            continue
+        raw = str(entry.get("at_iso") or "")
+        attempted_at = None
+        if raw:
+            try:
+                attempted_at = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                if attempted_at.tzinfo is None:
+                    attempted_at = attempted_at.replace(tzinfo=KST)
+            except ValueError:
+                attempted_at = None
+        if attempted_at is not None:
+            if _position_market_day(symbol, attempted_at) == _position_market_day(symbol, now):
+                current[symbol] = entry
+        elif legacy_date == now.astimezone(KST).strftime("%Y-%m-%d"):
+            current[symbol] = entry
+    return current
 
 
 def _to_float(v, default: float = 0.0) -> float:
@@ -554,8 +633,8 @@ def evaluate_sell_to_fund_candidates(
 def _market_open_for_symbol(symbol: str, now: datetime) -> bool:
     from core.market_hours import is_kr_market_open, is_us_market_open
     if symbol.endswith((".KS", ".KQ")) or symbol.isdigit():
-        return is_kr_market_open(now)
-    return is_us_market_open(now)
+        return is_kr_market_open(now) is True
+    return is_us_market_open(now) is True
 
 
 def execute_sell_candidates(
@@ -590,12 +669,21 @@ def execute_sell_candidates(
                             "reason": "market_closed"})
             continue
 
+        action = str(c.get("action") or "")
+        if action == _SELL_TO_FUND_ACTION:
+            intent_class = "rebalance"
+        elif int(c.get("quantity") or 0) >= int(c.get("held_quantity") or 0):
+            intent_class = "full_exit"
+        else:
+            intent_class = "partial_exit"
+        from core.toss_exit_execution_intent import build_exit_decision_ref
         order_candidate = {
             "symbol": symbol,
             "side": "sell",
             "quantity": c["quantity"],
             "limit_price": c["last_price"],
             "currency": c.get("currency"),
+            "decision_ref": build_exit_decision_ref(symbol, intent_class, now),
         }
         process_reason = c.get("process_reason") or (
             _SELL_TO_FUND_REASON
@@ -621,16 +709,27 @@ def execute_sell_candidates(
             )
         except Exception as e:
             log.error("position review sell error %s: %s", symbol, e)
-            r = {"symbol": symbol, "stage": "error", "reason": str(e)[:200]}
+            r = {
+                "ok": False, "live_order_sent": False,
+                "symbol": symbol, "stage": "error", "reason": str(e)[:200],
+            }
+        if type(r) is not dict:
+            r = {
+                "ok": False, "live_order_sent": False,
+                "symbol": symbol, "stage": "error", "reason": "invalid_pipeline_result",
+            }
         r["action"] = c["action"]
         r["pl_pct"] = c["pl_pct"]
-        attempted_map[symbol] = {
-            "at": now.strftime("%H:%M"),
-            "action": c["action"],
-            "process_reason": process_reason,
-            "stage": r.get("stage", ""),
-            "verdict": r.get("verdict", ""),
-        }
+        if r.get("ok") is True and r.get("live_order_sent") is True:
+            attempted_map[symbol] = {
+                "at": now.strftime("%H:%M"),
+                "at_iso": now.isoformat(),
+                "action": c["action"],
+                "process_reason": process_reason,
+                "stage": r.get("stage", ""),
+                "verdict": r.get("verdict", ""),
+                "live_order_sent": True,
+            }
         results.append(r)
     return results
 
@@ -651,14 +750,14 @@ def _format_review_message(candidates: list[dict], results: list[dict]) -> str:
             f"- {c['name']}({c['symbol']}) {label}: 손익 {c['pl_pct']:+.1f}%"
         )
         r = result_by_symbol.get(c["symbol"]) or {}
-        if r.get("verdict") == "PASS":
+        if r.get("ok") is True and r.get("live_order_sent") is True:
             if c["action"] == _SELL_TO_FUND_ACTION:
                 kind = "리밸런싱 매도"
             elif c["action"] in stop_actions or c["action"] in full_profit_actions:
                 kind = "전량 매도"
             else:
                 kind = "분할 익절"
-            lines.append(f"  → 🤖 자동 매도 발동 ({kind} {c['quantity']}주, 검증 PASS)")
+            lines.append(f"  → 🤖 자동 매도 전송 완료 ({kind} {c['quantity']}주)")
         elif r.get("stage") == "skipped":
             lines.append(f"  → 자동 매도 스킵: {r.get('reason', '')}")
         else:
@@ -680,14 +779,27 @@ def run_toss_position_review(
     - 매도 후보 발견 시 자동 매도 경로 + 텔레그램 요약
     """
     now = now or datetime.now(KST)
+    from core.market_hours import is_kr_market_open, is_us_market_open
 
+    kr_market_open = is_kr_market_open(now) is True
+    us_market_open = is_us_market_open(now) is True
     if not force:
-        if now.weekday() >= 5:
+        # KST 토요일 새벽은 미국 금요일 정규장일 수 있다. 캘린더 요일이나
+        # KST 10시 기준으로 US 보호 SELL review를 막지 않는다.
+        if now.weekday() >= 5 and not us_market_open:
             return {"skipped": "weekend"}
-        if now.hour < _REVIEW_HOUR_KST:
+        if now.hour < _REVIEW_HOUR_KST and not us_market_open:
             return {"skipped": "before_review_hour"}
+        # 장외 review가 throttle 상태를 소비하면 실제 개장 직후 보호 SELL이
+        # 최대 30분 늦어진다. 열린 시장이 있을 때만 상태를 소비한다.
+        if not kr_market_open and not us_market_open:
+            return {"skipped": "market_closed"}
+    elif not kr_market_open and not us_market_open:
+        return {"skipped": "market_closed"}
 
     state = _load_state()
+    if type(state) is not dict or state.get("_state_load_failed") is True:
+        return {"ok": False, "reason": "state_load_failed", "reviewed": False}
     today = now.strftime("%Y-%m-%d")
     if not force:
         last_review_at = state.get("last_review_at", "")
@@ -702,9 +814,7 @@ def run_toss_position_review(
             except Exception:
                 pass
 
-    attempted_map = state.get("attempted", {})
-    if state.get("attempted_date") != today:
-        attempted_map = {}
+    attempted_map = _attempted_for_market_day(state, now)
 
     policy = None
     try:
@@ -726,12 +836,38 @@ def run_toss_position_review(
         except Exception as e:
             log.warning("sell_to_fund evaluation failed: %s", e)
 
+    state.update({
+        "review_date": today,
+        "last_review_at": now.isoformat(timespec="seconds"),
+        "attempted_date": today,
+        "attempted": attempted_map,
+        "last_candidates": [
+            {k: c[k] for k in ("symbol", "action", "pl_pct", "quantity")}
+            for c in candidates
+        ],
+    })
+    if candidates and not _save_state(state):
+        return {
+            "ok": False,
+            "reason": "state_reservation_failed",
+            "reviewed": False,
+            "candidate_count": len(candidates),
+            "candidates": candidates,
+            "results": [],
+            "sent": False,
+        }
+
     results: list[dict] = []
     if candidates and policy is not None:
         try:
             results = execute_sell_candidates(candidates, policy, now, attempted_map)
         except Exception as e:
             log.warning("position review sell execution failed: %s", e)
+
+    state.update({
+        "attempted": attempted_map,
+    })
+    state_saved = _save_state(state)
 
     sent = False
     if candidates and send:
@@ -741,18 +877,6 @@ def run_toss_position_review(
         except Exception as e:
             log.warning("position review 알림 전송 실패: %s", e)
 
-    state.update({
-        "review_date": today,
-        "last_review_at": now.strftime("%Y-%m-%dT%H:%M:%S+09:00"),
-        "attempted_date": today,
-        "attempted": attempted_map,
-        "last_candidates": [
-            {k: c[k] for k in ("symbol", "action", "pl_pct", "quantity")}
-            for c in candidates
-        ],
-    })
-    _save_state(state)
-
     if candidates:
         log.info(
             "position review: %d candidates — %s",
@@ -761,6 +885,8 @@ def run_toss_position_review(
         )
 
     return {
+        "ok": state_saved,
+        "reason": "" if state_saved else "state_finalize_failed",
         "reviewed": True,
         "candidate_count": len(candidates),
         "candidates": candidates,

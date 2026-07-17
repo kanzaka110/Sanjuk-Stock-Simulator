@@ -235,27 +235,55 @@ def _safe_get(path: str, *, account_seq: str, params: dict | None = None) -> dic
     try:
         body = resp.json()
     except Exception:
-        body = {}
+        return {"ok": False, "reason": "malformed_json_response"}
+    if type(body) is not dict:
+        return {"ok": False, "reason": "malformed_response_body"}
     return {"ok": True, "body": tc.sanitize_dict(body)}
 
 
 def list_orders(status: str = "OPEN", *, account_seq: str | None = None) -> dict:
     """List Toss orders by status: OPEN or CLOSED. Safe read-only confirmation."""
+    if type(status) is not str or status not in {"OPEN", "CLOSED"}:
+        return {"ok": False, "reason": "invalid_order_status", "orders": [], "complete": False}
     seq = _resolve_account_seq(account_seq)
     if not seq:
-        return {"ok": False, "reason": "account_unavailable", "orders": []}
+        return {"ok": False, "reason": "account_unavailable", "orders": [], "complete": False}
     res = _safe_get(_ORDER_PATH, account_seq=seq, params={"status": status})
-    if not res.get("ok"):
-        return {**res, "orders": []}
-    body = res.get("body") or {}
-    result = body.get("result", []) if isinstance(body, dict) else []
-    if isinstance(result, dict):
-        for key in ("items", "orders", "content"):
-            if isinstance(result.get(key), list):
-                result = result[key]
-                break
-    orders = result if isinstance(result, list) else []
-    return {"ok": True, "status": status, "orders": [_sanitize_order_row(x) for x in orders if isinstance(x, dict)]}
+    if res.get("ok") is not True:
+        return {**res, "status": status, "orders": [], "complete": False}
+    body = res.get("body")
+    if type(body) is not dict or "result" not in body:
+        return {"ok": False, "reason": "malformed_orders_body", "status": status,
+                "orders": [], "complete": False}
+    result = body["result"]
+    if type(result) is dict:
+        containers = [key for key in ("items", "orders", "content") if key in result]
+        if len(containers) != 1 or type(result[containers[0]]) is not list:
+            return {"ok": False, "reason": "malformed_orders_result", "status": status,
+                    "orders": [], "complete": False}
+        for key in ("hasNext", "has_next"):
+            if key in result and result[key] is not False:
+                return {"ok": False, "reason": "orders_pagination_incomplete", "status": status,
+                        "orders": [], "complete": False}
+        for key in ("nextCursor", "next_cursor", "nextPage", "next_page"):
+            if key in result and result[key] not in (None, ""):
+                return {"ok": False, "reason": "orders_pagination_incomplete", "status": status,
+                        "orders": [], "complete": False}
+        orders = result[containers[0]]
+    elif type(result) is list:
+        orders = result
+    else:
+        return {"ok": False, "reason": "malformed_orders_result", "status": status,
+                "orders": [], "complete": False}
+    if any(type(row) is not dict for row in orders):
+        return {"ok": False, "reason": "malformed_order_row", "status": status,
+                "orders": [], "complete": False}
+    return {
+        "ok": True,
+        "status": status,
+        "orders": [_sanitize_order_row(row) for row in orders],
+        "complete": True,
+    }
 
 
 def get_order(order_id: str, *, account_seq: str | None = None) -> dict:

@@ -708,6 +708,29 @@ _STF_CAND = {
 }
 
 
+class TestAttemptedMarketDay(unittest.TestCase):
+    def test_us_attempt_survives_kst_midnight_but_not_next_us_session(self):
+        sent_at = datetime(2026, 7, 2, 23, 50, tzinfo=KST)
+        state = {
+            "attempted_date": "2026-07-02",
+            "attempted": {
+                "LRCX": {
+                    "at_iso": sent_at.isoformat(),
+                    "action": "stop_loss",
+                    "live_order_sent": True,
+                },
+            },
+        }
+        same_us_day = tpr._attempted_for_market_day(
+            state, datetime(2026, 7, 3, 0, 21, tzinfo=KST),
+        )
+        next_us_day = tpr._attempted_for_market_day(
+            state, datetime(2026, 7, 3, 22, 30, tzinfo=KST),
+        )
+        self.assertIn("LRCX", same_us_day)
+        self.assertNotIn("LRCX", next_us_day)
+
+
 class TestExecuteSell(unittest.TestCase):
     def _exec(self, policy=None, attempted=None, market_open=True,
               process_result=None, candidate=None):
@@ -715,6 +738,7 @@ class TestExecuteSell(unittest.TestCase):
         attempted = attempted if attempted is not None else {}
         candidate = dict(candidate if candidate is not None else _CAND)
         process_result = process_result or {
+            "ok": True, "live_order_sent": True,
             "symbol": candidate["symbol"], "stage": "verdict_recorded", "verdict": "PASS",
         }
         with patch.object(tpr, "_market_open_for_symbol", return_value=market_open), \
@@ -731,9 +755,23 @@ class TestExecuteSell(unittest.TestCase):
         cand = mock_pc.call_args[0][0]
         self.assertEqual(cand["side"], "sell")
         self.assertEqual(cand["quantity"], 10)
+        self.assertIn(".full_exit", cand["decision_ref"])
         self.assertEqual(mock_pc.call_args.kwargs.get("reason"),
                          "position_review_sell")
         self.assertIn("123450.KS", attempted)
+
+    def test_pass_without_live_send_does_not_consume_attempted(self):
+        process_result = {
+            "ok": True,
+            "live_order_sent": False,
+            "symbol": _CAND["symbol"],
+            "stage": "verdict_recorded",
+            "verdict": "PASS",
+        }
+        results, mock_pc, attempted = self._exec(process_result=process_result)
+        self.assertIs(results[0]["live_order_sent"], False)
+        self.assertNotIn(_CAND["symbol"], attempted)
+        mock_pc.assert_called_once()
 
     def test_autonomous_off_skips(self):
         policy = dict(_POLICY_SELL, autonomous_mode=False)
@@ -913,10 +951,98 @@ class TestRunReview(unittest.TestCase):
             r = self._run(tmp, now=datetime(2026, 7, 2, 9, 30, tzinfo=KST))
             self.assertEqual(r.get("skipped"), "before_review_hour")
 
+    def test_us_regular_session_after_kst_midnight_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            candidate = dict(_CAND, symbol="LRCX", currency="USD")
+            r = self._run(
+                tmp,
+                now=datetime(2026, 7, 2, 2, 0, tzinfo=KST),
+                candidates=[candidate],
+            )
+            self.assertTrue(r.get("reviewed"))
+            self.assertEqual(r.get("candidate_count"), 1)
+
+    def test_us_friday_session_on_kst_saturday_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            candidate = dict(_CAND, symbol="LRCX", currency="USD")
+            r = self._run(
+                tmp,
+                now=datetime(2026, 7, 11, 2, 0, tzinfo=KST),
+                candidates=[candidate],
+            )
+            self.assertTrue(r.get("reviewed"))
+            self.assertEqual(r.get("candidate_count"), 1)
+
+    def test_us_christmas_holiday_blocks_review_execution_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            captured = []
+            r = self._run(
+                tmp,
+                now=datetime(2026, 12, 25, 23, 30, tzinfo=KST),
+                capture=captured,
+            )
+        self.assertEqual(r.get("skipped"), "market_closed")
+        self.assertEqual(captured, [])
+
     def test_weekend_skips(self):
         with tempfile.TemporaryDirectory() as tmp:
             r = self._run(tmp, now=datetime(2026, 7, 4, 11, 0, tzinfo=KST))
             self.assertEqual(r.get("skipped"), "weekend")
+
+    def test_force_closed_does_not_consume_open_throttle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            closed = self._run(
+                tmp,
+                now=datetime(2026, 7, 2, 22, 29, tzinfo=KST),
+                force=True,
+            )
+            opened = self._run(
+                tmp,
+                now=datetime(2026, 7, 2, 22, 30, tzinfo=KST),
+            )
+        self.assertEqual(closed.get("skipped"), "market_closed")
+        self.assertTrue(opened.get("reviewed"))
+
+    def test_state_save_failure_blocks_sell_before_execute(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(tpr, "_save_state", return_value=False):
+            captured = []
+            result = self._run(tmp, capture=captured)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "state_reservation_failed")
+        self.assertEqual(captured, [])
+
+    def test_nested_state_corruption_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            captured = []
+            result = self._run(
+                tmp,
+                state={"attempted": "truthy", "attempted_date": "2026-07-02"},
+                capture=captured,
+            )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "state_load_failed")
+        self.assertEqual(captured, [])
+
+    def test_truthy_live_order_sent_in_state_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            captured = []
+            result = self._run(
+                tmp,
+                state={
+                    "attempted_date": "2026-07-02",
+                    "attempted": {
+                        "LRCX": {
+                            "at_iso": "2026-07-02T23:50:00+09:00",
+                            "live_order_sent": "false",
+                        },
+                    },
+                },
+                capture=captured,
+            )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "state_load_failed")
+        self.assertEqual(captured, [])
 
     def test_no_candidates_no_send(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -932,19 +1058,21 @@ class TestMessage(unittest.TestCase):
     def test_message_sell_to_fund(self):
         msg = tpr._format_review_message(
             [dict(_STF_CAND)],
-            [{"symbol": "015760.KS", "stage": "verdict_recorded", "verdict": "PASS"}],
+            [{"ok": True, "live_order_sent": True,
+              "symbol": "015760.KS", "stage": "verdict_recorded", "verdict": "PASS"}],
         )
         self.assertIn("리밸런싱 매도 후보", msg)
-        self.assertIn("자동 매도 발동 (리밸런싱 매도 6주, 검증 PASS)", msg)
+        self.assertIn("자동 매도 전송 완료 (리밸런싱 매도 6주)", msg)
         self.assertNotIn("손절 기준 도달", msg)
 
     def test_message_pass(self):
         msg = tpr._format_review_message(
             [dict(_CAND)],
-            [{"symbol": "123450.KS", "stage": "verdict_recorded", "verdict": "PASS"}],
+            [{"ok": True, "live_order_sent": True,
+              "symbol": "123450.KS", "stage": "verdict_recorded", "verdict": "PASS"}],
         )
         self.assertIn("손절 기준 도달", msg)
-        self.assertIn("자동 매도 발동", msg)
+        self.assertIn("자동 매도 전송 완료", msg)
         self.assertIn("-9.0%", msg)
 
     def test_message_skipped(self):

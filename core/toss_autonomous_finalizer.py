@@ -25,10 +25,169 @@ Hermes PASS → 자동 주문 실행 모듈.
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime, timezone, timedelta
 
 log = logging.getLogger(__name__)
 KST = timezone(timedelta(hours=9))
+_exit_dispatch_local = threading.local()
+
+
+def _acquire_active_exit_dispatch_lock(rec: dict) -> dict:
+    from core.toss_exit_execution_intent import (
+        acquire_exit_dispatch_lock,
+        exit_decision_ref_matches,
+        is_exit_decision_ref,
+    )
+
+    decision_ref = rec.get("decision_ref")
+    side = str(rec.get("side") or "").lower()
+    if side == "sell" and (
+        not is_exit_decision_ref(decision_ref)
+        or not exit_decision_ref_matches(
+            decision_ref, rec.get("symbol"), datetime.now(KST),
+        )
+    ):
+        return {"ok": False, "managed": True, "reason": "invalid_exit_decision_ref"}
+    managed = side == "sell"
+    if not managed:
+        return {"ok": True, "managed": False}
+    if getattr(_exit_dispatch_local, "lock", None) is not None:
+        return {"ok": False, "managed": True, "reason": "exit_intent_lock_reentrant"}
+    lock = acquire_exit_dispatch_lock(str(decision_ref))
+    if lock.get("ok") is not True:
+        return {
+            "ok": False,
+            "managed": True,
+            "reason": str(lock.get("reason") or "exit_intent_state_unavailable"),
+        }
+    _exit_dispatch_local.lock = lock
+    return {"ok": True, "managed": True}
+
+
+def _release_active_exit_dispatch_lock() -> None:
+    lock = getattr(_exit_dispatch_local, "lock", None)
+    if lock is None:
+        return
+    try:
+        from core.toss_exit_execution_intent import release_exit_dispatch_lock
+        release_exit_dispatch_lock(lock)
+    finally:
+        try:
+            del _exit_dispatch_local.lock
+        except AttributeError:
+            pass
+
+
+def _reconcile_prior_exit_intent(prior_pilot_id: str, records: list[dict]) -> dict:
+    prior = next((r for r in records if r.get("pilot_id") == prior_pilot_id), None)
+    if prior is not None and (
+        prior.get("status") == "live_sent" or prior.get("live_order_sent") is True
+    ):
+        return {"ok": True, "sent": True, "source": "ledger"}
+
+    try:
+        from core.toss_live_order_http import list_orders
+        responses = [list_orders("OPEN"), list_orders("CLOSED")]
+    except Exception:
+        return {"ok": False, "sent": False, "source": "broker_unavailable"}
+    for expected_status, response in zip(("OPEN", "CLOSED"), responses):
+        if (
+            type(response) is not dict
+            or response.get("ok") is not True
+            or response.get("status") != expected_status
+            or response.get("complete") is not True
+        ):
+            return {"ok": False, "sent": False, "source": "broker_unavailable"}
+        orders = response.get("orders")
+        if type(orders) is not list:
+            return {"ok": False, "sent": False, "source": "broker_unavailable"}
+        for order in orders:
+            if type(order) is dict and order.get("client_order_id") == prior_pilot_id:
+                broker_order_id = next((
+                    str(order.get(key))
+                    for key in ("broker_order_id", "order_id", "id")
+                    if type(order.get(key)) is str and order.get(key)
+                ), "")
+                return {
+                    "ok": True,
+                    "sent": True,
+                    "source": "broker",
+                    "broker_order_id": broker_order_id,
+                }
+    return {"ok": True, "sent": False, "source": "broker"}
+
+
+def _converge_reconciled_live_sent(pilot_id: str, broker_order_id: str = "") -> bool:
+    try:
+        from core.toss_live_pilot_ledger import record_live_sent
+        record_live_sent(pilot_id, broker_order_id=broker_order_id)
+        return True
+    except Exception as exc:
+        log.warning(
+            "reconciled live_sent ledger convergence failed: error_type=%s",
+            type(exc).__name__,
+        )
+        return False
+
+
+def _claim_exit_intent(rec: dict, pilot_id: str, records: list[dict]) -> dict:
+    from core.toss_exit_execution_intent import (
+        claim_exit_intent,
+        is_exit_decision_ref,
+        mark_exit_intent_sent,
+        takeover_exit_intent,
+    )
+
+    raw_decision_ref = rec.get("decision_ref")
+    side = str(rec.get("side") or "").lower()
+    if side != "sell":
+        return {"ok": True, "managed": False, "decision_ref": ""}
+    if not is_exit_decision_ref(raw_decision_ref):
+        return {
+            "ok": False,
+            "managed": True,
+            "decision_ref": "",
+            "reason": "invalid_exit_decision_ref",
+        }
+    decision_ref = str(raw_decision_ref)
+    claim = claim_exit_intent(decision_ref, pilot_id)
+    if claim.get("reason") == "exit_intent_already_sent":
+        _converge_reconciled_live_sent(str(claim.get("prior_pilot_id") or ""))
+    if claim.get("reason") != "exit_intent_reconcile_required":
+        return {**claim, "managed": True, "decision_ref": decision_ref}
+
+    prior_pilot_id = str(claim.get("prior_pilot_id") or "")
+    prior_decision_ref = str(claim.get("prior_decision_ref") or "")
+    prior_updated_at = str(claim.get("prior_updated_at") or "")
+    reconciled = _reconcile_prior_exit_intent(prior_pilot_id, records)
+    if reconciled.get("ok") is not True:
+        return {
+            "ok": False,
+            "managed": True,
+            "decision_ref": decision_ref,
+            "reason": "exit_intent_reconcile_unavailable",
+        }
+    if reconciled.get("sent") is True:
+        mark_exit_intent_sent(prior_decision_ref, prior_pilot_id)
+        _converge_reconciled_live_sent(
+            prior_pilot_id,
+            broker_order_id=str(reconciled.get("broker_order_id") or ""),
+        )
+        return {
+            "ok": False,
+            "managed": True,
+            "decision_ref": decision_ref,
+            "reason": "exit_intent_already_sent",
+        }
+    takeover = takeover_exit_intent(
+        decision_ref,
+        prior_pilot_id,
+        pilot_id,
+        expected_decision_ref=prior_decision_ref,
+        expected_updated_at=prior_updated_at,
+    )
+    return {**takeover, "managed": True, "decision_ref": decision_ref}
 
 
 def try_autonomous_finalize(pilot_id: str, allow_retry: bool = False) -> dict:
@@ -41,6 +200,7 @@ def try_autonomous_finalize(pilot_id: str, allow_retry: bool = False) -> dict:
     Returns:
         {"ok": bool, "action": str, "live_order_sent": bool, ...}
     """
+    previous_exit_lock = getattr(_exit_dispatch_local, "lock", None)
     try:
         return _finalize_impl(pilot_id, allow_retry=allow_retry)
     except Exception as e:
@@ -51,6 +211,10 @@ def try_autonomous_finalize(pilot_id: str, allow_retry: bool = False) -> dict:
             "live_order_sent": False,
             "reason": f"unexpected_error: {e}",
         }
+    finally:
+        # 재진입 차단된 내부 호출이 외부 호출의 lock을 풀면 fencing이 깨진다.
+        if previous_exit_lock is None:
+            _release_active_exit_dispatch_lock()
 
 
 def _finalize_impl(pilot_id: str, allow_retry: bool = False) -> dict:
@@ -265,7 +429,7 @@ def _finalize_impl(pilot_id: str, allow_retry: bool = False) -> dict:
                 "reason": quality_reason,
             }
 
-    # 7. transport + dispatch
+    # 7. shared exit intent → transport + dispatch
     payload = {
         "symbol": preview_stub["symbol"],
         "side": preview_stub["side"],
@@ -276,11 +440,114 @@ def _finalize_impl(pilot_id: str, allow_retry: bool = False) -> dict:
         "client_order_id": pilot_id,
         "pilot_id": pilot_id,
     }
-    transport = resolve_live_transport_for_confirm(policy)
-    dispatch_result = dispatch_toss_order_live(payload, policy, transport=transport)
+    exit_lock = _acquire_active_exit_dispatch_lock(rec)
+    if exit_lock.get("ok") is not True:
+        reason = str(exit_lock.get("reason") or "exit_intent_state_unavailable")
+        _record_event(
+            pilot_id=pilot_id,
+            event_type="autonomous_blocked_exit_intent",
+            status="live_send_blocked",
+            verification_id=verification_id,
+            reason=reason,
+            rec=rec,
+            policy=policy,
+        )
+        return {
+            "ok": False,
+            "action": "autonomous_finalize",
+            "live_order_sent": False,
+            "reason": reason,
+        }
+    exit_intent = _claim_exit_intent(rec, pilot_id, records)
+    if exit_intent.get("ok") is not True:
+        reason = str(exit_intent.get("reason") or "exit_intent_blocked")
+        _record_event(
+            pilot_id=pilot_id,
+            event_type="autonomous_blocked_exit_intent",
+            status="live_send_blocked",
+            verification_id=verification_id,
+            reason=reason,
+            rec=rec,
+            policy=policy,
+        )
+        return {
+            "ok": False,
+            "action": "autonomous_finalize",
+            "live_order_sent": False,
+            "reason": reason,
+        }
+    try:
+        transport = resolve_live_transport_for_confirm(policy)
+    except Exception as exc:
+        log.warning(
+            "autonomous transport resolution failed: error_type=%s",
+            type(exc).__name__,
+        )
+        raw_dispatch_result = {
+            "ok": False,
+            "live_order_sent": False,
+            "blocked": True,
+            "transport_status": "live_send_blocked",
+            "reason": "transport_resolution_failed",
+            "failure_reason": "transport_resolution_failed",
+        }
+    else:
+        try:
+            raw_dispatch_result = dispatch_toss_order_live(
+                payload, policy, transport=transport,
+            )
+        except Exception as exc:
+            log.error(
+                "autonomous dispatch raised — outcome ambiguous: error_type=%s",
+                type(exc).__name__,
+            )
+            raw_dispatch_result = {
+                "ok": False,
+                "live_order_sent": False,
+                "blocked": False,
+                "transport_status": "live_send_ambiguous",
+                "reason": "transport_exception",
+                "failure_reason": "transport_exception",
+            }
+    dispatch_contract_valid = bool(
+        type(raw_dispatch_result) is dict
+        and type(raw_dispatch_result.get("ok")) is bool
+        and type(raw_dispatch_result.get("live_order_sent")) is bool
+        and not (
+            raw_dispatch_result.get("ok") is False
+            and raw_dispatch_result.get("live_order_sent") is True
+        )
+    )
+    dispatch_sent = bool(
+        dispatch_contract_valid
+        and raw_dispatch_result.get("ok") is True
+        and raw_dispatch_result.get("live_order_sent") is True
+    )
+    dispatch_definitively_unsent = bool(
+        dispatch_contract_valid
+        and raw_dispatch_result.get("live_order_sent") is False
+        and (
+            raw_dispatch_result.get("blocked") is True
+            or raw_dispatch_result.get("transport_status") == "live_send_blocked"
+        )
+    )
+    if dispatch_contract_valid:
+        dispatch_result = raw_dispatch_result
+    else:
+        dispatch_result = {
+            "ok": False,
+            "live_order_sent": False,
+            "reason": "invalid_dispatch_result",
+            "failure_reason": "invalid_dispatch_result",
+        }
 
     # 7. ledger + events + telegram
-    if dispatch_result.get("live_order_sent"):
+    if dispatch_sent:
+        if exit_intent.get("managed") is True:
+            from core.toss_exit_execution_intent import mark_exit_intent_sent
+            marked = mark_exit_intent_sent(exit_intent["decision_ref"], pilot_id)
+            if marked.get("ok") is not True:
+                log.error("exit intent sent-state persist failed: pilot_id=%s", pilot_id)
         try:
             record_live_sent(
                 pilot_id,
@@ -315,6 +582,15 @@ def _finalize_impl(pilot_id: str, allow_retry: bool = False) -> dict:
             "broker_order_status": dispatch_result.get("broker_order_status", ""),
         }
     else:
+        if exit_intent.get("managed") is True and dispatch_definitively_unsent:
+            from core.toss_exit_execution_intent import release_exit_intent
+            released = release_exit_intent(exit_intent["decision_ref"], pilot_id)
+            if released.get("ok") is not True:
+                log.error("exit intent release failed: pilot_id=%s", pilot_id)
+        elif exit_intent.get("managed") is True:
+            # 모순/비bool 결과는 실제 전송 여부를 확정할 수 없다. claim을 유지해
+            # lease 뒤 exact ledger/broker reconciliation으로만 takeover를 허용한다.
+            log.error("ambiguous dispatch result — exit intent retained: pilot_id=%s", pilot_id)
         fail_reason = dispatch_result.get("reason", "dispatch_failed") or "dispatch_failed"
         error_body = dispatch_result.get("error_body", "")
         order_request_preview = (
@@ -332,6 +608,14 @@ def _finalize_impl(pilot_id: str, allow_retry: bool = False) -> dict:
         if cash_shortage:
             fail_detail = f"cash_blocked_rebalance_needed: {fail_detail}"
         retryable = _is_retryable_dispatch_failure(failure_reason, error_body)
+        reconcile_required = bool(
+            exit_intent.get("managed") is True and not dispatch_definitively_unsent
+        )
+        if reconcile_required:
+            # Blind resend는 claim이 막고, retry sweep은 lease 뒤 broker 원장
+            # reconciliation에 다시 진입할 수 있도록 terminal 소비하지 않는다.
+            retryable = True
+            fail_detail = f"reconcile_required: {fail_detail}"
         try:
             recorder = record_live_send_retryable if retryable else record_live_send_failed
             recorder(
@@ -409,6 +693,7 @@ def _is_retryable_dispatch_failure(reason: str, error_body: str = "") -> bool:
         return False
     retryable_tokens = (
         "dispatch_failed",
+        "transport_resolution_failed",
         "transport_exception",
         "network_error",
         "account_unavailable",

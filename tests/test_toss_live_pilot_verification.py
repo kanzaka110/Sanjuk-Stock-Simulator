@@ -122,6 +122,34 @@ class TestRecordHermesVerification(unittest.TestCase):
         self.assertTrue(r["ok"])
         self.assertEqual(r["status"], "PASS")
 
+    def test_pass_projects_exact_finalizer_send_result(self):
+        from core import toss_live_pilot_verification as verification
+        finalizer = {
+            "ok": True,
+            "live_order_sent": True,
+            "broker_order_id": "safe-order-id",
+        }
+        with patch.object(
+            verification, "_try_trigger_autonomous_finalize", return_value=finalizer,
+        ):
+            result = verification.record_hermes_verification(
+                self.verification_id, "PASS", ["ok"], {},
+            )
+        self.assertIs(result["finalizer_ok"], True)
+        self.assertIs(result["live_order_sent"], True)
+
+    def test_pass_does_not_launder_truthy_finalizer_values(self):
+        from core import toss_live_pilot_verification as verification
+        finalizer = {"ok": 1, "live_order_sent": "true"}
+        with patch.object(
+            verification, "_try_trigger_autonomous_finalize", return_value=finalizer,
+        ):
+            result = verification.record_hermes_verification(
+                self.verification_id, "PASS", ["ok"], {},
+            )
+        self.assertIs(result["finalizer_ok"], False)
+        self.assertIs(result["live_order_sent"], False)
+
     def test_pass_has_expires_at(self):
         from core.toss_live_pilot_verification import record_hermes_verification
         r = record_hermes_verification(self.verification_id, "PASS", [], {}, ttl_minutes=10)

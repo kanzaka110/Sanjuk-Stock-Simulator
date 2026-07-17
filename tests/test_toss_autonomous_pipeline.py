@@ -521,7 +521,7 @@ class TestSelect(unittest.TestCase):
 # ── 2. process_candidate ──────────────────────────────────────────
 
 class TestProcessCandidate(unittest.TestCase):
-    def _run(self, candidate, policy=None, verdict_status="PASS"):
+    def _run(self, candidate, policy=None, verdict_status="PASS", live_order_sent=False):
         policy = policy or dict(_POLICY_ON)
         recorded = {}
 
@@ -530,7 +530,12 @@ class TestProcessCandidate(unittest.TestCase):
                 "verification_id": verification_id, "status": status,
                 "reasons": reasons, "hermes_message": hermes_message,
             })
-            return {"ok": True, "status": status}
+            return {
+                "ok": True,
+                "status": status,
+                "finalizer_ok": live_order_sent,
+                "live_order_sent": live_order_sent,
+            }
 
         with patch("core.toss_live_pilot_ledger.record_live_pilot_preview",
                    return_value={"ok": True, "pilot_id": "tlive_test_1"}), \
@@ -553,6 +558,16 @@ class TestProcessCandidate(unittest.TestCase):
         self.assertEqual(recorded["status"], "PASS")
         self.assertIn("auto_verifier", recorded["hermes_message"])
         self.assertIn("bucket=PASS_EXECUTE", recorded["hermes_message"])
+        self.assertIs(r["live_order_sent"], False)
+
+    def test_projects_exact_live_send_result(self):
+        sent, _, _ = self._run(_candidate(), live_order_sent=True)
+        self.assertIs(sent["ok"], True)
+        self.assertIs(sent["live_order_sent"], True)
+
+        not_sent, _, _ = self._run(_candidate(), live_order_sent=False)
+        self.assertIs(not_sent["ok"], True)
+        self.assertIs(not_sent["live_order_sent"], False)
 
     def test_incomplete_or_truthy_policy_stops_before_preview(self):
         bad_policy = {
@@ -1171,13 +1186,18 @@ class TestRetrySweep(unittest.TestCase):
         "failure_reason": "network_error",
     }
 
-    def _sweep(self, state, records=None, verdict_status="PASS", **retry_kwargs):
+    def _sweep(
+        self, state, records=None, verdict_status="PASS", *, now=_NOW,
+        finalizer_result=None, **retry_kwargs,
+    ):
+        retry_kwargs.setdefault("blocked_buy_markets", set())
         records = records if records is not None else [dict(self._RETRYABLE)]
         finalize_calls = []
+        finalizer_result = finalizer_result or {"ok": True, "live_order_sent": True}
 
         def fake_finalize(pilot_id, allow_retry=False):
             finalize_calls.append((pilot_id, allow_retry))
-            return {"ok": True, "live_order_sent": True}
+            return dict(finalizer_result)
 
         failed_calls = []
         self.retry_preview = None
@@ -1200,7 +1220,7 @@ class TestRetrySweep(unittest.TestCase):
                    return_value={"status": verdict_status, "reasons": [], "checks": {}}), \
              patch("core.toss_autonomous_finalizer.try_autonomous_finalize",
                    side_effect=fake_finalize):
-            r = tap.retry_retryable_orders(now=_NOW, state=state, **retry_kwargs)
+            r = tap.retry_retryable_orders(now=now, state=state, **retry_kwargs)
         return r, finalize_calls, failed_calls
 
     def test_retry_pass_finalizes_with_allow_retry(self):
@@ -1210,6 +1230,61 @@ class TestRetrySweep(unittest.TestCase):
         self.assertEqual(r["sent"], 1)
         self.assertEqual(finalize_calls, [("tlive_retry_1", True)])
         self.assertEqual(state["retry_counts"]["tlive_retry_1"], 1)
+
+    def test_retry_sent_counter_requires_exact_true_pair(self):
+        result, calls, _ = self._sweep(
+            {}, finalizer_result={"ok": True, "live_order_sent": "false"},
+        )
+        self.assertEqual(calls, [("tlive_retry_1", True)])
+        self.assertEqual(result["sent"], 0)
+
+    def test_us_retry_survives_kst_midnight_with_count_continuity(self):
+        now = datetime(2026, 7, 3, 0, 20, tzinfo=KST)
+        record = dict(
+            self._RETRYABLE,
+            pilot_id="us-sell",
+            symbol="LRCX",
+            side="sell",
+            created_at="2026-07-02T23:50:00+09:00",
+            decision_ref="execution_decision:exit.LRCX.20260702.full_exit",
+        )
+        state = {"retry_date": "2026-07-02", "retry_counts": {"us-sell": 1}}
+        result, calls, _ = self._sweep(state, records=[record], now=now)
+        self.assertEqual(calls, [("us-sell", True)])
+        self.assertEqual(result["retried"], 1)
+        self.assertEqual(state["retry_counts"]["us-sell"], 2)
+
+    def test_reconcile_required_sell_does_not_exhaust_while_waiting_for_broker_truth(self):
+        now = datetime(2026, 7, 3, 0, 20, tzinfo=KST)
+        record = dict(
+            self._RETRYABLE,
+            pilot_id="us-reconcile",
+            symbol="LRCX",
+            side="sell",
+            created_at="2026-07-02T23:50:00+09:00",
+            decision_ref="execution_decision:exit.LRCX.20260702.full_exit",
+            failure_reason="reconcile_required: transport_exception",
+        )
+        for reason in ("exit_intent_reserved", "exit_intent_reconcile_unavailable"):
+            with self.subTest(reason=reason):
+                state = {"retry_counts": {"us-reconcile": tap._MAX_RETRIES}}
+                result, calls, failed = self._sweep(
+                    state,
+                    records=[record],
+                    now=now,
+                    finalizer_result={
+                        "ok": False,
+                        "live_order_sent": False,
+                        "reason": reason,
+                    },
+                )
+                self.assertEqual(calls, [("us-reconcile", True)])
+                self.assertEqual(result["retried"], 1)
+                self.assertEqual(result["exhausted"], 0)
+                self.assertEqual(failed, [])
+                self.assertEqual(
+                    state["retry_counts"].get("us-reconcile", 0), 0,
+                )
 
     def test_retry_invalid_policy_stops_before_ledger_fetch(self):
         bad_policy = {
@@ -1287,6 +1362,32 @@ class TestRetrySweep(unittest.TestCase):
         self.assertEqual(result["sent"], 1)
         self.assertEqual(result["skipped_buy_safety"], 1)
         self.assertEqual(result["skipped_market"], 1)
+
+    def test_default_retry_scope_is_currently_open_markets_only(self):
+        records = [
+            dict(self._RETRYABLE, pilot_id="kr", symbol="091180.KS", side="sell"),
+            dict(self._RETRYABLE, pilot_id="us", symbol="LRCX", side="sell"),
+        ]
+        with patch.object(tap, "_active_execution_market", return_value="KR"):
+            result, finalize_calls, _ = self._sweep({}, records=records)
+
+        self.assertEqual(finalize_calls, [("kr", True)])
+        self.assertEqual(result["retried"], 1)
+        self.assertEqual(result["skipped_market"], 1)
+
+    def test_default_retry_scope_blocks_buys_when_caller_omits_safety_scope(self):
+        records = [
+            dict(self._RETRYABLE, pilot_id="kr-buy", symbol="091180.KS", side="buy"),
+            dict(self._RETRYABLE, pilot_id="kr-sell", symbol="091180.KS", side="sell"),
+        ]
+        with patch.object(tap, "_active_execution_market", return_value="KR"):
+            result, finalize_calls, _ = self._sweep(
+                {}, records=records, blocked_buy_markets=None,
+            )
+
+        self.assertEqual(finalize_calls, [("kr-sell", True)])
+        self.assertEqual(result["retried"], 1)
+        self.assertEqual(result["skipped_buy_safety"], 1)
 
     def test_retry_market_classifier_rejects_unknown_values(self):
         self.assertEqual(tap._retry_record_market({"market": "JP", "symbol": "AAPL"}), "")

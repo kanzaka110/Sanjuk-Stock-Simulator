@@ -7,13 +7,106 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 
 from config.settings import KST
 
 # 미국 동부 표준시 (EST: UTC-5, EDT: UTC-4)
 _EST = timezone(timedelta(hours=-5))
 _EDT = timezone(timedelta(hours=-4))
+
+# KRX 2026 weekday closures: annual KRX calendar (16 days) plus the
+# 2026-05-19 KRX update adding Constitution Day (Jul 17). Sep 28 is open.
+_KRX_HOLIDAYS_2026 = frozenset({
+    date(2026, 1, 1),
+    date(2026, 2, 16), date(2026, 2, 17), date(2026, 2, 18),
+    date(2026, 3, 2),
+    date(2026, 5, 1), date(2026, 5, 5), date(2026, 5, 25),
+    date(2026, 6, 3),
+    date(2026, 7, 17),
+    date(2026, 8, 17),
+    date(2026, 9, 24), date(2026, 9, 25),
+    date(2026, 10, 5), date(2026, 10, 9),
+    date(2026, 12, 25), date(2026, 12, 31),
+})
+
+
+def _observed_fixed_holiday(day: date) -> date:
+    """NYSE fixed-date holiday observation (Saturday→Friday, Sunday→Monday)."""
+    if day.weekday() == 5:
+        return day - timedelta(days=1)
+    if day.weekday() == 6:
+        return day + timedelta(days=1)
+    return day
+
+
+def _nth_weekday(year: int, month: int, weekday: int, nth: int) -> date:
+    first = date(year, month, 1)
+    return first + timedelta(days=(weekday - first.weekday()) % 7 + 7 * (nth - 1))
+
+
+def _last_weekday(year: int, month: int, weekday: int) -> date:
+    if month == 12:
+        first_next = date(year + 1, 1, 1)
+    else:
+        first_next = date(year, month + 1, 1)
+    last = first_next - timedelta(days=1)
+    return last - timedelta(days=(last.weekday() - weekday) % 7)
+
+
+def _easter_sunday(year: int) -> date:
+    """Gregorian Easter (Meeus/Jones/Butcher), used for NYSE Good Friday."""
+    a = year % 19
+    b, c = divmod(year, 100)
+    d, e = divmod(b, 4)
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = divmod(c, 4)
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = (h + l - 7 * m + 114) % 31 + 1
+    return date(year, month, day)
+
+
+def _us_market_holidays(year: int) -> set[date]:
+    """NYSE recurring full-day holidays for the given ET calendar year."""
+    holidays = {
+        _nth_weekday(year, 1, 0, 3),   # Martin Luther King Jr. Day
+        _nth_weekday(year, 2, 0, 3),   # Washington's Birthday
+        _easter_sunday(year) - timedelta(days=2),
+        _last_weekday(year, 5, 0),     # Memorial Day
+        _observed_fixed_holiday(date(year, 6, 19)),
+        _observed_fixed_holiday(date(year, 7, 4)),
+        _nth_weekday(year, 9, 0, 1),   # Labor Day
+        _nth_weekday(year, 11, 3, 4),  # Thanksgiving
+        _observed_fixed_holiday(date(year, 12, 25)),
+    }
+    # New Year's observation can fall on Dec 31 of the previous year.
+    for new_year in (year, year + 1):
+        observed = _observed_fixed_holiday(date(new_year, 1, 1))
+        if observed.year == year:
+            holidays.add(observed)
+    return holidays
+
+
+def _us_market_close_time(day: date) -> dt_time:
+    """NYSE core-session close, including recurring 13:00 ET early closes."""
+    thanksgiving = _nth_weekday(day.year, 11, 3, 4)
+    day_after_thanksgiving = thanksgiving + timedelta(days=1)
+    christmas_eve = date(day.year, 12, 24)
+    july_fourth = date(day.year, 7, 4)
+    if july_fourth.weekday() == 5:  # Saturday holiday observed Friday → Thursday close
+        july_early_close = date(day.year, 7, 2)
+    elif july_fourth.weekday() in (1, 2, 3, 4):
+        july_early_close = date(day.year, 7, 3)
+    else:
+        july_early_close = None
+    if day in {day_after_thanksgiving, christmas_eve, july_early_close}:
+        if day.weekday() < 5 and day not in _us_market_holidays(day.year):
+            return dt_time(13, 0)
+    return dt_time(16, 0)
 
 
 def _is_us_dst(dt: datetime) -> bool:
@@ -67,8 +160,6 @@ def get_market_session(now: datetime | None = None) -> dict[str, str]:
     us_tz = _EDT if _is_us_dst(kst_now) else _EST
     et_now = kst_now.astimezone(us_tz)
 
-    from datetime import time as dt_time
-
     # 한국장: 09:00~15:30 KST, 평일
     kr = CLOSED
     if is_weekday(kst_now):
@@ -78,13 +169,15 @@ def get_market_session(now: datetime | None = None) -> dict[str, str]:
 
     # 미국장: 평일 ET 기준
     us = CLOSED
-    if is_weekday(et_now):
+    et_day = et_now.date()
+    if is_weekday(et_now) and et_day not in _us_market_holidays(et_day.year):
         t = et_now.time()
+        regular_close = _us_market_close_time(et_day)
         if dt_time(4, 0) <= t < dt_time(9, 30):
             us = US_PREMARKET
-        elif dt_time(9, 30) <= t < dt_time(16, 0):
+        elif dt_time(9, 30) <= t < regular_close:
             us = US_REGULAR
-        elif dt_time(16, 0) <= t < dt_time(20, 0):
+        elif regular_close == dt_time(16, 0) and dt_time(16, 0) <= t < dt_time(20, 0):
             us = US_AFTERMARKET
 
     return {"kr": kr, "us": us}
@@ -97,13 +190,16 @@ def is_us_tradeable(now: datetime | None = None) -> bool:
 
 
 def is_kr_market_open(now: datetime | None = None) -> bool:
-    """한국장 개장 여부 (09:00~15:30 KST, 평일)."""
+    """한국장 개장 여부 (2026 KRX authoritative calendar)."""
     kst_now = _to_kst(now or datetime.now(KST))
-    if not is_weekday(kst_now):
+    # 검증되지 않은 연도를 평일이라는 이유만으로 열지 않는다.
+    if kst_now.year != 2026:
         return False
-    t = kst_now.time()
-    from datetime import time as dt_time
-    return dt_time(9, 0) <= t < dt_time(15, 30)
+    if not is_weekday(kst_now) or kst_now.date() in _KRX_HOLIDAYS_2026:
+        return False
+    # 연초 개장식으로 첫 거래일은 10:00 개장, 종료는 15:30 유지.
+    start = dt_time(10, 0) if kst_now.date() == date(2026, 1, 2) else dt_time(9, 0)
+    return start <= kst_now.time() < dt_time(15, 30)
 
 
 def is_us_market_open(now: datetime | None = None) -> bool:
@@ -119,12 +215,12 @@ def is_us_market_open(now: datetime | None = None) -> bool:
     us_tz = _EDT if _is_us_dst(kst_now) else _EST
     et_now = kst_now.astimezone(us_tz)
 
-    if not is_weekday(et_now):
+    et_day = et_now.date()
+    if not is_weekday(et_now) or et_day in _us_market_holidays(et_day.year):
         return False
 
     t = et_now.time()
-    from datetime import time as dt_time
-    return dt_time(9, 30) <= t < dt_time(16, 0)
+    return dt_time(9, 30) <= t < _us_market_close_time(et_day)
 
 
 def is_any_market_open(now: datetime | None = None) -> bool:
@@ -201,8 +297,6 @@ def market_reliability_context(now: datetime | None = None) -> dict:
     """현재 시장 상태 기반 시세 신뢰도 컨텍스트. read-only 참고용."""
     kst_now = _to_kst(now or datetime.now(KST))
     session = get_market_session(kst_now)
-    from datetime import time as dt_time
-
     # 한국장 상태
     kr_sess = session["kr"]
     kr_is_open = kr_sess == KR_REGULAR
