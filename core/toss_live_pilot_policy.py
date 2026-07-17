@@ -286,6 +286,64 @@ def compute_toss_live_pilot_policy(
     return policy
 
 
+def validate_autonomous_execution_policy(
+    policy: object,
+    *,
+    side: str | None = None,
+) -> tuple[bool, str]:
+    """주문 경계가 신뢰할 수 있는 autonomous live policy인지 exact 검증."""
+    if type(policy) is not dict:
+        return False, "policy_contract_invalid"
+    if policy.get("autonomous_mode") is False:
+        return False, "autonomous_mode_disabled"
+    if policy.get("autonomous_mode") is not True:
+        return False, "policy_contract_invalid"
+    if policy.get("autonomous_kill_switch") is True:
+        return False, "kill_switch_active"
+    if policy.get("autonomous_kill_switch") is not False:
+        return False, "policy_contract_invalid"
+
+    true_fields = (
+        "live_pilot_enabled",
+        "live_order_allowed",
+        "all_live_gates_open",
+        "env_live_pilot_enabled",
+        "env_live_order_allowed",
+        "env_live_adapter_enabled",
+    )
+    false_fields = (
+        "requires_user_confirmation",
+        "requires_second_confirmation",
+    )
+    if (
+        policy.get("mode") != "autonomous_live_pilot"
+        or policy.get("adapter_status") != "enabled"
+        or policy.get("live_transport_status") != "configured"
+        or policy.get("side_mode") != _LIVE_PILOT_SIDE_MODE
+        or type(policy.get("allowed_sides")) is not list
+        or policy.get("allowed_sides") != list(_LIVE_PILOT_ALLOWED_SIDES)
+        or policy.get("sell_allowed") is not True
+        or any(policy.get(field) is not True for field in true_fields)
+        or any(policy.get(field) is not False for field in false_fields)
+    ):
+        return False, "policy_contract_invalid"
+
+    raw_sides = policy.get("autonomous_allowed_sides")
+    if (
+        type(raw_sides) is not list
+        or not raw_sides
+        or any(type(value) is not str or value not in {"buy", "sell"} for value in raw_sides)
+        or len(raw_sides) != len(set(raw_sides))
+    ):
+        return False, "policy_contract_invalid"
+    if side is not None:
+        if type(side) is not str or side not in {"buy", "sell"}:
+            return False, "policy_contract_invalid"
+        if side not in raw_sides:
+            return False, f"{side}_not_allowed_by_env"
+    return True, ""
+
+
 def _get_live_transport_status() -> str:
     """Toss live transport 설정 상태 반환 (read-only)."""
     try:

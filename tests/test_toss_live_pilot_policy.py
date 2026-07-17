@@ -15,6 +15,7 @@ if str(_ROOT) not in sys.path:
 from core.toss_live_pilot_policy import (
     compute_toss_live_pilot_policy,
     check_symbol_allowed,
+    validate_autonomous_execution_policy,
 )
 
 
@@ -139,6 +140,43 @@ class TestFinalLimitPolicy(unittest.TestCase):
         note = self.policy["daily_policy_note"]
         self.assertIn("BUY+SELL", note)
         self.assertIn("USD", note)
+
+
+class TestAutonomousExecutionPolicyContract(unittest.TestCase):
+    def _live_policy(self):
+        env = {
+            "TOSS_LIVE_PILOT_ENABLED": "true",
+            "TOSS_LIVE_ORDER_ALLOWED": "true",
+            "TOSS_LIVE_ADAPTER_ENABLED": "true",
+            "TOSS_AUTONOMOUS_MODE": "true",
+            "TOSS_AUTONOMOUS_KILL_SWITCH": "false",
+            "TOSS_AUTONOMOUS_ALLOWED_SIDES": "BUY,SELL",
+        }
+        with patch.dict("os.environ", env), patch(
+            "core.toss_live_pilot_policy._get_live_transport_status",
+            return_value="configured",
+        ):
+            return compute_toss_live_pilot_policy(evaluated_count=10)
+
+    def test_exact_buy_sell_contract_passes(self):
+        policy = self._live_policy()
+        self.assertEqual(validate_autonomous_execution_policy(policy, side="buy"), (True, ""))
+        self.assertEqual(validate_autonomous_execution_policy(policy, side="sell"), (True, ""))
+
+    def test_sibling_side_authority_drift_fails_closed(self):
+        mutations = {
+            "allowed_sides": ["buy"],
+            "side_mode": "BUY_ONLY",
+            "sell_allowed": False,
+        }
+        for field, value in mutations.items():
+            with self.subTest(field=field):
+                policy = self._live_policy()
+                policy[field] = value
+                self.assertEqual(
+                    validate_autonomous_execution_policy(policy, side="sell"),
+                    (False, "policy_contract_invalid"),
+                )
 
 
 class TestBlockedSymbols(unittest.TestCase):

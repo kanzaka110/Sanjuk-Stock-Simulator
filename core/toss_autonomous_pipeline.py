@@ -33,9 +33,13 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from core.toss_income_strategy import validate_executable_income_contract
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +49,12 @@ _DEFAULT_THROTTLE_MINUTES = 10  # 파이프라인 실행 최소 간격 (기본 1
 _MIN_THROTTLE_MINUTES = 5       # 과도 단축 방지 하한
 _MAX_ATTEMPTS_PER_RUN = 3       # 1회 실행당 최대 후보 처리 수
 _STATE_FILE = "toss_auto_pipeline_state.json"
+_KR_BUY_OPEN_COOLDOWN_MINUTES = 15
+_KR_BUY_SHOCK_THRESHOLD_PCT = -3.0
+_KR_BUY_INDEX_MAX_AGE_SEC = 180
+_KR_BUY_TRUSTED_INDEX_SOURCES = frozenset({"yf_batch", "yf_fast", "kis", "kis_domestic"})
+_BUY_CANDIDATE_SCHEMA = "toss_buy_candidates.v3.dual_income_ev"
+_INCOME_GATE_VERSION = "income_v2_dual_ev"
 
 
 def _utc_now() -> datetime:
@@ -88,6 +98,109 @@ def _active_execution_market(now: datetime | None = None) -> str:
     if kr_open:
         return "KR"
     return ""
+
+
+def _evaluate_kr_buy_safety(
+    now: datetime,
+    *,
+    market_snapshot: dict | None = None,
+) -> dict:
+    """한국장 신규 BUY 전용 시초가·급락장 fail-closed 게이트."""
+    local_now = now.astimezone(KST) if now.tzinfo else now.replace(tzinfo=KST)
+    minutes_after_midnight = local_now.hour * 60 + local_now.minute
+    market_open_minute = 9 * 60
+    if market_open_minute <= minutes_after_midnight < market_open_minute + _KR_BUY_OPEN_COOLDOWN_MINUTES:
+        return {
+            "ok": False,
+            "reason": "kr_open_cooldown",
+            "resume_at": "09:15 KST",
+        }
+
+    if market_snapshot is None:
+        try:
+            from core.dashboard_data import market_data
+            market_snapshot = market_data()
+        except Exception as exc:
+            log.warning("KR BUY market snapshot unavailable: %s", type(exc).__name__)
+            market_snapshot = {}
+
+    if type(market_snapshot) is not dict or type(market_snapshot.get("indices")) is not dict:
+        return {"ok": False, "reason": "kr_market_snapshot_unavailable"}
+
+    observed: dict[str, float] = {}
+    for label in ("KOSPI", "KOSDAQ"):
+        row = market_snapshot["indices"].get(label)
+        if type(row) is not dict:
+            return {"ok": False, "reason": "kr_market_snapshot_unavailable"}
+        source = str(row.get("source") or "").lower().strip()
+        if source not in _KR_BUY_TRUSTED_INDEX_SOURCES:
+            return {
+                "ok": False,
+                "reason": "kr_market_snapshot_untrusted",
+                "trigger_index": label,
+                "source": source or "missing",
+            }
+        raw_as_of = row.get("as_of")
+        if raw_as_of is None or isinstance(raw_as_of, bool):
+            return {
+                "ok": False,
+                "reason": "kr_market_snapshot_stale",
+                "trigger_index": label,
+                "age_sec": None,
+            }
+        try:
+            as_of = float(str(raw_as_of))
+        except (TypeError, ValueError):
+            return {
+                "ok": False,
+                "reason": "kr_market_snapshot_stale",
+                "trigger_index": label,
+                "age_sec": None,
+            }
+        if not math.isfinite(as_of):
+            return {
+                "ok": False,
+                "reason": "kr_market_snapshot_stale",
+                "trigger_index": label,
+                "age_sec": None,
+            }
+        age_sec = local_now.timestamp() - as_of
+        if age_sec < -30 or age_sec > _KR_BUY_INDEX_MAX_AGE_SEC:
+            return {
+                "ok": False,
+                "reason": "kr_market_snapshot_stale",
+                "trigger_index": label,
+                "age_sec": round(age_sec, 1),
+                "max_age_sec": _KR_BUY_INDEX_MAX_AGE_SEC,
+            }
+        raw_pct = row.get("pct")
+        if raw_pct is None or isinstance(raw_pct, bool):
+            return {"ok": False, "reason": "kr_market_snapshot_unavailable"}
+        try:
+            pct = float(str(raw_pct))
+        except (TypeError, ValueError):
+            return {"ok": False, "reason": "kr_market_snapshot_unavailable"}
+        if not math.isfinite(pct):
+            return {"ok": False, "reason": "kr_market_snapshot_unavailable"}
+        observed[label] = pct
+
+    trigger_index, trigger_pct = min(observed.items(), key=lambda item: item[1])
+    if trigger_pct <= _KR_BUY_SHOCK_THRESHOLD_PCT:
+        return {
+            "ok": False,
+            "reason": "kr_market_shock",
+            "trigger_index": trigger_index,
+            "trigger_pct": trigger_pct,
+            "threshold_pct": _KR_BUY_SHOCK_THRESHOLD_PCT,
+            "indices": observed,
+        }
+
+    return {
+        "ok": True,
+        "reason": "ok",
+        "threshold_pct": _KR_BUY_SHOCK_THRESHOLD_PCT,
+        "indices": observed,
+    }
 
 
 def _state_path() -> Path:
@@ -143,15 +256,18 @@ def select_ready_candidates(
 
     raw_data = toss_buy_candidates_data(limit=bounded_limit, market=market)
     data = raw_data if type(raw_data) is dict else {}
+    scan_summary = data.get("scan_summary")
+    if (
+        data.get("schema") != _BUY_CANDIDATE_SCHEMA
+        or type(scan_summary) is not dict
+        or scan_summary.get("income_gate_version") != _INCOME_GATE_VERSION
+    ):
+        return [], []
     captured_at_utc = _utc_now()
     raw_items = data.get("items")
-    if type(raw_items) is list:
-        items = raw_items[:10]
-    elif type(raw_items) is tuple:
-        items = list(raw_items[:10])
-    else:
-        items = []
-    scan_summary = data.get("scan_summary")
+    if type(raw_items) is not list or any(type(item) is not dict for item in raw_items):
+        return [], []
+    items = raw_items[:10]
     raw_fallback = (
         scan_summary.get("dependency_fallback_used")
         if type(scan_summary) is dict
@@ -182,14 +298,24 @@ def select_ready_candidates(
     not_ready: list[dict] = []
     for item in items:
         income = item.get("income_strategy") or {}
-        side = str(item.get("side") or "buy").lower()
-        # exact bool만 신뢰 — 문자열 "false"/"true"·정수 1은 직렬화 오염 신호 (fail-closed)
-        income_ok = side != "buy" or income.get("income_pass") is True
+        side = str(item.get("side") or "").lower().strip()
+        contract_reason = ""
+        if side == "buy":
+            if income.get("income_pass") is True:
+                income_ok, contract_reason = validate_executable_income_contract(income)
+            else:
+                income_ok = False
+        elif side == "sell":
+            income_ok = True
+        else:
+            income_ok = False
+            contract_reason = "income_contract_side_invalid"
         if item.get("stock_agent_ready") is True and income_ok:
             ready.append(item)
         else:
             reason = str(
-                income.get("income_block_label")
+                contract_reason
+                or income.get("income_block_label")
                 or income.get("income_block_reason")
                 or ("income_strategy_missing" if side == "buy" and not income else "")
                 or item.get("block_reason")
@@ -206,13 +332,18 @@ def select_ready_candidates(
     def _ready_sort_key(item: dict) -> tuple[float, float, float, float]:
         income = item.get("income_strategy") or {}
         def _f(v) -> float:
+            if type(v) not in (int, float):
+                return 0.0
             try:
-                return float(v or 0)
+                value = float(v)
             except (TypeError, ValueError):
                 return 0.0
+            return value if math.isfinite(value) else 0.0
+        decision_expected = income.get("decision_expected_pnl_krw")
+        decision_edge = income.get("decision_income_edge_ratio")
         return (
-            _f(income.get("expected_pnl_krw")),
-            _f(income.get("income_edge_ratio")),
+            _f(decision_expected),
+            _f(decision_edge),
             _f(item.get("risk_reward")),
             _f(item.get("score")),
         )
@@ -224,11 +355,8 @@ def select_ready_candidates(
 # ── 후보 1건 처리 ────────────────────────────────────────────────
 
 def _autonomous_sides(policy: dict) -> list[str]:
-    """자율실행 허용 side 목록 (env TOSS_AUTONOMOUS_ALLOWED_SIDES 기반)."""
-    sides = policy.get("autonomous_allowed_sides")
-    if not sides:
-        return ["buy"]
-    return [str(s).lower() for s in sides]
+    """공용 policy validator가 exact 검증한 자율실행 side 목록."""
+    return list(policy["autonomous_allowed_sides"])
 
 
 def process_candidate(
@@ -258,8 +386,22 @@ def process_candidate(
     from core.toss_live_pilot_hermes_bridge import build_default_hermes_verdict
 
     symbol = str(candidate.get("symbol") or candidate.get("ticker") or "")
-    side = str(candidate.get("side") or "buy").lower()
+    side = str(candidate.get("side") or "").lower().strip()
     income = candidate.get("income_strategy") or {}
+    if side not in {"buy", "sell"}:
+        return {
+            "symbol": symbol,
+            "stage": "income_contract_blocked",
+            "reason": "income_contract_side_invalid",
+        }
+    from core.toss_live_pilot_policy import validate_autonomous_execution_policy
+    policy_ok, policy_reason = validate_autonomous_execution_policy(policy, side=side)
+    if not policy_ok:
+        return {
+            "symbol": symbol,
+            "stage": "policy_blocked",
+            "reason": policy_reason,
+        }
     if side == "buy" and income.get("income_pass") is not True:
         return {
             "symbol": symbol,
@@ -270,6 +412,14 @@ def process_candidate(
                 or "income_strategy_missing"
             ),
         }
+    if side == "buy":
+        contract_ok, contract_reason = validate_executable_income_contract(income)
+        if not contract_ok:
+            return {
+                "symbol": symbol,
+                "stage": "income_contract_blocked",
+                "reason": contract_reason,
+            }
 
     # AI Berkshire BUY 게이트 — dashboard 후보 정규화와 독립 재검사.
     # stale preview / API 우회로 avoid 또는 checklist fail/gray_zone 종목이
@@ -415,7 +565,9 @@ def _quality_note(candidate: dict) -> str:
         parts.append(f"rr={rr}")
     income = candidate.get("income_strategy") or {}
     if income:
-        parts.append(f"expected_pnl={income.get('expected_pnl_krw')}")
+        parts.append(f"next_exit_pnl={income.get('expected_pnl_krw')}")
+        decision_expected = income.get("decision_expected_pnl_krw")
+        parts.append(f"decision_pnl={decision_expected}")
         parts.append(f"income_grade={income.get('income_grade')}")
     return " ".join(parts) or "quality_gate_pass"
 
@@ -425,7 +577,29 @@ def _quality_note(candidate: dict) -> str:
 _MAX_RETRIES = 3
 
 
-def retry_retryable_orders(now: datetime | None = None, state: dict | None = None) -> dict:
+def _retry_record_market(record: dict) -> str:
+    """재시도 레코드의 시장을 명시값 우선, 엄격한 심볼 형식 차선으로 판별한다."""
+    raw_explicit = record.get("market")
+    if raw_explicit is not None and str(raw_explicit).strip():
+        explicit = str(raw_explicit).upper().strip()
+        return explicit if explicit in {"KR", "US"} else ""
+    symbol = str(record.get("symbol") or "").upper().strip()
+    if not symbol:
+        return ""
+    if re.fullmatch(r"\d{6}(?:\.(?:KS|KQ))?", symbol):
+        return "KR"
+    if re.fullmatch(r"[A-Z]{1,5}(?:[.-][A-Z]{1,2})?", symbol):
+        return "US"
+    return ""
+
+
+def retry_retryable_orders(
+    now: datetime | None = None,
+    state: dict | None = None,
+    *,
+    allowed_markets: set[str] | None = None,
+    blocked_buy_markets: set[str] | None = None,
+) -> dict:
     """당일 live_send_retryable 주문 재시도.
 
     각 pilot_id에 대해:
@@ -456,11 +630,30 @@ def retry_retryable_orders(now: datetime | None = None, state: dict | None = Non
         build_hermes_verification_context,
     )
     from core.toss_live_pilot_hermes_bridge import build_default_hermes_verdict
-    from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
+    from core.toss_live_pilot_policy import (
+        compute_toss_live_pilot_policy,
+        validate_autonomous_execution_policy,
+    )
     from core.toss_autonomous_finalizer import try_autonomous_finalize
 
     policy = compute_toss_live_pilot_policy()
+    policy_ok, policy_reason = validate_autonomous_execution_policy(policy)
+    if not policy_ok:
+        return {
+            "retried": 0,
+            "sent": 0,
+            "exhausted": 0,
+            "policy_blocked": policy_reason,
+        }
+    allowed = (
+        {str(market).upper() for market in allowed_markets}
+        if allowed_markets is not None else None
+    )
+    blocked_buys = {
+        str(market).upper() for market in (blocked_buy_markets or set())
+    }
     retried = sent = exhausted = 0
+    skipped_market = skipped_buy_safety = skipped_invalid = 0
 
     try:
         records = list_live_pilot_records(limit=100)
@@ -472,6 +665,21 @@ def retry_retryable_orders(now: datetime | None = None, state: dict | None = Non
         if rec.get("status") != "live_send_retryable":
             continue
         if not str(rec.get("created_at", "")).startswith(today):
+            continue
+        side = str(rec.get("side") or "").lower().strip()
+        market = _retry_record_market(rec)
+        if side not in {"buy", "sell"} or not market:
+            skipped_invalid += 1
+            continue
+        side_allowed, _ = validate_autonomous_execution_policy(policy, side=side)
+        if not side_allowed:
+            skipped_invalid += 1
+            continue
+        if allowed is not None and market not in allowed:
+            skipped_market += 1
+            continue
+        if side == "buy" and market in blocked_buys:
+            skipped_buy_safety += 1
             continue
         pilot_id = rec.get("pilot_id", "")
         if not pilot_id:
@@ -530,7 +738,14 @@ def retry_retryable_orders(now: datetime | None = None, state: dict | None = Non
 
     if retried or exhausted:
         log.info("retry sweep: retried=%d sent=%d exhausted=%d", retried, sent, exhausted)
-    return {"retried": retried, "sent": sent, "exhausted": exhausted}
+    return {
+        "retried": retried,
+        "sent": sent,
+        "exhausted": exhausted,
+        "skipped_market": skipped_market,
+        "skipped_buy_safety": skipped_buy_safety,
+        "skipped_invalid": skipped_invalid,
+    }
 
 
 # ── 자본 가동률 KPI + 일일 리포트 ────────────────────────────────
@@ -702,17 +917,37 @@ def run_toss_autonomous_pipeline(
         return {"skipped": "pipeline_disabled"}
 
     active_market = _active_execution_market(now)
-    if force and not active_market:
-        active_market = "ALL"
     if not active_market:
         return {"skipped": "market_closed"}
+    if active_market not in {"KR", "US", "ALL"}:
+        return {"skipped": "invalid_active_market"}
+    execution_markets = {"KR", "US"} if active_market == "ALL" else {active_market}
+    candidate_market = active_market
 
-    from core.toss_live_pilot_policy import compute_toss_live_pilot_policy
+    from core.toss_live_pilot_policy import (
+        compute_toss_live_pilot_policy,
+        validate_autonomous_execution_policy,
+    )
     policy = compute_toss_live_pilot_policy()
-    if not policy.get("autonomous_mode"):
-        return {"skipped": "autonomous_mode_disabled"}
-    if policy.get("autonomous_kill_switch"):
-        return {"skipped": "kill_switch_active"}
+    policy_ok, policy_reason = validate_autonomous_execution_policy(policy)
+    if not policy_ok:
+        return {"skipped": policy_reason}
+
+    buy_safety_gate = None
+    blocked_buy_markets: set[str] = set()
+    if active_market in {"KR", "ALL"}:
+        try:
+            buy_safety_gate = _evaluate_kr_buy_safety(now)
+        except Exception as exc:
+            log.warning("KR BUY safety gate failed: %s", type(exc).__name__)
+            buy_safety_gate = {"ok": False, "reason": "kr_market_snapshot_unavailable"}
+        if type(buy_safety_gate) is not dict or buy_safety_gate.get("ok") is not True:
+            blocked_buy_markets.add("KR")
+            if active_market == "ALL":
+                candidate_market = "US"
+                active_market = "US"
+            else:
+                candidate_market = ""
 
     state = _load_state()
 
@@ -745,14 +980,21 @@ def run_toss_autonomous_pipeline(
         )
         cohort_consumer = None
 
-    try:
-        ready, not_ready = select_ready_candidates(
-            market=active_market,
-            cohort_consumer=cohort_consumer,
+    if candidate_market:
+        try:
+            ready, not_ready = select_ready_candidates(
+                market=candidate_market,
+                cohort_consumer=cohort_consumer,
+            )
+        except Exception as e:
+            log.warning("auto pipeline candidate fetch failed: %s", e)
+            ready, not_ready = [], [{"symbol": "", "reason": f"candidate_fetch_failed: {e}"}]
+    else:
+        gate_reason = (
+            str((buy_safety_gate or {}).get("reason") or "kr_buy_safety_blocked")
+            if type(buy_safety_gate) is dict else "kr_buy_safety_blocked"
         )
-    except Exception as e:
-        log.warning("auto pipeline candidate fetch failed: %s", e)
-        ready, not_ready = [], [{"symbol": "", "reason": f"candidate_fetch_failed: {e}"}]
+        ready, not_ready = [], [{"symbol": "", "reason": gate_reason}]
 
     results: list[dict] = []
     for candidate in ready:
@@ -771,7 +1013,12 @@ def run_toss_autonomous_pipeline(
 
     # retryable 주문 재시도 (state 공유 — 아래 _save_state에서 함께 저장)
     try:
-        retry_summary = retry_retryable_orders(now=now, state=state)
+        retry_summary = retry_retryable_orders(
+            now=now,
+            state=state,
+            allowed_markets=execution_markets,
+            blocked_buy_markets=blocked_buy_markets,
+        )
     except Exception as e:
         log.warning("retry sweep failed: %s", e)
         retry_summary = {"retried": 0, "sent": 0, "exhausted": 0}
@@ -792,6 +1039,8 @@ def run_toss_autonomous_pipeline(
         "attempted_date": today,
         "attempted": attempted_map,
         "active_market": active_market,
+        "candidate_market": candidate_market,
+        "buy_safety_gate": buy_safety_gate,
         "last_results": results,
         "no_action_diagnosis": diagnosis if diagnosis else None,
     })
@@ -809,6 +1058,8 @@ def run_toss_autonomous_pipeline(
         "attempted": len(results),
         "pass_count": pass_count,
         "active_market": active_market,
+        "candidate_market": candidate_market,
+        "buy_safety_gate": buy_safety_gate,
         "results": results,
         "retry": retry_summary,
         "no_action_diagnosis": diagnosis or None,

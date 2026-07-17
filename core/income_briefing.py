@@ -416,6 +416,18 @@ def _toss_ready_and_blocks(buys: dict) -> tuple[list[dict], list[dict]]:
         # exact bool만 신뢰 — 문자열 오염 시 fail-closed
         if not (it.get("stock_agent_ready") is True and income.get("income_pass") is True):
             continue
+        decision_fields = (
+            "decision_expected_pnl_model",
+            "decision_expected_pnl_scope",
+            "decision_expected_pnl_krw",
+            "decision_income_edge_ratio",
+        )
+        legacy_observation = not any(field in income for field in decision_fields)
+        if not legacy_observation:
+            from core.toss_income_strategy import validate_executable_income_contract
+            contract_ok, _ = validate_executable_income_contract(income)
+            if not contract_ok:
+                continue
         ready.append({
             "symbol": it.get("symbol") or it.get("ticker"),
             "name": it.get("name"),
@@ -423,20 +435,43 @@ def _toss_ready_and_blocks(buys: dict) -> tuple[list[dict], list[dict]]:
             "limit_price": it.get("limit_price"),
             "quantity": it.get("quantity"),
             "estimated_amount_krw": it.get("estimated_amount_krw"),
+            "expected_pnl_model": income.get("expected_pnl_model"),
+            "expected_pnl_scope": income.get("expected_pnl_scope"),
             "expected_pnl_krw": income.get("expected_pnl_krw"),
             "income_edge_ratio": income.get("income_edge_ratio"),
+            "decision_expected_pnl_model": income.get("decision_expected_pnl_model"),
+            "decision_expected_pnl_scope": income.get("decision_expected_pnl_scope"),
+            "decision_expected_pnl_krw": (
+                income.get("expected_pnl_krw")
+                if legacy_observation
+                else income.get("decision_expected_pnl_krw")
+            ),
+            "decision_income_edge_ratio": (
+                income.get("income_edge_ratio")
+                if legacy_observation
+                else income.get("decision_income_edge_ratio")
+            ),
             "risk_reward": it.get("risk_reward"),
             "target_price": it.get("target_price"),
             "stop_loss": it.get("stop_loss"),
             "execution_status": it.get("execution_status"),
             "automation": "toss_autonomous",
         })
-        if len(ready) >= _MAX_READY_BUYS:
-            break
+
+    def _decision_ev(row: dict) -> float:
+        import math
+        try:
+            value = float(str(row.get("decision_expected_pnl_krw")))
+        except (TypeError, ValueError):
+            return float("-inf")
+        return value if math.isfinite(value) else float("-inf")
+
+    ready.sort(key=_decision_ev, reverse=True)
+    ready = ready[:_MAX_READY_BUYS]
 
     counts: dict[str, int] = {}
     for it in items:
-        if it.get("stock_agent_ready"):
+        if it.get("stock_agent_ready") is True:
             continue
         key = str(it.get("execution_status") or it.get("block_reason") or "unknown")[:60]
         counts[key] = counts.get(key, 0) + 1
@@ -890,8 +925,18 @@ def render_income_telegram(payload: dict) -> list[str]:
         lines.append(f"🤖 *Toss: 자동운영* ({toss.get('automation_mode')})")
         ready = toss.get("ready_buys") or []
         for rb in ready:
-            lines.append(f"  🟢 {rb.get('name')}({rb.get('symbol')}) {rb.get('quantity')}주 "
-                         f"@{_num(rb.get('limit_price')):,.0f} 예상수입 {_won(rb.get('expected_pnl_krw'))} (실제 수입 아님)")
+            observation_label = (
+                "다음실현"
+                if rb.get("expected_pnl_scope") == "next_realized_exit_only"
+                else "관측EV"
+            )
+            lines.append(
+                f"  🟢 {rb.get('name')}({rb.get('symbol')}) {rb.get('quantity')}주 "
+                f"@{_num(rb.get('limit_price')):,.0f} "
+                f"{observation_label} {_won(rb.get('expected_pnl_krw'))} · "
+                f"실행EV {_won(rb.get('decision_expected_pnl_krw'))} "
+                "(실제 수입 아님)"
+            )
         if not ready:
             lines.append("  자동 매수 준비 후보 없음")
 
@@ -985,8 +1030,18 @@ def render_income_html(payload: dict) -> str:
         parts.append(f"<h3>🤖 Toss: 자동운영 ({esc(toss.get('automation_mode'))})</h3><ul>")
         ready = toss.get("ready_buys") or []
         for rb in ready:
-            parts.append(f"<li>{esc(rb.get('name'))}({esc(rb.get('symbol'))}) {esc(rb.get('quantity'))}주 "
-                         f"@{_num(rb.get('limit_price')):,.0f} 예상수입 {esc(_won(rb.get('expected_pnl_krw')))} (실제 수입 아님)</li>")
+            observation_label = (
+                "다음실현"
+                if rb.get("expected_pnl_scope") == "next_realized_exit_only"
+                else "관측EV"
+            )
+            parts.append(
+                f"<li>{esc(rb.get('name'))}({esc(rb.get('symbol'))}) "
+                f"{esc(rb.get('quantity'))}주 @{_num(rb.get('limit_price')):,.0f} "
+                f"{observation_label} {esc(_won(rb.get('expected_pnl_krw')))} · "
+                f"실행EV {esc(_won(rb.get('decision_expected_pnl_krw')))} "
+                "(실제 수입 아님)</li>"
+            )
         if not ready:
             parts.append("<li>자동 매수 준비 후보 없음</li>")
         parts.append("</ul>")

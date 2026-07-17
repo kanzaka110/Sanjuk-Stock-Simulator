@@ -61,8 +61,22 @@ def _rebalance_env(**overrides):
                 os.environ[key] = previous
 
 _POLICY_SELL = {
+    "mode": "autonomous_live_pilot",
     "autonomous_mode": True,
     "autonomous_kill_switch": False,
+    "live_pilot_enabled": True,
+    "requires_user_confirmation": False,
+    "requires_second_confirmation": False,
+    "live_order_allowed": True,
+    "all_live_gates_open": True,
+    "env_live_pilot_enabled": True,
+    "env_live_order_allowed": True,
+    "env_live_adapter_enabled": True,
+    "adapter_status": "enabled",
+    "live_transport_status": "configured",
+    "side_mode": "BUY_SELL",
+    "allowed_sides": ["buy", "sell"],
+    "sell_allowed": True,
     "autonomous_allowed_sides": ["buy", "sell"],
     "max_order_krw": 0,
     "blocked_symbols": [],
@@ -181,6 +195,7 @@ def _plan_row(symbol, name="약한종목", qty=6, last=35450.0, pl_pct=-6.55,
               currency="KRW") -> dict:
     return {
         "symbol": symbol,
+        "side": "sell",
         "name": name,
         "quantity": qty,
         "last_price": last,
@@ -202,25 +217,60 @@ def _plan_row(symbol, name="약한종목", qty=6, last=35450.0, pl_pct=-6.55,
 
 def _plan(rows, required=True, funding=False, funding_currency=None,
           funding_target=None) -> dict:
+    authority_rows = [
+        row for row in rows
+        if row.get("auto_sell_eligible") is True
+        and row.get("funding_mode") == "currency_income_replacement"
+        and row.get("covers_funding_target") is True
+    ]
+    if isinstance(funding_target, dict):
+        target = dict(funding_target)
+    elif funding_target:
+        target = {
+            "symbol": funding_target,
+            "side": "buy",
+            "currency": funding_currency,
+            "income_pass": True,
+            "decision_expected_pnl_krw": 10_000.0,
+            "decision_income_edge_ratio": 0.03,
+            "decision_expected_pnl_model": "income_exit_lifecycle_v1",
+            "decision_expected_pnl_scope": "full_position_threshold_exit",
+        }
+    else:
+        target = None
     return {
         "portfolio_rebalance_required": required,
         "sell_to_fund_candidates": rows,
         "funding_rebalance_required": funding,
         "funding_currency": funding_currency,
-        "funding_target": {"symbol": funding_target} if funding_target else None,
+        "funding_target": target,
+        "funding_source_symbol": (
+            authority_rows[0].get("symbol")
+            if funding and len(authority_rows) == 1 else None
+        ),
+        "funding_gap_native": (
+            next((row.get("funding_gap_native") for row in rows
+                  if row.get("funding_gap_native") is not None), None)
+            if funding else None
+        ),
     }
 
 
-def _funding_row(symbol, target="MS", currency="USD", **kw):
+def _funding_row(symbol, target="MS", currency="USD", gap=221.28,
+                 native=300.0, cumulative=None, covers=True, **kw):
     row = _plan_row(symbol, currency=currency, classification="trim", **kw)
+    row["quantity"] = 1
+    row["last_price"] = native
+    row["estimated_release_usd"] = native if currency == "USD" else None
+    row["estimated_release_krw"] = native * 1_418.0 if currency == "USD" else native
     row.update({
         "funding_mode": "currency_income_replacement",
         "funding_currency": currency,
         "funding_target_symbol": target,
-        "funding_gap_native": 221.28,
-        "estimated_release_native": 300.0,
-        "cumulative_release_native": 300.0,
-        "covers_funding_target": True,
+        "funding_gap_native": gap,
+        "estimated_release_native": native,
+        "cumulative_release_native": native if cumulative is None else cumulative,
+        "covers_funding_target": covers,
     })
     return row
 
@@ -426,6 +476,134 @@ class TestSellToFundCandidates(unittest.TestCase):
         self.assertEqual(c["funding_target_symbol"], "MS")
         self.assertEqual(c["funding_currency"], "USD")
 
+    def test_funding_owner_rejects_corrupt_plan_contracts(self):
+        cases = [
+            "flag_string", "target_missing", "side_missing", "legacy_missing",
+            "partial_contract", "metric_string", "metric_nan", "metric_inf",
+            "explicit_sell", "uppercase_buy", "whitespace_buy", "target_dict_subclass",
+            "row_boolean_string", "row_target_mismatch",
+            "row_side_buy", "target_symbol_non_string", "row_symbol_non_string",
+            "row_near_overflow_price", "source_symbol_mismatch",
+        ]
+        for case in cases:
+            with self.subTest(case=case):
+                plan = _plan([_funding_row("XOM")], required=False,
+                             funding=True, funding_currency="USD", funding_target="MS")
+                target = plan["funding_target"]
+                self.assertIsInstance(target, dict)
+                if case == "flag_string":
+                    plan["funding_rebalance_required"] = "true"
+                elif case == "target_missing":
+                    plan["funding_target"] = None
+                elif case == "side_missing":
+                    target.pop("side")
+                elif case == "legacy_missing":
+                    for key in list(target):
+                        if key.startswith("decision_"):
+                            target.pop(key)
+                elif case == "partial_contract":
+                    target.pop("decision_expected_pnl_scope")
+                elif case == "metric_string":
+                    target["decision_expected_pnl_krw"] = "10000"
+                elif case == "metric_nan":
+                    target["decision_expected_pnl_krw"] = float("nan")
+                elif case == "metric_inf":
+                    target["decision_income_edge_ratio"] = float("inf")
+                elif case == "explicit_sell":
+                    target["side"] = "sell"
+                elif case == "uppercase_buy":
+                    target["side"] = "BUY"
+                elif case == "whitespace_buy":
+                    target["side"] = " buy "
+                elif case == "target_dict_subclass":
+                    plan["funding_target"] = type("TargetDict", (dict,), {})(target)
+                elif case == "row_boolean_string":
+                    plan["sell_to_fund_candidates"][0]["covers_funding_target"] = "true"
+                elif case == "row_target_mismatch":
+                    plan["sell_to_fund_candidates"][0]["funding_target_symbol"] = "NVDA"
+                elif case == "row_side_buy":
+                    plan["sell_to_fund_candidates"][0]["side"] = "buy"
+                elif case == "target_symbol_non_string":
+                    target["symbol"] = 123
+                    plan["sell_to_fund_candidates"][0]["funding_target_symbol"] = 123
+                elif case == "row_symbol_non_string":
+                    plan["sell_to_fund_candidates"][0]["symbol"] = ["XOM"]
+                elif case == "row_near_overflow_price":
+                    row = plan["sell_to_fund_candidates"][0]
+                    row["last_price"] = 1e308
+                    row["estimated_release_native"] = 1e308
+                    row["cumulative_release_native"] = 1e308
+                elif case == "source_symbol_mismatch":
+                    plan["funding_source_symbol"] = "CVX"
+
+                with _rebalance_env():
+                    out = tpr.evaluate_sell_to_fund_candidates(
+                        account_summary={"holdings_count": 19, "holdings_items": []},
+                        rebalance_plan=plan, now=self._US_OPEN)
+                self.assertEqual(out, [])
+
+    def test_funding_owner_rejects_cumulative_multi_row_without_single_cover(self):
+        rows = [
+            _funding_row("XOM", gap=299.0, native=200.0,
+                         cumulative=200.0, covers=False),
+            _funding_row("CVX", gap=299.0, native=150.0,
+                         cumulative=350.0, covers=True),
+        ]
+        plan = _plan(rows, required=False, funding=True,
+                     funding_currency="USD", funding_target="MS")
+
+        with _rebalance_env():
+            out = tpr.evaluate_sell_to_fund_candidates(
+                account_summary={"holdings_count": 19, "holdings_items": []},
+                rebalance_plan=plan, now=self._US_OPEN)
+
+        self.assertEqual(out, [])
+
+    def test_funding_owner_rejects_missing_currency_contract(self):
+        row = _funding_row("XOM")
+        row["currency"] = ""
+        row["funding_currency"] = ""
+        plan = _plan([row], required=False, funding=True,
+                     funding_currency="", funding_target="MS")
+        plan["funding_target"]["currency"] = ""
+
+        with _rebalance_env():
+            out = tpr.evaluate_sell_to_fund_candidates(
+                account_summary={"holdings_count": 19, "holdings_items": []},
+                rebalance_plan=plan, now=self._US_OPEN)
+
+        self.assertEqual(out, [])
+
+    def test_funding_owner_rejects_declared_release_above_actual_sale_value(self):
+        row = _funding_row(
+            "XOM", gap=200.0, native=300.0, cumulative=300.0,
+        )
+        row["quantity"] = 1
+        row["last_price"] = 100.0
+        plan = _plan([row], required=False, funding=True,
+                     funding_currency="USD", funding_target="MS")
+
+        with _rebalance_env():
+            out = tpr.evaluate_sell_to_fund_candidates(
+                account_summary={"holdings_count": 19, "holdings_items": []},
+                rebalance_plan=plan, now=self._US_OPEN)
+
+        self.assertEqual(out, [])
+
+    def test_funding_owner_requires_exactly_one_sufficient_row(self):
+        plan = _plan(
+            [_funding_row("XOM"), _funding_row("CVX")],
+            required=False, funding=True,
+            funding_currency="USD", funding_target="MS",
+        )
+
+        with _rebalance_env():
+            out = tpr.evaluate_sell_to_fund_candidates(
+                account_summary={"holdings_count": 19, "holdings_items": []},
+                rebalance_plan=plan, now=self._US_OPEN)
+
+        self.assertEqual(out, [])
+
     def test_no_funding_and_below_min_holdings_returns_nothing(self):
         plan = _plan([_plan_row("XOM", currency="USD")], required=False, funding=False)
         with _rebalance_env():
@@ -472,15 +650,15 @@ class TestSellToFundCandidates(unittest.TestCase):
                 now=datetime(2026, 7, 2, 11, 0, tzinfo=KST))  # KR장만 열림
         self.assertEqual(out, [])
 
-    def test_funding_mode_respects_per_run_and_daily_caps(self):
-        rows = [_funding_row("XOM"), _funding_row("CVX", weakness=5.0)]
+    def test_funding_mode_respects_daily_cap_with_single_row(self):
+        rows = [_funding_row("XOM")]
         plan = _plan(rows, required=False, funding=True,
                      funding_currency="USD", funding_target="MS")
         with _rebalance_env():
             out = tpr.evaluate_sell_to_fund_candidates(
                 account_summary={"holdings_count": 19, "holdings_items": []},
                 rebalance_plan=plan, now=self._US_OPEN)
-        self.assertEqual(len(out), 1)  # per_run=1
+        self.assertEqual(len(out), 1)  # 유효한 단일 funding row
         attempted = {
             "111111.KS": {"action": "sell_to_fund"},
             "222222.KS": {"process_reason": "income_rebalance_sell_to_fund"},
@@ -562,6 +740,30 @@ class TestExecuteSell(unittest.TestCase):
         results, mock_pc, _ = self._exec(policy=policy)
         self.assertEqual(results[0]["reason"], "autonomous_mode_disabled")
         mock_pc.assert_not_called()
+
+    def test_execution_policy_requires_exact_typed_authority(self):
+        cases = [
+            dict(_POLICY_SELL, autonomous_mode="true"),
+            dict(_POLICY_SELL, autonomous_mode=1),
+            dict(_POLICY_SELL, autonomous_kill_switch="false"),
+            dict(_POLICY_SELL, autonomous_kill_switch=0),
+            dict(_POLICY_SELL, mode="approval_only_live_pilot"),
+            dict(_POLICY_SELL, requires_user_confirmation=True),
+            dict(_POLICY_SELL, requires_user_confirmation="false"),
+            dict(_POLICY_SELL, requires_second_confirmation=True),
+            dict(_POLICY_SELL, live_order_allowed=False),
+            dict(_POLICY_SELL, all_live_gates_open=False),
+            dict(_POLICY_SELL, adapter_status="disabled"),
+            dict(_POLICY_SELL, live_transport_status="not_configured"),
+            dict(_POLICY_SELL, autonomous_allowed_sides="sell"),
+            dict(_POLICY_SELL, autonomous_allowed_sides=["sell", 1]),
+            dict(_POLICY_SELL, autonomous_allowed_sides=["sell", "hold"]),
+            dict(_POLICY_SELL, autonomous_allowed_sides=["sell", ""]),
+        ]
+        for policy in cases:
+            with self.subTest(policy=policy):
+                _, mock_pc, _ = self._exec(policy=policy)
+                mock_pc.assert_not_called()
 
     def test_kill_switch_skips(self):
         policy = dict(_POLICY_SELL, autonomous_kill_switch=True)

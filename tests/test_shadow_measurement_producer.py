@@ -39,7 +39,24 @@ def _candidate(symbol: str = "005930.KS", **overrides) -> dict:
         "income_strategy": {
             "income_pass": True,
             "income_grade": "INCOME_PASS",
-            "expected_pnl_krw": 12_000.0,
+            "expected_pnl_model": "income_exit_cashflow_v2",
+            "expected_pnl_scope": "next_realized_exit_only",
+            "expected_pnl_krw": -2_000.0,
+            "income_edge_ratio": -0.002,
+            "decision_expected_pnl_model": "income_exit_lifecycle_v1",
+            "decision_expected_pnl_scope": "full_position_threshold_exit",
+            "decision_expected_pnl_krw": 12_000.0,
+            "decision_income_edge_ratio": 0.012,
+            "decision_breakeven_win_rate": 0.66,
+            "decision_breakeven_reachable": True,
+            "decision_upside_krw": 21_000.0,
+            "decision_loss_krw": 35_000.0,
+            "decision_profit_exit_pct": 1.5,
+            "decision_profit_exit_quantity": 1,
+            "decision_loss_exit_pct": -2.5,
+            "decision_loss_exit_quantity": 1,
+            "decision_residual_quantity_after_profit": 0,
+            "decision_residual_mark_to_market_included": False,
         },
         "account": "must-not-leak",
         "cash_check": {"available": 123456789},
@@ -72,6 +89,36 @@ def test_projection_is_deterministic_and_does_not_mutate_candidate():
     assert candidate == original
 
 
+def test_projection_preserves_next_exit_and_decision_income_contracts():
+    from core.shadow_measurement_producer import project_final_candidate
+
+    projected = project_final_candidate(
+        _candidate(),
+        cohort_position=0,
+        cohort_size=1,
+        market_scope="KR",
+    )
+    income = projected["final_state"]["income_strategy"]
+
+    assert income["expected_pnl_model"] == "income_exit_cashflow_v2"
+    assert income["expected_pnl_scope"] == "next_realized_exit_only"
+    assert income["expected_pnl_krw"] == -2_000.0
+    assert income["decision_expected_pnl_model"] == "income_exit_lifecycle_v1"
+    assert income["decision_expected_pnl_scope"] == "full_position_threshold_exit"
+    assert income["decision_expected_pnl_krw"] == 12_000.0
+    assert income["decision_income_edge_ratio"] == 0.012
+    assert income["decision_breakeven_win_rate"] == 0.66
+    assert income["decision_breakeven_reachable"] is True
+    assert income["decision_upside_krw"] == 21_000.0
+    assert income["decision_loss_krw"] == 35_000.0
+    assert income["decision_profit_exit_pct"] == 1.5
+    assert income["decision_profit_exit_quantity"] == 1.0
+    assert income["decision_loss_exit_pct"] == -2.5
+    assert income["decision_loss_exit_quantity"] == 1.0
+    assert income["decision_residual_quantity_after_profit"] == 0.0
+    assert income["decision_residual_mark_to_market_included"] is False
+
+
 @pytest.mark.parametrize(
     "bucket",
     [
@@ -96,7 +143,7 @@ def test_projection_accepts_each_raw_final_bucket(bucket):
         market_scope="KR",
     )
 
-    assert FEATURE_SET_VERSION == "toss_final_candidate_v1"
+    assert FEATURE_SET_VERSION == "toss_final_candidate_v2_dual_income_ev"
     assert projected["feature_set_version"] == FEATURE_SET_VERSION
     assert projected["symbol"] == "005930.KS"
     assert projected["side"] == "BUY"

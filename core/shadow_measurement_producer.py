@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Sequence
 
 
-FEATURE_SET_VERSION = "toss_final_candidate_v1"
+FEATURE_SET_VERSION = "toss_final_candidate_v2_dual_income_ev"
 SOURCE_NAME = "toss_final_candidate"
 _MAX_COHORT_SIZE = 10
 _MAX_TEXT_CHARS = 2048
@@ -118,9 +118,34 @@ _FINAL_TEXT_FIELDS = (
     "ai_berkshire_research_status",
 )
 _FINAL_LIST_FIELDS = ("missing_fields", "blocking_risk_flags", "observation_flags")
-_INCOME_BOOL_FIELDS = ("income_pass",)
-_INCOME_TEXT_FIELDS = ("income_grade", "income_block_reason", "income_block_label")
-_INCOME_NUMERIC_FIELDS = ("expected_pnl_krw", "income_edge_ratio")
+_INCOME_BOOL_FIELDS = (
+    "income_pass",
+    "decision_breakeven_reachable",
+    "decision_residual_mark_to_market_included",
+)
+_INCOME_TEXT_FIELDS = (
+    "income_grade",
+    "income_block_reason",
+    "income_block_label",
+    "expected_pnl_model",
+    "expected_pnl_scope",
+    "decision_expected_pnl_model",
+    "decision_expected_pnl_scope",
+)
+_INCOME_NUMERIC_FIELDS = (
+    "expected_pnl_krw",
+    "income_edge_ratio",
+    "decision_expected_pnl_krw",
+    "decision_income_edge_ratio",
+    "decision_breakeven_win_rate",
+    "decision_upside_krw",
+    "decision_loss_krw",
+    "decision_profit_exit_pct",
+    "decision_profit_exit_quantity",
+    "decision_loss_exit_pct",
+    "decision_loss_exit_quantity",
+    "decision_residual_quantity_after_profit",
+)
 
 
 def canonical_json(value: Any) -> str:

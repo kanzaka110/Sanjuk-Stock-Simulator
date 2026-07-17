@@ -520,6 +520,111 @@ def _safe(v, default=0.0):
     return v
 
 
+def _market_risk_context(
+    indices: dict,
+    vix_price: float,
+    *,
+    now_utc: datetime | None = None,
+) -> dict:
+    """VIX와 신뢰 가능한 국내 지수 급락을 반영한 read-only 위험 문맥."""
+    import math
+
+    trusted_sources = frozenset({"yf_batch", "yf_fast", "kis", "kis_domestic"})
+    max_age_sec = 180.0
+    future_skew_sec = 30.0
+    now = now_utc or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    now_ts = now.timestamp()
+
+    mode = "정상"
+    if vix_price >= 35:
+        mode = "위험"
+    elif vix_price >= 25:
+        mode = "주의"
+
+    index_labels = ("KOSPI", "KOSDAQ")
+    observed: dict[str, float] = {}
+    missing_indices: list[str] = []
+    untrusted_indices: list[str] = []
+    stale_indices: list[str] = []
+    index_provenance: dict[str, dict] = {}
+    for label in index_labels:
+        row = indices.get(label) if isinstance(indices, dict) else None
+        if not isinstance(row, dict):
+            missing_indices.append(label)
+            continue
+        raw_pct = row.get("pct")
+        if raw_pct is None or isinstance(raw_pct, bool):
+            missing_indices.append(label)
+            continue
+        try:
+            pct = float(str(raw_pct))
+        except (TypeError, ValueError):
+            missing_indices.append(label)
+            continue
+        if not math.isfinite(pct):
+            missing_indices.append(label)
+            continue
+
+        source = str(row.get("source") or "").lower().strip()
+        raw_as_of = row.get("as_of")
+        index_provenance[label] = {"source": source or "missing", "as_of": raw_as_of}
+        if source not in trusted_sources:
+            untrusted_indices.append(label)
+            continue
+        try:
+            as_of = float(str(raw_as_of))
+        except (TypeError, ValueError):
+            stale_indices.append(label)
+            continue
+        if not math.isfinite(as_of):
+            stale_indices.append(label)
+            continue
+        age_sec = now_ts - as_of
+        index_provenance[label]["age_sec"] = round(age_sec, 1)
+        if age_sec < -future_skew_sec or age_sec > max_age_sec:
+            stale_indices.append(label)
+            continue
+        observed[label] = pct
+
+    trigger_index = None
+    trigger_pct = None
+    local_level = "정상"
+    if observed:
+        trigger_index, trigger_pct = min(observed.items(), key=lambda item: item[1])
+        if trigger_pct <= -5.0:
+            local_level = "위험"
+        elif trigger_pct <= -3.0:
+            local_level = "주의"
+
+    severity = {"정상": 0, "주의": 1, "위험": 2}
+    if severity[local_level] > severity[mode]:
+        mode = local_level
+    provenance_incomplete = bool(missing_indices or untrusted_indices or stale_indices)
+    if provenance_incomplete and mode == "정상":
+        mode = "주의"
+    local_market_shock = local_level != "정상"
+    return {
+        "mode": mode,
+        "local_market_shock": local_market_shock,
+        "local_market_shock_level": local_level,
+        "trigger_index": trigger_index if local_market_shock else None,
+        "trigger_pct": trigger_pct if local_market_shock else None,
+        "shock_threshold_pct": -3.0,
+        "indices": observed,
+        "local_indices_complete": not provenance_incomplete,
+        "local_indices_trusted": not provenance_incomplete,
+        "missing_indices": missing_indices,
+        "untrusted_indices": untrusted_indices,
+        "stale_indices": stale_indices,
+        "index_provenance": index_provenance,
+        "trusted_sources": sorted(trusted_sources),
+        "max_age_sec": max_age_sec,
+        "future_skew_sec": future_skew_sec,
+    }
+
+
 def _fetch_market_raw() -> dict:
     """지수/매크로 시세 + 장 상태. 내부용(캐시 래핑)."""
     from config.settings import INDICES, MACRO
@@ -530,23 +635,38 @@ def _fetch_market_raw() -> dict:
     quotes = _batch_quotes(ticker_map)
 
     def _q(q):
-        return {"price": _safe(q.price), "change": _safe(q.change),
-                "pct": round(_safe(q.pct), 2),
-                "high": _safe(q.high), "low": _safe(q.low)}
+        import math
+
+        raw_pct = getattr(q, "pct", None)
+        try:
+            pct = (
+                float(str(raw_pct))
+                if raw_pct is not None and not isinstance(raw_pct, bool)
+                else None
+            )
+        except (TypeError, ValueError):
+            pct = None
+        if pct is not None and not math.isfinite(pct):
+            pct = None
+        return {
+            "price": _safe(getattr(q, "price", 0.0)),
+            "change": _safe(getattr(q, "change", 0.0)),
+            "pct": round(pct, 2) if pct is not None else None,
+            "high": _safe(getattr(q, "high", 0.0)),
+            "low": _safe(getattr(q, "low", 0.0)),
+            "source": str(getattr(q, "source", "") or ""),
+            "as_of": _safe(getattr(q, "as_of", None)),
+        }
 
     indices = {v: _q(quotes[k]) for k, v in INDICES.items() if k in quotes}
     macro = {v: _q(quotes[k]) for k, v in MACRO.items() if k in quotes}
 
-    # VIX 기반 시장 모드
+    # VIX + 국내 지수 급락 기반 시장 모드
     vix_price = 0.0
     for k, v in MACRO.items():
         if v == "VIX" and k in quotes:
             vix_price = quotes[k].price
-    mode = "정상"
-    if vix_price >= 35:
-        mode = "위험"
-    elif vix_price >= 25:
-        mode = "주의"
+    risk_context = _market_risk_context(indices, float(vix_price or 0.0))
 
     session = get_market_session()
     from core.market_hours import market_reliability_context
@@ -556,7 +676,9 @@ def _fetch_market_raw() -> dict:
         "macro": macro,
         "session": session,
         "status_text": market_status_text(),
-        "mode": mode,
+        "mode": risk_context["mode"],
+        "market_risk": risk_context,
+        "local_market_shock": risk_context["local_market_shock"],
         "vix": round(vix_price, 2),
         "now": datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S KST"),
         "market_reliability": reliability,
@@ -2354,6 +2476,17 @@ def ticker_chart_data(ticker: str, range_: str, interval: str) -> dict:
 
 
 # ─── /api/toss/account-summary (읽기 전용, 기존 포트폴리오 미합산) ──
+def _toss_pnl_scope_metadata() -> dict:
+    """현재 Toss 보유 응답으로 계산 가능한 손익 범위를 명시한다."""
+    return {
+        "profit_loss": "open_positions_unrealized_after_cost",
+        "today_profit_loss": "open_positions_daily_change_excludes_closed_realized",
+        "realized_profit_loss": "unavailable",
+        "true_daily_account_pnl_available": False,
+        "warning": "오늘 손익은 현재 보유만 합산하며 매도 종목의 실현손익은 포함하지 않음",
+    }
+
+
 def _fetch_toss_account_summary_raw(*, bound_dashboard_timeout: bool = True) -> dict:
     """Toss 실전 AI 자동거래 계좌 요약. 기존 포트폴리오에 절대 합산하지 않음."""
     if _dashboard_toss_broker_reads_isolated():
@@ -2379,6 +2512,7 @@ def _fetch_toss_account_summary_raw(*, bound_dashboard_timeout: bool = True) -> 
 
     now_str = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
     live_policy = _toss_live_policy_fast(timeout=0.2)
+    pnl_scope = _toss_pnl_scope_metadata()
     effective_live = bool(
         live_policy.get("autonomous_mode")
         and not live_policy.get("autonomous_kill_switch")
@@ -2401,12 +2535,20 @@ def _fetch_toss_account_summary_raw(*, bound_dashboard_timeout: bool = True) -> 
         "market_value": {"krw": 0, "usd": None},
         "cash": {"krw": 0, "usd": None, "source": "Toss"},
         "total_account_value": {"krw": 0, "usd": None},
+        "profit_loss": {"krw": None, "source": "unavailable"},
+        "today_profit_loss": {"krw": None, "source": "unavailable"},
+        "realized_profit_loss": {
+            "krw": None,
+            "source": "not_available_from_current_readonly_summary",
+        },
+        "pnl_scope": pnl_scope,
         "exchange_rate": None,
         "warnings": [
             "기존 삼성증권/수동 포트폴리오에 합산하지 않음",
             "실전 계좌 · 별도 성과 추적",
             "자율 live pilot 활성" if effective_live else "실주문 기능 없음",
             "Hermes PASS 후 자동주문" if effective_live else "자동거래 비활성",
+            pnl_scope["warning"],
         ],
         "updated_at": now_str,
         "error": "",
@@ -2579,8 +2721,11 @@ def _fetch_toss_account_summary_raw(*, bound_dashboard_timeout: bool = True) -> 
     base["realized_profit_loss"] = {
         "krw": None,
         "source": "not_available_from_current_readonly_summary",
-        "note": "Toss 앱의 수입이 일간/평가손익이면 today_profit_loss/profit_loss를 봐야 함",
+        "note": "매도 종목의 실현손익은 현재 read-only 보유 응답으로 계산할 수 없음",
     }
+    base["pnl_scope"] = _toss_pnl_scope_metadata()
+    if base["pnl_scope"]["warning"] not in base["warnings"]:
+        base["warnings"].append(base["pnl_scope"]["warning"])
 
     base["market_value"] = {
         "krw": market_value_krw_total,
@@ -2623,6 +2768,7 @@ def _toss_account_summary_is_live_good(data: dict) -> bool:
 def _toss_account_summary_unavailable(reason: str) -> dict:
     """Minimal read-only response used while Toss account calls are cooling down."""
     now_str = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
+    pnl_scope = _toss_pnl_scope_metadata()
     return {
         "enabled": True,
         "label": "Toss 실전 AI 자동거래 계좌",
@@ -2638,10 +2784,18 @@ def _toss_account_summary_unavailable(reason: str) -> dict:
         "market_value": {"krw": 0, "usd": None},
         "cash": {"krw": 0, "usd": None, "source": "Toss"},
         "total_account_value": {"krw": 0, "usd": None},
+        "profit_loss": {"krw": None, "source": "unavailable"},
+        "today_profit_loss": {"krw": None, "source": "unavailable"},
+        "realized_profit_loss": {
+            "krw": None,
+            "source": "not_available_from_current_readonly_summary",
+        },
+        "pnl_scope": pnl_scope,
         "exchange_rate": None,
         "warnings": [
             "기존 삼성증권/수동 포트폴리오에 합산하지 않음",
             "Toss API 일시 오류 — 계좌 조회 쿨다운 중",
+            pnl_scope["warning"],
         ],
         "updated_at": now_str,
         "error": reason,
@@ -2911,7 +3065,11 @@ def _pending_toss_order_symbols(limit: int = 150) -> dict[str, dict] | None:
     try:
         from core.toss_readonly_snapshot import load_snapshot
         snap = load_snapshot()
-        if snap.get("ok") is True and snap.get("status") == "fresh":
+        if (
+            snap.get("ok") is True
+            and snap.get("status") == "fresh"
+            and snap.get("usable_for_decisions") is True
+        ):
             terminal_broker = {
                 "FILLED", "CANCELLED", "CANCELED", "REJECTED", "EXPIRED", "FAILED",
             }
@@ -3354,13 +3512,15 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
                     "reason": f"snapshot_load_failed:{type(exc).__name__}",
                 }
             snapshot_status = str(snapshot_state.get("status") or "invalid")
-            snapshot_blocks_candidates = not bool(
-                snapshot_state.get("ok")
-                and snapshot_state.get("usable_for_decisions")
+            snapshot_blocks_candidates = not (
+                snapshot_status == "fresh"
+                and snapshot_state.get("ok") is True
+                and snapshot_state.get("usable_for_decisions") is True
             )
         elif snapshot_status:
-            snapshot_blocks_candidates = not bool(
-                account_for_cash_gate.get("snapshot_usable_for_decisions", False)
+            snapshot_blocks_candidates = not (
+                snapshot_status == "fresh"
+                and account_for_cash_gate.get("snapshot_usable_for_decisions") is True
             )
         if snapshot_blocks_candidates:
             # Do not let stale totals, cash, holdings, or FX participate in
@@ -3406,6 +3566,14 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
             sections,
             max_order_krw=candidate_affordability_limit_krw,
         )
+        from core.toss_income_strategy import (
+            detect_explicit_toss_input_error,
+            quarantine_explicit_toss_input,
+        )
+        for raw_item in result.get("items") or []:
+            raw_error = detect_explicit_toss_input_error(raw_item)
+            if raw_error:
+                quarantine_explicit_toss_input(raw_item, raw_error)
 
         # 승호 명시 제외: 크래프톤은 토스/신규 매수 후보에서 노출하지 않는다.
         # config/settings.py 원본 유니버스는 건드리지 않고, 주문/후보 API 직전에서
@@ -3431,7 +3599,12 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
         kept_items = []
         for item in result.get("items") or []:
             sym = str(item.get("symbol") or item.get("ticker") or "").upper().strip()
-            item_market = str(item.get("market") or ("KR" if sym.endswith((".KS", ".KQ")) else "US")).upper()
+            inferred_market = "KR" if sym.endswith((".KS", ".KQ")) or sym.isdigit() else "US"
+            item_market = (
+                inferred_market
+                if item.get("upstream_input_validation_error") == "symbol_market_mismatch"
+                else str(item.get("market") or inferred_market).upper()
+            )
             held_row = toss_held_map.get(sym)
             if not held_row and sym.endswith((".KS", ".KQ")):
                 held_row = toss_held_map.get(sym.split(".", 1)[0])
@@ -3557,6 +3730,44 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
             instead of guessing when data is absent.
             """
             out = dict(item)
+            validation_error = str(out.get("upstream_input_validation_error") or "")
+            if validation_error:
+                from core.toss_income_strategy import (
+                    compute_income_edge,
+                    quarantine_explicit_toss_input,
+                )
+                quarantine_explicit_toss_input(out, validation_error)
+                market = str(out.get("market") or "KR").upper()
+                safe_price = 1_000.0 if market == "US" else 10_000.0
+                safe_candidate = {
+                    "symbol": out.get("symbol") or out.get("ticker"),
+                    "market": market,
+                    "side": "buy",
+                    "quantity": 1,
+                    "limit_price": safe_price,
+                    "price": safe_price,
+                    "target_price": safe_price * 1.02,
+                    "stop_loss": safe_price * 0.98,
+                    "risk_reward": 2.0,
+                    "score": 75,
+                    "estimated_amount_krw": (
+                        safe_price * 1_400.0 if market == "US" else safe_price
+                    ),
+                    "fx_usdkrw": 1_400.0,
+                    "income_exit_model": "toss_position_review_v2",
+                    "upstream_input_validation_error": validation_error,
+                }
+                out["income_strategy"] = compute_income_edge(
+                    safe_candidate,
+                    account=account_for_cash_gate,
+                    pending_orders=pending_order_symbols,
+                    recent_risk_sells=recent_risk_sells,
+                )
+                out["decision_bucket"] = "BLOCK"
+                out["income_execution_contract_valid"] = False
+                out["quality_finalized"] = False
+                out["quantity_source"] = "blocked_invalid_input"
+                return out
             price = out.get("price") or out.get("limit_price") or out.get("entry_price")
             limit_price = out.get("limit_price") or price
             try:
@@ -3753,29 +3964,6 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
             except Exception as e:
                 out.setdefault("income_exit_plan_error", str(e)[:180])
 
-            try:
-                from core.toss_income_strategy import compute_income_edge
-                income_strategy = compute_income_edge(
-                    out,
-                    account=account_for_cash_gate,
-                    pending_orders=pending_order_symbols,
-                    recent_risk_sells=recent_risk_sells,
-                )
-            except Exception as e:
-                income_strategy = {
-                    "version": "income_v1",
-                    "income_pass": False,
-                    "income_grade": "BLOCK",
-                    "income_block_reason": "income_gate_error",
-                    "income_block_label": f"수입 게이트 계산 실패: {e}"[:180],
-                }
-            out["income_strategy"] = income_strategy
-            if income_strategy.get("income_pass") is not True and not out.get("block_reason"):
-                out["block_reason"] = "수입 기대값 gate 차단: " + str(
-                    income_strategy.get("income_block_label")
-                    or income_strategy.get("income_block_reason")
-                    or "income_pass=false"
-                )
             out.setdefault("condition", "지정가 이하에서만 검토 · Hermes PASS 후 결정론 안전 게이트")
             out.setdefault("execution_gate", "Hermes PASS + deterministic safety gates")
             out.setdefault("broker_execution", "Toss AI autonomous live pilot")
@@ -3846,12 +4034,6 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
                 risk_notes.extend(str(f) for f in out.get("blocking_risk_flags") or [])
             if out.get("observation_flags"):
                 risk_notes.extend(str(f) for f in out.get("observation_flags") or [])
-            income_strategy = out.get("income_strategy") or {}
-            if income_strategy and income_strategy.get("income_pass") is not True:
-                risk_notes.append(
-                    "수입 기대값 gate 차단: "
-                    + str(income_strategy.get("income_block_label") or income_strategy.get("income_block_reason") or "income_pass=false")
-                )
             out["risk_notes"] = risk_notes
 
             # income plan이 stop/target을 조정한 최종 가격으로 RR·total·bucket을
@@ -3869,6 +4051,36 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
                 out["execution_status"] = "quality_finalization_failed"
                 if not out.get("block_reason"):
                     out["block_reason"] = "최종 품질 증명 생성 실패"
+
+            # EV 입력인 decision_bucket/RR/score는 quality proof 최종화 뒤에만
+            # 확정된다. 사전 bucket으로 계산한 PASS를 재사용하지 않는다.
+            try:
+                from core.toss_income_strategy import compute_income_edge
+                income_strategy = compute_income_edge(
+                    out,
+                    account=account_for_cash_gate,
+                    pending_orders=pending_order_symbols,
+                    recent_risk_sells=recent_risk_sells,
+                    exit_model="toss_position_review_v2",
+                )
+            except Exception as e:
+                income_strategy = {
+                    "version": "income_v2_dual_ev",
+                    "income_pass": False,
+                    "income_grade": "BLOCK",
+                    "income_block_reason": "income_gate_error",
+                    "income_block_label": f"수입 게이트 계산 실패: {e}"[:180],
+                }
+            out["income_strategy"] = income_strategy
+            if income_strategy.get("income_pass") is not True:
+                income_note = "수입 기대값 gate 차단: " + str(
+                    income_strategy.get("income_block_label")
+                    or income_strategy.get("income_block_reason")
+                    or "income_pass=false"
+                )
+                if not out.get("block_reason"):
+                    out["block_reason"] = income_note
+                out.setdefault("risk_notes", []).append(income_note)
 
             missing = []
             required = {
@@ -3891,7 +4103,17 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
                 "hold_risk_flags", "chase_block", "data_quality_block",
                 "cash_unavailable", "quality_finalization_failed",
             } or bool(out.get("blocking_risk_flags"))
-            income_pass = (out.get("income_strategy") or {}).get("income_pass") is True
+            from core.toss_income_strategy import validate_executable_income_contract
+            income_pass, income_contract_reason = validate_executable_income_contract(
+                out.get("income_strategy")
+            )
+            out["income_execution_contract_valid"] = income_pass
+            if not income_pass and (out.get("income_strategy") or {}).get("income_pass") is True:
+                out["execution_status"] = "income_contract_blocked"
+                out["executable_now"] = False
+                if not out.get("block_reason"):
+                    out["block_reason"] = income_contract_reason
+                hard_blocked = True
 
             # 품질 게이트 + 수입 기대값 gate decision 반영
             bucket = str(out.get("decision_bucket") or "")
@@ -3944,7 +4166,12 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
 
         def _income_expected(item: dict) -> float:
             try:
-                return float((item.get("income_strategy") or {}).get("expected_pnl_krw") or 0)
+                income = item.get("income_strategy") or {}
+                value = income.get("decision_expected_pnl_krw")
+                if not isinstance(value, (int, float)) or isinstance(value, bool):
+                    return 0.0
+                number = float(value)
+                return number if number > 0 and number == number and number != float("inf") else 0.0
             except Exception:
                 return 0.0
 
@@ -3996,12 +4223,15 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
             scan_summary["rebalance_plan"] = build_rebalance_plan(account_for_cash_gate, items)
         except Exception as e:
             scan_summary["rebalance_plan_error"] = str(e)[:180]
-        income_pass_count = sum(1 for i in items if (i.get("income_strategy") or {}).get("income_pass"))
-        income_block_count = sum(1 for i in items if not (i.get("income_strategy") or {}).get("income_pass"))
+        income_pass_count = sum(
+            1 for i in items
+            if (i.get("income_strategy") or {}).get("income_pass") is True
+        )
+        income_block_count = len(items) - income_pass_count
         scan_summary["income_pass_count"] = income_pass_count
         scan_summary["income_block_count"] = income_block_count
         scan_summary["income_ready_count"] = sum(1 for i in items if i.get("stock_agent_ready") is True)
-        scan_summary["income_gate_version"] = "income_v1"
+        scan_summary["income_gate_version"] = "income_v2_dual_ev"
         scan_summary["ai_berkshire_gate_version"] = _AI_BERKSHIRE_BUY_GATE_VERSION
         scan_summary["ai_berkshire_buy_block_count"] = sum(
             1 for i in items if i.get("ai_berkshire_buy_block"))
@@ -4015,15 +4245,50 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
             "scan_summary": result.get("scan_summary", {}),
             "range": range_,
             "max_order_krw": max_order_krw,
-            "schema": "toss_buy_candidates.v2.stock_agent_ready",
+            "schema": "toss_buy_candidates.v3.dual_income_ev",
             "note": result["note"],
         }
 
-    cached = _cached(f"toss_buy_candidates:{range_}:{market_norm}", 120, _fetch)
-    if not isinstance(cached, dict):
-        return cached
+    try:
+        cached = _cached(f"toss_buy_candidates:{range_}:{market_norm}", 120, _fetch)
+    except Exception as e:
+        log.warning("toss buy candidates cache failed: error_type=%s", type(e).__name__)
+        cached = None
+    cache_valid = False
+    if type(cached) is dict:
+        cached_summary = cached.get("scan_summary")
+        cached_items = cached.get("items")
+        cached_excluded = cached.get("excluded")
+        cache_valid = (
+            cached.get("schema") == "toss_buy_candidates.v3.dual_income_ev"
+            and type(cached_summary) is dict
+            and cached_summary.get("income_gate_version") == "income_v2_dual_ev"
+            and type(cached_items) is list
+            and all(type(item) is dict for item in cached_items)
+            and type(cached_excluded) is list
+            and all(type(item) is dict for item in cached_excluded)
+        )
+    if cache_valid and type(cached) is dict:
+        safe_cached = cached
+    else:
+        safe_cached = {
+            "schema": "toss_buy_candidates.v3.dual_income_ev",
+            "scan_summary": {"income_gate_version": "income_v2_dual_ev"},
+            "items": [],
+            "excluded": [],
+            "count": 0,
+            "excluded_count": 0,
+            "range": range_,
+            "note": "cache_payload_invalid_fail_closed",
+        }
     requested_limit = max(0, int(limit))
-    out = copy.deepcopy(cached)
+    out = copy.deepcopy(safe_cached)
+    out["schema"] = "toss_buy_candidates.v3.dual_income_ev"
+    scan_summary = out.get("scan_summary")
+    if not isinstance(scan_summary, dict):
+        scan_summary = {}
+        out["scan_summary"] = scan_summary
+    scan_summary["income_gate_version"] = "income_v2_dual_ev"
     out["items"] = list(out.get("items") or [])[:requested_limit]
     out["excluded"] = list(out.get("excluded") or [])[:requested_limit]
     out["requested_limit"] = requested_limit

@@ -253,9 +253,17 @@ def _project_account_summary(value: object) -> dict:
             "krw": None,
             "source": "not_available_from_current_readonly_summary",
         },
+        "pnl_scope": {
+            "profit_loss": "open_positions_unrealized_after_cost",
+            "today_profit_loss": "open_positions_daily_change_excludes_closed_realized",
+            "realized_profit_loss": "unavailable",
+            "true_daily_account_pnl_available": False,
+            "warning": "오늘 손익은 현재 보유만 합산하며 매도 종목의 실현손익은 포함하지 않음",
+        },
         "warnings": [
             "기존 삼성증권/수동 포트폴리오에 합산하지 않음",
             "stock-bot snapshot: 주문 직접 사용 금지",
+            "오늘 손익은 현재 보유만 합산하며 매도 종목의 실현손익은 포함하지 않음",
         ],
         "error": "",
     }

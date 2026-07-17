@@ -64,8 +64,15 @@ _BUYS = {"items": [
      "estimated_amount_krw": 100_000, "risk_reward": 2.0,
      "target_price": 11_000, "stop_loss": 9_600,
      "execution_status": "executable",
-     "income_strategy": {"income_pass": True, "expected_pnl_krw": 8_000,
-                         "income_edge_ratio": 0.08}},
+     "income_strategy": {"income_pass": True,
+                         "expected_pnl_model": "income_exit_cashflow_v2",
+                         "expected_pnl_scope": "next_realized_exit_only",
+                         "expected_pnl_krw": -2_000,
+                         "income_edge_ratio": -0.02,
+                         "decision_expected_pnl_model": "income_exit_lifecycle_v1",
+                         "decision_expected_pnl_scope": "full_position_threshold_exit",
+                         "decision_expected_pnl_krw": 8_000,
+                         "decision_income_edge_ratio": 0.08}},
     {"symbol": "BBB.KS", "name": "차단후보", "stock_agent_ready": False,
      "execution_status": "cash_unavailable",
      "income_strategy": {"income_pass": False}},
@@ -408,12 +415,81 @@ class TestTossSection(unittest.TestCase):
         self.assertNotIn("CCC.KS", symbols)     # income_pass=false
         self.assertIn("AAA.KS", symbols)
 
-    def test_ready_buy_has_expected_pnl_fields(self):
+    def test_ready_buy_separates_next_exit_and_decision_pnl_fields(self):
         p = _build()
         rb = p["toss"]["ready_buys"][0]
-        self.assertEqual(rb["expected_pnl_krw"], 8_000)
-        self.assertEqual(rb["income_edge_ratio"], 0.08)
+        self.assertEqual(rb["expected_pnl_krw"], -2_000)
+        self.assertEqual(rb["income_edge_ratio"], -0.02)
+        self.assertEqual(rb["decision_expected_pnl_krw"], 8_000)
+        self.assertEqual(rb["decision_income_edge_ratio"], 0.08)
+        self.assertEqual(rb["expected_pnl_scope"], "next_realized_exit_only")
+        self.assertEqual(rb["decision_expected_pnl_scope"], "full_position_threshold_exit")
         self.assertEqual(rb["automation"], "toss_autonomous")
+
+    def test_ready_buys_are_top_three_by_decision_ev_not_input_order(self):
+        def row(symbol, decision_ev):
+            return {
+                "symbol": symbol,
+                "name": symbol,
+                "stock_agent_ready": True,
+                "income_strategy": {
+                    "income_pass": True,
+                    "expected_pnl_krw": -1,
+                    "income_edge_ratio": -0.01,
+                    "decision_expected_pnl_model": "income_exit_lifecycle_v1",
+                    "decision_expected_pnl_scope": "full_position_threshold_exit",
+                    "decision_expected_pnl_krw": decision_ev,
+                    "decision_income_edge_ratio": 0.01,
+                },
+            }
+
+        ready, _ = ib._toss_ready_and_blocks({"items": [
+            row("LOW", 1), row("MID", 2), row("HIGH", 3), row("TOP", 4),
+        ]})
+
+        self.assertEqual([item["symbol"] for item in ready], ["TOP", "HIGH", "MID"])
+
+    def test_partial_v2_is_not_laundered_through_legacy_observation_ev(self):
+        partial = {"items": [{
+            "symbol": "PARTIAL.KS",
+            "stock_agent_ready": True,
+            "income_strategy": {
+                "income_pass": True,
+                "expected_pnl_krw": 999_999,
+                "income_edge_ratio": 0.9,
+                "decision_expected_pnl_model": "income_exit_lifecycle_v1",
+                "decision_expected_pnl_scope": "full_position_threshold_exit",
+                "decision_expected_pnl_krw": None,
+                "decision_income_edge_ratio": 0.03,
+            },
+        }]}
+
+        ready, _ = ib._toss_ready_and_blocks(partial)
+
+        self.assertEqual(ready, [])
+
+    def test_ready_buy_render_labels_next_exit_and_decision_ev(self):
+        p = ib.finalize_income_briefing(_build(), None, "KR_OPEN")
+        text = "\n".join(ib.render_income_telegram(p))
+        self.assertIn("다음실현", text)
+        self.assertIn("실행EV", text)
+
+    def test_legacy_income_value_is_not_mislabeled_as_next_realized_exit(self):
+        legacy = {"items": [{
+            "symbol": "LEGACY.KS",
+            "name": "레거시",
+            "stock_agent_ready": True,
+            "income_strategy": {
+                "income_pass": True,
+                "expected_pnl_krw": 5_000,
+                "income_edge_ratio": 0.01,
+            },
+        }]}
+        p = ib.finalize_income_briefing(_build(buys=legacy), None, "KR_OPEN")
+        text = "\n".join(ib.render_income_telegram(p))
+
+        self.assertIn("관측EV", text)
+        self.assertNotIn("다음실현", text)
 
     def test_rebalance_rendered_before_new_buys_in_telegram(self):
         p = ib.finalize_income_briefing(_build(), None, "KR_OPEN")

@@ -121,6 +121,9 @@ def test_snapshot_allowlist_roundtrip_atomic_private_and_read_only(snapshot_path
     assert raw["account_summary"]["cash"]["krw_native"] == 400_000
     assert raw["account_summary"]["cash"]["usd_krw"] == 100_000
     assert raw["account_summary"]["total_account_value"]["usd_included"] is True
+    assert raw["account_summary"]["pnl_scope"]["realized_profit_loss"] == "unavailable"
+    assert raw["account_summary"]["pnl_scope"]["true_daily_account_pnl_available"] is False
+    assert any("매도" in warning for warning in raw["account_summary"]["warnings"])
     assert raw["broker_orders"][0]["client_order_id"] == "tlive_20260712_025100_1234"
     assert "broker_order_id" not in raw["broker_orders"][0]
     assert "access_token" not in raw["broker_orders"][0]

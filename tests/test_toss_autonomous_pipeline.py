@@ -34,11 +34,17 @@ import core.toss_autonomous_pipeline as tap
 
 
 @pytest.fixture(autouse=True)
-def _isolated_quality_db(tmp_path, monkeypatch):
+def _isolated_quality_db(tmp_path, monkeypatch, request):
     from core import toss_quality_gate as qg
 
     monkeypatch.setattr(qg, "_outcomes_db_path", lambda: tmp_path / "quality.db")
     qg._outcomes_schema_created = False
+    if getattr(request.node.cls, "__name__", "") != "TestKrBuySafetyGate":
+        monkeypatch.setattr(
+            tap,
+            "_evaluate_kr_buy_safety",
+            lambda *_args, **_kwargs: {"ok": True, "reason": "test_safe_market"},
+        )
     yield
     qg._outcomes_schema_created = False
 
@@ -46,14 +52,41 @@ def _isolated_quality_db(tmp_path, monkeypatch):
 _NOW = datetime(2026, 7, 3, 10, 0, tzinfo=KST)  # 목요일 장중
 
 _POLICY_ON = {
+    "mode": "autonomous_live_pilot",
     "autonomous_mode": True,
     "autonomous_kill_switch": False,
+    "live_pilot_enabled": True,
+    "requires_user_confirmation": False,
+    "requires_second_confirmation": False,
+    "all_live_gates_open": True,
+    "env_live_pilot_enabled": True,
+    "env_live_order_allowed": True,
+    "env_live_adapter_enabled": True,
     "max_order_krw": 0,          # 무제한
     "blocked_symbols": [],
-    "autonomous_allowed_sides": ["buy"],
+    "autonomous_allowed_sides": ["buy", "sell"],
+    "side_mode": "BUY_SELL",
+    "allowed_sides": ["buy", "sell"],
+    "sell_allowed": True,
     "adapter_status": "enabled",
     "live_order_allowed": True,
+    "live_transport_status": "configured",
 }
+
+_BUY_CANDIDATE_SCHEMA = "toss_buy_candidates.v3.dual_income_ev"
+_INCOME_GATE_VERSION = "income_v2_dual_ev"
+
+
+def _candidate_feed(items, **scan_summary) -> dict:
+    return {
+        "schema": _BUY_CANDIDATE_SCHEMA,
+        "items": items,
+        "scan_summary": {
+            "income_gate_version": _INCOME_GATE_VERSION,
+            "dependency_fallback_used": False,
+            **scan_summary,
+        },
+    }
 
 
 def _candidate(symbol="091180.KS", **kw) -> dict:
@@ -90,25 +123,115 @@ def _candidate(symbol="091180.KS", **kw) -> dict:
             "income_grade": "INCOME_PASS",
             "expected_pnl_krw": 12_000,
             "income_edge_ratio": 0.02,
+            "decision_expected_pnl_model": "income_exit_lifecycle_v1",
+            "decision_expected_pnl_scope": "full_position_threshold_exit",
+            "decision_expected_pnl_krw": 12_000,
+            "decision_income_edge_ratio": 0.02,
         },
     }
-    base.update(kw)
+    overrides = dict(kw)
+    income_override = overrides.pop("income_strategy", None)
+    base.update(overrides)
+    if income_override is not None:
+        base["income_strategy"].update(income_override)
+        if (
+            "expected_pnl_krw" in income_override
+            and "decision_expected_pnl_krw" not in income_override
+        ):
+            base["income_strategy"]["decision_expected_pnl_krw"] = income_override["expected_pnl_krw"]
+        if (
+            "income_edge_ratio" in income_override
+            and "decision_income_edge_ratio" not in income_override
+        ):
+            base["income_strategy"]["decision_income_edge_ratio"] = income_override["income_edge_ratio"]
     return base
+
+
+def _corrupt_income_candidate(case: str) -> dict:
+    candidate = _candidate()
+    income = candidate["income_strategy"]
+    if case == "side_missing":
+        candidate.pop("side")
+    elif case == "decision_contract_missing":
+        for key in (
+            "decision_expected_pnl_model",
+            "decision_expected_pnl_scope",
+            "decision_expected_pnl_krw",
+            "decision_income_edge_ratio",
+        ):
+            income.pop(key)
+    elif case == "decision_contract_partial":
+        income.pop("decision_income_edge_ratio")
+    elif case == "unknown_model":
+        income["decision_expected_pnl_model"] = "unknown"
+    elif case == "nan_ev":
+        income["decision_expected_pnl_krw"] = float("nan")
+    elif case == "inf_edge":
+        income["decision_income_edge_ratio"] = float("inf")
+    elif case == "numeric_strings":
+        income["decision_expected_pnl_krw"] = "12000"
+        income["decision_income_edge_ratio"] = "0.02"
+    return candidate
 
 
 # ── 1. select_ready_candidates ───────────────────────────────────
 
 class TestSelect(unittest.TestCase):
+    def test_api_schema_and_income_gate_version_mismatch_fail_closed(self):
+        valid = _candidate_feed([_candidate()])
+        bad_envelopes = [
+            dict(valid, schema="toss_buy_candidates.v2"),
+            dict(valid, schema=None),
+            dict(valid, scan_summary={"income_gate_version": "income_v1"}),
+            dict(valid, scan_summary={}),
+        ]
+        for envelope in bad_envelopes:
+            with self.subTest(envelope=envelope), patch(
+                "core.dashboard_data.toss_buy_candidates_data",
+                return_value=envelope,
+            ):
+                self.assertEqual(tap.select_ready_candidates(), ([], []))
+
+    def test_non_dict_candidate_item_fails_closed(self):
+        corrupt_items = ["not-a-list", ["not-a-dict"], [type("Item", (dict,), {})()]]
+        for items in corrupt_items:
+            envelope = _candidate_feed([])
+            envelope["items"] = items
+            with self.subTest(items=items), patch(
+                "core.dashboard_data.toss_buy_candidates_data",
+                return_value=envelope,
+            ):
+                self.assertEqual(tap.select_ready_candidates(), ([], []))
+
     def test_split_ready_and_not_ready(self):
         items = [
             _candidate("A.KS"),
             _candidate("B.KS", stock_agent_ready=False, block_reason="RR 부족"),
         ]
         with patch("core.dashboard_data.toss_buy_candidates_data",
-                   return_value={"items": items}):
+                   return_value=_candidate_feed(items)):
             ready, not_ready = tap.select_ready_candidates()
         self.assertEqual([r["symbol"] for r in ready], ["A.KS"])
         self.assertEqual(not_ready, [{"symbol": "B.KS", "reason": "RR 부족"}])
+
+    def test_rejects_corrupt_executable_income_contracts(self):
+        cases = (
+            "side_missing",
+            "decision_contract_missing",
+            "decision_contract_partial",
+            "unknown_model",
+            "nan_ev",
+            "inf_edge",
+            "numeric_strings",
+        )
+        items = [_corrupt_income_candidate(case) for case in cases]
+
+        with patch("core.dashboard_data.toss_buy_candidates_data", return_value=_candidate_feed(items)):
+            ready, not_ready = tap.select_ready_candidates()
+
+        self.assertEqual(ready, [])
+        self.assertEqual(len(not_ready), len(cases))
+        self.assertTrue(all(row["reason"].startswith("income_contract_") for row in not_ready))
 
     def test_consumer_receives_bounded_original_order_before_ready_split(self):
         import core.shadow_measurement_producer as producer
@@ -121,8 +244,8 @@ class TestSelect(unittest.TestCase):
                 block_reason="blocked" if index == 1 else "",
                 income_strategy={
                     "income_pass": index != 1,
-                    "expected_pnl_krw": index * 1_000,
-                    "income_edge_ratio": index / 100,
+                    "expected_pnl_krw": (index + 1) * 1_000,
+                    "income_edge_ratio": (index + 1) / 100,
                 },
             )
             for index in range(12)
@@ -143,10 +266,7 @@ class TestSelect(unittest.TestCase):
 
         with patch(
             "core.dashboard_data.toss_buy_candidates_data",
-            return_value={
-                "items": items,
-                "scan_summary": {"dependency_fallback_used": True},
-            },
+            return_value=_candidate_feed(items, dependency_fallback_used=True),
         ) as feed, patch.object(tap, "_utc_now", return_value=captured_at):
             ready, not_ready = tap.select_ready_candidates(
                 limit=99,
@@ -189,7 +309,7 @@ class TestSelect(unittest.TestCase):
 
         with patch(
             "core.dashboard_data.toss_buy_candidates_data",
-            return_value={"items": copy.deepcopy(items)},
+            return_value=_candidate_feed(copy.deepcopy(items)),
         ):
             expected = tap.select_ready_candidates()
 
@@ -200,10 +320,7 @@ class TestSelect(unittest.TestCase):
         with self.assertLogs(tap.log, level=logging.WARNING) as captured_logs:
             with patch(
                 "core.dashboard_data.toss_buy_candidates_data",
-                return_value={
-                    "items": items,
-                    "scan_summary": {"dependency_fallback_used": False},
-                },
+                return_value=_candidate_feed(items),
             ):
                 observed = tap.select_ready_candidates(
                     cohort_consumer=failing_consumer
@@ -219,7 +336,7 @@ class TestSelect(unittest.TestCase):
         for requested, expected in ((-7, 0), (0, 0), (4, 4), (99, 10)):
             with self.subTest(requested=requested), patch(
                 "core.dashboard_data.toss_buy_candidates_data",
-                return_value={"items": []},
+                return_value=_candidate_feed([]),
             ) as feed:
                 tap.select_ready_candidates(limit=requested)
             self.assertEqual(feed.call_args.kwargs["limit"], expected)
@@ -230,10 +347,7 @@ class TestSelect(unittest.TestCase):
 
         def provider(**_kwargs):
             events.append("provider_return")
-            return {
-                "items": [_candidate()],
-                "scan_summary": {"dependency_fallback_used": False},
-            }
+            return _candidate_feed([_candidate()])
 
         def clock():
             events.append("clock")
@@ -250,16 +364,18 @@ class TestSelect(unittest.TestCase):
         self.assertEqual(events, ["provider_return", "clock", "consumer"])
 
     def test_malformed_fallback_metadata_is_unknown_without_blocking_ready(self):
-        malformed_values = [None, "true", 1, {}, {"dependency_fallback_used": "true"}]
-        for scan_summary in malformed_values:
+        malformed_values = [None, "true", 1, {}]
+        for fallback_value in malformed_values:
             consumed = []
 
             def consumer(cohort):
                 consumed.append(cohort.fallback_used)
 
-            with self.subTest(scan_summary=scan_summary), patch(
+            with self.subTest(fallback_value=fallback_value), patch(
                 "core.dashboard_data.toss_buy_candidates_data",
-                return_value={"items": [_candidate()], "scan_summary": scan_summary},
+                return_value=_candidate_feed(
+                    [_candidate()], dependency_fallback_used=fallback_value
+                ),
             ):
                 ready, not_ready = tap.select_ready_candidates(
                     cohort_consumer=consumer
@@ -288,10 +404,7 @@ class TestSelect(unittest.TestCase):
 
         with patch(
             "core.dashboard_data.toss_buy_candidates_data",
-            return_value={
-                "items": [item],
-                "scan_summary": {"dependency_fallback_used": False},
-            },
+            return_value=_candidate_feed([item]),
         ):
             ready, not_ready = tap.select_ready_candidates(cohort_consumer=consumer)
 
@@ -313,7 +426,11 @@ class TestSelect(unittest.TestCase):
 
         with patch(
             "core.dashboard_data.toss_buy_candidates_data",
-            return_value={"items": [_candidate()], "scan_summary": HostileSummary()},
+            return_value={
+                "schema": _BUY_CANDIDATE_SCHEMA,
+                "items": [_candidate()],
+                "scan_summary": HostileSummary(),
+            },
         ):
             ready, not_ready = tap.select_ready_candidates(
                 cohort_consumer=lambda batch: consumed.append(batch)
@@ -321,8 +438,7 @@ class TestSelect(unittest.TestCase):
 
         self.assertEqual(calls, [])
         self.assertEqual(consumed, [])
-        self.assertEqual([candidate["symbol"] for candidate in ready], ["091180.KS"])
-        self.assertEqual(not_ready, [])
+        self.assertEqual((ready, not_ready), ([], []))
 
     def test_provider_boundary_rejects_envelope_and_items_subclasses_without_access(self):
         calls = []
@@ -356,16 +472,19 @@ class TestSelect(unittest.TestCase):
         with patch(
             "core.dashboard_data.toss_buy_candidates_data",
             return_value={
+                "schema": _BUY_CANDIDATE_SCHEMA,
                 "items": HostileItems([_candidate()]),
-                "scan_summary": {"dependency_fallback_used": False},
+                "scan_summary": {
+                    "income_gate_version": _INCOME_GATE_VERSION,
+                    "dependency_fallback_used": False,
+                },
             },
         ):
             ready, blocked = tap.select_ready_candidates(
                 cohort_consumer=lambda batch: consumed.append(batch)
             )
         self.assertEqual((ready, blocked), ([], []))
-        self.assertEqual(len(consumed), 1)
-        self.assertEqual(consumed[0].candidates, ())
+        self.assertEqual(consumed, [])
         self.assertEqual(calls, [])
 
     def test_unknown_fallback_skips_real_shadow_worker_without_blocking_ready(self):
@@ -373,10 +492,10 @@ class TestSelect(unittest.TestCase):
 
         with patch(
             "core.dashboard_data.toss_buy_candidates_data",
-            return_value={
-                "items": [_candidate(market="KR", currency="KRW")],
-                "scan_summary": {"dependency_fallback_used": "true"},
-            },
+            return_value=_candidate_feed(
+                [_candidate(market="KR", currency="KRW")],
+                dependency_fallback_used="true",
+            ),
         ), patch.object(producer.threading, "Thread") as thread, self.assertLogs(
             tap.log, level=logging.WARNING
         ) as captured_logs:
@@ -434,6 +553,37 @@ class TestProcessCandidate(unittest.TestCase):
         self.assertEqual(recorded["status"], "PASS")
         self.assertIn("auto_verifier", recorded["hermes_message"])
         self.assertIn("bucket=PASS_EXECUTE", recorded["hermes_message"])
+
+    def test_incomplete_or_truthy_policy_stops_before_preview(self):
+        bad_policy = {
+            "autonomous_mode": 1,
+            "autonomous_kill_switch": False,
+        }
+        with patch("core.toss_live_pilot_preview.build_live_pilot_preview") as preview:
+            result = tap.process_candidate(_candidate(), bad_policy)
+
+        self.assertEqual(result["stage"], "policy_blocked")
+        self.assertEqual(result["reason"], "policy_contract_invalid")
+        preview.assert_not_called()
+
+    def test_corrupt_income_contract_stops_before_preview(self):
+        cases = (
+            "side_missing",
+            "decision_contract_missing",
+            "decision_contract_partial",
+            "unknown_model",
+            "nan_ev",
+            "inf_edge",
+            "numeric_strings",
+        )
+        for case in cases:
+            with self.subTest(case=case), \
+                 patch("core.toss_live_pilot_preview.build_live_pilot_preview") as preview:
+                result = tap.process_candidate(_corrupt_income_candidate(case), dict(_POLICY_ON))
+
+            self.assertEqual(result["stage"], "income_contract_blocked")
+            self.assertTrue(result["reason"].startswith("income_contract_"))
+            preview.assert_not_called()
 
     def test_prediction_ref_flows_preview_ledger_and_verification(self):
         candidate = _candidate()
@@ -512,10 +662,10 @@ class TestProcessCandidate(unittest.TestCase):
         _, _, mock_verdict = self._run(_candidate())
         ctx = mock_verdict.call_args[0][0]
         self.assertEqual(ctx["max_order_krw"], 0)
-        self.assertEqual(ctx["allowed_sides"], ["buy"])
+        self.assertEqual(ctx["allowed_sides"], ["buy", "sell"])
 
     def test_autonomous_sides_env_extends_sides(self):
-        policy = dict(_POLICY_ON, autonomous_allowed_sides=["BUY", "SELL"])
+        policy = dict(_POLICY_ON, autonomous_allowed_sides=["buy", "sell"])
         _, _, mock_verdict = self._run(_candidate(), policy=policy)
         ctx = mock_verdict.call_args[0][0]
         self.assertEqual(ctx["allowed_sides"], ["buy", "sell"])
@@ -549,7 +699,109 @@ class TestProcessCandidate(unittest.TestCase):
         mock_ledger.assert_not_called()
 
 
-# ── 3-5. run_toss_autonomous_pipeline ────────────────────────────
+# ── 3. KR 신규 BUY 시장 안전 게이트 ──────────────────────────────
+
+class TestKrBuySafetyGate(unittest.TestCase):
+    @staticmethod
+    def _market(kospi=-0.5, kosdaq=0.2):
+        as_of = datetime(2026, 7, 16, 10, 30, tzinfo=KST).timestamp()
+        return {
+            "indices": {
+                "KOSPI": {"pct": kospi, "source": "yf_batch", "as_of": as_of},
+                "KOSDAQ": {"pct": kosdaq, "source": "yf_batch", "as_of": as_of},
+            }
+        }
+
+    def test_blocks_kr_buy_during_first_fifteen_minutes(self):
+        gate = tap._evaluate_kr_buy_safety(
+            datetime(2026, 7, 16, 9, 3, tzinfo=KST),
+            market_snapshot=self._market(),
+        )
+
+        self.assertIs(gate["ok"], False)
+        self.assertEqual(gate["reason"], "kr_open_cooldown")
+
+    def test_blocks_kr_buy_on_authoritative_local_index_crash(self):
+        gate = tap._evaluate_kr_buy_safety(
+            datetime(2026, 7, 16, 10, 30, tzinfo=KST),
+            market_snapshot=self._market(kospi=-6.46, kosdaq=-4.09),
+        )
+
+        self.assertIs(gate["ok"], False)
+        self.assertEqual(gate["reason"], "kr_market_shock")
+        self.assertEqual(gate["trigger_index"], "KOSPI")
+        self.assertEqual(gate["trigger_pct"], -6.46)
+
+    def test_allows_kr_buy_after_cooldown_when_indices_are_healthy(self):
+        gate = tap._evaluate_kr_buy_safety(
+            datetime(2026, 7, 16, 10, 30, tzinfo=KST),
+            market_snapshot=self._market(),
+        )
+
+        self.assertIs(gate["ok"], True)
+        self.assertEqual(gate["reason"], "ok")
+
+    def test_missing_market_snapshot_fails_closed(self):
+        gate = tap._evaluate_kr_buy_safety(
+            datetime(2026, 7, 16, 10, 30, tzinfo=KST),
+            market_snapshot={},
+        )
+
+        self.assertIs(gate["ok"], False)
+        self.assertEqual(gate["reason"], "kr_market_snapshot_unavailable")
+
+    def test_daily_fallback_market_snapshot_fails_closed(self):
+        snapshot = self._market()
+        for row in snapshot["indices"].values():
+            row["source"] = "yf_daily"
+
+        gate = tap._evaluate_kr_buy_safety(
+            datetime(2026, 7, 16, 10, 30, tzinfo=KST),
+            market_snapshot=snapshot,
+        )
+
+        self.assertIs(gate["ok"], False)
+        self.assertEqual(gate["reason"], "kr_market_snapshot_untrusted")
+
+    def test_stale_market_snapshot_fails_closed(self):
+        snapshot = self._market()
+        stale_as_of = datetime(2026, 7, 16, 10, 0, tzinfo=KST).timestamp()
+        for row in snapshot["indices"].values():
+            row["as_of"] = stale_as_of
+
+        gate = tap._evaluate_kr_buy_safety(
+            datetime(2026, 7, 16, 10, 30, tzinfo=KST),
+            market_snapshot=snapshot,
+        )
+
+        self.assertIs(gate["ok"], False)
+        self.assertEqual(gate["reason"], "kr_market_snapshot_stale")
+
+    def test_nonfinite_market_pct_fails_closed(self):
+        for nonfinite in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(nonfinite=nonfinite):
+                snapshot = self._market(kospi=nonfinite)
+                gate = tap._evaluate_kr_buy_safety(
+                    datetime(2026, 7, 16, 10, 30, tzinfo=KST),
+                    market_snapshot=snapshot,
+                )
+                self.assertIs(gate["ok"], False)
+                self.assertEqual(gate["reason"], "kr_market_snapshot_unavailable")
+
+    def test_nonfinite_market_as_of_fails_closed(self):
+        for nonfinite in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(nonfinite=nonfinite):
+                snapshot = self._market()
+                snapshot["indices"]["KOSPI"]["as_of"] = nonfinite
+                gate = tap._evaluate_kr_buy_safety(
+                    datetime(2026, 7, 16, 10, 30, tzinfo=KST),
+                    market_snapshot=snapshot,
+                )
+                self.assertIs(gate["ok"], False)
+                self.assertEqual(gate["reason"], "kr_market_snapshot_stale")
+
+
+# ── 4-6. run_toss_autonomous_pipeline ────────────────────────────
 
 class TestRun(unittest.TestCase):
     def _run(self, tmp, now=_NOW, policy=None, ready=None, not_ready=None,
@@ -577,6 +829,104 @@ class TestRun(unittest.TestCase):
             r = self._run(tmp)
             self.assertEqual(r["attempted"], 1)
             self.assertEqual(r["pass_count"], 1)
+
+    def test_incomplete_or_truthy_policy_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._run(
+                tmp,
+                policy={
+                    "autonomous_mode": 1,
+                    "autonomous_kill_switch": False,
+                },
+            )
+        self.assertEqual(result, {"skipped": "policy_contract_invalid"})
+
+    def test_force_does_not_bypass_closed_market(self):
+        with patch.object(tap, "_active_execution_market", return_value=None), patch.object(
+            tap, "select_ready_candidates"
+        ) as select, patch.object(tap, "retry_retryable_orders") as retry:
+            result = tap.run_toss_autonomous_pipeline(now=_NOW, force=True)
+
+        self.assertEqual(result, {"skipped": "market_closed"})
+        select.assert_not_called()
+        retry.assert_not_called()
+
+    def test_unknown_active_market_fails_closed(self):
+        with patch.object(tap, "_active_execution_market", return_value="JP"), patch.object(
+            tap, "select_ready_candidates"
+        ) as select, patch.object(tap, "retry_retryable_orders") as retry:
+            result = tap.run_toss_autonomous_pipeline(now=_NOW, force=True)
+
+        self.assertEqual(result, {"skipped": "invalid_active_market"})
+        select.assert_not_called()
+        retry.assert_not_called()
+
+    def test_kr_market_safety_block_stops_before_candidate_processing(self):
+        blocked = {
+            "ok": False,
+            "reason": "kr_market_shock",
+            "trigger_index": "KOSPI",
+            "trigger_pct": -6.46,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.json"
+            with patch.object(tap, "_state_path", return_value=state_path), patch.object(
+                tap, "_active_execution_market", return_value="KR"
+            ), patch(
+                "core.toss_live_pilot_policy.compute_toss_live_pilot_policy",
+                return_value=dict(_POLICY_ON),
+            ), patch.object(
+                tap, "_evaluate_kr_buy_safety", return_value=blocked
+            ) as gate, patch.object(
+                tap, "select_ready_candidates"
+            ) as select, patch.object(
+                tap, "retry_retryable_orders",
+                return_value={"retried": 1, "sent": 1, "exhausted": 0},
+            ) as retry, patch.object(tap, "process_candidate") as process:
+                result = tap.run_toss_autonomous_pipeline(now=_NOW)
+
+        self.assertEqual(result["attempted"], 0)
+        self.assertEqual(result["buy_safety_gate"], blocked)
+        gate.assert_called_once_with(_NOW)
+        select.assert_not_called()
+        process.assert_not_called()
+        self.assertEqual(retry.call_args.kwargs["allowed_markets"], {"KR"})
+        self.assertEqual(retry.call_args.kwargs["blocked_buy_markets"], {"KR"})
+
+    def test_all_market_shock_filters_kr_and_keeps_us_candidates(self):
+        blocked = {
+            "ok": False,
+            "reason": "kr_market_shock",
+            "trigger_index": "KOSPI",
+            "trigger_pct": -6.46,
+        }
+        us_candidate = _candidate("NVDA", market="US", currency="USD")
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.json"
+            with patch.object(tap, "_state_path", return_value=state_path), patch.object(
+                tap, "_active_execution_market", return_value="ALL"
+            ), patch(
+                "core.toss_live_pilot_policy.compute_toss_live_pilot_policy",
+                return_value=dict(_POLICY_ON),
+            ), patch.object(
+                tap, "_evaluate_kr_buy_safety", return_value=blocked
+            ), patch.object(
+                tap, "select_ready_candidates", return_value=([us_candidate], [])
+            ) as select, patch.object(
+                tap, "retry_retryable_orders",
+                return_value={"retried": 0, "sent": 0, "exhausted": 0},
+            ) as retry, patch.object(
+                tap, "process_candidate",
+                return_value={"symbol": "NVDA", "stage": "verdict_recorded", "verdict": "PASS"},
+            ):
+                result = tap.run_toss_autonomous_pipeline(now=_NOW)
+
+        self.assertEqual(select.call_args.kwargs["market"], "US")
+        self.assertEqual(result["active_market"], "US")
+        self.assertEqual(result["attempted"], 1)
+        self.assertEqual(result["buy_safety_gate"], blocked)
+        self.assertEqual(retry.call_args.kwargs["allowed_markets"], {"KR", "US"})
+        self.assertEqual(retry.call_args.kwargs["blocked_buy_markets"], {"KR"})
 
     def test_production_run_injects_bounded_shadow_enqueue_consumer(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -637,10 +987,7 @@ class TestRun(unittest.TestCase):
                 return_value=dict(_POLICY_ON),
             ), patch(
                 "core.dashboard_data.toss_buy_candidates_data",
-                return_value={
-                    "items": items,
-                    "scan_summary": {"dependency_fallback_used": False},
-                },
+                return_value=_candidate_feed(items),
             ), patch.object(
                 tap,
                 "retry_retryable_orders",
@@ -699,7 +1046,7 @@ class TestRun(unittest.TestCase):
                     return_value=dict(_POLICY_ON),
                 ), patch(
                     "core.dashboard_data.toss_buy_candidates_data",
-                    return_value={"items": items},
+                    return_value=_candidate_feed(items),
                 ), patch.object(
                     tap,
                     "retry_retryable_orders",
@@ -801,7 +1148,7 @@ class TestRun(unittest.TestCase):
 
     def test_select_ready_candidates_passes_market_to_candidate_feed(self):
         items = [_candidate("NVDA")]
-        with patch("core.dashboard_data.toss_buy_candidates_data", return_value={"items": items}) as mock_feed:
+        with patch("core.dashboard_data.toss_buy_candidates_data", return_value=_candidate_feed(items)) as mock_feed:
             ready, _ = tap.select_ready_candidates(market="US")
         self.assertEqual([r["symbol"] for r in ready], ["NVDA"])
         self.assertEqual(mock_feed.call_args.kwargs.get("market"), "US")
@@ -824,7 +1171,7 @@ class TestRetrySweep(unittest.TestCase):
         "failure_reason": "network_error",
     }
 
-    def _sweep(self, state, records=None, verdict_status="PASS"):
+    def _sweep(self, state, records=None, verdict_status="PASS", **retry_kwargs):
         records = records if records is not None else [dict(self._RETRYABLE)]
         finalize_calls = []
 
@@ -853,7 +1200,7 @@ class TestRetrySweep(unittest.TestCase):
                    return_value={"status": verdict_status, "reasons": [], "checks": {}}), \
              patch("core.toss_autonomous_finalizer.try_autonomous_finalize",
                    side_effect=fake_finalize):
-            r = tap.retry_retryable_orders(now=_NOW, state=state)
+            r = tap.retry_retryable_orders(now=_NOW, state=state, **retry_kwargs)
         return r, finalize_calls, failed_calls
 
     def test_retry_pass_finalizes_with_allow_retry(self):
@@ -863,6 +1210,27 @@ class TestRetrySweep(unittest.TestCase):
         self.assertEqual(r["sent"], 1)
         self.assertEqual(finalize_calls, [("tlive_retry_1", True)])
         self.assertEqual(state["retry_counts"]["tlive_retry_1"], 1)
+
+    def test_retry_invalid_policy_stops_before_ledger_fetch(self):
+        bad_policy = {
+            "autonomous_mode": 1,
+            "autonomous_kill_switch": False,
+        }
+        with patch(
+            "core.toss_live_pilot_policy.compute_toss_live_pilot_policy",
+            return_value=bad_policy,
+        ), patch(
+            "core.toss_live_pilot_ledger.list_live_pilot_records",
+        ) as records:
+            result = tap.retry_retryable_orders(now=_NOW, state={})
+
+        self.assertEqual(result, {
+            "retried": 0,
+            "sent": 0,
+            "exhausted": 0,
+            "policy_blocked": "policy_contract_invalid",
+        })
+        records.assert_not_called()
 
     def test_retry_preserves_original_direct_attribution_keys(self):
         self._sweep({})
@@ -899,6 +1267,44 @@ class TestRetrySweep(unittest.TestCase):
         self.assertEqual(r["retried"], 1)
         self.assertEqual(r["sent"], 0)
         self.assertEqual(finalize_calls, [])
+
+    def test_kr_shock_blocks_buy_retry_but_preserves_kr_sell_retry(self):
+        records = [
+            dict(self._RETRYABLE, pilot_id="kr_buy", side="buy"),
+            dict(self._RETRYABLE, pilot_id="kr_sell", side="sell"),
+            dict(self._RETRYABLE, pilot_id="us_buy", symbol="NVDA", side="buy"),
+        ]
+
+        result, finalize_calls, _ = self._sweep(
+            {},
+            records=records,
+            allowed_markets={"KR"},
+            blocked_buy_markets={"KR"},
+        )
+
+        self.assertEqual(finalize_calls, [("kr_sell", True)])
+        self.assertEqual(result["retried"], 1)
+        self.assertEqual(result["sent"], 1)
+        self.assertEqual(result["skipped_buy_safety"], 1)
+        self.assertEqual(result["skipped_market"], 1)
+
+    def test_retry_market_classifier_rejects_unknown_values(self):
+        self.assertEqual(tap._retry_record_market({"market": "JP", "symbol": "AAPL"}), "")
+        self.assertEqual(tap._retry_record_market({"symbol": "UNKNOWN"}), "")
+        self.assertEqual(tap._retry_record_market({"symbol": "NVDA"}), "US")
+        self.assertEqual(tap._retry_record_market({"symbol": "005930"}), "KR")
+
+    def test_retry_sweep_skips_unknown_market_without_finalizing(self):
+        records = [
+            dict(self._RETRYABLE, pilot_id="jp", market="JP", symbol="AAPL"),
+            dict(self._RETRYABLE, pilot_id="ambiguous", market="", symbol="UNKNOWN"),
+        ]
+
+        result, finalize_calls, _ = self._sweep({}, records=records)
+
+        self.assertEqual(finalize_calls, [])
+        self.assertEqual(result["retried"], 0)
+        self.assertEqual(result["skipped_invalid"], 2)
 
 
 # ── 7. 실패 사유 의무화 ──────────────────────────────────────────
@@ -1094,20 +1500,26 @@ def test_select_ready_candidates_requires_income_pass():
         _candidate("A.KS", income_strategy={"income_pass": True, "expected_pnl_krw": 9000, "income_edge_ratio": 0.02}),
         _candidate("B.KS", income_strategy={"income_pass": False, "income_block_reason": "expected_pnl_below_threshold"}),
     ]
-    with patch("core.dashboard_data.toss_buy_candidates_data", return_value={"items": items}):
+    with patch("core.dashboard_data.toss_buy_candidates_data", return_value=_candidate_feed(items)):
         ready, not_ready = tap.select_ready_candidates()
     assert [r["symbol"] for r in ready] == ["A.KS"]
     assert not_ready == [{"symbol": "B.KS", "reason": "expected_pnl_below_threshold"}]
 
 
-def test_select_ready_candidates_sorts_by_expected_income():
+def test_select_ready_candidates_sorts_by_decision_expected_income():
     items = [
-        _candidate("LOW.KS", income_strategy={"income_pass": True, "expected_pnl_krw": 8_000, "income_edge_ratio": 0.01}),
-        _candidate("HIGH.KS", income_strategy={"income_pass": True, "expected_pnl_krw": 18_000, "income_edge_ratio": 0.03}),
+        _candidate("NEXT_HIGH.KS", income_strategy={
+            "income_pass": True, "expected_pnl_krw": 18_000,
+            "decision_expected_pnl_krw": 1_000, "decision_income_edge_ratio": 0.001,
+        }),
+        _candidate("DECISION_HIGH.KS", income_strategy={
+            "income_pass": True, "expected_pnl_krw": -5_000,
+            "decision_expected_pnl_krw": 9_000, "decision_income_edge_ratio": 0.009,
+        }),
     ]
-    with patch("core.dashboard_data.toss_buy_candidates_data", return_value={"items": items}):
+    with patch("core.dashboard_data.toss_buy_candidates_data", return_value=_candidate_feed(items)):
         ready, _ = tap.select_ready_candidates()
-    assert [r["symbol"] for r in ready] == ["HIGH.KS", "LOW.KS"]
+    assert [r["symbol"] for r in ready] == ["DECISION_HIGH.KS", "NEXT_HIGH.KS"]
 
 
 if __name__ == "__main__":
@@ -1119,7 +1531,7 @@ class TestExactBoolReadiness(unittest.TestCase):
 
     def _select(self, items):
         with patch("core.dashboard_data.toss_buy_candidates_data",
-                   return_value={"items": items}):
+                   return_value=_candidate_feed(items)):
             ready, not_ready = tap.select_ready_candidates()
         return ready, not_ready
 

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -42,6 +43,8 @@ _INCOME_TAKE_PROFIT_SINGLE_PCT = 1.5
 _INCOME_PARTIAL_TAKE_PROFIT_PCT = 1.2
 _INCOME_EARLY_STOP_LOSS_PCT = -2.5
 _INCOME_HARD_STOP_LOSS_PCT = -4.5
+_MAX_EXECUTION_QUANTITY = 1_000_000
+_MAX_EXECUTION_PRICE = 1_000_000_000_000.0
 _REVIEW_HOUR_KST = 10            # KST 10시 이후 (개장 직후 노이즈 회피)
 _REVIEW_INTERVAL_MINUTES = 30     # 장중 보유 리스크는 일 1회가 아니라 주기 재평가
 
@@ -314,6 +317,87 @@ def _sell_to_fund_attempts_today(attempted_map: dict | None) -> int:
     return count
 
 
+def _strict_positive_value(value) -> float | None:
+    if type(value) not in (int, float):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) and number > 0 else None
+
+
+def _valid_funding_target(plan: dict, currency: str) -> dict | None:
+    if plan.get("funding_rebalance_required") is not True:
+        return None
+    target = plan.get("funding_target")
+    if type(target) is not dict or target.get("side") != "buy":
+        return None
+    target_symbol = target.get("symbol")
+    if type(target_symbol) is not str or not target_symbol.strip():
+        return None
+    if type(target.get("currency")) is not str or target.get("currency") != currency:
+        return None
+    from core.toss_income_strategy import (
+        canonical_trade_identity,
+        validate_executable_income_contract,
+    )
+    identity = canonical_trade_identity(target_symbol)
+    if identity is None or identity[2] != currency:
+        return None
+    ok, _ = validate_executable_income_contract(target)
+    if not ok or not str(target.get("symbol") or "").strip():
+        return None
+    return target
+
+
+def _valid_funding_row(row: dict, target: dict, currency: str, gap: float) -> bool:
+    row_gap = _strict_positive_value(row.get("funding_gap_native"))
+    release = _strict_positive_value(row.get("estimated_release_native"))
+    cumulative = _strict_positive_value(row.get("cumulative_release_native"))
+    quantity = row.get("quantity")
+    last_price = _strict_positive_value(row.get("last_price"))
+    row_symbol = row.get("symbol")
+    if (
+        row_gap is None
+        or release is None
+        or cumulative is None
+        or type(quantity) is not int
+        or not 0 < quantity <= _MAX_EXECUTION_QUANTITY
+        or last_price is None
+        or last_price > _MAX_EXECUTION_PRICE
+        or type(row_symbol) is not str
+        or not row_symbol.strip()
+    ):
+        return False
+    actual_release = quantity * last_price
+    if (
+        not math.isfinite(actual_release)
+        or abs(release - actual_release) > max(0.01, actual_release * 0.000001)
+    ):
+        return False
+    from core.toss_income_strategy import canonical_trade_identity
+    identity = canonical_trade_identity(row_symbol)
+    if identity is None or identity[2] != currency:
+        return False
+    return (
+        row.get("auto_sell_eligible") is True
+        and type(row.get("side")) is str
+        and row.get("side") == "sell"
+        and row.get("covers_funding_target") is True
+        and row.get("funding_mode") == "currency_income_replacement"
+        and type(row.get("funding_currency")) is str
+        and row.get("funding_currency") == currency
+        and type(row.get("currency")) is str
+        and row.get("currency") == currency
+        and type(row.get("funding_target_symbol")) is str
+        and row.get("funding_target_symbol") == target.get("symbol")
+        and abs(row_gap - gap) <= 0.0001
+        and release >= gap
+        and abs(cumulative - release) <= 0.0001
+    )
+
+
 def evaluate_sell_to_fund_candidates(
     account_summary: dict | None = None,
     rebalance_plan: dict | None = None,
@@ -372,13 +456,32 @@ def evaluate_sell_to_fund_candidates(
 
     # 두 발동 경로: ①보유 과다 리밸런싱 ②통화별 income 자금조달 (보유 20 이하 허용)
     portfolio_mode = (
-        bool(rebalance_plan.get("portfolio_rebalance_required"))
+        rebalance_plan.get("portfolio_rebalance_required") is True
         and holdings_count > _rebalance_min_holdings()
     )
-    funding_mode = bool(rebalance_plan.get("funding_rebalance_required"))
+    raw_funding_currency = rebalance_plan.get("funding_currency")
+    funding_currency = (
+        raw_funding_currency
+        if type(raw_funding_currency) is str
+        and raw_funding_currency in {"KRW", "USD"}
+        else ""
+    )
+    funding_gap = _strict_positive_value(rebalance_plan.get("funding_gap_native"))
+    raw_funding_source = rebalance_plan.get("funding_source_symbol")
+    funding_source = (
+        raw_funding_source
+        if type(raw_funding_source) is str and raw_funding_source.strip()
+        else ""
+    )
+    funding_target = (
+        _valid_funding_target(rebalance_plan, funding_currency)
+        if funding_currency and funding_source and funding_gap is not None
+        else None
+    )
+    funding_mode = funding_target is not None
     if not portfolio_mode and not funding_mode:
         return []
-    funding_currency = str(rebalance_plan.get("funding_currency") or "").upper()
+
 
     protected = _rebalance_protected_symbols(policy)
     attempted = attempted_map or {}
@@ -391,11 +494,16 @@ def evaluate_sell_to_fund_candidates(
     rows = [r for r in rows if r.get("auto_sell_eligible") is True]
     if not portfolio_mode:
         # funding 전용: funding target과 같은 통화의 funding rows만
+        if not isinstance(funding_target, dict) or funding_gap is None:
+            return []
         rows = [
             r for r in rows
-            if r.get("funding_target_symbol")
-            and str(r.get("currency") or "KRW").upper() == funding_currency
+            if _valid_funding_row(r, funding_target, funding_currency, funding_gap)
         ]
+        if len(rows) != 1:
+            return []
+        if rows[0].get("symbol") != funding_source:
+            return []
     rows.sort(
         key=lambda r: _to_float(r.get("adjusted_sell_priority"),
                                 _to_float(r.get("weakness_score"))),
@@ -460,16 +568,13 @@ def execute_sell_candidates(
 
     가드: autonomous/kill switch/env sell 허용/장중 + 심볼당 1일 1회.
     """
-    if not policy.get("autonomous_mode"):
+    if not isinstance(policy, dict):
+        return []
+    from core.toss_live_pilot_policy import validate_autonomous_execution_policy
+    policy_ok, policy_reason = validate_autonomous_execution_policy(policy, side="sell")
+    if not policy_ok:
         return [{"symbol": c["symbol"], "stage": "skipped",
-                 "reason": "autonomous_mode_disabled"} for c in candidates]
-    if policy.get("autonomous_kill_switch"):
-        return [{"symbol": c["symbol"], "stage": "skipped",
-                 "reason": "kill_switch_active"} for c in candidates]
-    sides = [str(s).lower() for s in (policy.get("autonomous_allowed_sides") or [])]
-    if "sell" not in sides:
-        return [{"symbol": c["symbol"], "stage": "skipped",
-                 "reason": "sell_not_allowed_by_env"} for c in candidates]
+                 "reason": policy_reason} for c in candidates]
 
     from core.toss_autonomous_pipeline import process_candidate
 

@@ -75,8 +75,17 @@ def _patch_network(monkeypatch):
     monkeypatch.setattr(tc, "get_exchange_rate",
                         lambda base="USD", quote="KRW": {"rate": 1500.0})
     monkeypatch.setattr(disc, "recent_recommended_tickers", lambda *a, **k: set())
-    # 기본 테스트는 계좌 현금 충분 상태로 고정한다. 현금 부족 회귀는 별도 테스트가 override.
+    # 기본 테스트는 계좌 현금과 read-only snapshot이 모두 fresh인 상태로 고정한다.
+    # 운영 repo에 우연히 존재하는 snapshot 파일에 테스트 결과가 의존하면
+    # 같은 commit도 GCP/live와 격리 worktree에서 baseline이 달라진다.
+    monkeypatch.setattr("core.toss_readonly_snapshot.load_snapshot", lambda: {
+        "ok": True,
+        "status": "fresh",
+        "usable_for_decisions": True,
+    })
     monkeypatch.setattr(dd, "toss_account_summary", lambda: {
+        "snapshot_status": "fresh",
+        "snapshot_usable_for_decisions": True,
         "cash": {"krw": 10_000_000, "krw_native": 10_000_000, "usd": 10_000.0, "usd_krw": 15_000_000},
         "holdings_count": 0,
     })
@@ -91,6 +100,34 @@ def _patch_sections(monkeypatch, sections):
         disc, "build_discovery_sections",
         lambda *a, **k: sections,
     )
+
+
+def _patch_positive_lifecycle_income(monkeypatch):
+    """수학 모델과 무관한 품질/cap/리밸런싱 테스트용 양수 실행 EV."""
+    from core import toss_income_strategy as tis
+
+    def positive(candidate, **kwargs):
+        entry = float(candidate.get("limit_price") or candidate.get("price") or 0)
+        target = float(candidate.get("target_price") or entry)
+        estimated = float(candidate.get("estimated_amount_krw") or 1)
+        decision_expected = max(target - entry, 1.0)
+        return {
+            "version": "income_v2",
+            "expected_pnl_model": "income_exit_cashflow_v2",
+            "expected_pnl_scope": "next_realized_exit_only",
+            "expected_pnl_krw": -decision_expected,
+            "income_edge_ratio": -decision_expected / estimated,
+            "decision_expected_pnl_model": "income_exit_lifecycle_v1",
+            "decision_expected_pnl_scope": "full_position_threshold_exit",
+            "decision_expected_pnl_krw": decision_expected,
+            "decision_income_edge_ratio": decision_expected / estimated,
+            "income_pass": True,
+            "income_grade": "SMALL_INCOME_PASS",
+            "income_block_reason": "",
+            "income_block_label": "",
+        }
+
+    monkeypatch.setattr(tis, "compute_income_edge", positive)
 
 
 def test_toss_buy_candidates_uses_new_discovery_only(monkeypatch):
@@ -324,6 +361,51 @@ def test_toss_buy_candidates_scan_failure_has_reasons(monkeypatch):
 
 
 
+def test_toss_buy_candidates_cache_exception_returns_canonical_empty_v3(monkeypatch):
+    def fail_cache(*_args, **_kwargs):
+        raise RuntimeError("synthetic cache failure")
+
+    monkeypatch.setattr(dd, "_cached", fail_cache)
+
+    result = dd.toss_buy_candidates_data(range_="today")
+
+    assert result["schema"] == "toss_buy_candidates.v3.dual_income_ev"
+    assert result["scan_summary"]["income_gate_version"] == "income_v2_dual_ev"
+    assert result["items"] == []
+    assert result["excluded"] == []
+
+
+@pytest.mark.parametrize(
+    "cached",
+    [
+        {
+            "schema": "toss_buy_candidates.v2.stock_agent_ready",
+            "scan_summary": {"income_gate_version": "income_v1"},
+            "items": [{"stock_agent_ready": True}],
+            "excluded": [],
+        },
+        {
+            "schema": "toss_buy_candidates.v3.dual_income_ev",
+            "scan_summary": {"income_gate_version": "income_v2_dual_ev"},
+            "items": ["not-a-dict"],
+            "excluded": [],
+        },
+    ],
+)
+def test_toss_buy_candidates_rejects_stale_or_corrupt_cached_authority(
+    monkeypatch,
+    cached,
+):
+    monkeypatch.setattr(dd, "_cached", lambda *_args, **_kwargs: cached)
+
+    result = dd.toss_buy_candidates_data(range_="today")
+
+    assert result["schema"] == "toss_buy_candidates.v3.dual_income_ev"
+    assert result["scan_summary"]["income_gate_version"] == "income_v2_dual_ev"
+    assert result["items"] == []
+    assert result["excluded"] == []
+
+
 def test_toss_buy_candidates_stock_agent_review_fields(monkeypatch):
     # Stock-Agent가 PASS/HOLD/BLOCK을 판단할 수 있도록 주문표 핵심 필드를 명시한다.
     sections = _sections(new=[_new_cand("000111.KS", "소액주", price=30_000)])
@@ -331,7 +413,8 @@ def test_toss_buy_candidates_stock_agent_review_fields(monkeypatch):
 
     result = dd.toss_buy_candidates_data(range_="today")
 
-    assert result["schema"] == "toss_buy_candidates.v2.stock_agent_ready"
+    assert result["schema"] == "toss_buy_candidates.v3.dual_income_ev"
+    assert result["scan_summary"]["income_gate_version"] == "income_v2_dual_ev"
     item = next(i for i in result["items"] if i["symbol"] == "000111.KS")
     assert item["account"] == "토스 AI"
     assert item["account_type"] == "토스 AI"
@@ -360,6 +443,101 @@ def test_toss_buy_candidates_stock_agent_review_fields(monkeypatch):
     assert item["stock_agent_ready"] is False
     assert "손익비" in item["block_reason"]
 
+
+def test_toss_buy_candidates_empty_cache_fallback_preserves_v3_schema(monkeypatch):
+    monkeypatch.setattr(dd, "_cached", lambda *args, **kwargs: {})
+
+    result = dd.toss_buy_candidates_data(range_="today", market="KR", limit=3)
+
+    assert result["schema"] == "toss_buy_candidates.v3.dual_income_ev"
+    assert result["scan_summary"]["income_gate_version"] == "income_v2_dual_ev"
+    assert result["items"] == []
+    assert result["excluded"] == []
+    assert result["requested_limit"] == 3
+
+
+def test_toss_buy_candidates_quarantines_stale_cached_contract_versions(monkeypatch):
+    monkeypatch.setattr(dd, "_cached", lambda *args, **kwargs: {
+        "schema": "toss_buy_candidates.v2.stock_agent_ready",
+        "scan_summary": {"income_gate_version": "income_v1"},
+        "items": [{"stock_agent_ready": True}],
+        "excluded": [],
+    })
+
+    result = dd.toss_buy_candidates_data(range_="today", market="KR", limit=3)
+
+    assert result["schema"] == "toss_buy_candidates.v3.dual_income_ev"
+    assert result["scan_summary"]["income_gate_version"] == "income_v2_dual_ev"
+    assert result["items"] == []
+    assert result["excluded"] == []
+
+
+@pytest.mark.parametrize(
+    ("market", "field", "bad_value", "reason"),
+    [
+        ("KR", "quantity", "1", "quantity_invalid"),
+        ("KR", "quantity", True, "quantity_invalid"),
+        ("KR", "risk_reward", "3.6", "risk_reward_invalid"),
+        ("KR", "estimated_amount_krw", "1400000", "estimated_notional_invalid"),
+        ("KR", "score", 0, "score_invalid"),
+        ("US", "fx_usdkrw", 0, "fx_usdkrw_invalid"),
+        ("KR", "quantity", float("nan"), "quantity_invalid"),
+        ("KR", "quantity", float("inf"), "quantity_invalid"),
+        ("KR", "quantity", float("-inf"), "quantity_invalid"),
+        ("KR", "limit_price", float("nan"), "entry_price_invalid"),
+        ("KR", "target_price", 10**400, "target_price_invalid"),
+        ("KR", "stop_loss", 10**400, "stop_loss_invalid"),
+        ("KR", "price", "POISON", "entry_price_invalid"),
+        ("KR", "entry_price", "POISON", "entry_price_invalid"),
+        ("KR", "current_price", "POISON", "entry_price_invalid"),
+        ("KR", "side", "sell", "side_invalid"),
+        ("KR", "market", "EU", "market_invalid"),
+        ("KR", "market", "US", "symbol_market_mismatch"),
+        ("KR", "currency", "USD", "currency_invalid"),
+        ("US", "currency", "KRW", "currency_invalid"),
+        ("US", "estimated_amount_usd", "1400", "estimated_notional_invalid"),
+    ],
+)
+def test_toss_buy_candidates_preserves_explicit_invalid_execution_inputs(
+    monkeypatch, market, field, bad_value, reason
+):
+    _patch_sections(monkeypatch, _sections())
+    symbol = "NVDA" if market == "US" else "207940.KS"
+    price = 1_400.0 if market == "US" else 1_400_000.0
+    raw = {
+        "symbol": symbol, "ticker": symbol, "name": "오염입력후보",
+        "market": market, "side": "buy", "price": price,
+        "current_price": price, "limit_price": price, "quantity": 1,
+        "score": 88, "risk_reward": 3.6,
+        "target_price": 1_500.0 if market == "US" else 1_500_000.0,
+        "stop_loss": 1_300.0 if market == "US" else 1_300_000.0,
+        "estimated_amount_krw": 2_100_000.0 if market == "US" else 1_400_000.0,
+        "estimated_amount_usd": 1_400.0 if market == "US" else None,
+        "fx_usdkrw": 1_500.0, "decision_bucket": "PASS_EXECUTE",
+        "candidate_scope": "new_discovery", "read_only": True,
+    }
+    raw[field] = bad_value
+    monkeypatch.setattr(disc, "toss_eligible_new_candidates", lambda *a, **k: {
+        "items": [raw], "excluded": [], "count": 1, "excluded_count": 0,
+        "scan_summary": {}, "note": "test fixture",
+    })
+    from core import toss_quality_gate as qg
+    monkeypatch.setattr(qg, "score_candidates_batch", lambda items, **kwargs: items)
+    monkeypatch.setattr(qg, "finalize_quality_proof", lambda item: True)
+    monkeypatch.setattr(dd, "_toss_holding_price_map", lambda: {})
+    monkeypatch.setattr(dd, "_recent_toss_risk_sell_symbols", lambda *a, **k: {})
+    monkeypatch.setattr(dd, "_pending_toss_order_symbols", lambda *a, **k: {})
+
+    item = dd.toss_buy_candidates_data(range_="today", market=market)["items"][0]
+    income = item["income_strategy"]
+
+    assert item["upstream_input_validation_error"] == reason
+    assert item["symbol"] == symbol
+    assert income["income_pass"] is False
+    assert income["income_block_reason"] == reason
+    assert income["expected_pnl_krw"] is None
+    assert income["decision_expected_pnl_krw"] is None
+    assert item["stock_agent_ready"] is False
 
 
 def test_toss_buy_candidates_blocks_buy_limit_above_current(monkeypatch):
@@ -453,6 +631,7 @@ def test_toss_candidate_missing_quality_bucket_is_never_stock_agent_ready(monkey
            "suggested_accounts": ("삼성 수동", "ISA", "토스 AI")}
     )
     _patch_sections(monkeypatch, _sections(new=[weak]))
+    _patch_positive_lifecycle_income(monkeypatch)
     monkeypatch.setattr(qg, "score_candidates_batch", lambda items, **kwargs: items)
 
     item = dd.toss_buy_candidates_data(range_="today")["items"][0]
@@ -477,6 +656,7 @@ def test_toss_candidate_with_weak_flow_only_becomes_conditional_small_entry(monk
     )
     sections = _sections(new=[weak])
     _patch_sections(monkeypatch, sections)
+    _patch_positive_lifecycle_income(monkeypatch)
 
     result = dd.toss_buy_candidates_data(range_="today")
     item = result["items"][0]
@@ -632,11 +812,14 @@ def test_toss_buy_candidates_income_strategy_fields_and_ready_gate(monkeypatch):
 
     result = dd.toss_buy_candidates_data(range_="today")
     item = next(i for i in result["items"] if i["symbol"] == "000777.KS")
+    income = item["income_strategy"]
 
-    assert "income_strategy" in item
-    assert item["income_strategy"]["income_pass"] is True
-    assert item["income_strategy"]["expected_pnl_krw"] > 0
-    assert item["stock_agent_ready"] is True
+    assert income["version"] == "income_v2"
+    assert income["expected_pnl_model"] == "income_exit_cashflow_v2"
+    assert income["income_pass"] is False
+    assert income["expected_pnl_krw"] < 0
+    assert income["profit_exit_quantity"] < income["loss_exit_quantity"]
+    assert item["stock_agent_ready"] is False
 
 
 def test_toss_buy_candidates_stale_snapshot_blocks_ready_and_sizing(monkeypatch):
@@ -660,6 +843,18 @@ def test_toss_buy_candidates_stale_snapshot_blocks_ready_and_sizing(monkeypatch)
     monkeypatch.setattr(dd, "_toss_holding_price_map", lambda: {})
     monkeypatch.setattr(dd, "_recent_toss_risk_sell_symbols", lambda *a, **k: {})
     monkeypatch.setattr(dd, "_pending_toss_order_symbols", lambda *a, **k: {})
+    monkeypatch.setattr(
+        "core.toss_income_strategy.compute_income_edge",
+        lambda *a, **k: {
+            "version": "income_v2",
+            "income_pass": True,
+            "income_grade": "INCOME_PASS",
+            "expected_pnl_krw": 12_000.0,
+            "income_edge_ratio": 0.02,
+            "income_block_reason": "",
+            "income_block_label": "",
+        },
+    )
 
     result = dd.toss_buy_candidates_data(range_="today")
     item = next(i for i in result["items"] if i["symbol"] == "000779.KS")
@@ -701,6 +896,62 @@ def test_toss_buy_candidates_missing_snapshot_also_fails_closed(monkeypatch):
     assert item["execution_status"] == "toss_snapshot_stale"
     assert result["scan_summary"]["snapshot_candidate_blocked"] is True
     assert result["scan_summary"]["snapshot_status"] == "missing"
+
+
+@pytest.mark.parametrize(
+    "snapshot_state",
+    [
+        {"ok": True, "status": "unknown", "usable_for_decisions": True},
+        {"ok": "true", "status": "fresh", "usable_for_decisions": "true"},
+    ],
+)
+def test_toss_buy_candidates_snapshot_requires_fresh_exact_booleans(monkeypatch, snapshot_state):
+    strong = _new_cand("000781.KS", "snapshot계약차단", price=50_000, score=88)
+    strong = strong.__class__(
+        **{**strong.__dict__, "target_price": 56_000.0, "stop_loss": 48_000.0, "risk_reward": 3.0}
+    )
+    _patch_sections(monkeypatch, _sections(new=[strong]))
+    monkeypatch.setattr(dd, "_dashboard_toss_broker_reads_isolated", lambda: True)
+    monkeypatch.setattr("core.toss_readonly_snapshot.load_snapshot", lambda: snapshot_state)
+
+    result = dd.toss_buy_candidates_data(range_="today")
+    item = next(i for i in result["items"] if i["symbol"] == "000781.KS")
+
+    assert item["stock_agent_ready"] is False
+    assert item["execution_status"] == "toss_snapshot_stale"
+    assert result["scan_summary"]["snapshot_candidate_blocked"] is True
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        {"snapshot_status": "unknown", "snapshot_usable_for_decisions": True},
+        {"snapshot_status": "fresh", "snapshot_usable_for_decisions": "true"},
+    ],
+)
+def test_toss_buy_candidates_account_snapshot_fallback_is_exact(monkeypatch, summary):
+    strong = _new_cand("000782.KS", "account계약차단", price=50_000, score=88)
+    strong = strong.__class__(
+        **{**strong.__dict__, "target_price": 56_000.0, "stop_loss": 48_000.0, "risk_reward": 3.0}
+    )
+    _patch_sections(monkeypatch, _sections(new=[strong]))
+    monkeypatch.setattr(dd, "_dashboard_toss_broker_reads_isolated", lambda: False)
+    monkeypatch.setattr(
+        dd,
+        "toss_account_summary",
+        lambda: {
+            **summary,
+            "cash": {"krw": 10_000_000, "krw_native": 10_000_000},
+            "holdings_count": 0,
+        },
+    )
+
+    result = dd.toss_buy_candidates_data(range_="today")
+    item = next(i for i in result["items"] if i["symbol"] == "000782.KS")
+
+    assert item["stock_agent_ready"] is False
+    assert item["execution_status"] == "toss_snapshot_stale"
+    assert result["scan_summary"]["snapshot_candidate_blocked"] is True
 
 
 def test_toss_buy_candidates_income_block_disables_stock_agent_ready(monkeypatch):
@@ -814,25 +1065,79 @@ def test_toss_buy_candidates_same_symbol_pending_blocks_ready(monkeypatch):
 
 
 def test_toss_buy_candidates_income_plan_tightens_stop_and_allows_strong_candidate(monkeypatch):
-    strong = _new_cand("000778.KS", "고수익후보", price=50_000, score=88)
+    strong = _new_cand("000778.KS", "고수익후보", price=1_400_000, score=88)
     strong = strong.__class__(
-        **{**strong.__dict__, "target_price": 58_000.0, "stop_loss": 47_000.0, "risk_reward": 2.6}
+        **{**strong.__dict__, "target_price": 1_620_000.0,
+           "stop_loss": 1_300_000.0, "risk_reward": 2.6}
     )
     sections = _sections(new=[strong])
     _patch_sections(monkeypatch, sections)
     monkeypatch.setattr(dd, "_toss_holding_price_map", lambda: {})
     monkeypatch.setattr(dd, "_recent_toss_risk_sell_symbols", lambda *a, **k: {})
     monkeypatch.setattr(dd, "_pending_toss_order_symbols", lambda *a, **k: {})
+    from core import toss_live_pilot_policy as tlp
+    monkeypatch.setattr(tlp, "compute_toss_live_pilot_policy", lambda *a, **k: {"max_order_krw": None})
+    monkeypatch.setattr(dd, "toss_account_summary", lambda: {
+        "cash": {"krw": 5_000_000, "krw_native": 5_000_000, "usd": 0.0},
+        "total_account_value": {"krw": 10_000_000},
+        "holdings_count": 10,
+    })
 
     result = dd.toss_buy_candidates_data(range_="today")
     item = next(i for i in result["items"] if i["symbol"] == "000778.KS")
 
-    assert item["original_stop_loss"] == 47_000.0
-    assert item["stop_loss"] > 47_000.0
+    assert item["original_stop_loss"] == 1_300_000.0
+    assert item["stop_loss"] > 1_300_000.0
     assert item["income_exit_plan"]["stop_risk_pct"] <= 4.5
+    assert item["income_strategy"]["decision_expected_pnl_krw"] > 0
     assert item["income_strategy"]["income_pass"] is True
     assert item["stock_agent_ready"] is True
 
+
+def test_income_edge_uses_finalized_bucket_not_preliminary_bucket(monkeypatch):
+    strong = _new_cand("000779.KS", "최종버킷후보", price=1_400_000, score=85)
+    strong = strong.__class__(
+        **{**strong.__dict__, "target_price": 1_620_000.0,
+           "stop_loss": 1_340_000.0, "risk_reward": 3.6}
+    )
+    _patch_sections(monkeypatch, _sections(new=[strong]))
+
+    from core import toss_income_strategy as tis
+    from core import toss_live_pilot_policy as tlp
+    from core import toss_quality_gate as qg
+
+    monkeypatch.setattr(tlp, "compute_toss_live_pilot_policy", lambda *a, **k: {"max_order_krw": None})
+    monkeypatch.setattr(dd, "_toss_holding_price_map", lambda: {})
+    monkeypatch.setattr(dd, "_recent_toss_risk_sell_symbols", lambda *a, **k: {})
+    monkeypatch.setattr(dd, "_pending_toss_order_symbols", lambda *a, **k: {})
+    monkeypatch.setattr(dd, "toss_account_summary", lambda: {
+        "cash": {"krw": 5_000_000, "krw_native": 5_000_000, "usd": 0.0},
+        "total_account_value": {"krw": 10_000_000},
+        "holdings_count": 10,
+    })
+
+    def finalize_to_small_pass(item):
+        item["decision_bucket"] = "SMALL_PASS"
+        item["decision_reason"] = "finalized_small_pass"
+        return True
+
+    seen_buckets = []
+    real_compute = tis.compute_income_edge
+
+    def compute_after_finalization(candidate, **kwargs):
+        seen_buckets.append(candidate.get("decision_bucket"))
+        return real_compute(candidate, **kwargs)
+
+    monkeypatch.setattr(qg, "finalize_quality_proof", finalize_to_small_pass)
+    monkeypatch.setattr(tis, "compute_income_edge", compute_after_finalization)
+
+    item = dd.toss_buy_candidates_data(range_="today")["items"][0]
+
+    assert seen_buckets == ["SMALL_PASS"]
+    assert item["decision_bucket"] == "SMALL_PASS"
+    assert item["income_strategy"]["decision_expected_pnl_krw"] < 0
+    assert item["income_strategy"]["income_pass"] is False
+    assert item["stock_agent_ready"] is False
 
 
 def test_toss_buy_candidates_caps_ready_to_top_three_when_many_holdings(monkeypatch):
@@ -847,6 +1152,7 @@ def test_toss_buy_candidates_caps_ready_to_top_three_when_many_holdings(monkeypa
     monkeypatch.setattr(dd, "_toss_holding_price_map", lambda: {})
     monkeypatch.setattr(dd, "_recent_toss_risk_sell_symbols", lambda *a, **k: {})
     monkeypatch.setattr(dd, "_pending_toss_order_symbols", lambda *a, **k: {})
+    _patch_positive_lifecycle_income(monkeypatch)
     monkeypatch.setattr(dd, "toss_account_summary", lambda: {
         "cash": {"krw": 2_000_000, "krw_native": 2_000_000, "usd": 0.0},
         "holdings_count": 15,
@@ -859,7 +1165,7 @@ def test_toss_buy_candidates_caps_ready_to_top_three_when_many_holdings(monkeypa
     # 검증 목적은 "반환 순서"가 아니라, 보유 12개 초과 시 기대손익 상위
     # 3개만 준비 완료로 남는지다. 순서 비교는 전역 상태에 따라 플래키했다.
     def _expected(i):
-        return float((i.get("income_strategy") or {}).get("expected_pnl_krw") or 0)
+        return float((i.get("income_strategy") or {}).get("decision_expected_pnl_krw") or 0)
 
     top3_symbols = {i["symbol"] for i in sorted(items, key=_expected, reverse=True)[:3]}
     assert len(ready_symbols) == 3
@@ -868,6 +1174,48 @@ def test_toss_buy_candidates_caps_ready_to_top_three_when_many_holdings(monkeypa
     assert result["scan_summary"]["portfolio_cap_block_count"] == 1
     blocked = [i for i in items if i.get("execution_status") == "portfolio_income_cap"]
     assert len(blocked) == 1
+
+
+def test_portfolio_cap_excludes_partial_v2_before_ranking(monkeypatch):
+    cands = []
+    for idx in range(1, 5):
+        c = _new_cand(f"10000{idx}.KS", f"후보{idx}", price=50_000, score=88)
+        cands.append(c.__class__(
+            **{**c.__dict__, "target_price": 58_000.0,
+               "stop_loss": 47_000.0, "risk_reward": 2.5}
+        ))
+    _patch_sections(monkeypatch, _sections(new=cands))
+    monkeypatch.setattr(dd, "_toss_holding_price_map", lambda: {})
+    monkeypatch.setattr(dd, "_recent_toss_risk_sell_symbols", lambda *a, **k: {})
+    monkeypatch.setattr(dd, "_pending_toss_order_symbols", lambda *a, **k: {})
+    monkeypatch.setattr(dd, "toss_account_summary", lambda: {
+        "cash": {"krw": 2_000_000, "krw_native": 2_000_000, "usd": 0.0},
+        "holdings_count": 15,
+    })
+    _patch_positive_lifecycle_income(monkeypatch)
+    from core import toss_income_strategy as tis
+    positive = tis.compute_income_edge
+
+    def partial_first(candidate, **kwargs):
+        out = positive(candidate, **kwargs)
+        if candidate.get("symbol") == "100001.KS":
+            out["expected_pnl_krw"] = 999_999.0
+            out["decision_expected_pnl_krw"] = None
+            out.pop("decision_expected_pnl_scope")
+        return out
+
+    monkeypatch.setattr(tis, "compute_income_edge", partial_first)
+
+    result = dd.toss_buy_candidates_data(range_="today")
+    by_symbol = {item["symbol"]: item for item in result["items"]}
+
+    assert by_symbol["100001.KS"]["stock_agent_ready"] is False
+    assert by_symbol["100004.KS"]["stock_agent_ready"] is True
+    assert sum(item["stock_agent_ready"] is True for item in result["items"]) == 3
+    assert not any(
+        item.get("execution_status") == "portfolio_income_cap"
+        for item in result["items"]
+    )
 
 
 def test_toss_buy_candidates_blocks_new_buy_when_holdings_over_twenty(monkeypatch):
@@ -880,6 +1228,7 @@ def test_toss_buy_candidates_blocks_new_buy_when_holdings_over_twenty(monkeypatc
     monkeypatch.setattr(dd, "_toss_holding_price_map", lambda: {})
     monkeypatch.setattr(dd, "_recent_toss_risk_sell_symbols", lambda *a, **k: {})
     monkeypatch.setattr(dd, "_pending_toss_order_symbols", lambda *a, **k: {})
+    _patch_positive_lifecycle_income(monkeypatch)
     monkeypatch.setattr(dd, "toss_account_summary", lambda: {
         "cash": {"krw": 2_000_000, "krw_native": 2_000_000, "usd": 0.0},
         "holdings_count": 21,
@@ -906,6 +1255,7 @@ def test_toss_buy_candidates_exposes_rebalance_plan_when_over_twenty_holdings(mo
     monkeypatch.setattr(dd, "_toss_holding_price_map", lambda: {})
     monkeypatch.setattr(dd, "_recent_toss_risk_sell_symbols", lambda *a, **k: {})
     monkeypatch.setattr(dd, "_pending_toss_order_symbols", lambda *a, **k: {})
+    _patch_positive_lifecycle_income(monkeypatch)
     monkeypatch.setattr(dd, "toss_account_summary", lambda: {
         "cash": {"krw": 50_000, "krw_native": 50_000, "usd": 0.0},
         "holdings_count": 25,
@@ -1026,7 +1376,8 @@ class TestPendingSymbolLifecycle:
     def _pending(self, records, snapshot=None, verification=None):
         import core.dashboard_data as dd
         snap = snapshot if snapshot is not None else {
-            "ok": True, "status": "fresh", "broker_orders": []}
+            "ok": True, "status": "fresh", "usable_for_decisions": True,
+            "broker_orders": []}
         with patch("core.toss_live_pilot_ledger.list_live_pilot_records",
                    return_value=records), \
              patch("core.toss_readonly_snapshot.load_snapshot",
@@ -1049,7 +1400,8 @@ class TestPendingSymbolLifecycle:
             assert "DELL" in out, st
 
     def test_live_sent_with_matching_open_blocks(self):
-        snap = {"ok": True, "status": "fresh", "broker_orders": [
+        snap = {"ok": True, "status": "fresh", "usable_for_decisions": True,
+                "broker_orders": [
             {"symbol": "DELL", "side": "BUY", "broker_order_status": "OPEN"}]}
         out = self._pending([self._rec(status="live_sent")], snapshot=snap)
         assert "DELL" in out
@@ -1058,9 +1410,18 @@ class TestPendingSymbolLifecycle:
     def test_live_sent_terminal_or_absent_broker_allows(self):
         for orders in ([{"symbol": "DELL", "side": "BUY",
                          "broker_order_status": "FILLED"}], []):
-            snap = {"ok": True, "status": "fresh", "broker_orders": orders}
+            snap = {"ok": True, "status": "fresh",
+                    "usable_for_decisions": True, "broker_orders": orders}
             out = self._pending([self._rec(status="live_sent")], snapshot=snap)
             assert out == {}, orders
+
+    @pytest.mark.parametrize("usable", [False, "true", 1, None])
+    def test_live_sent_snapshot_requires_exact_usable_authority(self, usable):
+        snap = {"ok": True, "status": "fresh",
+                "usable_for_decisions": usable, "broker_orders": []}
+        out = self._pending([self._rec(status="live_sent")], snapshot=snap)
+        assert out is not None
+        assert "DELL" in out
 
     def test_broker_unavailable_fails_closed(self):
         for snap in ({"ok": False, "status": "expired"},
@@ -1075,7 +1436,8 @@ class TestPendingSymbolLifecycle:
             self._rec(status="live_sent", created_delta_min=-60,
                       pilot_id="tlive_x_0"),
         ]
-        snap = {"ok": True, "status": "fresh", "broker_orders": [
+        snap = {"ok": True, "status": "fresh", "usable_for_decisions": True,
+                "broker_orders": [
             {"symbol": "DELL", "side": "BUY", "broker_order_status": "OPEN"}]}
         out = self._pending(records, snapshot=snap)
         assert out == {}   # 최신 상태(terminal) 기준 — stale live_sent 무시
