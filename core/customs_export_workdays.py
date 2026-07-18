@@ -576,7 +576,10 @@ def parse_kcs_workday_release_html(
     source_uri_canonical, document_id = _canonical_source_uri(source_uri)
     detail_title, detail_release_date, detail_agency = _detail_header(raw_html)
     normalized_source_title = re.sub(r"\s+", " ", source_title).strip()
-    if detail_title != normalized_source_title:
+    if detail_title not in {
+        normalized_source_title,
+        f"{normalized_source_title} [잠정치]",
+    }:
         raise ValueError("customs_workday_detail_title_mismatch")
     if detail_agency != agency:
         raise ValueError("customs_workday_detail_agency_mismatch")
@@ -612,7 +615,7 @@ def parse_kcs_workday_release_html(
                 "method_version": METHOD_VERSION,
                 "source_document_id": document_id,
                 "source_uri": source_uri_canonical,
-                "source_title": source_title,
+                "source_title": detail_title,
                 "source_agency": detail_agency,
                 "detail_header_title": detail_title,
                 "detail_header_release_date_kst": detail_release_date.isoformat(),

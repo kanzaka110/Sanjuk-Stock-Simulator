@@ -70,6 +70,26 @@ def test_parse_day10_preserves_fixed_point_and_date_only_lineage():
     assert all(row["eligible_for_production_score"] is False for row in rows)
 
 
+def test_parse_accepts_official_provisional_detail_title_as_lineage():
+    from core.customs_export_workdays import parse_kcs_workday_release_html
+
+    detail_title = TITLE + " [잠정치]"
+    rows = parse_kcs_workday_release_html(
+        _official_html(title=detail_title),
+        source_uri=SOURCE_URI,
+        source_title=TITLE,
+        agency="관세청",
+        release_date=date(2024, 12, 11),
+        expected_year=2024,
+        expected_month=12,
+        expected_period_end_day=10,
+        first_seen_at_utc=FIRST_SEEN,
+    )
+
+    assert all(row["source_title"] == detail_title for row in rows)
+    assert all(row["detail_header_title"] == detail_title for row in rows)
+
+
 def test_parse_accepts_half_day_decimal_but_rejects_non_tenth_precision():
     from core.customs_export_workdays import parse_kcs_workday_release_html
 
