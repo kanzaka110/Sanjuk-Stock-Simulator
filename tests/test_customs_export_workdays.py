@@ -378,6 +378,54 @@ def test_fetch_day20_discovers_once_and_returns_complete_workday_vector():
     assert all(timeout == 3.5 for _, timeout in calls)
 
 
+@pytest.mark.parametrize(
+    ("detail_html", "expected_error_type"),
+    (
+        (_official_html(agency="한국거래소"), "detail_agency_mismatch"),
+        (
+            _official_html(published="2024.12.31"),
+            "detail_release_date_mismatch",
+        ),
+        (_official_html(workday_line="조업일수 정보 없음"), "line_missing"),
+    ),
+    ids=("agency", "release_date", "workday_line"),
+)
+def test_fetch_preserves_specific_detail_lineage_error_type(
+    detail_html, expected_error_type
+):
+    from core.customs_export_workdays import fetch_kcs_workday_observations
+
+    class Response:
+        status = 200
+        headers = {"Content-Type": "text/html; charset=UTF-8"}
+
+        def __init__(self, body):
+            self.body = body
+
+        def read(self, limit):
+            return self.body[:limit]
+
+        def close(self):
+            pass
+
+    def transport(request, *, timeout):
+        del timeout
+        if "pressReleaseList.do" in request.full_url:
+            return Response(_release_list_html(include_day20=False))
+        return Response(detail_html)
+
+    moments = iter((FIRST_SEEN, FIRST_SEEN.replace(second=2)))
+    result = fetch_kcs_workday_observations(
+        [{"period_year": 2024, "period_month": 12, "period_end_day": 10}],
+        transport=transport,
+        clock=lambda: next(moments),
+    )
+
+    assert result.status == "failed"
+    assert result.error_type == expected_error_type
+    assert result.rows == ()
+
+
 def test_fetch_scans_later_pages_before_selecting_exact_release():
     from urllib.parse import parse_qs, urlsplit
 

@@ -1627,6 +1627,73 @@ def test_collector_rejects_forged_detail_metadata_before_storage(tmp_path):
     ) is None
 
 
+def test_workday_feature_error_type_never_trusts_non_valueerror_text():
+    from core.customs_export_observation_collector import _workday_feature_error_type
+
+    exc = TypeError("customs_workday_title_variant_invalid")
+
+    assert _workday_feature_error_type(exc) == "lineage.invalid"
+
+
+def test_collector_preserves_specific_workday_feature_error_type(tmp_path):
+    from core.customs_export_observation_collector import (
+        collect_customs_export_observations,
+    )
+    from core.customs_export_workdays import WorkdayFetchResult
+
+    amount_received = COMPLETED
+    workday_started = amount_received + timedelta(seconds=1)
+    workday_completed = amount_received + timedelta(seconds=2)
+    batch_completed = amount_received + timedelta(seconds=3)
+    available = workday_completed.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    rows = [
+        _workday_payload(2025, 70, available_at=available),
+        _workday_payload(2026, 80, available_at=available),
+    ]
+    for row in rows:
+        row["source_title"] += " [잠정치]x"
+        row["detail_header_title"] = row["source_title"]
+    result = WorkdayFetchResult(
+        status="success",
+        error_type="none",
+        rows=tuple(rows),
+        started_at_utc=workday_started,
+        completed_at_utc=workday_completed,
+    )
+    store = SourceObservationStoreV2(tmp_path / "workday-specific-lineage.db")
+
+    summary = collect_customs_export_observations(
+        "202507",
+        "202607",
+        store=store,
+        run_id="customs-workday-specific-lineage",
+        fetcher=lambda *_args, **_kwargs: _result(
+            [
+                _period(year=2025, month=7, day=10, total=900, semiconductors=90),
+                _period(year=2026, month=7, day=10, total=1000, semiconductors=100),
+            ],
+        ),
+        workday_fetcher=lambda _periods: result,
+        clock=_clock(STARTED, amount_received, batch_completed),
+    )
+
+    assert summary["status"] == "partial"
+    assert summary["error_type"] == "workday.title_variant_invalid"
+    assert summary["workday_error_type"] == "title_variant_invalid"
+    assert summary["workday_rows_inserted"] == 0
+    assert summary["feature_rows_ready"] == 0
+    assert store.latest_as_of(
+        decision_at=batch_completed,
+        source="korea_customs",
+        dataset="ten_day_export_workdays",
+        symbol="KR_EXPORTS",
+        market="KR",
+    ) is None
+    run = store.latest_collection_run("korea_customs", "ten_day_export_workdays")
+    assert run is not None
+    assert run.error_type == "title_variant_invalid"
+
+
 def _collect_workday_revision(store, *, run_id, offset_hours, sha_char="a", current=80):
     from core.customs_export_observation_collector import (
         collect_customs_export_observations,

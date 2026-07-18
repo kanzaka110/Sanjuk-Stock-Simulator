@@ -22,6 +22,24 @@ MAX_RELEASE_SEARCH_PAGES = 20
 _SOURCE_HOST = "m.korea.kr"
 _SOURCE_PATH = "/briefing/pressReleaseView.do"
 _NEWS_ID_RE = re.compile(r"[0-9]{6,12}")
+_OBSERVABLE_PARSE_ERROR_CODES = frozenset(
+    {
+        "customs_workday_agency_invalid",
+        "customs_workday_count_invalid",
+        "customs_workday_count_precision_invalid",
+        "customs_workday_detail_agency_mismatch",
+        "customs_workday_detail_header_invalid",
+        "customs_workday_detail_release_date_mismatch",
+        "customs_workday_detail_title_mismatch",
+        "customs_workday_line_ambiguous",
+        "customs_workday_line_missing",
+        "customs_workday_period_invalid",
+        "customs_workday_release_date_invalid",
+        "customs_workday_source_uri_invalid",
+        "customs_workday_title_period_mismatch",
+        "customs_workday_year_pair_invalid",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -761,6 +779,8 @@ def _error_type(exc: Exception) -> str:
             return "incomplete"
         if code == "customs_workday_clock_regression":
             return "clock_regression"
+        if code in _OBSERVABLE_PARSE_ERROR_CODES:
+            return code.removeprefix("customs_workday_")
         return "malformed"
     return "internal"
 

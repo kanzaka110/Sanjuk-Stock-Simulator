@@ -384,6 +384,50 @@ def test_day10_uses_exact_kcs_reported_workdays_for_daily_yoy():
     assert "WORKDAY_LINEAGE_MISSING" not in feature["quality_flags"]
 
 
+def test_exact_provisional_workday_title_remains_valid_authoritative_lineage():
+    workdays = [
+        _workday(2025, 7, 10, 70, "wd-prior-10"),
+        _workday(2026, 7, 10, 80, "wd-current-10"),
+    ]
+    for row in workdays:
+        row["source_title"] += " [잠정치]"
+        row["detail_header_title"] = row["source_title"]
+
+    feature = _feature(
+        [
+            _row(2025, 7, 10, 1000, 100, "prior-10"),
+            _row(2026, 7, 10, 1200, 120, "current-10"),
+        ],
+        workdays=workdays,
+        decision_at=datetime(2026, 7, 16, tzinfo=timezone.utc),
+    )
+
+    assert feature["workday_adjusted_interval_yoy_pct"] == pytest.approx(5.0)
+    assert feature["workday_feature_ready"] is True
+    assert feature["feature_ready"] is True
+    assert feature["workday_quality"] == "kcs_reported"
+
+
+def test_provisional_title_near_miss_is_rejected_with_specific_code():
+    workdays = [
+        _workday(2025, 7, 10, 70, "wd-prior-10"),
+        _workday(2026, 7, 10, 80, "wd-current-10"),
+    ]
+    for row in workdays:
+        row["source_title"] += " [잠정치]x"
+        row["detail_header_title"] = row["source_title"]
+
+    with pytest.raises(ValueError, match="customs_workday_title_variant_invalid"):
+        _feature(
+            [
+                _row(2025, 7, 10, 1000, 100, "prior-10"),
+                _row(2026, 7, 10, 1200, 120, "current-10"),
+            ],
+            workdays=workdays,
+            decision_at=datetime(2026, 7, 16, tzinfo=timezone.utc),
+        )
+
+
 def test_day20_subtracts_cumulative_workdays_before_daily_yoy():
     feature = _feature(
         [

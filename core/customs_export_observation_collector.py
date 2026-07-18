@@ -36,6 +36,22 @@ _ALL_DATASETS = (
     FEATURE_DATASET,
 )
 _COLLECTION_MODES = frozenset({"scheduled_live", "research_backfill", "manual_replay"})
+_OBSERVABLE_WORKDAY_FEATURE_ERROR_CODES = frozenset(
+    {
+        "customs_workday_available_at_invalid",
+        "customs_workday_count_invalid",
+        "customs_workday_decision_at_invalid",
+        "customs_workday_future_snapshot",
+        "customs_workday_method_invalid",
+        "customs_workday_period_duplicate",
+        "customs_workday_period_invalid",
+        "customs_workday_row_invalid",
+        "customs_workday_snapshot_id_invalid",
+        "customs_workday_source_not_kcs",
+        "customs_workday_title_variant_invalid",
+        "customs_workdays_invalid",
+    }
+)
 _BASE64_ALPHABET = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 )
@@ -325,6 +341,13 @@ def _validate_result_timestamps(result: FetchResult, received_at: datetime) -> N
         )
     ):
         raise ValueError("timestamp.future")
+
+
+def _workday_feature_error_type(exc: Exception) -> str:
+    code = str(exc)
+    if isinstance(exc, ValueError) and code in _OBSERVABLE_WORKDAY_FEATURE_ERROR_CODES:
+        return code.removeprefix("customs_workday_")
+    return "lineage.invalid"
 
 
 def _validate_workday_fetch_result(
@@ -1038,9 +1061,9 @@ def collect_customs_export_observations(
                     workdays=validation_workdays,
                     decision_at_utc=completed_at,
                 )
-            except (TypeError, ValueError, KeyError):
+            except (TypeError, ValueError, KeyError) as exc:
                 workday_status = "failed"
-                workday_error_type = "lineage.invalid"
+                workday_error_type = _workday_feature_error_type(exc)
                 workday_rows = []
 
     def write(conn):

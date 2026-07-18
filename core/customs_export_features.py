@@ -64,6 +64,9 @@ def _parse_utc(value: Any) -> datetime:
 def _workday_title_year(title: Any, *, month: int, day: int) -> int:
     if type(title) is not str or len(title.encode("utf-8")) > 512:
         raise ValueError("customs_workday_lineage_invalid")
+    normalized_title = (
+        title.removesuffix(" [잠정치]") if title.endswith(" [잠정치]") else title
+    )
     year_token = r"(?:(?P<long>20[0-9]{2})|[’']?(?P<short>[0-9]{2}))"
     if day in {10, 20}:
         suffix = (
@@ -72,8 +75,10 @@ def _workday_title_year(title: Any, *, month: int, day: int) -> int:
         )
     else:
         suffix = rf"\s*년\s*{month}\s*월\s*수출입\s*현황"
-    match = re.fullmatch(year_token + suffix, title)
+    match = re.fullmatch(year_token + suffix, normalized_title)
     if match is None:
+        if "[잠정치]" in title:
+            raise ValueError("customs_workday_title_variant_invalid")
         raise ValueError("customs_workday_lineage_invalid")
     year = int(match.group("long") or match.group("short"))
     if match.group("long") is None:
