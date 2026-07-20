@@ -45,6 +45,15 @@ GMAIL_USER: str = os.environ.get("GMAIL_USER", "")  # 발송 계정 (예: kanzak
 GMAIL_APP_PASSWORD: str = os.environ.get("GMAIL_APP_PASSWORD", "")  # 16자 앱 비밀번호
 GMAIL_TO: str = os.environ.get("GMAIL_TO", "")  # 수신자 (미설정 시 GMAIL_USER로)
 
+# 주식 정규 브리핑은 archive → Hermes 최종검수 → Hermes Telegram 주제로 전달한다.
+# 음성/통화 메일 파이프라인과는 별도 설정이다.
+BRIEFING_EMAIL_ENABLED: bool = os.environ.get(
+    "STOCK_BRIEFING_EMAIL_ENABLED", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
+BRIEFING_RAW_TELEGRAM_ENABLED: bool = os.environ.get(
+    "STOCK_BRIEFING_RAW_TELEGRAM_ENABLED", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
+
 # ─── 포트폴리오 ─────────────────────────────────────
 PORTFOLIO: dict[str, str] = {
     "005930.KS": "삼성전자",

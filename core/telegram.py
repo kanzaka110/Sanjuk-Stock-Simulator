@@ -14,6 +14,7 @@ from datetime import datetime
 import requests
 
 from config.settings import (
+    BRIEFING_RAW_TELEGRAM_ENABLED,
     KST,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
@@ -279,6 +280,9 @@ def send_briefing_telegram(
     Returns:
         성공 여부
     """
+    if not BRIEFING_RAW_TELEGRAM_ENABLED:
+        log.info("주식 브리핑 raw Telegram 비활성 — Hermes 최종검수 전달 대기")
+        return False
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         log.warning("텔레그램 설정 없음 — 건너뜀")
         return False

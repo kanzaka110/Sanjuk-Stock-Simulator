@@ -13,7 +13,13 @@ import smtplib
 from datetime import datetime
 from email.message import EmailMessage
 
-from config.settings import GMAIL_APP_PASSWORD, GMAIL_TO, GMAIL_USER, KST
+from config.settings import (
+    BRIEFING_EMAIL_ENABLED,
+    GMAIL_APP_PASSWORD,
+    GMAIL_TO,
+    GMAIL_USER,
+    KST,
+)
 from core.models import BriefingResult
 
 log = logging.getLogger(__name__)
@@ -571,10 +577,6 @@ def send_briefing_email(
     briefing_type: str = "MANUAL",
 ) -> bool:
     """브리핑 결과를 Gmail로 HTML 메일 전송 (텍스트 fallback 포함)."""
-    if not GMAIL_USER or not GMAIL_APP_PASSWORD:
-        log.warning("Gmail 설정 없음 — 메일 건너뜀")
-        return False
-
     from core.notion import LABEL_MAP
     from core.telegram import _build_briefing_message
 
@@ -594,9 +596,16 @@ def send_briefing_email(
         save_briefing_archive(
             briefing_type=briefing_type, title=title, subject=subject,
             body_text=body_text, body_html=body_html,
-            raw_json=raw, channel="email",
+            raw_json=raw, channel="hermes_review",
         )
     except Exception as e:
         log.warning("briefing archive hook failed: %s", e)
+
+    if not BRIEFING_EMAIL_ENABLED:
+        log.info("주식 브리핑 Gmail 전송 비활성 — Hermes 최종검수 archive만 저장")
+        return False
+    if not GMAIL_USER or not GMAIL_APP_PASSWORD:
+        log.warning("Gmail 설정 없음 — 메일 건너뜀")
+        return False
 
     return send_email(subject, body_text, body_html=body_html)
