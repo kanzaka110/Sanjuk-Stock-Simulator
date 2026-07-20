@@ -17,6 +17,7 @@ read-only — 주문/POST/PUT/DELETE/실매매 경로 없음.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 
@@ -59,6 +60,13 @@ class NewCandidate:
     risk_flags: tuple[str, ...] = ()
     suggested_accounts: tuple[str, ...] = ()
     tags: tuple[str, ...] = ()
+    # Fast-universe quality inputs are separate from the display/ranking score.
+    # Only observed quote/chart fields belong here; synthetic neutral defaults
+    # must never become BUY authority.
+    quality_inputs: dict = field(default_factory=dict)
+    quality_input_provenance: dict = field(default_factory=dict)
+    quality_data_starved: bool = False
+    quality_data_starvation_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -286,7 +294,12 @@ def _gate(c: dict) -> str:
     market = _market_of(c.get("ticker", ""), c.get("market", ""))
     value = float(c.get("volume_value") or 0)
     min_value = _MIN_KR_VALUE_KRW if market == "KR" else _MIN_US_MCAP
-    if value < min_value:
+    fast_quality = c.get("quality_inputs") if type(c.get("quality_inputs")) is dict else None
+    # Fast fallback may not expose volume/market-cap. Keep it visible for an
+    # explicit downstream quality-data block; never forge the minimum value.
+    if value < min_value and not (
+        fast_quality is not None and "volume_value" not in fast_quality
+    ):
         return "거래대금/유동성 부족"
 
     change = float(c.get("change_pct") or 0)
@@ -416,6 +429,12 @@ def build_new_discovery(
             risk_flags=tuple(risk_flags),
             suggested_accounts=_suggested_accounts(c, price),
             tags=tuple(c.get("tags") or ()),
+            quality_inputs=dict(c.get("quality_inputs") or {}),
+            quality_input_provenance=dict(c.get("quality_input_provenance") or {}),
+            quality_data_starved=c.get("quality_data_starved") is True,
+            quality_data_starvation_reason=str(
+                c.get("quality_data_starvation_reason") or ""
+            ),
         ))
 
     passed.sort(key=lambda x: x.score, reverse=True)
@@ -484,6 +503,101 @@ def _vol_surge(vols: list[int], lookback: int = 20) -> float:
     return round(recent / avg, 2)
 
 
+_FAST_QUALITY_MAX_AGE_SEC = 300.0
+_FAST_QUALITY_FUTURE_SKEW_SEC = 30.0
+_FAST_QUALITY_FIELDS = (
+    "price", "change_pct", "high_price", "low_price", "volume_value",
+    "ret_20d", "ret_60d", "rsi", "vol_surge", "pct_from_52w_high",
+)
+
+
+def _strict_quality_number(value) -> float | None:
+    if type(value) not in (int, float):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _attach_fast_quality_inputs(candidate: dict) -> dict:
+    """Bind observed fast-quote fields to source/time and classify starvation.
+
+    The fallback must not manufacture neutral RSI/volume/market-cap values.  A
+    field can affect quality only when its actual numeric observation and
+    value-level source/fetch timestamp are both present.
+    """
+    out = dict(candidate)
+    raw_source = out.get("quote_source") or out.get("source")
+    source = raw_source.strip().lower() if type(raw_source) is str else ""
+    as_of = _strict_quality_number(out.get("quote_as_of"))
+    now_ts = datetime.now(timezone.utc).timestamp()
+    fresh = bool(
+        source
+        and as_of is not None
+        and as_of > 0
+        and -_FAST_QUALITY_FUTURE_SKEW_SEC <= now_ts - as_of <= _FAST_QUALITY_MAX_AGE_SEC
+    )
+
+    inputs: dict[str, float] = {}
+    provenance: dict[str, dict] = {}
+    for field_name in _FAST_QUALITY_FIELDS:
+        if field_name not in out:
+            continue
+        value = _strict_quality_number(out.get(field_name))
+        if value is None:
+            continue
+        inputs[field_name] = value
+        provenance[field_name] = {
+            "source": source or "missing",
+            "as_of": as_of if as_of is not None and as_of > 0 else None,
+            "fresh": fresh,
+        }
+
+    price = inputs.get("price")
+    high = inputs.get("high_price")
+    low = inputs.get("low_price")
+    groups: list[str] = []
+    if fresh and "change_pct" in inputs:
+        groups.append("quote_change")
+    if (
+        fresh
+        and price is not None and price > 0
+        and high is not None and low is not None
+        and high >= price >= low > 0 and high > low
+    ):
+        groups.append("intraday_range")
+    if fresh and inputs.get("volume_value", 0.0) > 0:
+        groups.append("liquidity")
+    if fresh and any(
+        name in inputs
+        for name in ("ret_20d", "ret_60d", "rsi", "vol_surge", "pct_from_52w_high")
+    ):
+        groups.append("indicator")
+
+    missing_groups = [
+        group for group in ("quote_change", "intraday_range", "liquidity", "indicator")
+        if group not in groups
+    ]
+    if not source or as_of is None or as_of <= 0:
+        starvation_reason = "quality_provenance_missing"
+    elif not fresh:
+        starvation_reason = "quality_provenance_stale"
+    elif len(groups) < 2:
+        starvation_reason = "quality_evidence_insufficient"
+    else:
+        starvation_reason = ""
+
+    out["quality_inputs"] = inputs
+    out["quality_input_provenance"] = provenance
+    out["quality_evidence_groups"] = groups
+    out["quality_missing_groups"] = missing_groups
+    out["quality_data_starved"] = bool(starvation_reason)
+    out["quality_data_starvation_reason"] = starvation_reason
+    return out
+
+
 def _light_quote_kr(ticker: str) -> dict | None:
     """KIS 일봉(requests-only)으로 KR 종목 시세+모멘텀. pandas 불필요."""
     from core.market_kis import get_domestic_chart, get_domestic_price
@@ -498,34 +612,57 @@ def _light_quote_kr(ticker: str) -> dict | None:
                 closes.append(c)
                 vols.append(int(p.get("volume") or 0))
 
+    quote_source = ""
+    quote_as_of = 0.0
+    high_price = 0.0
+    low_price = 0.0
     if closes:
         price = closes[-1]
         change_pct = float(chart.get("day_pct") or 0.0)
+        quote_source = str(chart.get("source") or "").lower()
+        quote_as_of = datetime.now(timezone.utc).timestamp()
+        last_point = chart["points"][-1]
+        high_price = float(last_point.get("high") or 0.0)
+        low_price = float(last_point.get("low") or 0.0)
     else:
         q = get_domestic_price(ticker)
         if q is None:
             return None
         price = float(q.price)
         change_pct = float(q.pct)
+        high_price = float(q.high)
+        low_price = float(q.low)
+        quote_source = str(q.source or "").lower()
+        quote_as_of = float(q.as_of or 0.0)
     if price <= 0:
         return None
 
-    turnover = _avg_turnover(closes, vols)
-    return {
+    out = {
         "ticker": ticker, "name": _name_for(ticker), "market": "KR",
         "price": price, "change_pct": change_pct,
-        "ret_20d": _ret_pct(closes, 20), "ret_60d": _ret_pct(closes, 60),
-        "rsi": _rsi_from_closes(closes), "vol_surge": _vol_surge(vols),
-        "pct_from_52w_high": _pct_from_high(closes),
-        # 거래대금 미산출 시 curated 유니버스이므로 최소 기준값으로 보정
-        "volume_value": turnover if turnover > 0 else _MIN_KR_VALUE_KRW,
-        "source": "유니버스(fallback)", "tags": ("유니버스",),
+        "high_price": high_price, "low_price": low_price,
+        "source": "유니버스(fallback)", "quote_source": quote_source,
+        "quote_as_of": quote_as_of, "tags": ("유니버스",),
         "has_catalyst": False,
     }
+    turnover = _avg_turnover(closes, vols)
+    if turnover > 0:
+        out["volume_value"] = turnover
+    if len(closes) > 20:
+        out["ret_20d"] = _ret_pct(closes, 20)
+    if len(closes) > 60:
+        out["ret_60d"] = _ret_pct(closes, 60)
+    if len(closes) > 14:
+        out["rsi"] = _rsi_from_closes(closes)
+    if len(vols) >= 5:
+        out["vol_surge"] = _vol_surge(vols)
+    if closes:
+        out["pct_from_52w_high"] = _pct_from_high(closes)
+    return out
 
 
 def _light_quote_us(ticker: str) -> dict | None:
-    """KIS 해외 현재가(requests-only)로 US 종목. 모멘텀은 중립(차트 미수집)."""
+    """KIS 해외 현재가로 observed quote fields만 반환한다."""
     from core.market_kis import get_overseas_price
 
     q = get_overseas_price(ticker)
@@ -534,14 +671,28 @@ def _light_quote_us(ticker: str) -> dict | None:
     price = float(q.price)
     if price <= 0:
         return None
-    return {
+    out = {
         "ticker": ticker, "name": _name_for(ticker), "market": "US",
         "price": price, "change_pct": float(q.pct),
-        "ret_20d": 0.0, "ret_60d": 0.0, "rsi": 50.0, "vol_surge": 1.0,
-        "pct_from_52w_high": 0.0, "volume_value": _MIN_US_MCAP,
-        "source": "유니버스(fallback)", "tags": ("유니버스",),
-        "has_catalyst": False,
+        "high_price": float(q.high), "low_price": float(q.low),
+        "source": "유니버스(fallback)",
+        "quote_source": str(q.source or "").lower(),
+        "quote_as_of": float(q.as_of or 0.0),
+        "tags": ("유니버스",), "has_catalyst": False,
     }
+    previous_close = price - float(q.change or 0.0)
+    turnover = (
+        previous_close * float(q.previous_volume)
+        if previous_close > 0 and float(q.previous_volume or 0.0) > 0
+        else 0.0
+    )
+    if turnover <= 0:
+        turnover = float(q.turnover or 0.0)
+    if turnover <= 0 and float(q.volume or 0.0) > 0:
+        turnover = price * float(q.volume)
+    if turnover > 0:
+        out["volume_value"] = turnover
+    return out
 
 
 def _light_quote(ticker: str, market: str) -> dict | None:
@@ -608,7 +759,7 @@ def _fallback_universe_candidates(markets: list[str]) -> list[dict]:
         if q is None:
             return idx, None
         q.setdefault("name", name)
-        return idx, q
+        return idx, _attach_fast_quality_inputs(q)
 
     out_by_idx: dict[int, dict] = {}
     max_workers = min(12, max(1, len(entries)))
@@ -915,6 +1066,8 @@ def toss_eligible_new_candidates(
         over_limit = est > max_order_krw
         blocking_flags = _blocking_risk_flags(c.risk_flags)
         observation_flags = _soft_observation_flags(c.risk_flags)
+        if c.quality_data_starved and "quality_data_starvation" not in blocking_flags:
+            blocking_flags.append("quality_data_starvation")
         item = {
             "symbol": c.ticker, "name": c.name, "side": "buy", "quantity": 1,
             "price": c.price,
@@ -940,6 +1093,16 @@ def toss_eligible_new_candidates(
             "executable_now": not over_limit and not blocking_flags,
             "limit_exceeded": over_limit,
         }
+        if c.quality_input_provenance or c.quality_data_starved:
+            item.update({
+                "quality_inputs": dict(c.quality_inputs),
+                "quality_input_provenance": dict(c.quality_input_provenance),
+                "quality_data_starved": c.quality_data_starved,
+                "quality_data_starvation_reason": c.quality_data_starvation_reason,
+                "quality_score_authority": "quality_breakdown.score_total",
+            })
+        if c.quality_data_starved:
+            item["upstream_input_validation_error"] = "quality_data_starvation"
         if blocking_flags:
             item["execution_status"] = "hold_risk_flags"
             item["block_reason"] = " / ".join(blocking_flags + observation_flags)

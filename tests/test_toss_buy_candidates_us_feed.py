@@ -137,3 +137,91 @@ def test_us_candidate_sizing_uses_usd_price_not_krw_budget_divided_by_usd_price(
     assert item["estimated_amount_usd"] == 190.0
     assert item["estimated_amount_krw"] == 285_000.0
     assert item["quantity_source"] in {"provided_usd", "provided"}
+
+
+def test_fast_us_quote_quality_provenance_is_differentiated_and_starvation_fails_closed(
+    monkeypatch,
+):
+    """Actual fast quote -> discovery -> quality proof -> income/dashboard tracer bullet."""
+    import time
+    from core import dashboard_data as dd
+    from core import discovery_candidates as disc
+    from core import toss_quality_gate as qg
+    from core.models import Quote
+
+    now = time.time()
+    quotes = {
+        "EVID": Quote(
+            ticker="EVID", name="근거후보", price=100.0, change=4.0, pct=4.0,
+            high=102.0, low=94.0, source="kis", as_of=now,
+            volume=30_000_000.0, turnover=1.0,
+            previous_volume=30_000_000.0,
+        ),
+        "STARV": Quote(
+            ticker="STARV", name="근거부족", price=100.0, change=0.0, pct=0.0,
+            high=0.0, low=0.0, source="", as_of=0.0,
+        ),
+    }
+
+    monkeypatch.setattr(
+        disc,
+        "_universe_for",
+        lambda markets: {"EVID": ("US", "근거후보"), "STARV": ("US", "근거부족")},
+    )
+    monkeypatch.setattr(
+        "core.market_kis.get_overseas_price",
+        lambda ticker: quotes[ticker],
+    )
+    monkeypatch.setattr(disc, "_known_sets", lambda: (set(), set(), set(), set()))
+    monkeypatch.setattr(disc, "recent_recommended_tickers", lambda *a, **k: set())
+    monkeypatch.setattr(dd, "_cache", {}, raising=False)
+    monkeypatch.setattr(dd, "_cached", lambda _key, _ttl, fn: fn())
+    monkeypatch.setattr(dd, "_dashboard_toss_broker_reads_isolated", lambda: False)
+    monkeypatch.setattr(dd, "toss_account_summary", lambda: {
+        "snapshot_status": "fresh",
+        "snapshot_usable_for_decisions": True,
+        "cash": {
+            "krw": 10_000_000,
+            "krw_native": 10_000_000,
+            "usd": 10_000.0,
+        },
+        "holdings_count": 0,
+    })
+    monkeypatch.setattr(dd, "_toss_holding_price_map", lambda: {})
+    monkeypatch.setattr(dd, "_recent_toss_risk_sell_symbols", lambda *a, **k: {})
+    monkeypatch.setattr(dd, "_pending_toss_order_symbols", lambda *a, **k: {})
+    monkeypatch.setattr(
+        "core.toss_live_pilot_policy.compute_toss_live_pilot_policy",
+        lambda: {"max_order_krw": 500_000},
+    )
+    monkeypatch.setattr(
+        "core.toss_client.get_exchange_rate",
+        lambda *a, **k: {"rate": 1_500.0},
+    )
+    monkeypatch.setattr("core.regime.detect_regime", lambda *a, **k: None)
+    monkeypatch.setattr("core.memory.get_accuracy_summary", lambda: {})
+    monkeypatch.setattr("core.ai_berkshire_toss.load_ai_berkshire_scores", lambda: {})
+    monkeypatch.setattr(
+        qg,
+        "_outcomes_conn",
+        lambda: (_ for _ in ()).throw(AssertionError("GET opened quality DB")),
+    )
+
+    data = dd.toss_buy_candidates_data(market="US", limit=5)
+    by_symbol = {item["symbol"]: item for item in data["items"]}
+
+    assert set(by_symbol) == {"EVID", "STARV"}
+    evid = by_symbol["EVID"]
+    assert evid["quality_input_provenance"]["change_pct"]["source"] == "kis"
+    assert evid["quality_input_provenance"]["volume_value"]["source"] == "kis"
+    assert evid["quality_inputs"]["volume_value"] == 2_880_000_000.0
+    assert evid["quality_score_authority"] == "quality_breakdown.score_total"
+    assert evid["quality_finalized"] is True
+    from core.toss_income_strategy import estimate_win_prob
+    assert evid["income_strategy"]["win_prob"] == estimate_win_prob(evid)
+    assert evid["quality_score"] != by_symbol["STARV"]["quality_score"]
+    assert by_symbol["STARV"]["quality_data_starved"] is True
+    assert by_symbol["STARV"]["decision_bucket"] == "BLOCK"
+    assert by_symbol["STARV"]["stock_agent_ready"] is False
+    assert by_symbol["STARV"]["income_strategy"]["income_pass"] is False
+    assert by_symbol["STARV"]["income_strategy"]["income_block_reason"] == "quality_data_starvation"

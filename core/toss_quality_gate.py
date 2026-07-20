@@ -261,11 +261,58 @@ def suggest_weight_calibration(min_outcomes: int = 30) -> dict:
 def _score_momentum(candidate: dict) -> float:
     """기술 지표 모멘텀 점수 (0-25).
 
-    대시보드 GET 경로에서는 신규 발굴 스캐너가 이미 계산한 candidate.score를
-    우선 사용한다. 종목별 calculate_indicators()는 yfinance/pykrx 조회가 섞여
-    /api/toss/buy-candidates를 45초 이상 막을 수 있으므로 score가 없을 때만
-    보조 경로로 호출한다.
+    Fast-universe candidates use only provenance-bound quote/indicator inputs.
+    Other producers retain the legacy discovery-score compatibility path.
     """
+    if "quality_inputs" in candidate:
+        inputs = candidate.get("quality_inputs")
+        provenance = candidate.get("quality_input_provenance")
+        if type(inputs) is not dict or type(provenance) is not dict:
+            return 0.0
+
+        def observed(name: str) -> float | None:
+            if name not in inputs:
+                return None
+            row = provenance.get(name)
+            value = _finite_number(inputs.get(name))
+            if (
+                value is None
+                or type(row) is not dict
+                or type(row.get("source")) is not str
+                or not row["source"].strip()
+                or row["source"] == "missing"
+                or row.get("fresh") is not True
+                or _finite_number(row.get("as_of")) is None
+            ):
+                return None
+            return float(value)
+
+        score = 0.0
+        change = observed("change_pct")
+        if change is not None and change > 0:
+            score += min(10.0, change * 2.0)
+
+        price = observed("price")
+        high = observed("high_price")
+        low = observed("low_price")
+        if (
+            price is not None and high is not None and low is not None
+            and high >= price >= low > 0 and high > low
+        ):
+            range_position = (price - low) / (high - low)
+            score += min(10.0, max(0.0, (range_position - 0.5) * 20.0))
+
+        ret_20d = observed("ret_20d")
+        if ret_20d is not None and ret_20d > 0:
+            score += min(5.0, ret_20d / 2.0)
+        vol_surge = observed("vol_surge")
+        if vol_surge is not None and vol_surge > 1.0:
+            score += min(5.0, (vol_surge - 1.0) * 5.0)
+        rsi = observed("rsi")
+        if rsi is not None and 45.0 <= rsi <= 70.0:
+            score += 5.0
+        return min(25.0, max(0.0, score))
+
     score = candidate.get("score", 0)
     try:
         score_f = float(score or 0)
@@ -295,12 +342,16 @@ def _score_liquidity(candidate: dict) -> float:
         base = 2_000_000_000  # $2B
     volume_value = float(candidate.get("volume_value", 0) or 0)
     if volume_value <= 0:
-        # volume_value 없으면 price * volume 추정
+        # A provenance-aware fast quote with no volume has no liquidity proof.
+        # Do not restore the old synthetic minimum score.
+        if "quality_inputs" in candidate:
+            return 0.0
+        # Legacy producers may expose raw price × volume instead.
         price = float(candidate.get("price", 0) or 0)
         volume = float(candidate.get("volume", 0) or 0)
         volume_value = price * volume
     if volume_value <= 0:
-        return 5.0  # 데이터 없으면 최소 점수
+        return 5.0  # legacy producer compatibility only
     return min(25.0, volume_value / base * 12.5)
 
 
@@ -681,8 +732,22 @@ def score_candidates_batch(
                 expensive_checks=expensive_checks,
                 fetch_budget=fetch_budget,
             )
-            item["quality_score"] = qs.score_total
-            item["quality_breakdown"] = qs.to_dict()
+            breakdown = qs.to_dict()
+            authority = item.get("quality_score_authority")
+            if authority is not None:
+                if authority != "quality_breakdown.score_total":
+                    raise ValueError("quality_score_authority_invalid")
+                breakdown["quality_score_authority"] = authority
+                proof_hash = _score_breakdown_hash(
+                    breakdown,
+                    schema_version=QUALITY_SCORE_SCHEMA_VERSION,
+                    weight_hash=str(breakdown.get("weight_profile_hash") or ""),
+                )
+                if not proof_hash:
+                    raise ValueError("quality_score_authority_proof_failed")
+                breakdown["score_breakdown_sha256"] = proof_hash
+            item["quality_breakdown"] = breakdown
+            item["quality_score"] = breakdown["score_total"]
             item["decision_bucket"] = qs.decision_bucket
             item["decision_reason"] = qs.decision_reason
             # scorer proof는 qs.to_dict()에 이미 포함된다. 여기서는 실행 대상
@@ -1336,6 +1401,11 @@ def _score_breakdown_hash(
     if decision_context is None:
         return None
     payload["decision_context"] = decision_context
+    authority = _source_value(source, "quality_score_authority")
+    if authority is not None:
+        if authority != "quality_breakdown.score_total":
+            return None
+        payload["quality_score_authority"] = authority
     canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -1383,8 +1453,32 @@ def candidate_snapshot_hash(candidate) -> str | None:
             if value is None or float(value) <= 0:
                 return None
             snap[field] = round(float(value), 6)
+    if "quality_score_authority" in candidate:
+        authority = candidate.get("quality_score_authority")
+        if type(authority) is not str or authority != "quality_breakdown.score_total":
+            return None
+        snap["quality_score_authority"] = authority
     payload = json.dumps(snap, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def has_canonical_quality_authority(candidate: object) -> bool:
+    """Detect an explicit authority marker, including post-finalization removal."""
+    if type(candidate) is not dict:
+        return False
+    if "quality_score_authority" in candidate:
+        return True
+    breakdown = candidate.get("quality_breakdown")
+    if type(breakdown) is not dict:
+        return False
+    if breakdown.get("quality_score_authority") == "quality_breakdown.score_total":
+        return True
+    stored_snapshot = breakdown.get("candidate_snapshot_sha256")
+    if type(stored_snapshot) is not str or not stored_snapshot:
+        return False
+    hypothetical = dict(candidate)
+    hypothetical["quality_score_authority"] = "quality_breakdown.score_total"
+    return candidate_snapshot_hash(hypothetical) == stored_snapshot
 
 
 def _strict_candidate_number(value: object) -> float | None:
@@ -1398,6 +1492,60 @@ def _strict_candidate_number(value: object) -> float | None:
     except OverflowError:
         return None
     return number if math.isfinite(number) else None
+
+
+def canonical_quality_score(
+    candidate: object,
+    *,
+    require_finalized: bool = True,
+    require_snapshot: bool = True,
+) -> tuple[float | None, str]:
+    """Resolve the one execution-authoritative score from a scorer proof.
+
+    Discovery ``score`` remains display/ranking input.  Once any quality proof is
+    present, only ``quality_breakdown.score_total`` may drive execution, and it
+    must agree with the typed mirror ``quality_score`` plus current proof,
+    identity, decision context, bucket, weights, and (for consumption) snapshot.
+    """
+    if type(candidate) is not dict or any(type(key) is not str for key in candidate):
+        return None, "candidate_quality_contract_invalid"
+    if candidate.get("quality_score_authority") != "quality_breakdown.score_total":
+        return None, "candidate_quality_authority_invalid"
+    if require_finalized and candidate.get("quality_finalized") is not True:
+        return None, "candidate_quality_not_finalized"
+    breakdown = candidate.get("quality_breakdown")
+    if type(breakdown) is not dict or any(type(key) is not str for key in breakdown):
+        return None, "candidate_quality_proof_invalid"
+    if breakdown.get("quality_score_authority") != candidate["quality_score_authority"]:
+        return None, "candidate_quality_authority_invalid"
+    if (
+        not _score_proof_valid(breakdown, require_current_weights=True)
+        or not _score_identity_matches(candidate, breakdown)
+        or not _score_decision_context_matches(candidate, breakdown)
+        or breakdown.get("decision_bucket") != candidate.get("decision_bucket")
+        or not _stored_bucket_replay_matches(breakdown)
+    ):
+        return None, "candidate_quality_proof_invalid"
+
+    quality_score = _strict_candidate_number(candidate.get("quality_score"))
+    proof_score = _strict_candidate_number(breakdown.get("score_total"))
+    recomputed = _recompute_score_total(breakdown)
+    if (
+        quality_score is None
+        or proof_score is None
+        or recomputed is None
+        or not 0.0 <= quality_score <= 100.0
+        or quality_score != proof_score
+        or round(float(recomputed), 1) != proof_score
+    ):
+        return None, "candidate_quality_score_invalid"
+
+    if require_snapshot:
+        snapshot = candidate_snapshot_hash(candidate)
+        proof_snapshot = breakdown.get("candidate_snapshot_sha256")
+        if type(proof_snapshot) is not str or not snapshot or proof_snapshot != snapshot:
+            return None, "candidate_quality_snapshot_invalid"
+    return proof_score, "quality_breakdown.score_total"
 
 
 def validate_ready_candidate_contract(candidate: object) -> tuple[bool, str]:
@@ -1559,6 +1707,19 @@ def finalize_quality_proof(candidate: dict) -> bool:
         breakdown.pop("candidate_snapshot_sha256", None)
         return False
     if not _score_decision_context_matches(candidate, breakdown):
+        breakdown.pop("candidate_snapshot_sha256", None)
+        return False
+    quality_score = _strict_candidate_number(candidate.get("quality_score"))
+    proof_score = _strict_candidate_number(breakdown.get("score_total"))
+    recomputed_score = _recompute_score_total(breakdown)
+    if (
+        quality_score is None
+        or proof_score is None
+        or recomputed_score is None
+        or not 0.0 <= quality_score <= 100.0
+        or quality_score != proof_score
+        or round(float(recomputed_score), 1) != proof_score
+    ):
         breakdown.pop("candidate_snapshot_sha256", None)
         return False
     rr = _recompute_rr_ratio(

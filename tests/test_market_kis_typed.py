@@ -18,6 +18,37 @@ def _utc(hour: int = 1) -> datetime:
     return datetime(2026, 7, 15, hour, 2, 3, tzinfo=timezone.utc)
 
 
+def test_overseas_quote_preserves_official_volume_and_turnover(monkeypatch) -> None:
+    from core import market_kis
+
+    class _Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "rt_cd": "0",
+                "output": {
+                    "last": "190.00", "base": "185.00",
+                    "high": "192.00", "low": "184.00",
+                    "pvol": "9876543", "tvol": "12345678",
+                    "tamt": "2345678901.25",
+                },
+            }
+
+    monkeypatch.setattr(market_kis.requests, "get", lambda *a, **k: _Response())
+    monkeypatch.setattr(market_kis.time, "time", lambda: 1_752_541_323.0)
+
+    quote = market_kis._fetch_overseas_quote("NVDA", "NAS", "token")
+
+    assert quote is not None
+    assert quote.volume == 12_345_678.0
+    assert quote.turnover == 2_345_678_901.25
+    assert quote.previous_volume == 9_876_543.0
+    assert quote.source == "kis"
+    assert quote.as_of == 1_752_541_323.0
+
+
 def _orderbook_payload(*, depth: int = 100) -> dict:
     output1: dict[str, str] = {
         "aspr_acpt_hour": "101530",

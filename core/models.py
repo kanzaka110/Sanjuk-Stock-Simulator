@@ -21,6 +21,9 @@ class Quote:
     low: float = 0.0
     source: str = ""  # 시세 출처 (kis / afterhours / yf_fast / yf_daily ...)
     as_of: float = 0.0  # 조회 시각 (epoch seconds)
+    volume: float = 0.0  # 누적 거래량 (원본 provider 단위)
+    turnover: float = 0.0  # 누적 거래대금 (해당 시장 통화 기준)
+    previous_volume: float = 0.0  # 전일 거래량 (장중 누적 편향 없는 유동성 기준)
 
 
 @dataclass(frozen=True)

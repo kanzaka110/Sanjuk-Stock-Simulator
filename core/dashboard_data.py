@@ -4748,7 +4748,8 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
                 out["decision_bucket"] = "BLOCK"
                 out["decision_reason"] = "quality_finalization_failed"
                 out["executable_now"] = False
-                out["execution_status"] = "quality_finalization_failed"
+                if not buy_limit_above_current:
+                    out["execution_status"] = "quality_finalization_failed"
                 if not out.get("block_reason"):
                     out["block_reason"] = "최종 품질 증명 생성 실패"
 

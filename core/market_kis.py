@@ -666,6 +666,9 @@ def _fetch_overseas_quote(
         prev_close = float(output.get("base", 0))  # 전일 종가
         high = float(output.get("high", 0))  # 최고가
         low = float(output.get("low", 0))  # 최저가
+        volume = float(output.get("tvol", 0) or 0)  # 누적 거래량
+        turnover = float(output.get("tamt", 0) or 0)  # 누적 거래대금
+        previous_volume = float(output.get("pvol", 0) or 0)  # 전일 거래량
 
         if price <= 0:
             return None
@@ -685,6 +688,9 @@ def _fetch_overseas_quote(
             low=round(low, 2),
             source="kis",
             as_of=time.time(),
+            volume=volume,
+            turnover=turnover,
+            previous_volume=previous_volume,
         )
 
     except requests.RequestException:

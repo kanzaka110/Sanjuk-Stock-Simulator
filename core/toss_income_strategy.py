@@ -40,7 +40,8 @@ _EXECUTION_INPUT_ERRORS = frozenset({
     "stop_loss_invalid", "risk_reward_invalid", "score_invalid",
     "estimated_notional_invalid", "fx_usdkrw_invalid", "side_invalid",
     "market_invalid", "symbol_market_mismatch", "currency_invalid",
-    "canonical_notional_invalid",
+    "canonical_notional_invalid", "quality_data_starvation",
+    "canonical_quality_score_invalid",
 })
 _EXECUTABLE_DECISION_CONTRACT = (
     "income_exit_lifecycle_v1",
@@ -78,6 +79,9 @@ def _strict_bounded_number(value, maximum: float) -> float | None:
 
 def detect_explicit_toss_input_error(candidate: Mapping) -> str:
     """Normalization 전에 명시된 오염 입력을 탐지한다. 누락값은 sizing 대상이다."""
+    upstream_error = candidate.get("upstream_input_validation_error")
+    if type(upstream_error) is str and upstream_error in _EXECUTION_INPUT_ERRORS:
+        return upstream_error
     if "side" in candidate and (
         type(candidate.get("side")) is not str
         or str(candidate.get("side")).strip().lower() != "buy"
@@ -301,7 +305,23 @@ def estimate_win_prob(candidate: Mapping, reliability_stats=None) -> float:
     표본 3건 미만 신뢰도는 0%로 감점하지 않고 score 기반 기본값을 사용한다.
     """
     symbol = str(candidate.get("symbol") or candidate.get("ticker") or "").upper().strip()
-    score = _num(candidate.get("score"), 65.0)
+    try:
+        from core.toss_quality_gate import has_canonical_quality_authority
+
+        has_quality_authority = has_canonical_quality_authority(candidate)
+    except Exception:
+        has_quality_authority = "quality_score_authority" in candidate
+    if has_quality_authority:
+        try:
+            from core.toss_quality_gate import canonical_quality_score
+
+            score, _ = canonical_quality_score(candidate)
+        except Exception:
+            score = None
+        if score is None:
+            return 0.0
+    else:
+        score = _num(candidate.get("score"), 65.0)
     # score 60=0.52, 80=0.62 근처. 과신 방지로 상한 제한.
     prob = 0.52 + max(min(score - 60.0, 30.0), -20.0) * 0.005
 
@@ -817,9 +837,26 @@ def compute_income_edge(
     if strict_toss_contract:
         raw_qty = candidate.get("quantity")
         upstream_error = str(candidate.get("upstream_input_validation_error") or "")
+        has_quality_authority = False
         if upstream_error in _EXECUTION_INPUT_ERRORS:
             toss_input_error = upstream_error
-        elif explicit_error := detect_explicit_toss_input_error(candidate):
+        else:
+            try:
+                from core.toss_quality_gate import has_canonical_quality_authority
+
+                has_quality_authority = has_canonical_quality_authority(candidate)
+            except Exception:
+                has_quality_authority = "quality_score_authority" in candidate
+        if not toss_input_error and has_quality_authority:
+            try:
+                from core.toss_quality_gate import canonical_quality_score
+
+                canonical_score, _ = canonical_quality_score(candidate)
+            except Exception:
+                canonical_score = None
+            if canonical_score is None:
+                toss_input_error = "canonical_quality_score_invalid"
+        elif not toss_input_error and (explicit_error := detect_explicit_toss_input_error(candidate)):
             toss_input_error = explicit_error
         if type(raw_qty) is int and 0 < raw_qty <= _MAX_EXECUTION_QUANTITY:
             qty = raw_qty

@@ -32,6 +32,38 @@ def _candidate(symbol="000111.KS", price=50_000, target=56_000, stop=48_000, qty
     return base
 
 
+def _finalized_quality_candidate():
+    from core import toss_quality_gate as qg
+
+    candidate = _candidate(
+        symbol="207940.KS", price=1_400_000, target=1_620_000,
+        stop=1_340_000, qty=1, score=88, rr=3.6,
+    )
+    score = qg.score_candidate(
+        candidate,
+        regime_obj=None,
+        accuracy_stats={},
+        expensive_checks=False,
+        fetch_budget={"remaining": 0},
+    )
+    breakdown = score.to_dict()
+    breakdown["quality_score_authority"] = "quality_breakdown.score_total"
+    breakdown["score_breakdown_sha256"] = qg._score_breakdown_hash(
+        breakdown,
+        schema_version=qg.QUALITY_SCORE_SCHEMA_VERSION,
+        weight_hash=breakdown["weight_profile_hash"],
+    )
+    candidate["quality_score"] = breakdown["score_total"]
+    candidate["quality_breakdown"] = breakdown
+    candidate["quality_score_authority"] = "quality_breakdown.score_total"
+    candidate["decision_bucket"] = score.decision_bucket
+    candidate["decision_reason"] = score.decision_reason
+    assert qg.attach_quality_proof(candidate) is True
+    assert qg.finalize_quality_proof(candidate) is True
+    candidate["quality_finalized"] = True
+    return candidate
+
+
 def test_distant_research_target_does_not_create_false_income_pass():
     out = compute_income_edge(_candidate(), pending_orders={})
 
@@ -124,6 +156,84 @@ def test_reachable_single_share_lifecycle_edge_can_pass():
     assert out["decision_breakeven_reachable"] is True
     assert out["income_pass"] is True
     assert out["income_grade"] == "SMALL_INCOME_PASS"
+
+
+def test_explicit_raw_score_positive_control_keeps_legacy_win_probability():
+    assert estimate_win_prob(_candidate(qty=1, score=88)) == 0.685
+
+
+def test_estimate_win_prob_uses_finalized_canonical_quality_score_not_raw_score():
+    candidate = _finalized_quality_candidate()
+    canonical_score = candidate["quality_score"]
+    candidate["score"] = 1
+
+    expected = round(
+        min(0.72, 0.52 + max(min(canonical_score - 60.0, 30.0), -20.0) * 0.005 + 0.025),
+        4,
+    )
+
+    assert estimate_win_prob(candidate) == expected
+    assert estimate_win_prob(candidate) > estimate_win_prob(_candidate(qty=1, score=1))
+
+
+def test_quality_score_proof_mismatch_blocks_income_and_finalization():
+    from core import toss_quality_gate as qg
+
+    candidate = _finalized_quality_candidate()
+    candidate["quality_score"] += 1.0
+
+    assert qg.finalize_quality_proof(candidate) is False
+    assert estimate_win_prob(candidate) == 0.0
+    out = compute_income_edge(candidate, pending_orders={})
+    assert out["income_pass"] is False
+    assert out["income_block_reason"] == "canonical_quality_score_invalid"
+    assert out["expected_pnl_krw"] is None
+    assert out["decision_expected_pnl_krw"] is None
+
+
+@pytest.mark.parametrize("bad_score", [True, "88", math.nan, math.inf, -math.inf])
+def test_malformed_canonical_quality_score_blocks_income(bad_score):
+    candidate = _finalized_quality_candidate()
+    candidate["quality_score"] = bad_score
+
+    assert estimate_win_prob(candidate) == 0.0
+    out = compute_income_edge(candidate, pending_orders={})
+    assert out["income_pass"] is False
+    assert out["income_block_reason"] == "canonical_quality_score_invalid"
+    assert out["expected_pnl_krw"] is None
+    assert out["decision_expected_pnl_krw"] is None
+
+
+def test_stale_quality_snapshot_blocks_income_authority():
+    candidate = _finalized_quality_candidate()
+    candidate["target_price"] += 1_000.0
+
+    assert estimate_win_prob(candidate) == 0.0
+    out = compute_income_edge(candidate, pending_orders={})
+    assert out["income_pass"] is False
+    assert out["income_block_reason"] == "canonical_quality_score_invalid"
+
+
+@pytest.mark.parametrize("mutation", ["remove", "replace", "remove_and_reprice"])
+def test_quality_score_authority_marker_cannot_be_removed_or_replaced(mutation):
+    candidate = _finalized_quality_candidate()
+    if mutation in {"remove", "remove_and_reprice"}:
+        candidate.pop("quality_score_authority")
+        if mutation == "remove_and_reprice":
+            candidate["target_price"] += 1_000.0
+    else:
+        candidate["quality_score_authority"] = "score"
+
+    assert estimate_win_prob(candidate) == 0.0
+    out = compute_income_edge(candidate, pending_orders={})
+    assert out["income_pass"] is False
+    assert out["income_block_reason"] == "canonical_quality_score_invalid"
+
+
+def test_prepare_income_buy_plan_leaves_sell_candidate_unchanged():
+    sell = _candidate(side="sell", score=88)
+
+    assert prepare_income_buy_plan(sell) == sell
 
 
 def test_multi_share_lifecycle_is_blocked_until_residual_model_is_validated():
