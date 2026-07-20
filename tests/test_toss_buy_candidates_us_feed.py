@@ -217,6 +217,17 @@ def test_fast_us_quote_quality_provenance_is_differentiated_and_starvation_fails
     assert evid["quality_inputs"]["volume_value"] == 2_880_000_000.0
     assert evid["quality_score_authority"] == "quality_breakdown.score_total"
     assert evid["quality_finalized"] is True
+    breakdown = evid["quality_breakdown"]
+    assert breakdown["score_liquidity"] == 18.0
+    assert breakdown["score_total"] == round(sum(
+        breakdown[key]
+        for key in (
+            "score_momentum", "score_liquidity", "score_risk_reward",
+            "score_reliability", "score_market_regime",
+            "score_supply_demand", "penalty_overheat",
+            "penalty_duplicate", "penalty_event_risk",
+        )
+    ), 1)
     from core.toss_income_strategy import estimate_win_prob
     assert evid["income_strategy"]["win_prob"] == estimate_win_prob(evid)
     assert evid["quality_score"] != by_symbol["STARV"]["quality_score"]

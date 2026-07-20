@@ -93,7 +93,6 @@ class QualityScore:
 
     def to_dict(self) -> dict:
         result = {
-            "score_total": round(self.score_total, 1),
             "score_momentum": round(self.score_momentum, 1),
             "score_liquidity": round(self.score_liquidity, 1),
             "score_risk_reward": round(self.score_risk_reward, 1),
@@ -118,6 +117,15 @@ class QualityScore:
             "decision_origin_bucket": self.decision_origin_bucket,
             "decision_origin_reason": self.decision_origin_reason,
         }
+        result["score_total"] = round(max(0.0, min(100.0, sum(
+            result[key]
+            for key in (
+                "score_momentum", "score_liquidity", "score_risk_reward",
+                "score_reliability", "score_market_regime",
+                "score_supply_demand", "penalty_overheat",
+                "penalty_duplicate", "penalty_event_risk",
+            )
+        ))), 1)
         if self.weight_profile_hash and self.score_breakdown_sha256:
             result.update({
                 "score_schema_version": self.score_schema_version,
@@ -340,7 +348,28 @@ def _score_liquidity(candidate: dict) -> float:
         base = 30_000_000_000  # 300억
     else:
         base = 2_000_000_000  # $2B
-    volume_value = float(candidate.get("volume_value", 0) or 0)
+    if "quality_inputs" in candidate:
+        quality_inputs = candidate.get("quality_inputs")
+        if type(quality_inputs) is not dict:
+            return 0.0
+        value = quality_inputs.get("volume_value")
+        max_volume_value = base * 1_000_000.0
+        if type(value) is int:
+            volume_value = (
+                float(value)
+                if 0 < value <= max_volume_value
+                else 0.0
+            )
+        elif (
+            type(value) is float
+            and math.isfinite(value)
+            and 0.0 < value <= max_volume_value
+        ):
+            volume_value = value
+        else:
+            volume_value = 0.0
+    else:
+        volume_value = float(candidate.get("volume_value", 0) or 0)
     if volume_value <= 0:
         # A provenance-aware fast quote with no volume has no liquidity proof.
         # Do not restore the old synthetic minimum score.
@@ -620,20 +649,37 @@ def score_candidate(
     s_supply = _score_supply_demand(ticker, pre_score, fetch_budget=fetch_budget) \
         * w["supply_demand"]
 
-    score_total = max(0.0, min(100.0,
+    blocking_flags = candidate.get("blocking_risk_flags") or []
+    raw_score_total = max(0.0, min(100.0,
         s_momentum + s_liquidity + s_rr + s_reliability + s_regime
         + s_supply + p_overheat + p_duplicate + p_event
     ))
-
     regime_str = getattr(regime_obj, "regime", "판단불가") if regime_obj else "판단불가"
+    raw_bucket, raw_reason = _decide_bucket(
+        raw_score_total, rr, regime_str, change_pct,
+        has_stop, has_target, days_to_earnings,
+        blocking_risk_flags=blocking_flags,
+    )
+
+    (
+        s_momentum, s_liquidity, s_rr, s_reliability, s_regime,
+        s_supply, p_overheat, p_duplicate, p_event,
+    ) = (
+        round(float(value), 1)
+        for value in (
+            s_momentum, s_liquidity, s_rr, s_reliability, s_regime,
+            s_supply, p_overheat, p_duplicate, p_event,
+        )
+    )
+    score_total = round(max(0.0, min(100.0,
+        s_momentum + s_liquidity + s_rr + s_reliability + s_regime
+        + s_supply + p_overheat + p_duplicate + p_event
+    )), 1)
 
     # risk_flags 집계
     flags = list(candidate.get("risk_flags", []))
     if candidate.get("blocking_risk_flags"):
         flags.extend(candidate["blocking_risk_flags"])
-
-    # blocking_risk_flags
-    blocking_flags = candidate.get("blocking_risk_flags") or []
 
     # decision
     bucket, reason = _decide_bucket(
@@ -641,6 +687,10 @@ def score_candidate(
         has_stop, has_target, days_to_earnings,
         blocking_risk_flags=blocking_flags,
     )
+    if raw_bucket not in EXECUTABLE_BUCKETS and bucket in EXECUTABLE_BUCKETS:
+        bucket, reason = raw_bucket, raw_reason
+    elif raw_bucket == SMALL_PASS and bucket == PASS_EXECUTE:
+        bucket, reason = raw_bucket, raw_reason
 
     quality_score = QualityScore(
         ticker=ticker,

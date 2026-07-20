@@ -166,6 +166,119 @@ class TestDecideBucket:
 
 class TestScoreCandidate:
 
+    @patch("core.toss_quality_gate._score_supply_demand", return_value=0.0)
+    def test_us_quality_inputs_volume_value_drives_liquidity_score(self, _mock_supply):
+        candidate = _candidate(
+            market="US",
+            symbol="AVGO",
+            volume_value=1.0,
+            quality_inputs={"volume_value": 4_000_000_000.0},
+        )
+
+        score = score_candidate(
+            candidate,
+            regime_obj=None,
+            accuracy_stats={},
+            expensive_checks=False,
+            fetch_budget={"remaining": 0},
+        )
+
+        assert score.score_liquidity == 25.0
+
+    @pytest.mark.parametrize(
+        "invalid_volume",
+        [
+            True, "4000000000", float("nan"), float("inf"),
+            10 ** 300, 10 ** 10_000,
+        ],
+        ids=["bool", "string", "nan", "inf", "finite_huge_int", "overflow_int"],
+    )
+    @patch("core.toss_quality_gate._score_supply_demand", return_value=0.0)
+    def test_invalid_quality_input_volume_cannot_fall_back_to_top_level(
+        self, _mock_supply, invalid_volume,
+    ):
+        score = score_candidate(
+            _candidate(
+                market="US",
+                symbol="AVGO",
+                volume_value=4_000_000_000.0,
+                quality_inputs={"volume_value": invalid_volume},
+            ),
+            regime_obj=None,
+            accuracy_stats={},
+            expensive_checks=False,
+            fetch_budget={"remaining": 0},
+        )
+
+        assert score.score_liquidity == 0.0
+
+    @pytest.mark.parametrize(
+        "invalid_inputs",
+        [None, [], "invalid"],
+        ids=["none", "list", "string"],
+    )
+    @patch("core.toss_quality_gate._score_supply_demand", return_value=0.0)
+    def test_malformed_quality_inputs_cannot_enable_legacy_liquidity_fallback(
+        self, _mock_supply, invalid_inputs,
+    ):
+        score = score_candidate(
+            _candidate(
+                market="US",
+                symbol="AVGO",
+                volume_value=4_000_000_000.0,
+                quality_inputs=invalid_inputs,
+            ),
+            regime_obj=None,
+            accuracy_stats={},
+            expensive_checks=False,
+            fetch_budget={"remaining": 0},
+        )
+
+        assert score.score_liquidity == 0.0
+
+    @patch("core.toss_quality_gate._score_supply_demand", return_value=0.0)
+    @patch("core.toss_quality_gate._score_market_regime", return_value=15.0)
+    @patch("core.toss_quality_gate._score_reliability", return_value=7.5)
+    @patch("core.toss_quality_gate._score_risk_reward", return_value=10.0)
+    @patch("core.toss_quality_gate._score_liquidity", return_value=0.0)
+    @patch("core.toss_quality_gate._score_momentum", return_value=12.46)
+    def test_component_rounding_cannot_promote_non_executable_origin(
+        self, _momentum, _liquidity, _rr, _reliability, _regime, _supply,
+    ):
+        score = score_candidate(
+            _candidate(market="US", symbol="TSM", risk_reward=1.3),
+            regime_obj=MagicMock(regime="강세장"),
+            accuracy_stats={},
+            expensive_checks=False,
+            fetch_budget={"remaining": 0},
+        )
+
+        assert score.score_total == 45.0
+        assert score.decision_bucket == WATCH
+
+    @patch("core.toss_quality_gate._score_supply_demand", return_value=0.0)
+    @patch("core.toss_quality_gate._score_market_regime", return_value=15.0)
+    @patch("core.toss_quality_gate._score_reliability", return_value=7.549)
+    @patch("core.toss_quality_gate._score_risk_reward", return_value=10.049)
+    @patch("core.toss_quality_gate._score_liquidity", return_value=0.0)
+    @patch("core.toss_quality_gate._score_momentum", return_value=12.449)
+    def test_bucket_replays_from_serialized_component_total(
+        self, _momentum, _liquidity, _rr, _reliability, _regime, _supply,
+    ):
+        from core import toss_quality_gate as qg
+
+        score = score_candidate(
+            _candidate(market="US", symbol="TSM", risk_reward=1.67),
+            regime_obj=MagicMock(regime="강세장"),
+            accuracy_stats={},
+            expensive_checks=False,
+            fetch_budget={"remaining": 0},
+        )
+        breakdown = score.to_dict()
+
+        assert score.score_total == breakdown["score_total"]
+        assert qg._stored_bucket_replay_matches(breakdown) is True
+
     @patch("core.toss_quality_gate._score_momentum", return_value=15.0)
     @patch("core.toss_quality_gate._penalty_event_risk", return_value=(0.0, -1))
     def test_good_candidate_passes(self, mock_event, mock_momentum):
@@ -263,6 +376,61 @@ class TestBatch:
 # ── QualityScore.to_dict 테스트 ──────────────────────────────────
 
 class TestToDict:
+
+    def test_score_total_clamps_serialized_component_sum(self):
+        common = {
+            "ticker": "BOUND", "risk_flags": (),
+            "decision_bucket": PASS_EXECUTE, "decision_reason": "ok",
+            "rr_ratio": 2.0, "regime": "강세장",
+            "scored_at": "2026-07-20T23:00:00+09:00",
+        }
+        high = QualityScore(
+            score_total=100.0,
+            score_momentum=25.0, score_liquidity=25.0,
+            score_risk_reward=20.0, score_reliability=15.0,
+            score_market_regime=15.0, score_supply_demand=10.0,
+            penalty_overheat=0.0, penalty_duplicate=0.0,
+            penalty_event_risk=0.0,
+            **common,
+        )
+        low = QualityScore(
+            score_total=0.0,
+            score_momentum=0.0, score_liquidity=0.0,
+            score_risk_reward=0.0, score_reliability=0.0,
+            score_market_regime=0.0, score_supply_demand=0.0,
+            penalty_overheat=-15.0, penalty_duplicate=-5.0,
+            penalty_event_risk=-15.0,
+            **common,
+        )
+
+        assert high.to_dict()["score_total"] == 100.0
+        assert low.to_dict()["score_total"] == 0.0
+
+    def test_score_total_matches_serialized_component_sum_at_rounding_boundary(self):
+        qs = QualityScore(
+            ticker="TSM", score_total=35.499999,
+            score_momentum=2.949999, score_liquidity=0.0,
+            score_risk_reward=10.049999, score_reliability=7.5,
+            score_market_regime=15.0, score_supply_demand=0.0,
+            penalty_overheat=0.0, penalty_duplicate=0.0,
+            penalty_event_risk=0.0, risk_flags=(),
+            decision_bucket=WATCH, decision_reason="score boundary",
+            rr_ratio=1.67, regime="강세장",
+            scored_at="2026-07-20T23:00:00+09:00",
+        )
+
+        breakdown = qs.to_dict()
+        component_total = sum(
+            breakdown[key]
+            for key in (
+                "score_momentum", "score_liquidity", "score_risk_reward",
+                "score_reliability", "score_market_regime",
+                "score_supply_demand", "penalty_overheat",
+                "penalty_duplicate", "penalty_event_risk",
+            )
+        )
+
+        assert breakdown["score_total"] == round(component_total, 1)
 
     def test_to_dict_has_required_fields(self):
         qs = QualityScore(
