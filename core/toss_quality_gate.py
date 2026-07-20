@@ -1387,6 +1387,127 @@ def candidate_snapshot_hash(candidate) -> str | None:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
+def _strict_candidate_number(value: object) -> float | None:
+    try:
+        if type(value) is int:
+            number = float(value)
+        elif type(value) is float:
+            number = value
+        else:
+            return None
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def validate_ready_candidate_contract(candidate: object) -> tuple[bool, str]:
+    """Validate a BUY-ready candidate without coercion or mutation."""
+    if (
+        type(candidate) is not dict
+        or any(type(key) is not str for key in candidate)
+    ):
+        return False, "candidate_contract_invalid"
+
+    symbol = candidate.get("symbol")
+    market = candidate.get("market")
+    currency = candidate.get("currency")
+    side = candidate.get("side")
+    decision_bucket = candidate.get("decision_bucket")
+    if (
+        type(symbol) is not str
+        or not symbol.strip()
+        or type(market) is not str
+        or market not in {"KR", "US"}
+        or type(currency) is not str
+        or currency != ("KRW" if market == "KR" else "USD")
+        or (market == "KR" and not symbol.endswith((".KS", ".KQ")))
+        or (market == "US" and symbol.endswith((".KS", ".KQ")))
+        or type(side) is not str
+        or side != "buy"
+        or type(decision_bucket) is not str
+        or decision_bucket not in EXECUTABLE_BUCKETS
+        or candidate.get("stock_agent_ready") is not True
+        or type(candidate.get("missing_fields")) is not list
+        or candidate["missing_fields"]
+    ):
+        return False, "candidate_identity_invalid"
+
+    quantity = candidate.get("quantity")
+    if type(quantity) is not int or not 0 < quantity <= 1_000_000_000:
+        return False, "candidate_quantity_invalid"
+    prices: dict[str, float] = {}
+    for field in ("limit_price", "stop_loss", "target_price"):
+        number = _strict_candidate_number(candidate.get(field))
+        if number is None or not 0 < number <= 1_000_000_000_000_000:
+            return False, f"candidate_{field}_invalid"
+        prices[field] = number
+    if not prices["stop_loss"] < prices["limit_price"] < prices["target_price"]:
+        return False, "candidate_price_order_invalid"
+
+    income = candidate.get("income_strategy")
+    if type(income) is not dict or any(type(key) is not str for key in income):
+        return False, "candidate_income_contract_invalid"
+    from core.toss_income_strategy import validate_executable_income_contract
+    income_ok, income_reason = validate_executable_income_contract(income)
+    if not income_ok or candidate.get("income_execution_contract_valid") is not True:
+        return False, income_reason
+    for income_field, candidate_field in (
+        ("planned_entry_price", "limit_price"),
+        ("planned_stop_loss", "stop_loss"),
+        ("planned_target_price", "target_price"),
+        ("planned_quantity", "quantity"),
+    ):
+        planned_value = income.get(income_field)
+        candidate_value = candidate.get(candidate_field)
+        if (
+            type(planned_value) is not type(candidate_value)
+            or planned_value != candidate_value
+        ):
+            return False, "candidate_income_snapshot_mismatch"
+
+    breakdown = candidate.get("quality_breakdown")
+    if (
+        candidate.get("quality_finalized") is not True
+        or type(breakdown) is not dict
+        or any(type(key) is not str for key in breakdown)
+        or not _score_proof_valid(breakdown, require_current_weights=True)
+        or not _score_identity_matches(candidate, breakdown)
+        or not _score_decision_context_matches(candidate, breakdown)
+        or breakdown.get("decision_bucket") != candidate["decision_bucket"]
+    ):
+        return False, "candidate_quality_proof_invalid"
+    snapshot = candidate_snapshot_hash(candidate)
+    if (
+        type(breakdown.get("candidate_snapshot_sha256")) is not str
+        or not snapshot
+        or breakdown["candidate_snapshot_sha256"] != snapshot
+    ):
+        return False, "candidate_quality_snapshot_invalid"
+
+    quality_score = _strict_candidate_number(candidate.get("quality_score"))
+    proof_score = _strict_candidate_number(breakdown.get("score_total"))
+    risk_reward = _strict_candidate_number(candidate.get("risk_reward"))
+    proof_rr = _strict_candidate_number(breakdown.get("rr_ratio"))
+    actual_rr = _recompute_rr_ratio(
+        prices["limit_price"],
+        prices["stop_loss"],
+        prices["target_price"],
+    )
+    if (
+        quality_score is None
+        or proof_score is None
+        or quality_score != proof_score
+        or risk_reward is None
+        or proof_rr is None
+        or actual_rr is None
+        or round(risk_reward, 2) != proof_rr
+        or round(actual_rr, 6) != risk_reward
+        or round(actual_rr, 2) != proof_rr
+    ):
+        return False, "candidate_quality_values_invalid"
+    return True, "ok"
+
+
 def attach_quality_proof(candidate: dict) -> bool:
     """검증된 scorer proof에 최종 실행 snapshot만 결합한다.
 

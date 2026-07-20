@@ -371,7 +371,14 @@ def _patch_dashboard(monkeypatch, sections, scores):
     monkeypatch.setattr(dd, "_cross_check_price_quality",
                         lambda sym, cur=None: {"quality": "unknown", "checks": []})
     monkeypatch.setattr(tc, "get_exchange_rate", lambda base="USD", quote="KRW": {"rate": 1500.0})
+    monkeypatch.setattr("core.toss_readonly_snapshot.load_snapshot", lambda: {
+        "ok": True,
+        "status": "fresh",
+        "usable_for_decisions": True,
+    })
     monkeypatch.setattr(dd, "toss_account_summary", lambda: {
+        "snapshot_status": "fresh",
+        "snapshot_usable_for_decisions": True,
         "cash": {"krw": 10_000_000, "krw_native": 10_000_000, "usd": 10_000.0},
         "holdings_count": 0,
     })
@@ -379,6 +386,29 @@ def _patch_dashboard(monkeypatch, sections, scores):
     monkeypatch.setattr(dd, "_recent_toss_risk_sell_symbols", lambda *a, **k: {})
     monkeypatch.setattr(dd, "_pending_toss_order_symbols", lambda *a, **k: {})
     monkeypatch.setattr(abt, "load_ai_berkshire_scores", lambda *a, **k: scores)
+
+    from core import toss_income_strategy as tis
+
+    def positive_income(candidate, **kwargs):
+        estimated = float(candidate.get("estimated_amount_krw") or 1)
+        decision_expected = 12_000.0
+        return {
+            "version": "income_v2",
+            "expected_pnl_model": "income_exit_cashflow_v2",
+            "expected_pnl_scope": "next_realized_exit_only",
+            "expected_pnl_krw": -decision_expected,
+            "income_edge_ratio": -decision_expected / estimated,
+            "decision_expected_pnl_model": "income_exit_lifecycle_v1",
+            "decision_expected_pnl_scope": "full_position_threshold_exit",
+            "decision_expected_pnl_krw": decision_expected,
+            "decision_income_edge_ratio": decision_expected / estimated,
+            "income_pass": True,
+            "income_grade": "SMALL_INCOME_PASS",
+            "income_block_reason": "",
+            "income_block_label": "",
+        }
+
+    monkeypatch.setattr(tis, "compute_income_edge", positive_income)
 
 
 def test_dashboard_avoid_candidate_is_hard_blocked(monkeypatch):
@@ -483,21 +513,36 @@ def test_dashboard_expired_and_invalid_keep_ready_with_distinct_status(monkeypat
 # ═══════════════════════════════════════════════════════════════
 
 _POLICY_ON = {
+    "mode": "autonomous_live_pilot",
     "autonomous_mode": True,
     "autonomous_kill_switch": False,
+    "live_pilot_enabled": True,
+    "requires_user_confirmation": False,
+    "requires_second_confirmation": False,
+    "all_live_gates_open": True,
+    "env_live_pilot_enabled": True,
+    "env_live_order_allowed": True,
+    "env_live_adapter_enabled": True,
     "max_order_krw": 0,
     "blocked_symbols": [],
     "autonomous_allowed_sides": ["buy", "sell"],
+    "side_mode": "BUY_SELL",
+    "allowed_sides": ["buy", "sell"],
+    "sell_allowed": True,
     "adapter_status": "enabled",
     "live_order_allowed": True,
+    "live_transport_status": "configured",
 }
 
 
 def _candidate(symbol=_AVOID_SYM, side="buy", **kw):
     base = {
-        "symbol": symbol, "side": side, "quantity": 10, "limit_price": 30_000.0,
+        "symbol": symbol, "side": side, "market": "KR", "currency": "KRW",
+        "quantity": 10, "limit_price": 30_000.0,
         "stop_loss": 28_000, "target_price": 34_000,
-        "stock_agent_ready": True, "decision_bucket": "PASS_EXECUTE",
+        "stock_agent_ready": True, "executable_now": True,
+        "quality_finalized": True, "income_execution_contract_valid": True,
+        "missing_fields": [], "decision_bucket": "PASS_EXECUTE",
         "decision_reason": "quality pass", "quality_score": 88,
         "quality_breakdown": {
             "score_total": 88, "score_momentum": 20, "score_liquidity": 20,
@@ -508,10 +553,26 @@ def _candidate(symbol=_AVOID_SYM, side="buy", **kw):
             "rr_ratio": 2.0, "regime": "강세장",
         },
         "score": 88, "risk_reward": 2.0,
-        "income_strategy": {"income_pass": True, "income_grade": "INCOME_PASS",
-                            "expected_pnl_krw": 12_000, "income_edge_ratio": 0.02},
+        "income_strategy": {
+            "income_pass": True,
+            "income_grade": "INCOME_PASS",
+            "expected_pnl_krw": 12_000,
+            "income_edge_ratio": 0.02,
+            "decision_expected_pnl_model": "income_exit_lifecycle_v1",
+            "decision_expected_pnl_scope": "full_position_threshold_exit",
+            "decision_expected_pnl_krw": 12_000,
+            "decision_income_edge_ratio": 0.02,
+        },
     }
     base.update(kw)
+    income = base.get("income_strategy")
+    if type(income) is dict:
+        income.update({
+            "planned_entry_price": base.get("limit_price"),
+            "planned_stop_loss": base.get("stop_loss"),
+            "planned_target_price": base.get("target_price"),
+            "planned_quantity": base.get("quantity"),
+        })
     if str(base.get("side") or "").lower() == "buy":
         from core import toss_quality_gate as _qg
         _seal_quality_proof_for_test(_qg, base)

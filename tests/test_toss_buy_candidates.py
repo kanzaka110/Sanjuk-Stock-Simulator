@@ -444,6 +444,244 @@ def test_toss_buy_candidates_stock_agent_review_fields(monkeypatch):
     assert "손익비" in item["block_reason"]
 
 
+def test_toss_buy_candidates_reports_systemic_income_liveness_regression(monkeypatch):
+    sections = _sections(new=[_strong_cand("000112.KS", "운영분포후보", price=100_000)])
+    _patch_sections(monkeypatch, sections)
+
+    result = dd.toss_buy_candidates_data(range_="today")
+    summary = result["scan_summary"]
+
+    assert summary["income_liveness_version"] == "income_liveness_v1"
+    assert summary["upstream_executable_count"] > 0
+    assert summary["income_ready_count"] == 0
+    assert summary["income_liveness_status"] == "degraded"
+    diagnosis = summary["income_liveness_diagnosis"]
+    assert diagnosis["reason"] == "upstream_executable_but_no_income_ready"
+    assert diagnosis["top_income_block_reasons"]
+    assert diagnosis["top_income_block_reasons"][0]["count"] >= 1
+
+
+def test_income_liveness_diagnosis_counts_only_upstream_executable_candidates(monkeypatch):
+    sections = _sections(new=[
+        _strong_cand("000121.KS", "실행후단차단", price=100_000),
+        _new_cand("000122.KS", "앞단차단1", price=30_000),
+        _new_cand("000123.KS", "앞단차단2", price=31_000),
+        _new_cand("000124.KS", "앞단차단3", price=32_000),
+    ])
+    _patch_sections(monkeypatch, sections)
+
+    summary = dd.toss_buy_candidates_data(range_="today")["scan_summary"]
+    diagnosis = summary["income_liveness_diagnosis"]
+
+    assert summary["upstream_executable_count"] == 1
+    assert sum(row["count"] for row in diagnosis["top_income_block_reasons"]) == 1
+    assert diagnosis["top_income_block_reasons"] == [
+        {"reason": "multi_share_lifecycle_unmodeled", "count": 1}
+    ]
+
+
+def test_income_liveness_preserves_multiple_downstream_block_reasons(monkeypatch):
+    sections = _sections(new=[
+        _strong_cand("000131.KS", "다주수명주기", price=100_000),
+        _strong_cand("000132.KS", "일주기대값", price=400_000),
+    ])
+    _patch_sections(monkeypatch, sections)
+
+    summary = dd.toss_buy_candidates_data(range_="today")["scan_summary"]
+    reasons = summary["income_liveness_diagnosis"]["top_income_block_reasons"]
+
+    assert summary["income_gate_eligible_count"] == 2
+    assert sum(row["count"] for row in reasons) == 2
+    assert {row["reason"] for row in reasons} == {
+        "multi_share_lifecycle_unmodeled",
+        "expected_pnl_below_threshold",
+    }
+
+
+def test_income_liveness_excludes_candidates_blocked_before_income_gate(monkeypatch):
+    sections = _sections(new=[
+        _strong_cand("000125.KS", "주문한도초과", price=600_000),
+    ])
+    _patch_sections(monkeypatch, sections)
+
+    result = dd.toss_buy_candidates_data(range_="today")
+    item = result["items"][0]
+    summary = result["scan_summary"]
+
+    assert item["decision_bucket"] in {"PASS_EXECUTE", "SMALL_PASS"}
+    assert item["limit_exceeded"] is True
+    assert summary["upstream_executable_count"] == 0
+    assert summary["income_liveness_status"] == "no_signal"
+    assert summary["income_liveness_diagnosis"]["reason"] == (
+        "no_income_gate_eligible_candidates"
+    )
+
+
+def test_execution_calibration_is_summary_only_and_never_authorizes_buy(monkeypatch):
+    from src import toss_execution_calibration as calibration
+
+    sections = _sections(new=[
+        _strong_cand("000129.KS", "검증후보", price=100_000),
+    ])
+    _patch_sections(monkeypatch, sections)
+    _patch_positive_lifecycle_income(monkeypatch)
+
+    def calibration_report(sell_price):
+        report = calibration.reconstruct_execution_calibration([
+            {
+                "pilot_id": "tlive_buy-summary",
+                "side": "buy",
+                "symbol": "005930.KS",
+                "quantity": 1,
+                "filled_quantity": 1,
+                "filled_price": 100_000,
+                "estimated_amount_krw": 100_000,
+                "broker_order_status": "FILLED",
+                "strategy_reason": "auto_pipeline",
+                "event_type": "autonomous_live_sent",
+                "live_order_sent": 1,
+                "adapter_status": "enabled",
+                "live_order_allowed": 1,
+                "created_at": "2026-07-15T09:00:00+09:00",
+            },
+            {
+                "pilot_id": "tlive_sell-summary",
+                "side": "sell",
+                "symbol": "005930.KS",
+                "quantity": 1,
+                "filled_quantity": 1,
+                "filled_price": sell_price,
+                "estimated_amount_krw": sell_price,
+                "broker_order_status": "FILLED",
+                "strategy_reason": "position_review_sell",
+                "event_type": "autonomous_live_sent",
+                "live_order_sent": 1,
+                "adapter_status": "enabled",
+                "live_order_allowed": 1,
+                "created_at": "2026-07-15T10:00:00+09:00",
+            },
+        ], min_samples=1)
+        report.update({
+            "status": "ok",
+            "source": "read_only_live_pilot_event_ledger",
+            "source_window_truncated": False,
+            "source_row_limit": 5_000,
+            "source_rows_loaded": 2,
+            "ledger_reason_conflict_count": 0,
+            "ledger_reason_missing_count": 0,
+            "ledger_reason_invalid_count": 0,
+        })
+        return report
+
+    monkeypatch.setattr(
+        calibration,
+        "load_execution_calibration",
+        lambda **kwargs: calibration_report(90_000),
+    )
+    low_report = dd.toss_buy_candidates_data(range_="today")
+    monkeypatch.setattr(dd, "_cache", {}, raising=False)
+    monkeypatch.setattr(
+        calibration,
+        "load_execution_calibration",
+        lambda **kwargs: calibration_report(120_000),
+    )
+    high_report = dd.toss_buy_candidates_data(range_="today")
+
+    assert high_report["items"] == low_report["items"]
+    assert high_report["excluded"] == low_report["excluded"]
+    assert high_report["count"] == low_report["count"]
+    assert high_report["items"][0]["stock_agent_ready"] == low_report["items"][0][
+        "stock_agent_ready"
+    ]
+    report = high_report["scan_summary"]["execution_calibration"]
+    assert report["mode"] == "observability_only"
+    assert report["decision_usable"] is False
+    assert report["decision_block_reason"] == (
+        "lifecycle_transition_model_unvalidated"
+    )
+    assert "outcomes" not in report
+    assert "open_positions" not in report
+
+
+def test_execution_calibration_reconciles_fresh_holdings_without_raw_lot_leak(monkeypatch):
+    from src import toss_execution_calibration as calibration
+
+    _patch_sections(monkeypatch, _sections())
+    raw = calibration.reconstruct_execution_calibration([
+        {
+            "pilot_id": "tlive_buy-1",
+            "side": "buy",
+            "symbol": "005930.KS",
+            "quantity": 4,
+            "filled_quantity": 4,
+            "filled_price": 100_000,
+            "estimated_amount_krw": 400_000,
+            "broker_order_status": "FILLED",
+            "strategy_reason": "auto_pipeline",
+            "event_type": "autonomous_live_sent",
+            "live_order_sent": 1,
+            "adapter_status": "enabled",
+            "live_order_allowed": 1,
+            "created_at": "2026-07-15T09:00:00+09:00",
+        },
+    ])
+    raw.update({
+        "status": "ok",
+        "source": "read_only_live_pilot_event_ledger",
+        "source_window_truncated": False,
+        "source_row_limit": 5_000,
+        "source_rows_loaded": 1,
+        "ledger_reason_conflict_count": 0,
+        "ledger_reason_missing_count": 0,
+        "ledger_reason_invalid_count": 0,
+    })
+    monkeypatch.setattr(calibration, "load_execution_calibration", lambda **kwargs: raw)
+    monkeypatch.setattr(dd, "toss_account_summary", lambda: {
+        "snapshot_status": "fresh",
+        "snapshot_usable_for_decisions": True,
+        "cash": {"krw": 10_000_000, "krw_native": 10_000_000},
+        "holdings_count": 1,
+        "holdings_items": [{"symbol": "005930.KS", "quantity": 2}],
+    })
+
+    report = dd.toss_buy_candidates_data(range_="today")["scan_summary"][
+        "execution_calibration"
+    ]
+
+    assert report["status"] == "partial"
+    assert report["holdings_reconciliation_status"] == "incomplete"
+    assert report["open_quantity_exceeds_holdings"] == 2
+    assert "open_lots_exceed_holdings" in report["lineage_reasons"]
+    assert report["evidence_sufficient"] is False
+    assert "open_positions" not in report
+    assert "outcomes" not in report
+
+
+def test_income_liveness_separates_post_income_downstream_block(monkeypatch):
+    sections = _sections(new=[
+        _strong_cand("000126.KS", "수입통과후차단", price=100_000),
+    ])
+    _patch_sections(monkeypatch, sections)
+    _patch_positive_lifecycle_income(monkeypatch)
+
+    def block_after_income(item, _scores):
+        item["stock_agent_ready"] = False
+        item["ai_berkshire_buy_block"] = True
+        item["execution_status"] = "ai_berkshire_buy_block"
+
+    monkeypatch.setattr(dd, "_apply_ai_berkshire_buy_gate", block_after_income)
+
+    summary = dd.toss_buy_candidates_data(range_="today")["scan_summary"]
+
+    assert summary["income_gate_eligible_count"] == 1
+    assert summary["income_pass_count"] == 1
+    assert summary["income_ready_count"] == 0
+    assert summary["income_liveness_status"] == "downstream_blocked"
+    assert summary["income_liveness_diagnosis"]["reason"] == (
+        "income_pass_but_no_final_ready"
+    )
+
+
 def test_toss_buy_candidates_empty_cache_fallback_preserves_v3_schema(monkeypatch):
     monkeypatch.setattr(dd, "_cached", lambda *args, **kwargs: {})
 
@@ -451,6 +689,11 @@ def test_toss_buy_candidates_empty_cache_fallback_preserves_v3_schema(monkeypatc
 
     assert result["schema"] == "toss_buy_candidates.v3.dual_income_ev"
     assert result["scan_summary"]["income_gate_version"] == "income_v2_dual_ev"
+    assert result["scan_summary"]["income_liveness_status"] == "unavailable"
+    assert result["scan_summary"]["income_liveness_diagnosis"]["reason"] == (
+        "candidate_cache_payload_unavailable"
+    )
+    assert result["scan_summary"]["execution_calibration"]["decision_usable"] is False
     assert result["items"] == []
     assert result["excluded"] == []
     assert result["requested_limit"] == 3
@@ -470,6 +713,903 @@ def test_toss_buy_candidates_quarantines_stale_cached_contract_versions(monkeypa
     assert result["scan_summary"]["income_gate_version"] == "income_v2_dual_ev"
     assert result["items"] == []
     assert result["excluded"] == []
+
+
+def test_toss_buy_candidates_quarantines_unsafe_cached_calibration(monkeypatch):
+    monkeypatch.setattr(dd, "_cached", lambda *args, **kwargs: {
+        "schema": "toss_buy_candidates.v3.dual_income_ev",
+        "scan_summary": {
+            "income_gate_version": "income_v2_dual_ev",
+            "income_liveness_version": "income_liveness_v1",
+            "income_liveness_status": "healthy",
+            "execution_calibration": {
+                "schema": "toss_execution_calibration.v1",
+                "mode": "observability_only",
+                "decision_usable": True,
+                "decision_block_reason": "lifecycle_transition_model_unvalidated",
+                "attribution_verified": False,
+                "outcomes": [{"buy_pilot_id": "raw-secret"}],
+                "open_positions": [{"symbol": "RAW", "quantity": 1}],
+            },
+        },
+        "items": [{"stock_agent_ready": True}],
+        "excluded": [],
+    })
+
+    result = dd.toss_buy_candidates_data(range_="today", market="KR", limit=3)
+    calibration = result["scan_summary"]["execution_calibration"]
+
+    assert result["scan_summary"]["cache_contract_valid"] is False
+    assert result["items"] == []
+    assert calibration["decision_usable"] is False
+    assert calibration["attribution_verified"] is False
+    assert calibration["evidence_sufficient"] is False
+    assert "outcomes" not in calibration
+    assert "open_positions" not in calibration
+
+
+class _CalibrationListSubclass(list):
+    pass
+
+
+class _CalibrationStrSubclass(str):
+    pass
+
+
+class _DeepcopyBomb:
+    def __deepcopy__(self, memo):
+        raise AssertionError("untrusted cache value must not be deep-copied")
+
+
+class _BoolListSubclass(list):
+    bool_calls = 0
+
+    def __bool__(self):
+        type(self).bool_calls += 1
+        return True
+
+    def __iter__(self):
+        raise AssertionError("untrusted list subclass must not be iterated")
+
+
+class _HostileKey(str):
+    armed = False
+    hash_calls = 0
+    eq_calls = 0
+
+    def __hash__(self):
+        if type(self).armed:
+            type(self).hash_calls += 1
+        return str.__hash__(self)
+
+    def __eq__(self, other):
+        if type(self).armed:
+            type(self).eq_calls += 1
+        return str.__eq__(self, other)
+
+
+def _valid_cached_execution_calibration():
+    return {
+        "schema": "toss_execution_calibration.v1",
+        "status": "ok",
+        "mode": "observability_only",
+        "decision_usable": False,
+        "decision_block_reason": "lifecycle_transition_model_unvalidated",
+        "attribution_model": "symbol_fifo_v1",
+        "attribution_verified": False,
+        "cost_model": "decision_buffer_v1_not_broker_statement",
+        "completed_count": 1,
+        "wins": 1,
+        "losses": 0,
+        "flats": 0,
+        "win_rate": 1.0,
+        "avg_win_pct": 1.0,
+        "avg_loss_pct": None,
+        "mean_net_return_pct": 1.0,
+        "minimum_sample_reached": False,
+        "sample_sufficient": False,
+        "evidence_sufficient": False,
+        "min_samples": 20,
+        "lineage_status": "complete",
+        "lineage_reasons": [],
+        "unmatched_sell_fill_count": 0,
+        "unmatched_sell_quantity": 0,
+        "symbol_alias_conflict_count": 0,
+        "ambiguous_fill_count": 0,
+        "holdings_reconciliation_status": "complete",
+        "holdings_symbol_alias_conflict_count": 0,
+        "open_quantity_exceeds_holdings": 0,
+        "open_lot_count": 0,
+        "open_quantity": 0,
+        "ignored_count": 0,
+        "quarantined_fill_count": 0,
+        "invalid_fill_count": 0,
+        "conflict_count": 0,
+        "source": "read_only_live_pilot_event_ledger",
+        "source_window_truncated": False,
+        "source_row_limit": 5_000,
+        "source_rows_loaded": 2,
+        "ledger_reason_conflict_count": 0,
+        "ledger_reason_missing_count": 0,
+        "ledger_reason_invalid_count": 0,
+    }
+
+
+def _cached_candidate_payload(calibration):
+    return {
+        "schema": "toss_buy_candidates.v3.dual_income_ev",
+        "scan_summary": {
+            "income_gate_version": "income_v2_dual_ev",
+            "income_liveness_version": "income_liveness_v1",
+            "income_liveness_status": "idle",
+            "raw_income_pass_count": 0,
+            "income_pass_count": 0,
+            "income_block_count": 0,
+            "income_gate_eligible_count": 0,
+            "upstream_executable_count": 0,
+            "income_ready_count": 0,
+            "income_liveness_diagnosis": None,
+            "execution_calibration": calibration,
+        },
+        "items": [],
+        "excluded": [],
+        "count": 0,
+        "excluded_count": 0,
+    }
+
+
+def _proofed_ready_cache_item():
+    from core import toss_quality_gate as qg
+
+    item = {
+        "symbol": "091180.KS",
+        "side": "buy",
+        "market": "KR",
+        "currency": "KRW",
+        "quantity": 10,
+        "limit_price": 30_000,
+        "stop_loss": 28_000,
+        "target_price": 34_000,
+        "risk_reward": 2.0,
+        "change_pct": 2.0,
+        "blocking_risk_flags": [],
+        "decision_bucket": "PASS_EXECUTE",
+        "decision_reason": "quality pass",
+        "quality_score": 75,
+        "quality_finalized": True,
+        "income_execution_contract_valid": True,
+        "missing_fields": [],
+        "limit_exceeded": False,
+        "execution_status": "ready",
+        "executable_now": True,
+        "stock_agent_ready": True,
+        "income_strategy": {
+            "version": "income_v2_dual_ev",
+            "income_pass": True,
+            "decision_expected_pnl_model": "income_exit_lifecycle_v1",
+            "decision_expected_pnl_scope": "full_position_threshold_exit",
+            "expected_pnl_krw": 5000.0,
+            "income_edge_ratio": 2.0,
+            "decision_expected_pnl_krw": 5000.0,
+            "decision_income_edge_ratio": 2.0,
+            "planned_entry_price": 30_000,
+            "planned_stop_loss": 28_000,
+            "planned_target_price": 34_000,
+            "planned_quantity": 10,
+            "decision_position_size": 10,
+            "income_expected_pnl_source": "decision_ev",
+            "income_edge_ratio_source": "decision_edge",
+            "decision_contract_version": "income_decision_v1",
+            "decision_contract_frozen_at": "2026-07-20T00:00:00+00:00",
+        },
+        "quality_breakdown": {
+            "score_total": 75,
+            "score_momentum": 18,
+            "score_liquidity": 17,
+            "score_risk_reward": 16,
+            "score_reliability": 12,
+            "score_market_regime": 12,
+            "score_supply_demand": 0,
+            "penalty_overheat": 0,
+            "penalty_duplicate": 0,
+            "penalty_event_risk": 0,
+            "rr_ratio": 2.0,
+            "regime": "중립",
+        },
+    }
+    breakdown = item["quality_breakdown"]
+    breakdown.update({
+        "decision_bucket": item["decision_bucket"],
+        "decision_reason": item["decision_reason"],
+        "score_symbol": item["symbol"],
+        "score_side": item["side"],
+        "decision_change_pct": item["change_pct"],
+        "decision_days_to_earnings": -1,
+        "decision_has_stop": True,
+        "decision_has_target": True,
+        "decision_blocking_risk_flags": [],
+        "decision_origin_bucket": item["decision_bucket"],
+        "decision_origin_reason": item["decision_reason"],
+        "score_schema_version": qg.QUALITY_SCORE_SCHEMA_VERSION,
+    })
+    weight_hash = qg._weight_profile_hash()
+    breakdown["weight_profile_hash"] = weight_hash
+    breakdown["score_breakdown_sha256"] = qg._score_breakdown_hash(
+        breakdown,
+        schema_version=qg.QUALITY_SCORE_SCHEMA_VERSION,
+        weight_hash=weight_hash,
+    )
+    assert breakdown["score_breakdown_sha256"]
+    assert qg.attach_quality_proof(item) is True
+    return item
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [
+        ("evidence_sufficient", True),
+        ("completed_count", "1"),
+        ("lineage_reasons", {}),
+        ("lineage_reasons", _CalibrationListSubclass()),
+        ("lineage_reasons", [_CalibrationStrSubclass("unmatched_sell_fill")]),
+        ("mean_net_return_pct", float("nan")),
+        ("win_rate", 10**400),
+        ("avg_win_pct", 10**400),
+        ("status", _CalibrationStrSubclass("ok")),
+        ("source_row_limit", 10**400),
+        ("ledger_reason_missing_count", 1),
+        ("ambiguous_fill_count", 1),
+        ("ledger_reason_invalid_count", 1),
+        ("quarantined_fill_count", 1),
+        ("source_rows_loaded", 1),
+        ("avg_loss_pct", -77.0),
+        ("mean_net_return_pct", 0.5),
+        ("wins", 2),
+    ],
+)
+def test_toss_buy_candidates_quarantines_malformed_nested_calibration(
+    monkeypatch,
+    field,
+    bad_value,
+):
+    calibration = _valid_cached_execution_calibration()
+    calibration[field] = bad_value
+    monkeypatch.setattr(
+        dd,
+        "_cached",
+        lambda *args, **kwargs: _cached_candidate_payload(calibration),
+    )
+
+    result = dd.toss_buy_candidates_data(range_="today", market="KR", limit=3)
+    report = result["scan_summary"]["execution_calibration"]
+
+    assert result["scan_summary"]["cache_contract_valid"] is False
+    assert result["items"] == []
+    assert report["decision_usable"] is False
+    assert report["attribution_verified"] is False
+    assert report["evidence_sufficient"] is False
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {
+            "status": "partial",
+            "lineage_status": "incomplete",
+            "lineage_reasons": ["pilot_payload_conflict"],
+            "source_rows_loaded": 3,
+            "conflict_count": 1,
+            "quarantined_fill_count": 1,
+            "ignored_count": 1,
+        },
+        {
+            "status": "partial",
+            "lineage_status": "incomplete",
+            "lineage_reasons": ["krx_symbol_alias_conflict"],
+            "source_rows_loaded": 3,
+            "symbol_alias_conflict_count": 1,
+            "quarantined_fill_count": 1,
+            "ignored_count": 1,
+        },
+        {
+            "status": "partial",
+            "lineage_status": "incomplete",
+            "lineage_reasons": [
+                "fill_contract_invalid",
+                "fill_order_ambiguous",
+            ],
+            "source_rows_loaded": 3,
+            "ambiguous_fill_count": 1,
+            "invalid_fill_count": 1,
+            "quarantined_fill_count": 1,
+            "ignored_count": 1,
+        },
+        {
+            "status": "partial",
+            "lineage_status": "incomplete",
+            "lineage_reasons": ["source_window_truncated"],
+            "source_window_truncated": True,
+        },
+        {
+            "status": "unavailable",
+            "lineage_status": "incomplete",
+            "lineage_reasons": [
+                "execution_calibration_source_unavailable",
+                "holdings_reconciliation_unavailable",
+            ],
+            "holdings_reconciliation_status": "unavailable",
+            "reason": "execution_calibration_source_unavailable",
+        },
+        {
+            "status": "partial",
+            "lineage_status": "incomplete",
+            "lineage_reasons": ["fill_contract_invalid"],
+            "invalid_fill_count": 3,
+            "quarantined_fill_count": 3,
+        },
+        {
+            "ignored_count": 3,
+        },
+        {
+            "status": "partial",
+            "lineage_status": "incomplete",
+            "lineage_reasons": ["fill_order_ambiguous"],
+        },
+        {
+            "status": "partial",
+            "lineage_status": "incomplete",
+            "lineage_reasons": ["ledger_reason_invalid"],
+        },
+        {
+            "wins": 0,
+            "losses": 1,
+            "win_rate": 0.0,
+            "avg_win_pct": 1.0,
+            "avg_loss_pct": -1.0,
+            "mean_net_return_pct": -1.0,
+        },
+        {
+            "avg_win_pct": 0.0,
+            "mean_net_return_pct": 0.0,
+        },
+        {
+            "wins": 0,
+            "losses": 1,
+            "win_rate": 0.0,
+            "avg_win_pct": None,
+            "avg_loss_pct": -0.0,
+            "mean_net_return_pct": -0.0,
+        },
+    ],
+)
+def test_toss_buy_candidates_quarantines_inconsistent_cached_pnl_lineage(
+    monkeypatch,
+    updates,
+):
+    calibration = _valid_cached_execution_calibration()
+    calibration.update(updates)
+    monkeypatch.setattr(
+        dd,
+        "_cached",
+        lambda *args, **kwargs: _cached_candidate_payload(calibration),
+    )
+
+    result = dd.toss_buy_candidates_data(range_="today", market="KR", limit=3)
+
+    assert result["scan_summary"]["cache_contract_valid"] is False
+    assert result["items"] == []
+
+
+def test_toss_buy_candidates_accepts_completed_lifecycle_with_oversized_sell_cache(
+    monkeypatch,
+):
+    from src.toss_execution_calibration import reconstruct_execution_calibration
+
+    report = reconstruct_execution_calibration([
+        {
+            "pilot_id": "tlive_buy-oversized-sell",
+            "side": "buy",
+            "symbol": "005930.KS",
+            "quantity": 1,
+            "filled_quantity": 1,
+            "filled_price": 100_000,
+            "estimated_amount_krw": 100_000,
+            "broker_order_status": "FILLED",
+            "strategy_reason": "auto_pipeline",
+            "event_type": "autonomous_live_sent",
+            "live_order_sent": 1,
+            "adapter_status": "enabled",
+            "live_order_allowed": 1,
+            "created_at": "2026-07-15T09:00:00+09:00",
+        },
+        {
+            "pilot_id": "tlive_sell-oversized-sell",
+            "side": "sell",
+            "symbol": "005930.KS",
+            "quantity": 2,
+            "filled_quantity": 2,
+            "filled_price": 105_000,
+            "estimated_amount_krw": 210_000,
+            "broker_order_status": "FILLED",
+            "strategy_reason": "position_review_sell",
+            "event_type": "autonomous_live_sent",
+            "live_order_sent": 1,
+            "adapter_status": "enabled",
+            "live_order_allowed": 1,
+            "created_at": "2026-07-15T10:00:00+09:00",
+        },
+    ])
+    calibration = _valid_cached_execution_calibration()
+    calibration.update({
+        key: value
+        for key, value in report.items()
+        if key in calibration
+    })
+    calibration.update({
+        "source": "read_only_live_pilot_event_ledger",
+        "source_window_truncated": False,
+        "source_row_limit": 5_000,
+        "source_rows_loaded": 2,
+        "ledger_reason_conflict_count": 0,
+        "ledger_reason_missing_count": 0,
+        "ledger_reason_invalid_count": 0,
+    })
+    monkeypatch.setattr(
+        dd,
+        "_cached",
+        lambda *args, **kwargs: _cached_candidate_payload(calibration),
+    )
+
+    result = dd.toss_buy_candidates_data(range_="today", market="KR", limit=3)
+
+    assert result["scan_summary"]["cache_contract_valid"] is True
+    projected = result["scan_summary"]["execution_calibration"]
+    assert projected["completed_count"] == 1
+    assert projected["ignored_count"] == 1
+    assert projected["unmatched_sell_fill_count"] == 1
+    assert projected["unmatched_sell_quantity"] == 1
+    assert "unmatched_sell_fill" in projected["lineage_reasons"]
+
+
+def test_toss_buy_candidates_accepts_canonical_unavailable_calibration_cache(monkeypatch):
+    calibration = _valid_cached_execution_calibration()
+    zero_fields = (
+        "completed_count",
+        "wins",
+        "losses",
+        "flats",
+        "unmatched_sell_fill_count",
+        "unmatched_sell_quantity",
+        "symbol_alias_conflict_count",
+        "ambiguous_fill_count",
+        "holdings_symbol_alias_conflict_count",
+        "open_quantity_exceeds_holdings",
+        "open_lot_count",
+        "open_quantity",
+        "ignored_count",
+        "quarantined_fill_count",
+        "invalid_fill_count",
+        "conflict_count",
+        "source_rows_loaded",
+        "ledger_reason_conflict_count",
+        "ledger_reason_missing_count",
+        "ledger_reason_invalid_count",
+    )
+    calibration.update({field: 0 for field in zero_fields})
+    calibration.update({
+        "status": "unavailable",
+        "lineage_status": "incomplete",
+        "lineage_reasons": [
+            "execution_calibration_source_unavailable",
+            "holdings_reconciliation_unavailable",
+        ],
+        "holdings_reconciliation_status": "unavailable",
+        "reason": "execution_calibration_source_unavailable",
+        "win_rate": None,
+        "avg_win_pct": None,
+        "avg_loss_pct": None,
+        "mean_net_return_pct": None,
+        "minimum_sample_reached": False,
+        "sample_sufficient": False,
+        "source_window_truncated": False,
+    })
+    monkeypatch.setattr(
+        dd,
+        "_cached",
+        lambda *args, **kwargs: _cached_candidate_payload(calibration),
+    )
+
+    result = dd.toss_buy_candidates_data(range_="today", market="KR", limit=3)
+
+    assert result["scan_summary"]["cache_contract_valid"] is True
+    assert result["scan_summary"]["execution_calibration"]["status"] == "unavailable"
+
+
+def test_toss_buy_candidates_accepts_complete_truncated_source_window_cache(monkeypatch):
+    calibration = _valid_cached_execution_calibration()
+    calibration.update({
+        "status": "partial",
+        "lineage_status": "incomplete",
+        "lineage_reasons": ["source_window_truncated"],
+        "source_window_truncated": True,
+        "source_rows_loaded": calibration["source_row_limit"],
+    })
+    monkeypatch.setattr(
+        dd,
+        "_cached",
+        lambda *args, **kwargs: _cached_candidate_payload(calibration),
+    )
+
+    result = dd.toss_buy_candidates_data(range_="today", market="KR", limit=3)
+
+    assert result["scan_summary"]["cache_contract_valid"] is True
+    report = result["scan_summary"]["execution_calibration"]
+    assert report["source_window_truncated"] is True
+    assert report["source_rows_loaded"] == report["source_row_limit"]
+
+
+def test_toss_buy_candidates_accepts_consistent_conflict_quarantine_cache(monkeypatch):
+    calibration = _valid_cached_execution_calibration()
+    calibration.update({
+        "status": "partial",
+        "lineage_status": "incomplete",
+        "lineage_reasons": ["pilot_payload_conflict"],
+        "source_rows_loaded": 5,
+        "conflict_count": 1,
+        "quarantined_fill_count": 3,
+        "ignored_count": 3,
+    })
+    monkeypatch.setattr(
+        dd,
+        "_cached",
+        lambda *args, **kwargs: _cached_candidate_payload(calibration),
+    )
+
+    result = dd.toss_buy_candidates_data(range_="today", market="KR", limit=3)
+
+    assert result["scan_summary"]["cache_contract_valid"] is True
+    report = result["scan_summary"]["execution_calibration"]
+    assert report["conflict_count"] == 1
+    assert report["quarantined_fill_count"] == 3
+    assert report["lineage_reasons"] == ["pilot_payload_conflict"]
+
+
+def test_toss_buy_candidates_accepts_consistent_mixed_pnl_cache(monkeypatch):
+    calibration = _valid_cached_execution_calibration()
+    calibration.update({
+        "completed_count": 3,
+        "wins": 1,
+        "losses": 1,
+        "flats": 1,
+        "win_rate": 0.3333,
+        "avg_win_pct": 3.0,
+        "avg_loss_pct": -3.0,
+        "mean_net_return_pct": 0.0,
+        "source_rows_loaded": 6,
+    })
+    monkeypatch.setattr(
+        dd,
+        "_cached",
+        lambda *args, **kwargs: _cached_candidate_payload(calibration),
+    )
+
+    result = dd.toss_buy_candidates_data(range_="today", market="KR", limit=3)
+
+    assert result["scan_summary"]["cache_contract_valid"] is True
+    assert result["scan_summary"]["execution_calibration"] == calibration
+
+
+def test_toss_buy_candidates_accepts_exact_safe_nested_calibration(monkeypatch):
+    calibration = _valid_cached_execution_calibration()
+    monkeypatch.setattr(
+        dd,
+        "_cached",
+        lambda *args, **kwargs: _cached_candidate_payload(calibration),
+    )
+
+    result = dd.toss_buy_candidates_data(range_="today", market="KR", limit=3)
+
+    assert result["scan_summary"]["cache_contract_valid"] is True
+    assert result["scan_summary"]["execution_calibration"] == calibration
+
+
+@pytest.mark.parametrize(
+    "raw_field", ["outcomes", "open_positions", "unexpected_field"]
+)
+def test_toss_buy_candidates_rejects_raw_fields_outside_calibration(
+    monkeypatch,
+    raw_field,
+):
+    payload = _cached_candidate_payload(_valid_cached_execution_calibration())
+    payload["scan_summary"][raw_field] = [{"raw": "must-not-leak"}]
+    monkeypatch.setattr(dd, "_cached", lambda *args, **kwargs: payload)
+
+    result = dd.toss_buy_candidates_data(range_="today", market="KR", limit=3)
+
+    assert result["scan_summary"]["cache_contract_valid"] is False
+    assert raw_field not in result["scan_summary"]
+    assert result["items"] == []
+
+
+@pytest.mark.parametrize("container", ["items", "excluded"])
+def test_toss_buy_candidates_rejects_forbidden_raw_fields_at_any_cache_depth(
+    monkeypatch,
+    container,
+):
+    payload = _cached_candidate_payload(_valid_cached_execution_calibration())
+    payload[container] = [
+        {"symbol": "SAFE", "nested": {"outcomes": [], "open_positions": []}}
+    ]
+    payload["excluded_count" if container == "excluded" else "count"] = 1
+    if container == "items":
+        payload["scan_summary"]["income_liveness_status"] = "no_signal"
+        payload["scan_summary"]["income_liveness_diagnosis"] = {
+            "reason": "no_income_gate_eligible_candidates",
+            "upstream_executable_count": 0,
+            "income_pass_count": 0,
+            "income_ready_count": 0,
+            "top_income_block_reasons": [],
+        }
+    monkeypatch.setattr(dd, "_cached", lambda *args, **kwargs: payload)
+
+    result = dd.toss_buy_candidates_data(range_="today", market="KR", limit=3)
+
+    assert result["scan_summary"]["cache_contract_valid"] is False
+    assert result["items"] == []
+    assert result["excluded"] == []
+
+
+def test_toss_buy_candidates_never_deepcopies_untrusted_cached_items(monkeypatch):
+    payload = _cached_candidate_payload(_valid_cached_execution_calibration())
+    payload["items"] = [{"raw": _DeepcopyBomb()}]
+    payload["count"] = 1
+    monkeypatch.setattr(dd, "_cached", lambda *args, **kwargs: payload)
+
+    result = dd.toss_buy_candidates_data(range_="today", market="KR", limit=3)
+
+    assert result["scan_summary"]["cache_contract_valid"] is False
+    assert result["items"] == []
+    assert result["scan_summary"]["execution_calibration"]["evidence_sufficient"] is False
+
+
+def test_toss_buy_candidates_does_not_call_hostile_cached_list_truthiness(monkeypatch):
+    payload = _cached_candidate_payload(_valid_cached_execution_calibration())
+    hostile_items = _BoolListSubclass([{}])
+    _BoolListSubclass.bool_calls = 0
+    payload["items"] = hostile_items
+    payload["count"] = 1
+    payload["scan_summary"]["income_liveness_status"] = "no_signal"
+    payload["scan_summary"]["income_liveness_diagnosis"] = {
+        "reason": "no_income_gate_eligible_candidates",
+        "upstream_executable_count": 0,
+        "income_pass_count": 0,
+        "income_ready_count": 0,
+        "top_income_block_reasons": [],
+    }
+    monkeypatch.setattr(dd, "_cached", lambda *args, **kwargs: payload)
+
+    result = dd.toss_buy_candidates_data(range_="today", market="KR", limit=3)
+
+    assert _BoolListSubclass.bool_calls == 0
+    assert result["scan_summary"]["cache_contract_valid"] is False
+    assert result["items"] == []
+
+
+def test_toss_buy_candidates_rejects_malformed_liveness_diagnosis(monkeypatch):
+    payload = _cached_candidate_payload(_valid_cached_execution_calibration())
+    payload["scan_summary"]["income_liveness_diagnosis"] = {
+        "reason": "unexpected",
+        "upstream_executable_count": 0,
+        "income_pass_count": 0,
+        "income_ready_count": 0,
+        "top_income_block_reasons": [],
+        "raw": "unknown",
+    }
+    monkeypatch.setattr(dd, "_cached", lambda *args, **kwargs: payload)
+
+    result = dd.toss_buy_candidates_data(range_="today", market="KR", limit=3)
+
+    assert result["scan_summary"]["cache_contract_valid"] is False
+    assert result["items"] == []
+
+
+def test_toss_buy_candidates_rejects_semantically_wrong_liveness_reason(monkeypatch):
+    payload = _cached_candidate_payload(_valid_cached_execution_calibration())
+    payload["items"] = [{}]
+    payload["count"] = 1
+    payload["scan_summary"]["income_liveness_status"] = "no_signal"
+    payload["scan_summary"]["income_liveness_diagnosis"] = {
+        "reason": "semantically_wrong_but_primitive",
+        "upstream_executable_count": 0,
+        "income_pass_count": 0,
+        "income_ready_count": 0,
+        "top_income_block_reasons": [],
+    }
+    monkeypatch.setattr(dd, "_cached", lambda *args, **kwargs: payload)
+
+    result = dd.toss_buy_candidates_data(range_="today", market="KR", limit=3)
+
+    assert result["scan_summary"]["cache_contract_valid"] is False
+    assert result["items"] == []
+
+
+def test_toss_buy_candidates_rejects_cached_item_liveness_mismatch(monkeypatch):
+    payload = _cached_candidate_payload(_valid_cached_execution_calibration())
+    payload["items"] = [{
+        "side": "buy",
+        "decision_bucket": "PASS_EXECUTE",
+        "missing_fields": [],
+        "limit_exceeded": False,
+        "blocking_risk_flags": [],
+        "execution_status": "ready",
+        "stock_agent_ready": True,
+        "income_strategy": {"income_pass": True},
+    }]
+    payload["count"] = 1
+    payload["scan_summary"]["income_liveness_status"] = "no_signal"
+    payload["scan_summary"]["income_liveness_diagnosis"] = {
+        "reason": "no_income_gate_eligible_candidates",
+        "upstream_executable_count": 0,
+        "income_pass_count": 0,
+        "income_ready_count": 0,
+        "top_income_block_reasons": [],
+    }
+    monkeypatch.setattr(dd, "_cached", lambda *args, **kwargs: payload)
+
+    result = dd.toss_buy_candidates_data(range_="today", market="KR", limit=3)
+
+    assert result["scan_summary"]["cache_contract_valid"] is False
+    assert result["items"] == []
+
+
+def test_toss_buy_candidates_accepts_proofed_ready_cache(monkeypatch):
+    payload = _cached_candidate_payload(_valid_cached_execution_calibration())
+    payload["items"] = [_proofed_ready_cache_item()]
+    payload["count"] = 1
+    payload["scan_summary"].update({
+        "raw_income_pass_count": 1,
+        "income_pass_count": 1,
+        "income_block_count": 0,
+        "income_gate_eligible_count": 1,
+        "upstream_executable_count": 1,
+        "income_ready_count": 1,
+        "income_liveness_status": "healthy",
+        "income_liveness_diagnosis": None,
+    })
+    monkeypatch.setattr(dd, "_cached", lambda *args, **kwargs: payload)
+
+    result = dd.toss_buy_candidates_data(range_="today", market="KR", limit=3)
+
+    assert result["scan_summary"]["cache_contract_valid"] is True
+    assert len(result["items"]) == 1
+    assert result["items"][0]["quantity"] == 10
+
+
+@pytest.mark.parametrize(
+    ("authority_field", "bad_value"),
+    [
+        ("side", "sell"),
+        ("decision_bucket", "HOLD"),
+        ("income_pass", False),
+        ("stock_agent_ready", 1),
+        ("quantity", "10"),
+        ("quality_proof", None),
+    ],
+)
+def test_toss_buy_candidates_rejects_cached_ready_authority_mismatch(
+    monkeypatch,
+    authority_field,
+    bad_value,
+):
+    payload = _cached_candidate_payload(_valid_cached_execution_calibration())
+    item = _proofed_ready_cache_item()
+    if authority_field == "income_pass":
+        item["income_strategy"]["income_pass"] = bad_value
+    elif authority_field == "quality_proof":
+        item["quality_breakdown"].pop("candidate_snapshot_sha256", None)
+    else:
+        item[authority_field] = bad_value
+    payload["items"] = [item]
+    payload["count"] = 1
+    payload["scan_summary"].update({
+        "raw_income_pass_count": 1,
+        "income_pass_count": 1,
+        "income_block_count": 0,
+        "income_gate_eligible_count": 1,
+        "upstream_executable_count": 1,
+        "income_ready_count": 1,
+        "income_liveness_status": "healthy",
+        "income_liveness_diagnosis": None,
+    })
+    monkeypatch.setattr(dd, "_cached", lambda *args, **kwargs: payload)
+
+    result = dd.toss_buy_candidates_data(range_="today", market="KR", limit=3)
+
+    assert result["scan_summary"]["cache_contract_valid"] is False
+    assert result["items"] == []
+
+
+@pytest.mark.parametrize("hostile_container", ["diagnosis", "reason_row"])
+def test_toss_buy_candidates_rejects_hostile_liveness_keys_without_hooks(
+    monkeypatch,
+    hostile_container,
+):
+    payload = _cached_candidate_payload(_valid_cached_execution_calibration())
+    payload["items"] = [{}]
+    payload["count"] = 1
+    summary = payload["scan_summary"]
+    summary.update({
+        "income_liveness_status": "degraded",
+        "income_gate_eligible_count": 2,
+        "upstream_executable_count": 2,
+        "income_block_count": 2,
+    })
+    reason_row = {"reason": "risk_block", "count": 2}
+    diagnosis = {
+        "reason": "upstream_executable_but_no_income_ready",
+        "upstream_executable_count": 2,
+        "income_pass_count": 0,
+        "income_ready_count": 0,
+        "top_income_block_reasons": [reason_row],
+    }
+    if hostile_container == "diagnosis":
+        diagnosis = {_HostileKey(key): value for key, value in diagnosis.items()}
+    else:
+        diagnosis["top_income_block_reasons"] = [
+            {_HostileKey(key): value for key, value in reason_row.items()}
+        ]
+    summary["income_liveness_diagnosis"] = diagnosis
+    monkeypatch.setattr(dd, "_cached", lambda *args, **kwargs: payload)
+    _HostileKey.hash_calls = 0
+    _HostileKey.eq_calls = 0
+    _HostileKey.armed = True
+
+    try:
+        result = dd.toss_buy_candidates_data(range_="today", market="KR", limit=3)
+    finally:
+        _HostileKey.armed = False
+
+    assert _HostileKey.hash_calls == 0
+    assert _HostileKey.eq_calls == 0
+    assert result["scan_summary"]["cache_contract_valid"] is False
+    assert result["items"] == []
+
+
+@pytest.mark.parametrize(
+    "reason_row",
+    [
+        {"reason": "x", "count": 999},
+        {"reason": "x", "count": 0},
+        {"reason": "", "count": 1},
+    ],
+)
+def test_toss_buy_candidates_rejects_impossible_liveness_reason_counts(
+    monkeypatch,
+    reason_row,
+):
+    payload = _cached_candidate_payload(_valid_cached_execution_calibration())
+    payload["items"] = [{}]
+    payload["count"] = 1
+    summary = payload["scan_summary"]
+    summary.update({
+        "income_liveness_status": "degraded",
+        "income_gate_eligible_count": 2,
+        "upstream_executable_count": 2,
+        "income_block_count": 2,
+        "income_liveness_diagnosis": {
+            "reason": "upstream_executable_but_no_income_ready",
+            "upstream_executable_count": 2,
+            "income_pass_count": 0,
+            "income_ready_count": 0,
+            "top_income_block_reasons": [reason_row],
+        },
+    })
+    monkeypatch.setattr(dd, "_cached", lambda *args, **kwargs: payload)
+
+    result = dd.toss_buy_candidates_data(range_="today", market="KR", limit=3)
+
+    assert result["scan_summary"]["cache_contract_valid"] is False
+    assert result["items"] == []
 
 
 @pytest.mark.parametrize(
@@ -1449,16 +2589,38 @@ class TestPendingSymbolLifecycle:
         old = self._pending([self._rec(created_delta_min=-120)], verification=None)
         assert old == {}
 
-    def test_repeat_calls_do_not_mutate_db(self, tmp_path):
+    def test_repeat_calls_do_not_mutate_db(self, tmp_path, monkeypatch):
         import sqlite3
-        # 실제 운영 DB 행 수가 반복 호출로 변하지 않음 (read-only 계약)
+        from db import store
+        from core import toss_live_pilot_ledger as ledger
+
+        monkeypatch.setattr(store, "DB_DIR", tmp_path)
+        monkeypatch.setattr(ledger, "_schema_created", False)
+        assert ledger.list_live_pilot_records(limit=1) == []
+        db_path = tmp_path / "toss_live_pilot.db"
+
         def count():
-            c = sqlite3.connect(
-                "file:db/data/toss_live_pilot.db?mode=ro", uri=True)
-            n = c.execute("SELECT COUNT(*) FROM live_pilot_ledger").fetchone()[0]
-            c.close()
-            return n
-        before = count()
-        for _ in range(3):
-            self._pending([self._rec()])
-        assert count() == before
+            c = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+            try:
+                return c.execute(
+                    "SELECT COUNT(*) FROM live_pilot_ledger"
+                ).fetchone()[0]
+            finally:
+                c.close()
+
+        before_count = count()
+        before_bytes = db_path.read_bytes()
+        with patch(
+            "core.toss_readonly_snapshot.load_snapshot",
+            return_value={
+                "ok": True,
+                "status": "fresh",
+                "usable_for_decisions": True,
+                "broker_orders": [],
+            },
+        ):
+            for _ in range(3):
+                assert dd._pending_toss_order_symbols() == {}
+
+        assert count() == before_count
+        assert db_path.read_bytes() == before_bytes

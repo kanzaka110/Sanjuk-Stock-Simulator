@@ -19,6 +19,8 @@ DOC = ROOT / "docs" / "toss_auto_invest_future_plan.md"
 ALLOWED_TOSS_FILES = {
     "core/toss_client.py",
     "core/toss_readonly_snapshot.py",
+    "src/toss_execution_calibration.py",
+    "tests/test_toss_execution_calibration.py",
     "core/toss_automation_guard.py",
     "core/toss_paper_trading.py",
     "core/toss_candidate_builder.py",

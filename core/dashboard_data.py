@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import math
 import os
 import re
 import sqlite3
@@ -3479,6 +3480,704 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
         market_norm = "KR"
     markets = ["KR", "US"] if market_norm == "ALL" else [market_norm]
     briefing_type = "US_BEFORE" if market_norm == "US" else ("MANUAL" if market_norm == "ALL" else "KR_BEFORE")
+    calibration_fields = frozenset({
+        "schema", "status", "mode", "decision_usable", "decision_block_reason",
+        "attribution_model", "attribution_verified", "cost_model", "reason",
+        "error_type", "completed_count", "wins", "losses", "flats", "win_rate",
+        "avg_win_pct", "avg_loss_pct", "mean_net_return_pct",
+        "minimum_sample_reached", "sample_sufficient", "evidence_sufficient",
+        "min_samples", "lineage_status", "lineage_reasons",
+        "unmatched_sell_fill_count", "unmatched_sell_quantity",
+        "symbol_alias_conflict_count", "ambiguous_fill_count",
+        "holdings_reconciliation_status", "open_quantity_exceeds_holdings",
+        "open_lot_count", "open_quantity", "ignored_count",
+        "quarantined_fill_count", "invalid_fill_count", "conflict_count",
+        "source", "source_window_truncated", "source_row_limit",
+        "source_rows_loaded", "ledger_reason_conflict_count",
+        "ledger_reason_missing_count", "ledger_reason_invalid_count",
+        "holdings_symbol_alias_conflict_count",
+    })
+    calibration_forbidden_fields = frozenset({"outcomes", "open_positions"})
+    calibration_count_fields = frozenset({
+        "completed_count", "wins", "losses", "flats", "min_samples",
+        "unmatched_sell_fill_count", "unmatched_sell_quantity",
+        "symbol_alias_conflict_count", "ambiguous_fill_count",
+        "holdings_symbol_alias_conflict_count", "open_quantity_exceeds_holdings",
+        "open_lot_count", "open_quantity", "ignored_count",
+        "quarantined_fill_count", "invalid_fill_count", "conflict_count",
+        "source_row_limit", "source_rows_loaded", "ledger_reason_conflict_count",
+        "ledger_reason_missing_count", "ledger_reason_invalid_count",
+    })
+    calibration_required_fields = frozenset({
+        "schema", "status", "mode", "decision_usable", "decision_block_reason",
+        "attribution_model", "attribution_verified", "cost_model",
+        "completed_count", "wins", "losses", "flats", "win_rate",
+        "avg_win_pct", "avg_loss_pct", "mean_net_return_pct",
+        "minimum_sample_reached", "sample_sufficient", "evidence_sufficient",
+        "min_samples", "lineage_status", "lineage_reasons",
+        "unmatched_sell_fill_count", "unmatched_sell_quantity",
+        "symbol_alias_conflict_count", "ambiguous_fill_count",
+        "holdings_reconciliation_status", "holdings_symbol_alias_conflict_count",
+        "open_quantity_exceeds_holdings", "open_lot_count", "open_quantity",
+        "ignored_count", "quarantined_fill_count", "invalid_fill_count",
+        "conflict_count", "source", "source_window_truncated",
+        "source_row_limit", "source_rows_loaded", "ledger_reason_conflict_count",
+        "ledger_reason_missing_count", "ledger_reason_invalid_count",
+    })
+    calibration_lineage_reasons = frozenset({
+        "pilot_payload_conflict", "krx_symbol_alias_conflict",
+        "fill_contract_invalid", "fill_order_ambiguous", "unmatched_sell_fill",
+        "holdings_reconciliation_unavailable", "open_lots_exceed_holdings",
+        "holdings_symbol_alias_conflict", "source_window_truncated",
+        "ledger_reason_conflict", "ledger_reason_missing", "ledger_reason_invalid",
+        "execution_calibration_source_unavailable",
+    })
+
+    def _unavailable_execution_calibration(
+        reason: str,
+        error_type: str | None = None,
+    ) -> dict:
+        payload = {
+            "schema": "toss_execution_calibration.v1",
+            "status": "unavailable",
+            "mode": "observability_only",
+            "decision_usable": False,
+            "decision_block_reason": "lifecycle_transition_model_unvalidated",
+            "attribution_model": "symbol_fifo_v1",
+            "attribution_verified": False,
+            "cost_model": "decision_buffer_v1_not_broker_statement",
+            "reason": reason,
+            "completed_count": 0,
+            "wins": 0,
+            "losses": 0,
+            "flats": 0,
+            "win_rate": None,
+            "avg_win_pct": None,
+            "avg_loss_pct": None,
+            "mean_net_return_pct": None,
+            "minimum_sample_reached": False,
+            "sample_sufficient": False,
+            "evidence_sufficient": False,
+            "min_samples": 20,
+            "lineage_status": "incomplete",
+            "lineage_reasons": [
+                "execution_calibration_source_unavailable",
+                "holdings_reconciliation_unavailable",
+            ],
+            "unmatched_sell_fill_count": 0,
+            "unmatched_sell_quantity": 0,
+            "symbol_alias_conflict_count": 0,
+            "ambiguous_fill_count": 0,
+            "holdings_reconciliation_status": "unavailable",
+            "holdings_symbol_alias_conflict_count": 0,
+            "open_quantity_exceeds_holdings": 0,
+            "open_lot_count": 0,
+            "open_quantity": 0,
+            "ignored_count": 0,
+            "quarantined_fill_count": 0,
+            "invalid_fill_count": 0,
+            "conflict_count": 0,
+            "source": "read_only_live_pilot_event_ledger",
+            "source_window_truncated": False,
+            "source_row_limit": 5_000,
+            "source_rows_loaded": 0,
+            "ledger_reason_conflict_count": 0,
+            "ledger_reason_missing_count": 0,
+            "ledger_reason_invalid_count": 0,
+        }
+        if error_type is not None:
+            payload["error_type"] = error_type
+        return payload
+
+    def _exact_text(value: object, expected: str | frozenset[str]) -> bool:
+        if type(value) is not str:
+            return False
+        if type(expected) is str:
+            return value == expected
+        return value in expected
+
+    def _bounded_number(
+        value: object,
+        minimum: float,
+        maximum: float,
+    ) -> bool:
+        if type(value) is int:
+            return minimum <= value <= maximum
+        if type(value) is float:
+            return math.isfinite(value) and minimum <= value <= maximum
+        return False
+
+    def _bounded_int(value: object, minimum: int, maximum: int) -> bool:
+        return type(value) is int and minimum <= value <= maximum
+
+    def _exact_number(value: object) -> float | None:
+        if type(value) is int:
+            return float(value)
+        if type(value) is float and math.isfinite(value):
+            return value
+        return None
+
+    def _safe_execution_calibration(value: object) -> dict | None:
+        if type(value) is not dict:
+            return None
+        if (
+            any(type(key) is not str for key in value)
+            or calibration_forbidden_fields.intersection(value)
+            or set(value).difference(calibration_fields)
+            or not calibration_required_fields.issubset(value)
+        ):
+            return None
+        if (
+            not _exact_text(value.get("schema"), "toss_execution_calibration.v1")
+            or not _exact_text(
+                value.get("status"), frozenset({"ok", "partial", "unavailable"})
+            )
+            or not _exact_text(value.get("mode"), "observability_only")
+            or value.get("decision_usable") is not False
+            or not _exact_text(
+                value.get("decision_block_reason"),
+                "lifecycle_transition_model_unvalidated",
+            )
+            or not _exact_text(value.get("attribution_model"), "symbol_fifo_v1")
+            or value.get("attribution_verified") is not False
+            or not _exact_text(
+                value.get("cost_model"),
+                "decision_buffer_v1_not_broker_statement",
+            )
+            or value.get("evidence_sufficient") is not False
+            or not _exact_text(
+                value.get("source"), "read_only_live_pilot_event_ledger"
+            )
+            or not _exact_text(
+                value.get("holdings_reconciliation_status"),
+                frozenset({"complete", "incomplete", "unavailable"}),
+            )
+        ):
+            return None
+        if any(
+            not _bounded_int(value.get(field), 0, 10_000_000)
+            for field in calibration_count_fields
+        ):
+            return None
+        source_rows_loaded = value["source_rows_loaded"]
+        row_based_count_fields = (
+            "completed_count",
+            "wins",
+            "losses",
+            "flats",
+            "unmatched_sell_fill_count",
+            "open_lot_count",
+            "ignored_count",
+            "quarantined_fill_count",
+            "invalid_fill_count",
+            "conflict_count",
+            "symbol_alias_conflict_count",
+            "ambiguous_fill_count",
+            "ledger_reason_missing_count",
+            "ledger_reason_conflict_count",
+            "ledger_reason_invalid_count",
+        )
+        if (
+            any(value[field] > source_rows_loaded for field in row_based_count_fields)
+            or value["invalid_fill_count"] > value["quarantined_fill_count"]
+            or value["quarantined_fill_count"] > value["ignored_count"]
+        ):
+            return None
+        has_quarantine_cause = bool(
+            value["invalid_fill_count"]
+            or value["conflict_count"]
+            or value["symbol_alias_conflict_count"]
+        )
+        if (value["quarantined_fill_count"] > 0) != has_quarantine_cause:
+            return None
+        minimum_quarantine = (
+            value["invalid_fill_count"]
+            + (2 * value["conflict_count"])
+            + (2 * value["symbol_alias_conflict_count"])
+        )
+        minimum_lifecycle_rows = (
+            value["ignored_count"]
+            + value["open_lot_count"]
+            + value["completed_count"]
+            + (
+                1
+                if (
+                    value["completed_count"]
+                    and value["unmatched_sell_fill_count"] == 0
+                )
+                else 0
+            )
+        )
+        if (
+            value["quarantined_fill_count"] < minimum_quarantine
+            or value["invalid_fill_count"] < value["ambiguous_fill_count"]
+            or value["ambiguous_fill_count"] == 1
+            or source_rows_loaded < minimum_lifecycle_rows
+            or (
+                value["source_window_truncated"]
+                and source_rows_loaded != value["source_row_limit"]
+            )
+        ):
+            return None
+        if (
+            not 1 <= value["min_samples"] <= 1_000_000
+            or not 1 <= value["source_row_limit"] <= 10_000
+            or value["source_rows_loaded"] > value["source_row_limit"]
+            or value["wins"] + value["losses"] + value["flats"]
+            != value["completed_count"]
+            or value["completed_count"] > value["source_rows_loaded"]
+        ):
+            return None
+        for key in ("minimum_sample_reached", "sample_sufficient", "source_window_truncated"):
+            if type(value.get(key)) is not bool:
+                return None
+        sample_reached = value["completed_count"] >= value["min_samples"]
+        if (
+            value["minimum_sample_reached"] is not sample_reached
+            or value["sample_sufficient"] is not sample_reached
+        ):
+            return None
+        lineage_reasons = value.get("lineage_reasons")
+        if (
+            type(lineage_reasons) is not list
+            or len(lineage_reasons) > 20
+            or any(
+                type(reason) is not str
+                or reason not in calibration_lineage_reasons
+                for reason in lineage_reasons
+            )
+            or len(set(lineage_reasons)) != len(lineage_reasons)
+        ):
+            return None
+        lineage_status = value.get("lineage_status")
+        if (
+            not _exact_text(
+                lineage_status, frozenset({"complete", "incomplete"})
+            )
+            or (lineage_status == "complete") != (not lineage_reasons)
+            or (value["status"] == "ok") != (lineage_status == "complete")
+        ):
+            return None
+        if (
+            (value["unmatched_sell_fill_count"] > 0)
+            != (value["unmatched_sell_quantity"] > 0)
+            or value["quarantined_fill_count"] < value["invalid_fill_count"]
+        ):
+            return None
+        expected_lineage_reasons = {
+            "pilot_payload_conflict": value["conflict_count"] > 0,
+            "krx_symbol_alias_conflict": value["symbol_alias_conflict_count"] > 0,
+            "fill_contract_invalid": value["invalid_fill_count"] > 0,
+            "unmatched_sell_fill": value["unmatched_sell_fill_count"] > 0,
+            "holdings_reconciliation_unavailable": (
+                value["holdings_reconciliation_status"] == "unavailable"
+            ),
+            "open_lots_exceed_holdings": value["open_quantity_exceeds_holdings"] > 0,
+            "holdings_symbol_alias_conflict": (
+                value["holdings_symbol_alias_conflict_count"] > 0
+            ),
+            "source_window_truncated": value["source_window_truncated"],
+            "ledger_reason_conflict": value["ledger_reason_conflict_count"] > 0,
+            "ledger_reason_missing": value["ledger_reason_missing_count"] > 0,
+            "ledger_reason_invalid": value["ledger_reason_invalid_count"] > 0,
+            "fill_order_ambiguous": value["ambiguous_fill_count"] > 0,
+            "execution_calibration_source_unavailable": value["status"] == "unavailable",
+        }
+        reason_set = set(lineage_reasons)
+        if any(
+            (reason in reason_set) is not expected
+            for reason, expected in expected_lineage_reasons.items()
+        ):
+            return None
+        holdings_issue = (
+            value["open_quantity_exceeds_holdings"] > 0
+            or value["holdings_symbol_alias_conflict_count"] > 0
+        )
+        if (
+            (value["holdings_reconciliation_status"] == "incomplete")
+            != holdings_issue
+        ):
+            return None
+        win_rate = value.get("win_rate")
+        expected_win_rate = (
+            value["wins"] / value["completed_count"]
+            if value["completed_count"] else None
+        )
+        if expected_win_rate is None:
+            if win_rate is not None:
+                return None
+        elif (
+            not _bounded_number(win_rate, 0, 1)
+            or abs(win_rate - expected_win_rate) > 0.0001
+        ):
+            return None
+        avg_win = value.get("avg_win_pct")
+        avg_loss = value.get("avg_loss_pct")
+        mean_return = value.get("mean_net_return_pct")
+        avg_win_number = _exact_number(avg_win)
+        avg_loss_number = _exact_number(avg_loss)
+        if (
+            (value["wins"] == 0 and avg_win is not None)
+            or (
+                value["wins"] > 0
+                and (
+                    not _bounded_number(avg_win, 0, 100_000)
+                    or avg_win_number is None
+                    or avg_win_number <= 0
+                )
+            )
+            or (value["losses"] == 0 and avg_loss is not None)
+            or (
+                value["losses"] > 0
+                and (
+                    not _bounded_number(avg_loss, -100_000, 0)
+                    or avg_loss_number is None
+                    or avg_loss_number >= 0
+                )
+            )
+            or (
+                value["completed_count"] == 0
+                and mean_return is not None
+            )
+            or (
+                value["completed_count"] > 0
+                and not _bounded_number(mean_return, -100_000, 100_000)
+            )
+        ):
+            return None
+        if value["completed_count"]:
+            mean_number = _exact_number(mean_return)
+            if mean_number is None:
+                return None
+            expected_mean = (
+                ((avg_win_number or 0) * value["wins"])
+                + ((avg_loss_number or 0) * value["losses"])
+            ) / value["completed_count"]
+            if abs(mean_number - expected_mean) > 0.0002:
+                return None
+        for key in ("reason", "error_type"):
+            text = value.get(key)
+            if text is not None and (type(text) is not str or len(text) > 200):
+                return None
+        if value["status"] == "unavailable":
+            unavailable_zero_fields = calibration_count_fields.difference({
+                "min_samples",
+                "source_row_limit",
+            })
+            if (
+                type(value.get("reason")) is not str
+                or any(value[field] != 0 for field in unavailable_zero_fields)
+                or value["source_window_truncated"] is not False
+                or value["minimum_sample_reached"] is not False
+                or value["sample_sufficient"] is not False
+                or value["win_rate"] is not None
+                or value["avg_win_pct"] is not None
+                or value["avg_loss_pct"] is not None
+                or value["mean_net_return_pct"] is not None
+                or value["holdings_reconciliation_status"] != "unavailable"
+            ):
+                return None
+        safe = {}
+        for key, field_value in value.items():
+            safe[key] = list(field_value) if key == "lineage_reasons" else field_value
+        return safe
+
+    cache_invalid = object()
+    cache_top_level_fields = frozenset({
+        "schema", "scan_summary", "items", "excluded", "count",
+        "excluded_count", "range", "max_order_krw", "note",
+    })
+    cache_required_summary_fields = frozenset({
+        "income_gate_version", "income_liveness_version",
+        "income_liveness_status", "raw_income_pass_count",
+        "income_pass_count", "income_block_count",
+        "income_gate_eligible_count", "upstream_executable_count",
+        "income_ready_count", "income_liveness_diagnosis",
+        "execution_calibration",
+    })
+    cache_summary_fields = frozenset({
+        "universe_count", "scanned_count", "dependency_fallback_used",
+        "pandas_available", "source", "pass_count", "reject_count",
+        "top_reject_reasons", "executable_count",
+        "conditional_small_entry_count", "limit_exceeded_count",
+        "toss_held_excluded_count", "toss_held_excluded_symbols",
+        "recent_risk_sell_excluded_count", "recent_risk_sell_excluded_symbols",
+        "market", "markets", "user_blocked_buy_symbols", "user_blocked_count",
+        "configured_max_order_krw", "candidate_affordability_limit_krw",
+        "snapshot_candidate_blocked", "snapshot_status", "snapshot_block_count",
+        "portfolio_rebalance_required", "portfolio_income_ready_cap",
+        "holdings_count_for_income_gate", "portfolio_cap_block_count",
+        "rebalance_plan", "rebalance_plan_error", "raw_income_pass_count",
+        "income_pass_count", "income_block_count", "income_gate_eligible_count",
+        "upstream_executable_count", "income_ready_count",
+        "income_liveness_status", "income_liveness_diagnosis",
+        "income_liveness_version", "execution_calibration", "income_gate_version",
+        "ai_berkshire_gate_version", "ai_berkshire_buy_block_count",
+        "ai_berkshire_needs_research_count",
+    })
+    liveness_diagnosis_fields = frozenset({
+        "reason", "upstream_executable_count", "income_pass_count",
+        "income_ready_count", "top_income_block_reasons",
+    })
+
+    def _safe_json_value(value: object, depth: int = 0) -> object:
+        if depth > 8:
+            return cache_invalid
+        if value is None or type(value) is bool:
+            return value
+        if type(value) is int:
+            return value if abs(value) <= 10**18 else cache_invalid
+        if type(value) is float:
+            return value if math.isfinite(value) and abs(value) <= 10**18 else cache_invalid
+        if type(value) is str:
+            return value if len(value) <= 50_000 else cache_invalid
+        if type(value) is list:
+            if len(value) > 1_000:
+                return cache_invalid
+            projected_list = []
+            for item in value:
+                projected = _safe_json_value(item, depth + 1)
+                if projected is cache_invalid:
+                    return cache_invalid
+                projected_list.append(projected)
+            return projected_list
+        if type(value) is dict:
+            if len(value) > 250:
+                return cache_invalid
+            projected_dict = {}
+            for key, item in value.items():
+                if (
+                    type(key) is not str
+                    or len(key) > 200
+                    or key in calibration_forbidden_fields
+                ):
+                    return cache_invalid
+                projected = _safe_json_value(item, depth + 1)
+                if projected is cache_invalid:
+                    return cache_invalid
+                projected_dict[key] = projected
+            return projected_dict
+        return cache_invalid
+
+    def _safe_liveness_diagnosis(
+        value: object,
+        status: str,
+    ) -> object:
+        if status in {"healthy", "idle"}:
+            return None if value is None else cache_invalid
+        if (
+            type(value) is not dict
+            or any(type(key) is not str for key in value)
+            or set(value) != liveness_diagnosis_fields
+        ):
+            return cache_invalid
+        expected_reason = {
+            "degraded": "upstream_executable_but_no_income_ready",
+            "downstream_blocked": "income_pass_but_no_final_ready",
+            "no_signal": "no_income_gate_eligible_candidates",
+        }.get(status)
+        if not _exact_text(value.get("reason"), expected_reason or ""):
+            return cache_invalid
+        for key in (
+            "upstream_executable_count", "income_pass_count", "income_ready_count"
+        ):
+            if type(value.get(key)) is not int or not 0 <= value[key] <= 10_000_000:
+                return cache_invalid
+        reasons = value.get("top_income_block_reasons")
+        if type(reasons) is not list or len(reasons) > 5:
+            return cache_invalid
+        safe_reasons = []
+        for row in reasons:
+            if (
+                type(row) is not dict
+                or any(type(key) is not str for key in row)
+                or set(row) != {"reason", "count"}
+            ):
+                return cache_invalid
+            if (
+                type(row.get("reason")) is not str
+                or not row["reason"].strip()
+                or len(row["reason"]) > 200
+                or type(row.get("count")) is not int
+                or not 1 <= row["count"] <= 10_000_000
+            ):
+                return cache_invalid
+            safe_reasons.append({"reason": row["reason"], "count": row["count"]})
+        return {
+            "reason": value["reason"],
+            "upstream_executable_count": value["upstream_executable_count"],
+            "income_pass_count": value["income_pass_count"],
+            "income_ready_count": value["income_ready_count"],
+            "top_income_block_reasons": safe_reasons,
+        }
+
+    pre_income_block_statuses = frozenset({
+        "hold_risk_flags",
+        "chase_block",
+        "data_quality_block",
+        "cash_unavailable",
+        "quality_finalization_failed",
+        "toss_snapshot_stale",
+    })
+
+    def _income_gate_eligible(item: dict) -> bool:
+        if str(item.get("decision_bucket") or "") not in {
+            "PASS_EXECUTE", "SMALL_PASS"
+        }:
+            return False
+        if item.get("missing_fields"):
+            return False
+        if item.get("limit_exceeded") is True:
+            return False
+        if item.get("blocking_risk_flags"):
+            return False
+        return str(item.get("execution_status") or "") not in (
+            pre_income_block_statuses
+        )
+
+    def _item_income_pass(item: dict) -> bool:
+        income = item.get("income_strategy")
+        return type(income) is dict and income.get("income_pass") is True
+
+    def _safe_candidate_cache(value: object) -> dict | None:
+        if (
+            type(value) is not dict
+            or any(type(key) is not str for key in value)
+            or set(value).difference(cache_top_level_fields)
+            or not {"schema", "scan_summary", "items", "excluded", "count", "excluded_count"}.issubset(value)
+            or not _exact_text(value.get("schema"), "toss_buy_candidates.v3.dual_income_ev")
+        ):
+            return None
+        summary = value.get("scan_summary")
+        if (
+            type(summary) is not dict
+            or any(type(key) is not str for key in summary)
+            or set(summary).difference(cache_summary_fields)
+            or calibration_forbidden_fields.intersection(summary)
+            or not cache_required_summary_fields.issubset(summary)
+            or not _exact_text(summary.get("income_gate_version"), "income_v2_dual_ev")
+            or not _exact_text(summary.get("income_liveness_version"), "income_liveness_v1")
+            or not _exact_text(
+                summary.get("income_liveness_status"),
+                frozenset({"healthy", "degraded", "downstream_blocked", "no_signal", "idle"}),
+            )
+        ):
+            return None
+        raw_items = value.get("items")
+        raw_excluded = value.get("excluded")
+        if type(raw_items) is not list or type(raw_excluded) is not list:
+            return None
+        items = _safe_json_value(raw_items)
+        excluded = _safe_json_value(raw_excluded)
+        if (
+            type(items) is not list
+            or any(type(item) is not dict for item in items)
+            or type(excluded) is not list
+            or any(type(item) is not dict for item in excluded)
+            or type(value.get("count")) is not int
+            or value["count"] != len(items)
+            or type(value.get("excluded_count")) is not int
+            or value["excluded_count"] != len(excluded)
+        ):
+            return None
+        for item in items:
+            ready = item.get("stock_agent_ready")
+            if type(ready) is not bool:
+                return None
+            if ready is True:
+                from core.toss_quality_gate import validate_ready_candidate_contract
+                ready_ok, _ = validate_ready_candidate_contract(item)
+                if not ready_ok:
+                    return None
+        calibration = _safe_execution_calibration(summary.get("execution_calibration"))
+        diagnosis = _safe_liveness_diagnosis(
+            summary.get("income_liveness_diagnosis"),
+            summary["income_liveness_status"],
+        )
+        if calibration is None or diagnosis is cache_invalid:
+            return None
+        for key in (
+            "raw_income_pass_count", "income_pass_count", "income_block_count",
+            "income_gate_eligible_count", "upstream_executable_count",
+            "income_ready_count",
+        ):
+            if type(summary.get(key)) is not int or not 0 <= summary[key] <= 10_000_000:
+                return None
+        derived_eligible_items = [
+            item for item in items if _income_gate_eligible(item)
+        ]
+        derived_counts = {
+            "raw_income_pass_count": sum(
+                1 for item in items if _item_income_pass(item)
+            ),
+            "income_pass_count": sum(
+                1 for item in derived_eligible_items if _item_income_pass(item)
+            ),
+            "income_block_count": sum(
+                1 for item in derived_eligible_items if not _item_income_pass(item)
+            ),
+            "income_gate_eligible_count": len(derived_eligible_items),
+            "upstream_executable_count": len(derived_eligible_items),
+            "income_ready_count": sum(
+                1 for item in items if item["stock_agent_ready"] is True
+            ),
+        }
+        if any(summary[key] != count for key, count in derived_counts.items()):
+            return None
+        expected_liveness_status = (
+            "healthy"
+            if summary["income_ready_count"] > 0
+            else "degraded"
+            if summary["upstream_executable_count"] > 0
+            and summary["income_pass_count"] == 0
+            else "downstream_blocked"
+            if summary["income_pass_count"] > 0
+            else "no_signal"
+            if len(items) > 0
+            else "idle"
+        )
+        if (
+            summary["income_gate_eligible_count"]
+            != summary["upstream_executable_count"]
+            or summary["income_block_count"]
+            != summary["upstream_executable_count"] - summary["income_pass_count"]
+            or summary["raw_income_pass_count"] < summary["income_pass_count"]
+            or summary["income_ready_count"] > summary["income_pass_count"]
+            or summary["income_liveness_status"] != expected_liveness_status
+        ):
+            return None
+        if type(diagnosis) is dict:
+            reason_rows = diagnosis["top_income_block_reasons"]
+            if (
+                diagnosis["upstream_executable_count"]
+                != summary["upstream_executable_count"]
+                or diagnosis["income_pass_count"] != summary["income_pass_count"]
+                or diagnosis["income_ready_count"] != summary["income_ready_count"]
+                or len({row["reason"] for row in reason_rows}) != len(reason_rows)
+                or sum(row["count"] for row in reason_rows)
+                > summary["income_block_count"]
+            ):
+                return None
+        projected_summary = _safe_json_value(summary)
+        if type(projected_summary) is not dict:
+            return None
+        projected_summary["execution_calibration"] = calibration
+        projected_summary["income_liveness_diagnosis"] = diagnosis
+
+        safe = {}
+        for key, field_value in value.items():
+            if key in {"scan_summary", "items", "excluded"}:
+                continue
+            projected = _safe_json_value(field_value)
+            if projected is cache_invalid:
+                return None
+            safe[key] = projected
+        safe.update({
+            "scan_summary": projected_summary,
+            "items": items,
+            "excluded": excluded,
+        })
+        return safe
 
     def _fetch():
         from core.discovery_candidates import (
@@ -4044,6 +4743,7 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
             except Exception as exc:
                 quality_finalized = False
                 log.debug("quality proof finalization failed: %s", type(exc).__name__)
+            out["quality_finalized"] = quality_finalized
             if not quality_finalized:
                 out["decision_bucket"] = "BLOCK"
                 out["decision_reason"] = "quality_finalization_failed"
@@ -4071,6 +4771,12 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
                     "income_block_reason": "income_gate_error",
                     "income_block_label": f"수입 게이트 계산 실패: {e}"[:180],
                 }
+            income_strategy.update({
+                "planned_entry_price": out.get("limit_price"),
+                "planned_stop_loss": out.get("stop_loss"),
+                "planned_target_price": out.get("target_price"),
+                "planned_quantity": out.get("quantity"),
+            })
             out["income_strategy"] = income_strategy
             if income_strategy.get("income_pass") is not True:
                 income_note = "수입 기대값 gate 차단: " + str(
@@ -4223,14 +4929,135 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
             scan_summary["rebalance_plan"] = build_rebalance_plan(account_for_cash_gate, items)
         except Exception as e:
             scan_summary["rebalance_plan_error"] = str(e)[:180]
-        income_pass_count = sum(
-            1 for i in items
-            if (i.get("income_strategy") or {}).get("income_pass") is True
+        income_gate_eligible_items = [
+            item for item in items if _income_gate_eligible(item)
+        ]
+        raw_income_pass_count = sum(
+            1 for item in items if _item_income_pass(item)
         )
-        income_block_count = len(items) - income_pass_count
+        income_pass_count = sum(
+            1 for item in income_gate_eligible_items if _item_income_pass(item)
+        )
+        income_block_count = len(income_gate_eligible_items) - income_pass_count
+        upstream_executable_count = len(income_gate_eligible_items)
+        income_ready_count = sum(
+            1 for item in items if item.get("stock_agent_ready") is True
+        )
+        income_block_reasons: dict[str, int] = {}
+        for item in income_gate_eligible_items:
+            reason = str(
+                (item.get("income_strategy") or {}).get("income_block_reason") or ""
+            ).strip()
+            if reason:
+                income_block_reasons[reason] = income_block_reasons.get(reason, 0) + 1
+        top_income_block_reasons = [
+            {"reason": reason, "count": count}
+            for reason, count in sorted(
+                income_block_reasons.items(), key=lambda row: (-row[1], row[0])
+            )[:5]
+        ]
+        if income_ready_count > 0:
+            income_liveness_status = "healthy"
+            income_liveness_diagnosis = None
+        elif upstream_executable_count > 0 and income_pass_count == 0:
+            income_liveness_status = "degraded"
+            income_liveness_diagnosis = {
+                "reason": "upstream_executable_but_no_income_ready",
+                "upstream_executable_count": upstream_executable_count,
+                "income_pass_count": 0,
+                "income_ready_count": 0,
+                "top_income_block_reasons": top_income_block_reasons,
+            }
+        elif income_pass_count > 0:
+            income_liveness_status = "downstream_blocked"
+            income_liveness_diagnosis = {
+                "reason": "income_pass_but_no_final_ready",
+                "upstream_executable_count": upstream_executable_count,
+                "income_pass_count": income_pass_count,
+                "income_ready_count": 0,
+                "top_income_block_reasons": top_income_block_reasons,
+            }
+        elif items:
+            income_liveness_status = "no_signal"
+            income_liveness_diagnosis = {
+                "reason": "no_income_gate_eligible_candidates",
+                "upstream_executable_count": 0,
+                "income_pass_count": 0,
+                "income_ready_count": 0,
+                "top_income_block_reasons": top_income_block_reasons,
+            }
+        else:
+            income_liveness_status = "idle"
+            income_liveness_diagnosis = None
+        scan_summary["raw_income_pass_count"] = raw_income_pass_count
         scan_summary["income_pass_count"] = income_pass_count
         scan_summary["income_block_count"] = income_block_count
-        scan_summary["income_ready_count"] = sum(1 for i in items if i.get("stock_agent_ready") is True)
+        scan_summary["income_gate_eligible_count"] = upstream_executable_count
+        scan_summary["upstream_executable_count"] = upstream_executable_count
+        scan_summary["income_ready_count"] = income_ready_count
+        scan_summary["income_liveness_status"] = income_liveness_status
+        scan_summary["income_liveness_diagnosis"] = income_liveness_diagnosis
+        scan_summary["income_liveness_version"] = "income_liveness_v1"
+        try:
+            from src.toss_execution_calibration import (
+                load_execution_calibration,
+                reconcile_calibration_with_holdings,
+            )
+
+            raw_calibration = load_execution_calibration()
+            holdings_for_reconciliation = account_for_cash_gate.get("holdings_items")
+            if (
+                snapshot_status == "fresh"
+                and account_for_cash_gate.get("snapshot_usable_for_decisions") is True
+                and type(holdings_for_reconciliation) is list
+            ):
+                raw_calibration = reconcile_calibration_with_holdings(
+                    raw_calibration,
+                    holdings_for_reconciliation,
+                )
+            else:
+                raw_calibration = dict(raw_calibration)
+                raw_lineage_reasons = raw_calibration.get("lineage_reasons")
+                lineage_reasons = (
+                    list(raw_lineage_reasons)
+                    if type(raw_lineage_reasons) is list else []
+                )
+                if "holdings_reconciliation_unavailable" not in lineage_reasons:
+                    lineage_reasons.append("holdings_reconciliation_unavailable")
+                raw_calibration.update({
+                    "status": (
+                        "unavailable"
+                        if raw_calibration.get("status") == "unavailable"
+                        else "partial"
+                    ),
+                    "holdings_reconciliation_status": "unavailable",
+                    "holdings_symbol_alias_conflict_count": 0,
+                    "open_quantity_exceeds_holdings": 0,
+                    "lineage_status": "incomplete",
+                    "lineage_reasons": lineage_reasons,
+                    "evidence_sufficient": False,
+                })
+            fresh_projection = {
+                key: value
+                for key, value in raw_calibration.items()
+                if key in calibration_fields
+            }
+            fresh_projection.update({
+                "schema": "toss_execution_calibration.v1",
+                "mode": "observability_only",
+                "decision_usable": False,
+                "decision_block_reason": "lifecycle_transition_model_unvalidated",
+                "attribution_verified": False,
+            })
+            execution_calibration = _safe_execution_calibration(fresh_projection)
+            if execution_calibration is None:
+                raise ValueError("execution_calibration_contract_invalid")
+        except Exception as exc:
+            execution_calibration = _unavailable_execution_calibration(
+                "execution_calibration_load_failed",
+                type(exc).__name__,
+            )
+        scan_summary["execution_calibration"] = execution_calibration
         scan_summary["income_gate_version"] = "income_v2_dual_ev"
         scan_summary["ai_berkshire_gate_version"] = _AI_BERKSHIRE_BUY_GATE_VERSION
         scan_summary["ai_berkshire_buy_block_count"] = sum(
@@ -4254,23 +5081,16 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
     except Exception as e:
         log.warning("toss buy candidates cache failed: error_type=%s", type(e).__name__)
         cached = None
-    cache_valid = False
-    if type(cached) is dict:
-        cached_summary = cached.get("scan_summary")
-        cached_items = cached.get("items")
-        cached_excluded = cached.get("excluded")
-        cache_valid = (
-            cached.get("schema") == "toss_buy_candidates.v3.dual_income_ev"
-            and type(cached_summary) is dict
-            and cached_summary.get("income_gate_version") == "income_v2_dual_ev"
-            and type(cached_items) is list
-            and all(type(item) is dict for item in cached_items)
-            and type(cached_excluded) is list
-            and all(type(item) is dict for item in cached_excluded)
+    try:
+        safe_cached = _safe_candidate_cache(cached)
+    except Exception as exc:
+        log.warning(
+            "toss buy candidates cache contract rejected: error_type=%s",
+            type(exc).__name__,
         )
-    if cache_valid and type(cached) is dict:
-        safe_cached = cached
-    else:
+        safe_cached = None
+    cache_valid = safe_cached is not None
+    if safe_cached is None:
         safe_cached = {
             "schema": "toss_buy_candidates.v3.dual_income_ev",
             "scan_summary": {"income_gate_version": "income_v2_dual_ev"},
@@ -4282,15 +5102,44 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
             "note": "cache_payload_invalid_fail_closed",
         }
     requested_limit = max(0, int(limit))
-    out = copy.deepcopy(safe_cached)
+    out = dict(safe_cached)
+    out["scan_summary"] = dict(safe_cached.get("scan_summary") or {})
+    out["items"] = list(safe_cached.get("items") or [])
+    out["excluded"] = list(safe_cached.get("excluded") or [])
     out["schema"] = "toss_buy_candidates.v3.dual_income_ev"
     scan_summary = out.get("scan_summary")
     if not isinstance(scan_summary, dict):
         scan_summary = {}
         out["scan_summary"] = scan_summary
     scan_summary["income_gate_version"] = "income_v2_dual_ev"
+    scan_summary["income_liveness_version"] = "income_liveness_v1"
+    scan_summary["cache_contract_valid"] = cache_valid
+    if not cache_valid:
+        scan_summary.update({
+            "raw_income_pass_count": 0,
+            "income_pass_count": 0,
+            "income_block_count": 0,
+            "income_gate_eligible_count": 0,
+            "upstream_executable_count": 0,
+            "income_ready_count": 0,
+            "income_liveness_status": "unavailable",
+            "income_liveness_diagnosis": {
+                "reason": "candidate_cache_payload_unavailable",
+                "upstream_executable_count": 0,
+                "income_pass_count": 0,
+                "income_ready_count": 0,
+                "top_income_block_reasons": [],
+            },
+            "execution_calibration": _unavailable_execution_calibration(
+                "candidate_cache_payload_unavailable"
+            ),
+        })
     out["items"] = list(out.get("items") or [])[:requested_limit]
     out["excluded"] = list(out.get("excluded") or [])[:requested_limit]
+    scan_summary["returned_candidate_count"] = len(out["items"])
+    scan_summary["returned_income_ready_count"] = sum(
+        1 for item in out["items"] if item.get("stock_agent_ready") is True
+    )
     out["requested_limit"] = requested_limit
     return out
 

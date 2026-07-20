@@ -41,6 +41,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from core.toss_income_strategy import validate_executable_income_contract
+from core.toss_quality_gate import validate_ready_candidate_contract
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +58,7 @@ _KR_BUY_INDEX_MAX_AGE_SEC = 180
 _KR_BUY_TRUSTED_INDEX_SOURCES = frozenset({"yf_batch", "yf_fast", "kis", "kis_domestic"})
 _BUY_CANDIDATE_SCHEMA = "toss_buy_candidates.v3.dual_income_ev"
 _INCOME_GATE_VERSION = "income_v2_dual_ev"
+_INCOME_LIVENESS_VERSION = "income_liveness_v1"
 
 
 def _utc_now() -> datetime:
@@ -260,9 +262,18 @@ def select_ready_candidates(
     data = raw_data if type(raw_data) is dict else {}
     scan_summary = data.get("scan_summary")
     if (
-        data.get("schema") != _BUY_CANDIDATE_SCHEMA
+        type(data.get("schema")) is not str
+        or data["schema"] != _BUY_CANDIDATE_SCHEMA
         or type(scan_summary) is not dict
-        or scan_summary.get("income_gate_version") != _INCOME_GATE_VERSION
+        or type(scan_summary.get("income_gate_version")) is not str
+        or scan_summary["income_gate_version"] != _INCOME_GATE_VERSION
+        or scan_summary.get("cache_contract_valid") is not True
+        or type(scan_summary.get("income_liveness_version")) is not str
+        or scan_summary["income_liveness_version"] != _INCOME_LIVENESS_VERSION
+        or type(scan_summary.get("income_liveness_status")) is not str
+        or scan_summary["income_liveness_status"] not in {
+            "healthy", "degraded", "downstream_blocked", "no_signal", "idle"
+        }
     ):
         return [], []
     captured_at_utc = _utc_now()
@@ -270,6 +281,24 @@ def select_ready_candidates(
     if type(raw_items) is not list or any(type(item) is not dict for item in raw_items):
         return [], []
     items = raw_items[:10]
+    returned_ready_count = sum(
+        1 for item in items if item.get("stock_agent_ready") is True
+    )
+    income_ready_count = scan_summary.get("income_ready_count")
+    income_pass_count = scan_summary.get("income_pass_count")
+    if (
+        type(scan_summary.get("returned_candidate_count")) is not int
+        or scan_summary["returned_candidate_count"] != len(items)
+        or type(scan_summary.get("returned_income_ready_count")) is not int
+        or scan_summary["returned_income_ready_count"] != returned_ready_count
+        or type(income_ready_count) is not int
+        or type(income_pass_count) is not int
+        or income_ready_count < returned_ready_count
+        or income_pass_count < income_ready_count
+        or (income_ready_count > 0)
+        != (scan_summary["income_liveness_status"] == "healthy")
+    ):
+        return [], []
     raw_fallback = (
         scan_summary.get("dependency_fallback_used")
         if type(scan_summary) is dict
@@ -313,6 +342,13 @@ def select_ready_candidates(
             income_ok = False
             contract_reason = "income_contract_side_invalid"
         if item.get("stock_agent_ready") is True and income_ok:
+            if side == "buy":
+                ready_ok, contract_reason = validate_ready_candidate_contract(item)
+            else:
+                ready_ok = True
+        else:
+            ready_ok = False
+        if ready_ok:
             ready.append(item)
         else:
             reason = str(
@@ -421,6 +457,13 @@ def process_candidate(
                 "symbol": symbol,
                 "stage": "income_contract_blocked",
                 "reason": contract_reason,
+            }
+        candidate_ok, candidate_reason = validate_ready_candidate_contract(candidate)
+        if not candidate_ok:
+            return {
+                "symbol": symbol,
+                "stage": "candidate_contract_blocked",
+                "reason": candidate_reason,
             }
 
     # AI Berkshire BUY 게이트 — dashboard 후보 정규화와 독립 재검사.

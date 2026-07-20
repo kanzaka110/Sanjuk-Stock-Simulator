@@ -75,14 +75,77 @@ _POLICY_ON = {
 
 _BUY_CANDIDATE_SCHEMA = "toss_buy_candidates.v3.dual_income_ev"
 _INCOME_GATE_VERSION = "income_v2_dual_ev"
+_INCOME_LIVENESS_VERSION = "income_liveness_v1"
+
+
+def _seal_quality_proof_for_test(candidate: dict) -> None:
+    from core import toss_quality_gate as qg
+
+    breakdown = candidate["quality_breakdown"]
+    breakdown["decision_bucket"] = candidate["decision_bucket"]
+    breakdown["decision_reason"] = candidate["decision_reason"]
+    breakdown["score_symbol"] = candidate["symbol"].upper()
+    breakdown["score_side"] = candidate["side"].lower()
+    breakdown.update({
+        "decision_change_pct": float(candidate.get("change_pct") or 0.0),
+        "decision_days_to_earnings": -1,
+        "decision_has_stop": True,
+        "decision_has_target": True,
+        "decision_blocking_risk_flags": [],
+        "decision_origin_bucket": breakdown["decision_bucket"],
+        "decision_origin_reason": breakdown["decision_reason"],
+        "score_schema_version": qg.QUALITY_SCORE_SCHEMA_VERSION,
+    })
+    weight_hash = qg._weight_profile_hash()
+    breakdown["weight_profile_hash"] = weight_hash
+    breakdown["score_breakdown_sha256"] = qg._score_breakdown_hash(
+        breakdown,
+        schema_version=qg.QUALITY_SCORE_SCHEMA_VERSION,
+        weight_hash=weight_hash,
+    )
+    assert breakdown["score_breakdown_sha256"]
+    assert qg.attach_quality_proof(candidate) is True
 
 
 def _candidate_feed(items, **scan_summary) -> dict:
+    returned_items = items[:10]
+    income_pass_count = sum(
+        1
+        for item in items
+        if type(item) is dict
+        and type(item.get("income_strategy")) is dict
+        and item["income_strategy"].get("income_pass") is True
+    )
+    income_ready_count = sum(
+        1
+        for item in items
+        if type(item) is dict and item.get("stock_agent_ready") is True
+    )
+    liveness_status = (
+        "healthy"
+        if income_ready_count > 0
+        else "downstream_blocked"
+        if income_pass_count > 0
+        else "no_signal"
+        if items
+        else "idle"
+    )
     return {
         "schema": _BUY_CANDIDATE_SCHEMA,
         "items": items,
         "scan_summary": {
             "income_gate_version": _INCOME_GATE_VERSION,
+            "income_liveness_version": _INCOME_LIVENESS_VERSION,
+            "income_liveness_status": liveness_status,
+            "income_pass_count": income_pass_count,
+            "income_ready_count": income_ready_count,
+            "returned_candidate_count": len(returned_items),
+            "returned_income_ready_count": sum(
+                1
+                for item in returned_items
+                if type(item) is dict and item.get("stock_agent_ready") is True
+            ),
+            "cache_contract_valid": True,
             "dependency_fallback_used": False,
             **scan_summary,
         },
@@ -100,6 +163,10 @@ def _candidate(symbol="091180.KS", **kw) -> dict:
         "stop_loss": 28000,
         "target_price": 34000,
         "stock_agent_ready": True,
+        "executable_now": True,
+        "quality_finalized": True,
+        "income_execution_contract_valid": True,
+        "missing_fields": [],
         "decision_bucket": "PASS_EXECUTE",
         "decision_reason": "quality pass",
         "quality_score": 75,
@@ -110,6 +177,7 @@ def _candidate(symbol="091180.KS", **kw) -> dict:
             "score_risk_reward": 16,
             "score_reliability": 12,
             "score_market_regime": 12,
+            "score_supply_demand": 0,
             "penalty_overheat": 0,
             "penalty_duplicate": 0,
             "penalty_event_risk": 0,
@@ -132,6 +200,17 @@ def _candidate(symbol="091180.KS", **kw) -> dict:
     overrides = dict(kw)
     income_override = overrides.pop("income_strategy", None)
     base.update(overrides)
+    if not base["symbol"].endswith((".KS", ".KQ")):
+        if "market" not in kw:
+            base["market"] = "US"
+        if "currency" not in kw:
+            base["currency"] = "USD"
+    base["income_strategy"].update({
+        "planned_entry_price": base["limit_price"],
+        "planned_stop_loss": base["stop_loss"],
+        "planned_target_price": base["target_price"],
+        "planned_quantity": base["quantity"],
+    })
     if income_override is not None:
         base["income_strategy"].update(income_override)
         if (
@@ -144,6 +223,7 @@ def _candidate(symbol="091180.KS", **kw) -> dict:
             and "decision_income_edge_ratio" not in income_override
         ):
             base["income_strategy"]["decision_income_edge_ratio"] = income_override["income_edge_ratio"]
+    _seal_quality_proof_for_test(base)
     return base
 
 
@@ -191,6 +271,68 @@ class TestSelect(unittest.TestCase):
                 return_value=envelope,
             ):
                 self.assertEqual(tap.select_ready_candidates(), ([], []))
+
+    def test_cached_ready_item_liveness_mismatch_fails_closed(self):
+        feed = _candidate_feed([_candidate()])
+        feed["scan_summary"].update({
+            "income_liveness_status": "no_signal",
+            "income_pass_count": 0,
+            "income_ready_count": 0,
+        })
+
+        with patch(
+            "core.dashboard_data.toss_buy_candidates_data",
+            return_value=feed,
+        ):
+            self.assertEqual(tap.select_ready_candidates(), ([], []))
+
+    def test_malformed_ready_contract_fails_closed(self):
+        for case in (
+            "string_quantity",
+            "missing_quality_proof",
+            "side_subclass",
+            "huge_limit_price",
+            "stale_risk_reward",
+            "income_entry_mismatch",
+            "income_entry_type_mismatch",
+            "income_stop_mismatch",
+            "income_target_mismatch",
+            "income_quantity_mismatch",
+        ):
+            candidate = _candidate()
+            if case == "string_quantity":
+                candidate["quantity"] = "10"
+            elif case == "side_subclass":
+                candidate["side"] = type("Side", (str,), {})("buy")
+            elif case == "huge_limit_price":
+                candidate["limit_price"] = 10**400
+            elif case == "stale_risk_reward":
+                from core import toss_quality_gate as qg
+                candidate["target_price"] = 30_001
+                candidate["income_strategy"]["planned_target_price"] = 30_001
+                assert qg.attach_quality_proof(candidate) is True
+            elif case == "income_entry_mismatch":
+                candidate["income_strategy"]["planned_entry_price"] = 30_001.0
+            elif case == "income_entry_type_mismatch":
+                candidate["income_strategy"]["planned_entry_price"] = 30_000
+            elif case == "income_stop_mismatch":
+                candidate["income_strategy"]["planned_stop_loss"] = 27_999
+            elif case == "income_target_mismatch":
+                candidate["income_strategy"]["planned_target_price"] = 35_000
+            elif case == "income_quantity_mismatch":
+                candidate["income_strategy"]["planned_quantity"] = 11
+            else:
+                candidate["quality_breakdown"].pop(
+                    "candidate_snapshot_sha256", None
+                )
+            with self.subTest(case=case), patch(
+                "core.dashboard_data.toss_buy_candidates_data",
+                return_value=_candidate_feed([candidate]),
+            ):
+                ready, not_ready = tap.select_ready_candidates()
+                self.assertEqual(ready, [])
+                self.assertEqual(len(not_ready), 1)
+                self.assertTrue(not_ready[0]["reason"].startswith("candidate_"))
 
     def test_non_dict_candidate_item_fails_closed(self):
         corrupt_items = ["not-a-list", ["not-a-dict"], [type("Item", (dict,), {})()]]
@@ -600,6 +742,62 @@ class TestProcessCandidate(unittest.TestCase):
             self.assertTrue(result["reason"].startswith("income_contract_"))
             preview.assert_not_called()
 
+    def test_malformed_ready_contract_stops_before_all_boundaries(self):
+        for case in (
+            "string_quantity",
+            "missing_quality_proof",
+            "side_subclass",
+            "huge_limit_price",
+            "stale_risk_reward",
+            "income_entry_mismatch",
+            "income_entry_type_mismatch",
+            "income_stop_mismatch",
+            "income_target_mismatch",
+            "income_quantity_mismatch",
+        ):
+            candidate = _candidate()
+            if case == "string_quantity":
+                candidate["quantity"] = "10"
+            elif case == "side_subclass":
+                candidate["side"] = type("Side", (str,), {})("buy")
+            elif case == "huge_limit_price":
+                candidate["limit_price"] = 10**400
+            elif case == "stale_risk_reward":
+                from core import toss_quality_gate as qg
+                candidate["target_price"] = 30_001
+                candidate["income_strategy"]["planned_target_price"] = 30_001
+                assert qg.attach_quality_proof(candidate) is True
+            elif case == "income_entry_mismatch":
+                candidate["income_strategy"]["planned_entry_price"] = 30_001.0
+            elif case == "income_entry_type_mismatch":
+                candidate["income_strategy"]["planned_entry_price"] = 30_000
+            elif case == "income_stop_mismatch":
+                candidate["income_strategy"]["planned_stop_loss"] = 27_999
+            elif case == "income_target_mismatch":
+                candidate["income_strategy"]["planned_target_price"] = 35_000
+            elif case == "income_quantity_mismatch":
+                candidate["income_strategy"]["planned_quantity"] = 11
+            else:
+                candidate["quality_breakdown"].pop(
+                    "candidate_snapshot_sha256", None
+                )
+            with self.subTest(case=case), patch(
+                "core.ai_berkshire_toss.evaluate_ai_berkshire_buy_gate",
+                return_value={"buy_block": False, "buy_reason": "ai_berkshire_pass"},
+            ), patch(
+                "core.toss_live_pilot_preview.build_live_pilot_preview"
+            ) as preview, patch(
+                "core.toss_live_pilot_ledger.record_live_pilot_preview"
+            ) as ledger, patch(
+                "core.toss_live_pilot_verification.create_verification_request"
+            ) as verification:
+                result = tap.process_candidate(candidate, dict(_POLICY_ON))
+
+            self.assertEqual(result["stage"], "candidate_contract_blocked")
+            preview.assert_not_called()
+            ledger.assert_not_called()
+            verification.assert_not_called()
+
     def test_prediction_ref_flows_preview_ledger_and_verification(self):
         candidate = _candidate()
         candidate["source_prediction_id"] = 42
@@ -662,14 +860,16 @@ class TestProcessCandidate(unittest.TestCase):
     def test_buy_without_executable_bucket_stops_before_quality_and_verification(self):
         candidate = _candidate()
         candidate.pop("decision_bucket", None)
-        with patch("core.toss_live_pilot_ledger.record_live_pilot_preview",
-                   return_value={"ok": True, "pilot_id": "tlive_quality_missing"}), \
+        with patch("core.toss_live_pilot_preview.build_live_pilot_preview") as preview, \
+             patch("core.toss_live_pilot_ledger.record_live_pilot_preview") as ledger, \
              patch("core.toss_quality_gate.record_execution_quality_decision") as quality, \
              patch("core.toss_live_pilot_verification.create_verification_request") as verification:
             result = tap.process_candidate(candidate, dict(_POLICY_ON))
 
-        assert result["stage"] == "quality_attribution_failed"
-        assert result["reason"] == "non_executable_decision_bucket"
+        assert result["stage"] == "candidate_contract_blocked"
+        assert result["reason"] == "candidate_identity_invalid"
+        preview.assert_not_called()
+        ledger.assert_not_called()
         quality.assert_not_called()
         verification.assert_not_called()
 
@@ -844,6 +1044,40 @@ class TestRun(unittest.TestCase):
             r = self._run(tmp)
             self.assertEqual(r["attempted"], 1)
             self.assertEqual(r["pass_count"], 1)
+
+    def test_cached_liveness_mismatch_stops_before_preview(self):
+        feed = _candidate_feed([_candidate()])
+        feed["scan_summary"].update({
+            "income_liveness_status": "no_signal",
+            "income_pass_count": 0,
+            "income_ready_count": 0,
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.json"
+            with patch.object(
+                tap, "_state_path", return_value=state_path
+            ), patch.object(
+                tap, "_active_execution_market", return_value="KR"
+            ), patch(
+                "core.toss_live_pilot_policy.compute_toss_live_pilot_policy",
+                return_value=dict(_POLICY_ON),
+            ), patch(
+                "core.dashboard_data.toss_buy_candidates_data",
+                return_value=feed,
+            ), patch.object(
+                tap,
+                "retry_retryable_orders",
+                return_value={"retried": 0, "sent": 0, "exhausted": 0},
+            ), patch.object(
+                tap, "process_candidate"
+            ) as process, patch(
+                "core.toss_live_pilot_preview.build_live_pilot_preview"
+            ) as preview:
+                result = tap.run_toss_autonomous_pipeline(now=_NOW, force=True)
+
+        self.assertEqual(result["attempted"], 0)
+        process.assert_not_called()
+        preview.assert_not_called()
 
     def test_incomplete_or_truthy_policy_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1599,7 +1833,14 @@ class TestDailyReport(unittest.TestCase):
 def test_select_ready_candidates_requires_income_pass():
     items = [
         _candidate("A.KS", income_strategy={"income_pass": True, "expected_pnl_krw": 9000, "income_edge_ratio": 0.02}),
-        _candidate("B.KS", income_strategy={"income_pass": False, "income_block_reason": "expected_pnl_below_threshold"}),
+        _candidate(
+            "B.KS",
+            stock_agent_ready=False,
+            income_strategy={
+                "income_pass": False,
+                "income_block_reason": "expected_pnl_below_threshold",
+            },
+        ),
     ]
     with patch("core.dashboard_data.toss_buy_candidates_data", return_value=_candidate_feed(items)):
         ready, not_ready = tap.select_ready_candidates()
