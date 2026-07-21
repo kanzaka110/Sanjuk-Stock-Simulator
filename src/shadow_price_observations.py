@@ -33,7 +33,11 @@ _SOURCE_MAP = {
 
 
 def _aware_utc(value: datetime, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None:
+    if (
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() is None
+    ):
         raise ValueError(f"{name}_timezone_aware_required")
     return value.astimezone(timezone.utc)
 
@@ -218,11 +222,15 @@ def load_shadow_symbols(
         connection.execute("PRAGMA query_only=ON")
         rows = connection.execute(
             """SELECT symbol, features_json
-               FROM shadow_decisions
+               FROM (
+                   SELECT id, symbol, decided_at_utc, features_json
+                   FROM shadow_decisions
+                   ORDER BY id DESC
+                   LIMIT ?
+               ) AS bounded_recent
                WHERE decided_at_utc >= ?
-               ORDER BY decided_at_utc DESC
-               LIMIT ?""",
-            (since.strftime("%Y-%m-%dT%H:%M:%S.%fZ"), _MAX_DECISION_SCAN),
+               ORDER BY decided_at_utc DESC, id DESC""",
+            (_MAX_DECISION_SCAN, since.strftime("%Y-%m-%dT%H:%M:%S.%fZ")),
         ).fetchall()
 
     result: list[str] = []
