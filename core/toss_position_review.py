@@ -43,7 +43,6 @@ _DEFAULT_STOP_LOSS_PCT = -8.0    # 이하 → 전량 매도
 _DEFAULT_TAKE_PROFIT_PCT = 15.0  # 이상 → 분할 익절
 _PARTIAL_SELL_RATIO = 0.5
 _INCOME_TAKE_PROFIT_SINGLE_PCT = 1.5
-_INCOME_PARTIAL_TAKE_PROFIT_PCT = 1.2
 _INCOME_EARLY_STOP_LOSS_PCT = -2.5
 _INCOME_HARD_STOP_LOSS_PCT = -4.5
 _MAX_EXECUTION_QUANTITY = 1_000_000
@@ -350,10 +349,8 @@ def evaluate_holdings(holdings_items: list[dict] | None = None) -> list[dict]:
                 action, sell_qty = "income_hard_stop_loss", qty
             elif pl_pct <= _INCOME_EARLY_STOP_LOSS_PCT:
                 action, sell_qty = "income_early_stop_loss", qty
-            elif qty <= 1 and pl_pct >= _INCOME_TAKE_PROFIT_SINGLE_PCT:
+            elif pl_pct >= _INCOME_TAKE_PROFIT_SINGLE_PCT:
                 action, sell_qty = "income_take_profit", qty
-            elif qty > 1 and pl_pct >= _INCOME_PARTIAL_TAKE_PROFIT_PCT:
-                action, sell_qty = "income_partial_take_profit", max(1, int(qty * _PARTIAL_SELL_RATIO))
             else:
                 continue
         elif pl_pct <= stop_pct:

@@ -277,8 +277,14 @@ def check_exit_levels(
             continue
         seen_symbols.add(symbol)
 
+        entry = _as_float(r.get("limit_price"))
+        reason = str(r.get("reason") or "").lower()
+        income_managed = "auto_pipeline" in reason or "income" in reason
         stop = _as_float(r.get("stop_loss"))
         target = _as_float(r.get("target_price"))
+        if income_managed and entry > 0:
+            stop = round(entry * (1.0 - 0.025), 6)
+            target = round(entry * (1.0 + 0.015), 6)
         if stop <= 0 and target <= 0:
             continue
 
@@ -286,7 +292,6 @@ def check_exit_levels(
         if price <= 0:
             continue
 
-        entry = _as_float(r.get("limit_price"))
         base = {
             "pilot_id": str(r.get("pilot_id", "")),
             "symbol": symbol,
@@ -295,6 +300,7 @@ def check_exit_levels(
             "stop_loss": stop,
             "target_price": target,
             "quantity": int(_as_float(r.get("quantity"))),
+            "income_managed": income_managed,
         }
         if stop > 0 and price <= stop:
             alerts.append({**base, "type": "stop_loss_hit"})
@@ -329,6 +335,8 @@ def compute_exit_sell_quantity(alert: dict, held_qty: float) -> int:
     if base_qty <= 0:
         return 0
     if alert.get("type") == "target_hit":
+        if alert.get("income_managed") is True:
+            return base_qty
         return max(1, int(base_qty * TARGET_PARTIAL_SELL_RATIO))
     return base_qty
 

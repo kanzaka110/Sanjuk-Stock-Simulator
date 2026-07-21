@@ -174,6 +174,22 @@ class TestEvaluateHoldings(unittest.TestCase):
         self.assertEqual(out[0]["quantity"], 1)
         self.assertEqual(out[0]["review_reason"], "income_position_review")
 
+    def test_income_multi_share_waits_below_one_point_five_pct(self):
+        out = self._eval([
+            _holding(symbol="555553", pl_amount=1400, purchase=100000, qty=4, last_price=25350)
+        ], income_managed={"555553.KS"})
+        self.assertEqual(out, [])
+
+    def test_income_multi_share_takes_profit_in_full_at_one_point_five_pct(self):
+        out = self._eval([
+            _holding(symbol="555554", pl_amount=1600, purchase=100000, qty=4, last_price=25400)
+        ], income_managed={"555554.KS"})
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["action"], "income_take_profit")
+        self.assertEqual(out[0]["quantity"], 4)
+        self.assertEqual(out[0]["held_quantity"], 4)
+        self.assertEqual(out[0]["review_reason"], "income_position_review")
+
     def test_income_position_early_stop_at_minus_two_point_five_pct(self):
         out = self._eval([
             _holding(symbol="555551", pl_amount=-2600, purchase=100000, qty=3, last_price=97400)

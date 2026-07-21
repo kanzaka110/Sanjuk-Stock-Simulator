@@ -230,9 +230,15 @@ def test_fast_us_quote_quality_provenance_is_differentiated_and_starvation_fails
     ), 1)
     from core.toss_income_strategy import estimate_win_prob
     assert evid["income_strategy"]["win_prob"] == estimate_win_prob(evid)
-    assert evid["quality_score"] != by_symbol["STARV"]["quality_score"]
-    assert by_symbol["STARV"]["quality_data_starved"] is True
-    assert by_symbol["STARV"]["decision_bucket"] == "BLOCK"
-    assert by_symbol["STARV"]["stock_agent_ready"] is False
-    assert by_symbol["STARV"]["income_strategy"]["income_pass"] is False
-    assert by_symbol["STARV"]["income_strategy"]["income_block_reason"] == "quality_data_starvation"
+    starved = by_symbol["STARV"]
+    assert "quality_score" not in starved
+    assert "quality_score_authority" not in starved
+    starved_breakdown = starved.get("quality_breakdown") or {}
+    assert "quality_score_authority" not in starved_breakdown
+    assert "score_breakdown_sha256" not in starved_breakdown
+    assert "candidate_snapshot_sha256" not in starved_breakdown
+    assert starved["quality_data_starved"] is True
+    assert starved["decision_bucket"] == "BLOCK"
+    assert starved["stock_agent_ready"] is False
+    assert starved["income_strategy"]["income_pass"] is False
+    assert starved["income_strategy"]["income_block_reason"] == "quality_data_starvation"

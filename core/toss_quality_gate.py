@@ -883,6 +883,7 @@ def _outcomes_conn() -> sqlite3.Connection:
                 target_price REAL,
                 quantity REAL DEFAULT 0,
                 side TEXT DEFAULT '',
+                quality_score_authority TEXT DEFAULT '',
                 score_schema_version INTEGER DEFAULT 0,
                 weight_profile_hash TEXT DEFAULT '',
                 score_breakdown_sha256 TEXT DEFAULT '',
@@ -931,6 +932,7 @@ def _outcomes_conn() -> sqlite3.Connection:
             "target_price": "REAL DEFAULT 0",
             "quantity": "REAL DEFAULT 0",
             "side": "TEXT DEFAULT ''",
+            "quality_score_authority": "TEXT DEFAULT ''",
             "score_schema_version": "INTEGER DEFAULT 0",
             "weight_profile_hash": "TEXT DEFAULT ''",
             "score_breakdown_sha256": "TEXT DEFAULT ''",
@@ -979,11 +981,10 @@ def _outcomes_conn() -> sqlite3.Connection:
                 "PRAGMA table_info(quality_gate_decisions)"
             ).fetchall()
         }
-        actual_indexes = {
-            str(row[1]) for row in conn.execute(
-                "PRAGMA index_list(quality_gate_decisions)"
-            ).fetchall()
-        }
+        index_rows = conn.execute(
+            "PRAGMA index_list(quality_gate_decisions)"
+        ).fetchall()
+        actual_indexes = {str(row[1]) for row in index_rows}
         missing_columns = ({"id"} | set(migrations)) - actual_columns
         missing_indexes = {
             "idx_qg_decision_ref_exact", "idx_qg_pilot_id_exact",
@@ -992,6 +993,41 @@ def _outcomes_conn() -> sqlite3.Connection:
             raise RuntimeError(
                 "quality_schema_incomplete:"
                 f"columns={sorted(missing_columns)},indexes={sorted(missing_indexes)}"
+            )
+        expected_exact_indexes = {
+            "idx_qg_decision_ref_exact": "decision_ref",
+            "idx_qg_pilot_id_exact": "pilot_id",
+        }
+        invalid_indexes = []
+        for index_name, column in expected_exact_indexes.items():
+            row = next((r for r in index_rows if str(r[1]) == index_name), None)
+            key_columns = [
+                str(r[2]) for r in conn.execute(
+                    f'PRAGMA index_xinfo("{index_name}")'
+                ).fetchall()
+                if int(r[5]) == 1
+            ]
+            sql_row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
+                (index_name,),
+            ).fetchone()
+            sql = str(sql_row[0] or "") if sql_row else ""
+            where_match = re.search(r"\bWHERE\s+(.+)$", sql, re.IGNORECASE)
+            predicate = re.sub(
+                r'[\s"`\[\]\(\)]', "", where_match.group(1)
+            ).lower() if where_match else ""
+            if (
+                row is None
+                or int(row[2]) != 1
+                or int(row[4]) != 1
+                or key_columns != [column]
+                or predicate != f"{column}<>''"
+            ):
+                invalid_indexes.append(index_name)
+        if invalid_indexes:
+            raise RuntimeError(
+                "quality_schema_index_invalid:"
+                f"indexes={sorted(invalid_indexes)}"
             )
         _outcomes_schema_created = True
         return conn
@@ -1137,6 +1173,12 @@ def validate_execution_quality_decision(rec: dict, *, pilot_id: str) -> dict:
         row_side = ""
     if row_side != "buy":
         return {"ok": False, "reason": "quality_decision_side_unverified"}
+    try:
+        row_authority = str(row["quality_score_authority"] or "")
+    except (KeyError, IndexError):
+        row_authority = ""
+    if row_authority != "quality_breakdown.score_total":
+        return {"ok": False, "reason": "quality_decision_authority_unverified"}
     # 계보 증명 (B6): scorer 산출 증거가 없는 row는 dispatch 근거가 될 수 없다
     try:
         row_version = _finite_number(row["score_schema_version"])
@@ -1503,11 +1545,6 @@ def candidate_snapshot_hash(candidate) -> str | None:
             if value is None or float(value) <= 0:
                 return None
             snap[field] = round(float(value), 6)
-    if "quality_score_authority" in candidate:
-        authority = candidate.get("quality_score_authority")
-        if type(authority) is not str or authority != "quality_breakdown.score_total":
-            return None
-        snap["quality_score_authority"] = authority
     payload = json.dumps(snap, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
@@ -1935,6 +1972,7 @@ def record_execution_quality_decision(
     side = raw_side.lower().strip()
     bucket = str(candidate.get("decision_bucket") or "")
     breakdown = candidate.get("quality_breakdown")
+    authority = candidate.get("quality_score_authority")
     if (
         not _CLIENT_ORDER_ID_RE.fullmatch(pid)
         or not _DECISION_REF_RE.fullmatch(ref)
@@ -1942,6 +1980,8 @@ def record_execution_quality_decision(
         or side != "buy"
         or bucket not in EXECUTABLE_BUCKETS
         or not isinstance(breakdown, dict)
+        or authority != "quality_breakdown.score_total"
+        or breakdown.get("quality_score_authority") != authority
     ):
         return {"ok": False, "reason": "quality_execution_contract_invalid"}
 
@@ -2039,6 +2079,7 @@ def record_execution_quality_decision(
         "target_price": float(target),
         "quantity": float(quantity),
         "side": side,
+        "quality_score_authority": authority,
         "score_schema_version": QUALITY_SCORE_SCHEMA_VERSION,
         "weight_profile_hash": proof_weights,
         "score_breakdown_sha256": proof_breakdown_hash,
@@ -2089,6 +2130,7 @@ def record_execution_quality_decision(
                 "score_reliability, score_market_regime, score_supply_demand, penalty_overheat, "
                 "penalty_duplicate, penalty_event_risk, rr_ratio, regime, "
                 "entry_price, stop_loss, target_price, quantity, side, "
+                "quality_score_authority, "
                 "score_schema_version, weight_profile_hash, score_breakdown_sha256, "
                 "candidate_snapshot_sha256, decision_change_pct, "
                 "decision_days_to_earnings, decision_has_stop, decision_has_target, "
@@ -2122,13 +2164,13 @@ def record_execution_quality_decision(
                     score_reliability, score_market_regime, score_supply_demand,
                     penalty_overheat, penalty_duplicate, penalty_event_risk,
                     rr_ratio, regime, entry_price, stop_loss, target_price, quantity,
-                    side, score_schema_version, weight_profile_hash,
+                    side, quality_score_authority, score_schema_version, weight_profile_hash,
                     score_breakdown_sha256, candidate_snapshot_sha256,
                     decision_change_pct, decision_days_to_earnings,
                     decision_has_stop, decision_has_target,
                     decision_blocking_risk_flags, decision_origin_bucket,
                     decision_origin_reason, pilot_id, decision_ref)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     symbol,
                     datetime.now(KST).strftime("%Y-%m-%dT%H:%M:%S+09:00"),
@@ -2151,6 +2193,7 @@ def record_execution_quality_decision(
                     immutable_payload["target_price"],
                     immutable_payload["quantity"],
                     immutable_payload["side"],
+                    immutable_payload["quality_score_authority"],
                     immutable_payload["score_schema_version"],
                     immutable_payload["weight_profile_hash"],
                     immutable_payload["score_breakdown_sha256"],

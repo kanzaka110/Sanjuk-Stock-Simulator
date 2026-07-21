@@ -29,7 +29,9 @@ from core.toss_quality_gate import (
 def _seal_quality_proof_for_test(qg, candidate):
     """저수준 DB 변조 테스트 전용. production binder 우회 의도를 명시한다."""
     candidate.setdefault("side", "buy")
+    candidate["quality_score_authority"] = "quality_breakdown.score_total"
     breakdown = candidate["quality_breakdown"]
+    breakdown["quality_score_authority"] = candidate["quality_score_authority"]
     breakdown["decision_bucket"] = candidate.get("decision_bucket", "")
     breakdown["decision_reason"] = candidate.get("decision_reason", "")
     breakdown["score_symbol"] = str(candidate.get("symbol") or candidate.get("ticker") or "").upper()
@@ -1067,6 +1069,33 @@ class TestExactExecutionQualityDecision:
         assert qg._outcomes_schema_created is True
         assert "idx_qg_decision_ref_exact" in indexes
         assert "idx_qg_pilot_id_exact" in indexes
+
+    def test_quality_schema_rejects_hostile_same_name_nonunique_indexes(self, tmp_path, monkeypatch):
+        from core import toss_quality_gate as qg
+
+        db = tmp_path / "quality_hostile_index.db"
+        seed = sqlite3.connect(db)
+        seed.execute(
+            "CREATE TABLE quality_gate_decisions ("
+            "id INTEGER PRIMARY KEY, ticker TEXT, decision_ref TEXT, pilot_id TEXT)"
+        )
+        seed.execute(
+            "CREATE INDEX idx_qg_decision_ref_exact "
+            "ON quality_gate_decisions(ticker)"
+        )
+        seed.execute(
+            "CREATE INDEX idx_qg_pilot_id_exact "
+            "ON quality_gate_decisions(ticker)"
+        )
+        seed.commit()
+        seed.close()
+
+        monkeypatch.setattr(qg, "_outcomes_db_path", lambda: db)
+        qg._outcomes_schema_created = False
+
+        with pytest.raises(RuntimeError, match="quality_schema_index_invalid"):
+            qg._outcomes_conn()
+        assert qg._outcomes_schema_created is False
 
 
 class TestFailClosedRecompute:

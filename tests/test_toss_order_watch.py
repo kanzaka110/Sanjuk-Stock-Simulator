@@ -99,6 +99,33 @@ class TestExitLevels(unittest.TestCase):
         )
         self.assertEqual(alerts[0]["type"], "target_hit")
 
+    def test_income_target_hit_is_marked_for_full_exit(self):
+        alerts = tow.check_exit_levels(
+            now=_NOW,
+            records=[_ledger_record(reason="auto_pipeline")],
+            price_fn=lambda s: 35000.0,
+        )
+        self.assertIs(alerts[0]["income_managed"], True)
+
+    def test_income_uses_fixed_one_point_five_profit_and_two_point_five_stop(self):
+        record = _ledger_record(reason="auto_pipeline")
+
+        profit = tow.check_exit_levels(
+            now=_NOW, records=[record], price_fn=lambda s: 30_450.0,
+        )
+        loss = tow.check_exit_levels(
+            now=_NOW, records=[record], price_fn=lambda s: 29_250.0,
+        )
+        manual = tow.check_exit_levels(
+            now=_NOW, records=[_ledger_record()], price_fn=lambda s: 30_450.0,
+        )
+
+        self.assertEqual(profit[0]["type"], "target_hit")
+        self.assertEqual(profit[0]["target_price"], 30_450.0)
+        self.assertEqual(profit[0]["stop_loss"], 29_250.0)
+        self.assertEqual(loss[0]["type"], "stop_loss_hit")
+        self.assertEqual(manual, [])
+
     def test_in_range_no_alert(self):
         alerts = tow.check_exit_levels(
             now=_NOW, records=[_ledger_record()], price_fn=lambda s: 31000.0
@@ -610,6 +637,8 @@ class TestPromoteExitToSell(unittest.TestCase):
         self.assertEqual(tow.compute_exit_sell_quantity(_ALERT_STOP, held_qty=10), 10)
         target = dict(_ALERT_STOP, type="target_hit")
         self.assertEqual(tow.compute_exit_sell_quantity(target, held_qty=10), 5)
+        income_target = dict(target, income_managed=True)
+        self.assertEqual(tow.compute_exit_sell_quantity(income_target, held_qty=10), 10)
         # 실보유가 더 적으면 실보유 기준
         self.assertEqual(tow.compute_exit_sell_quantity(_ALERT_STOP, held_qty=4), 4)
         # 미보유 → 0
@@ -650,6 +679,18 @@ class TestPromoteExitToSell(unittest.TestCase):
         self.assertEqual(r["sell_quantity"], 5)
         self.assertEqual(mock_pc.call_args[0][0]["quantity"], 5)
         self.assertIn(".partial_exit", mock_pc.call_args[0][0]["decision_ref"])
+
+    def test_income_target_hit_full_sell(self):
+        alert = dict(
+            _ALERT_STOP,
+            type="target_hit",
+            current_price=35000,
+            income_managed=True,
+        )
+        r, mock_pc = self._promote(alert=alert)
+        self.assertEqual(r["sell_quantity"], 10)
+        self.assertEqual(mock_pc.call_args[0][0]["quantity"], 10)
+        self.assertIn(".full_exit", mock_pc.call_args[0][0]["decision_ref"])
 
     def test_one_share_target_is_full_exit_intent(self):
         alert = dict(

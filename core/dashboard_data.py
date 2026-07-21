@@ -4402,6 +4402,7 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
         # 품질 점수는 ready 판정 전에 반드시 채운다. GET 경로는 DB 기록/고비용 조회 없이
         # 후보 객체만 결정론적으로 보강한다. 실패·누락은 아래 ready gate에서 차단된다.
         try:
+            from core.toss_income_strategy import prepare_income_buy_plan
             from core.toss_quality_gate import score_candidates_batch
             quality_items = result.get("items") or []
             for quality_market in ("KR", "US"):
@@ -4412,12 +4413,37 @@ def toss_buy_candidates_data(range_: str = "today", limit: int = 20, market: str
                         else "US"
                     )).upper() == quality_market
                 ]
+                def _execution_scoring_copy(item: dict) -> dict:
+                    scoring_item = prepare_income_buy_plan(item)
+                    scoring_item["quality_score_authority"] = (
+                        "quality_breakdown.score_total"
+                    )
+                    return scoring_item
+
+                scoring_pairs = []
+                for item in market_items:
+                    if item.get("upstream_input_validation_error"):
+                        item.pop("quality_score_authority", None)
+                        item.pop("quality_score", None)
+                        item.pop("quality_breakdown", None)
+                        continue
+                    scoring_pairs.append((item, _execution_scoring_copy(item)))
                 score_candidates_batch(
-                    market_items,
+                    [scoring_item for _, scoring_item in scoring_pairs],
                     market=quality_market,
                     persist_decisions=False,
                     expensive_checks=False,
                 )
+                for item, scoring_item in scoring_pairs:
+                    for field in (
+                        "quality_breakdown",
+                        "quality_score",
+                        "quality_score_authority",
+                        "decision_bucket",
+                        "decision_reason",
+                    ):
+                        if field in scoring_item:
+                            item[field] = scoring_item[field]
         except Exception as exc:
             log.warning("Toss candidate quality scoring failed: %s", type(exc).__name__)
 

@@ -17,8 +17,6 @@ _STRONG_EXPECTED_KRW = 15_000.0
 _MAX_STOP_RISK_PCT = 4.5
 _INCOME_PLAN_STOP_RISK_PCT = 4.2
 _INCOME_TAKE_PROFIT_SINGLE_PCT = 1.5
-_INCOME_PARTIAL_TAKE_PROFIT_PCT = 1.2
-_INCOME_PARTIAL_SELL_RATIO = 0.5
 _INCOME_EARLY_STOP_LOSS_PCT = -2.5
 _INCOME_HARD_STOP_LOSS_PCT = -4.5
 _MIN_RISK_REWARD = 1.5
@@ -43,10 +41,10 @@ _EXECUTION_INPUT_ERRORS = frozenset({
     "canonical_notional_invalid", "quality_data_starvation",
     "canonical_quality_score_invalid",
 })
-_EXECUTABLE_DECISION_CONTRACT = (
-    "income_exit_lifecycle_v1",
-    "full_position_threshold_exit",
-)
+_EXECUTABLE_DECISION_CONTRACTS = frozenset({
+    ("income_exit_lifecycle_v1", "full_position_threshold_exit"),
+    ("income_exit_lifecycle_v2", "full_position_threshold_exit"),
+})
 
 
 def _num(value, default: float = 0.0) -> float:
@@ -240,7 +238,7 @@ def validate_executable_income_contract(income: Mapping | None) -> tuple[bool, s
         income.get("decision_expected_pnl_model"),
         income.get("decision_expected_pnl_scope"),
     )
-    if contract != _EXECUTABLE_DECISION_CONTRACT:
+    if contract not in _EXECUTABLE_DECISION_CONTRACTS:
         return False, "income_contract_model_scope_invalid"
     expected = _strict_finite_number(
         income.get("decision_expected_pnl_krw"),
@@ -387,7 +385,7 @@ def prepare_income_buy_plan(candidate: Mapping) -> dict:
         out.setdefault("original_target_price", original_target)
 
     out["income_exit_plan"] = {
-        "version": "income_v1_exit_plan",
+        "version": "income_v2_full_exit_plan",
         "entry_price": entry,
         "target_price": target or None,
         "stop_loss": stop or None,
@@ -395,11 +393,11 @@ def prepare_income_buy_plan(candidate: Mapping) -> dict:
         "original_target_price": original_target or None,
         "stop_risk_pct": stop_risk_pct,
         "risk_reward": rr,
-        "single_share_take_profit_pct": _INCOME_TAKE_PROFIT_SINGLE_PCT,
-        "multi_share_partial_take_profit_pct": _INCOME_PARTIAL_TAKE_PROFIT_PCT,
+        "take_profit_pct": _INCOME_TAKE_PROFIT_SINGLE_PCT,
+        "profit_exit_mode": "full_position",
         "early_stop_loss_pct": _INCOME_EARLY_STOP_LOSS_PCT,
         "hard_stop_loss_pct": _INCOME_HARD_STOP_LOSS_PCT,
-        "note": "income_v1 후보는 기존 6% stop을 그대로 쓰지 않고 4.2% 내외로 당겨 수입 기대값을 재계산",
+        "note": "income v2는 수량과 무관하게 +1.5% 전량익절/-2.5% 전량손절 lifecycle EV를 사용",
     }
     return out
 
@@ -978,20 +976,17 @@ def compute_income_edge(
             "invalid_exit_model_fail_closed" if invalid_exit_model
             else "income_exit_cashflow_v2"
         )
-        profit_exit_quantity = qty if qty <= 1 else max(1, int(qty * _INCOME_PARTIAL_SELL_RATIO))
+        profit_exit_quantity = qty
         loss_exit_quantity = qty
         expected_pnl_scope = "next_realized_exit_only"
-        residual_quantity_after_profit = max(qty - profit_exit_quantity, 0)
+        residual_quantity_after_profit = 0
         residual_mark_to_market_included = False
-        profit_exit_pct = (
-            _INCOME_TAKE_PROFIT_SINGLE_PCT if qty <= 1
-            else _INCOME_PARTIAL_TAKE_PROFIT_PCT
-        )
+        profit_exit_pct = _INCOME_TAKE_PROFIT_SINGLE_PCT
         loss_exit_pct = abs(_INCOME_EARLY_STOP_LOSS_PCT)
         upside_krw = entry * profit_exit_quantity * (profit_exit_pct / 100.0) * multiplier
         loss_krw = entry * loss_exit_quantity * (loss_exit_pct / 100.0) * multiplier
 
-        multi_share_lifecycle_unmodeled = qty > 1 and not invalid_exit_model
+        multi_share_lifecycle_unmodeled = False
         if invalid_exit_model:
             decision_expected_pnl_model = "invalid_exit_model_fail_closed"
             decision_expected_pnl_scope = "invalid_exit_model"
@@ -1001,20 +996,10 @@ def compute_income_edge(
             decision_residual_mark_to_market_included = False
             decision_upside_krw = None
             decision_loss_krw = None
-        elif multi_share_lifecycle_unmodeled:
-            # 실제 보유관리는 +1.2%에서 절반만 매도한다. 잔여 수량의 조건부
-            # 종료 분포가 검증되기 전에는 전량 +1.2% 청산으로 낙관하지 않는다.
-            decision_expected_pnl_model = "multi_share_lifecycle_unmodeled_v1"
-            decision_expected_pnl_scope = "partial_profit_residual_unmodeled"
-            decision_profit_exit_quantity = profit_exit_quantity
-            decision_loss_exit_quantity = loss_exit_quantity
-            decision_residual_quantity_after_profit = residual_quantity_after_profit
-            decision_residual_mark_to_market_included = False
-            decision_upside_krw = None
-            decision_loss_krw = None
         else:
-            multi_share_lifecycle_unmodeled = False
-            decision_expected_pnl_model = "income_exit_lifecycle_v1"
+            decision_expected_pnl_model = (
+                "income_exit_lifecycle_v2" if qty > 1 else "income_exit_lifecycle_v1"
+            )
             decision_expected_pnl_scope = "full_position_threshold_exit"
             decision_profit_exit_quantity = qty
             decision_loss_exit_quantity = qty
@@ -1147,11 +1132,6 @@ def compute_income_edge(
         grade = "BLOCK"
         block_reason = "stop_risk_pct_above_4.5"
         block_label = "손절폭 4.5% 초과"
-    elif multi_share_lifecycle_unmodeled:
-        income_pass = False
-        grade = "BLOCK"
-        block_reason = "multi_share_lifecycle_unmodeled"
-        block_label = "부분익절 후 잔여 포지션 lifecycle 미검증 — 다주 BUY 차단"
     else:
         min_expected = max(_MIN_EXPECTED_KRW, estimated * _MIN_EDGE_RATIO)
         strong_expected = max(_STRONG_EXPECTED_KRW, estimated * _STRONG_EDGE_RATIO)
@@ -1278,13 +1258,9 @@ def compute_income_edge(
                 "invalid_exit_model_fail_closed"
                 if invalid_exit_model
                 else (
-                    "multi_share_lifecycle_unmodeled_block"
-                    if multi_share_lifecycle_unmodeled
-                    else (
-                        "positive_lifecycle_ev_after_cost"
-                        if use_toss_exit_cashflow
-                        else "legacy_research_minimum_edge"
-                    )
+                    "positive_lifecycle_ev_after_cost"
+                    if use_toss_exit_cashflow
+                    else "legacy_research_minimum_edge"
                 )
             ),
             "min_expected_pnl_krw": round(decision_min_expected, 2),

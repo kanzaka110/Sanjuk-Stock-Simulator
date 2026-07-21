@@ -9,7 +9,7 @@
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -128,6 +128,21 @@ def _patch_positive_lifecycle_income(monkeypatch):
         }
 
     monkeypatch.setattr(tis, "compute_income_edge", positive)
+
+
+def _patch_strong_canonical_quality(monkeypatch):
+    """실DB/네트워크 없이 production canonical score 94.9를 재현한다."""
+    from core import toss_quality_gate as qg
+
+    monkeypatch.setattr(qg, "_score_momentum", lambda *args, **kwargs: 25.0)
+    monkeypatch.setattr(qg, "_score_liquidity", lambda *args, **kwargs: 25.0)
+    monkeypatch.setattr(qg, "_score_reliability", lambda *args, **kwargs: 7.5)
+    monkeypatch.setattr(qg, "_score_market_regime", lambda *args, **kwargs: 15.0)
+    monkeypatch.setattr(qg, "_score_supply_demand", lambda *args, **kwargs: 2.4)
+    monkeypatch.setattr(
+        "core.regime.detect_regime",
+        lambda *args, **kwargs: MagicMock(regime="강세장"),
+    )
 
 
 def test_toss_buy_candidates_uses_new_discovery_only(monkeypatch):
@@ -461,6 +476,70 @@ def test_toss_buy_candidates_reports_systemic_income_liveness_regression(monkeyp
     assert diagnosis["top_income_block_reasons"][0]["count"] >= 1
 
 
+def test_kr_multishare_full_exit_v2_restores_production_like_positive_path(monkeypatch):
+    price = 100_700
+    candidate = _new_cand("055550.KS", "다중수량양수EV", price=price, score=88)
+    candidate = candidate.__class__(
+        **{
+            **candidate.__dict__,
+            "target_price": round(price * 1.10, 2),
+            "stop_loss": round(price * 0.94, 2),
+            "risk_reward": 1.67,
+        }
+    )
+    _patch_sections(monkeypatch, _sections(new=[candidate]))
+
+    from core import toss_live_pilot_policy as tlp
+    from core import toss_quality_gate as qg
+
+    monkeypatch.setattr(
+        tlp,
+        "compute_toss_live_pilot_policy",
+        lambda *args, **kwargs: {"max_order_krw": 1_000_000},
+    )
+
+    monkeypatch.setattr(qg, "_score_momentum", lambda _candidate: 25.0)
+    monkeypatch.setattr(qg, "_score_liquidity", lambda _candidate: 25.0)
+    monkeypatch.setattr(qg, "_score_supply_demand", lambda *args, **kwargs: 2.4)
+    monkeypatch.setattr(
+        "core.regime.detect_regime",
+        lambda *args, **kwargs: MagicMock(regime="강세장"),
+    )
+    monkeypatch.setattr("core.memory.get_accuracy_summary", lambda: {})
+
+    item = dd.toss_buy_candidates_data(range_="today")["items"][0]
+    income = item["income_strategy"]
+
+    assert item["quantity"] == 4
+    assert item["position_sizing"]["stop_risk_pct"] == 6.0
+    assert item["original_stop_loss"] == round(price * 0.94, 2)
+    assert item["quality_score"] == 94.9
+    assert item["quality_score_authority"] == "quality_breakdown.score_total"
+    from core.toss_quality_gate import canonical_quality_score
+    assert canonical_quality_score(item) == (
+        94.9,
+        "quality_breakdown.score_total",
+    )
+    assert item["quality_breakdown"]["decision_origin_bucket"] == "PASS_EXECUTE"
+    assert item["decision_bucket"] == "PASS_EXECUTE"
+    assert income["decision_expected_pnl_model"] == "income_exit_lifecycle_v2"
+    assert income["decision_expected_pnl_scope"] == "full_position_threshold_exit"
+    assert income["decision_expected_pnl_krw"] > 0, {
+        key: income.get(key)
+        for key in (
+            "win_prob",
+            "canonical_notional_krw",
+            "fee_slippage_buffer_krw",
+            "decision_upside_krw",
+            "decision_loss_krw",
+            "decision_expected_pnl_krw",
+            "decision_income_edge_ratio",
+            "income_block_reason",
+        )
+    }
+    assert income["income_pass"] is True
+
+
 def test_income_liveness_diagnosis_counts_only_upstream_executable_candidates(monkeypatch):
     sections = _sections(new=[
         _strong_cand("000121.KS", "실행후단차단", price=100_000),
@@ -476,11 +555,11 @@ def test_income_liveness_diagnosis_counts_only_upstream_executable_candidates(mo
     assert summary["upstream_executable_count"] == 1
     assert sum(row["count"] for row in diagnosis["top_income_block_reasons"]) == 1
     assert diagnosis["top_income_block_reasons"] == [
-        {"reason": "multi_share_lifecycle_unmodeled", "count": 1}
+        {"reason": "expected_pnl_below_threshold", "count": 1}
     ]
 
 
-def test_income_liveness_preserves_multiple_downstream_block_reasons(monkeypatch):
+def test_income_liveness_aggregates_full_exit_negative_ev_reasons(monkeypatch):
     sections = _sections(new=[
         _strong_cand("000131.KS", "다주수명주기", price=100_000),
         _strong_cand("000132.KS", "일주기대값", price=400_000),
@@ -492,10 +571,7 @@ def test_income_liveness_preserves_multiple_downstream_block_reasons(monkeypatch
 
     assert summary["income_gate_eligible_count"] == 2
     assert sum(row["count"] for row in reasons) == 2
-    assert {row["reason"] for row in reasons} == {
-        "multi_share_lifecycle_unmodeled",
-        "expected_pnl_below_threshold",
-    }
+    assert reasons == [{"reason": "expected_pnl_below_threshold", "count": 2}]
 
 
 def test_income_liveness_excludes_candidates_blocked_before_income_gate(monkeypatch):
@@ -1958,7 +2034,9 @@ def test_toss_buy_candidates_income_strategy_fields_and_ready_gate(monkeypatch):
     assert income["expected_pnl_model"] == "income_exit_cashflow_v2"
     assert income["income_pass"] is False
     assert income["expected_pnl_krw"] < 0
-    assert income["profit_exit_quantity"] < income["loss_exit_quantity"]
+    assert income["profit_exit_quantity"] == income["loss_exit_quantity"]
+    assert income["residual_quantity_after_profit"] == 0
+    assert income["decision_expected_pnl_model"] == "income_exit_lifecycle_v2"
     assert item["stock_agent_ready"] is False
 
 
@@ -2212,6 +2290,7 @@ def test_toss_buy_candidates_income_plan_tightens_stop_and_allows_strong_candida
     )
     sections = _sections(new=[strong])
     _patch_sections(monkeypatch, sections)
+    _patch_strong_canonical_quality(monkeypatch)
     monkeypatch.setattr(dd, "_toss_holding_price_map", lambda: {})
     monkeypatch.setattr(dd, "_recent_toss_risk_sell_symbols", lambda *a, **k: {})
     monkeypatch.setattr(dd, "_pending_toss_order_symbols", lambda *a, **k: {})
@@ -2237,14 +2316,13 @@ def test_toss_buy_candidates_income_plan_tightens_stop_and_allows_strong_candida
 def test_income_edge_uses_finalized_bucket_not_preliminary_bucket(monkeypatch):
     strong = _new_cand("000779.KS", "최종버킷후보", price=1_400_000, score=85)
     strong = strong.__class__(
-        **{**strong.__dict__, "target_price": 1_620_000.0,
-           "stop_loss": 1_340_000.0, "risk_reward": 3.6}
+        **{**strong.__dict__, "target_price": 1_500_000.0,
+           "stop_loss": 1_340_000.0, "risk_reward": 1.67}
     )
     _patch_sections(monkeypatch, _sections(new=[strong]))
 
     from core import toss_income_strategy as tis
     from core import toss_live_pilot_policy as tlp
-    from core import toss_quality_gate as qg
 
     monkeypatch.setattr(tlp, "compute_toss_live_pilot_policy", lambda *a, **k: {"max_order_krw": None})
     monkeypatch.setattr(dd, "_toss_holding_price_map", lambda: {})
@@ -2256,11 +2334,6 @@ def test_income_edge_uses_finalized_bucket_not_preliminary_bucket(monkeypatch):
         "holdings_count": 10,
     })
 
-    def finalize_to_small_pass(item):
-        item["decision_bucket"] = "SMALL_PASS"
-        item["decision_reason"] = "finalized_small_pass"
-        return True
-
     seen_buckets = []
     real_compute = tis.compute_income_edge
 
@@ -2268,7 +2341,6 @@ def test_income_edge_uses_finalized_bucket_not_preliminary_bucket(monkeypatch):
         seen_buckets.append(candidate.get("decision_bucket"))
         return real_compute(candidate, **kwargs)
 
-    monkeypatch.setattr(qg, "finalize_quality_proof", finalize_to_small_pass)
     monkeypatch.setattr(tis, "compute_income_edge", compute_after_finalization)
 
     item = dd.toss_buy_candidates_data(range_="today")["items"][0]
@@ -2427,6 +2499,7 @@ def test_toss_buy_candidates_no_fixed_cap_uses_account_risk_sizing(monkeypatch):
         }
     )
     _patch_sections(monkeypatch, _sections(new=[expensive]))
+    _patch_strong_canonical_quality(monkeypatch)
     from core import ai_berkshire_toss as abt
     from core import toss_live_pilot_policy as tlp
     # 이 테스트는 수량 산정 계약만 검증한다. 실제 repo score의 종목별 BUY

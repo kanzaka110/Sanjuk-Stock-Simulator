@@ -236,7 +236,7 @@ def test_prepare_income_buy_plan_leaves_sell_candidate_unchanged():
     assert prepare_income_buy_plan(sell) == sell
 
 
-def test_multi_share_lifecycle_is_blocked_until_residual_model_is_validated():
+def test_multi_share_uses_versioned_full_position_lifecycle_when_sell_contract_matches():
     candidate = _candidate(
         symbol="MULTI.KS",
         price=100_000,
@@ -253,16 +253,22 @@ def test_multi_share_lifecycle_is_blocked_until_residual_model_is_validated():
     )
 
     assert out["win_prob"] == 0.7087
-    assert out["expected_pnl_krw"] == -4_530.3
-    assert out["decision_expected_pnl_model"] == "multi_share_lifecycle_unmodeled_v1"
-    assert out["decision_expected_pnl_scope"] == "partial_profit_residual_unmodeled"
-    assert out["decision_expected_pnl_krw"] is None
-    assert out["decision_income_edge_ratio"] is None
+    assert out["expected_pnl_krw"] == 1_848.0
+    assert out["decision_expected_pnl_model"] == "income_exit_lifecycle_v2"
+    assert out["decision_expected_pnl_scope"] == "full_position_threshold_exit"
+    assert out["decision_profit_exit_pct"] == 1.5
+    assert out["decision_profit_exit_quantity"] == 10
+    assert out["decision_loss_exit_pct"] == 2.5
+    assert out["decision_loss_exit_quantity"] == 10
+    assert out["decision_expected_pnl_krw"] == 1_848.0
+    assert out["decision_income_edge_ratio"] == 0.001848
+    assert out["residual_quantity_after_profit"] == 0
     assert out["residual_mark_to_market_included"] is False
+    assert out["decision_residual_quantity_after_profit"] == 0
     assert out["decision_residual_mark_to_market_included"] is False
-    assert out["income_pass"] is False
-    assert out["income_grade"] == "BLOCK"
-    assert out["income_block_reason"] == "multi_share_lifecycle_unmodeled"
+    assert out["income_pass"] is True
+    assert out["income_grade"] == "SMALL_INCOME_PASS"
+    assert out["income_block_reason"] == ""
 
 
 def test_reported_notional_mismatch_cannot_reduce_cost_or_open_income_gate():
@@ -515,7 +521,7 @@ def test_negative_expected_pnl_blocks_even_if_quality_bucket_passes():
     assert "expected_pnl" in out["income_block_reason"]
 
 
-def test_income_expected_pnl_uses_actual_partial_profit_and_full_early_stop():
+def test_income_expected_pnl_uses_actual_full_profit_and_full_early_stop():
     candidate = _candidate(
         symbol="403870.KS",
         price=44_350,
@@ -530,24 +536,25 @@ def test_income_expected_pnl_uses_actual_partial_profit_and_full_early_stop():
 
     assert out["version"] == "income_v2"
     assert out["income_pass"] is False
-    assert out["income_block_reason"] == "multi_share_lifecycle_unmodeled"
+    assert out["income_block_reason"] == "expected_pnl_below_threshold"
     assert out["expected_pnl_model"] == "income_exit_cashflow_v2"
-    assert out["profit_exit_quantity"] == 8
+    assert out["profit_exit_quantity"] == 16
     assert out["loss_exit_quantity"] == 16
     assert out["expected_pnl_scope"] == "next_realized_exit_only"
-    assert out["residual_quantity_after_profit"] == 8
+    assert out["residual_quantity_after_profit"] == 0
     assert out["residual_mark_to_market_included"] is False
-    assert out["upside_krw"] == 4_257.6
+    assert out["upside_krw"] == 10_644.0
     assert out["loss_krw"] == 17_740.0
     assert out["research_target_upside_krw"] > 200_000
-    assert out["expected_pnl_krw"] < 0
-    assert out["breakeven_win_rate"] > 0.8
-    assert out["decision_expected_pnl_model"] == "multi_share_lifecycle_unmodeled_v1"
-    assert out["decision_expected_pnl_scope"] == "partial_profit_residual_unmodeled"
-    assert out["decision_upside_krw"] is None
-    assert out["decision_expected_pnl_krw"] is None
-    assert out["decision_breakeven_win_rate"] is None
-    assert out["decision_breakeven_reachable"] is False
+    assert out["expected_pnl_krw"] == -1_915.92
+    assert out["breakeven_win_rate"] == 0.6625
+    assert out["decision_expected_pnl_model"] == "income_exit_lifecycle_v2"
+    assert out["decision_expected_pnl_scope"] == "full_position_threshold_exit"
+    assert out["decision_upside_krw"] == 10_644.0
+    assert out["decision_loss_krw"] == 17_740.0
+    assert out["decision_expected_pnl_krw"] == -1_915.92
+    assert out["decision_breakeven_win_rate"] == 0.6625
+    assert out["decision_breakeven_reachable"] is True
 
 
 def test_high_rr_but_deep_stop_risk_blocks():
@@ -604,7 +611,9 @@ def test_prepare_income_buy_plan_tightens_six_pct_stop_and_recomputes_rr():
     assert planned["income_exit_plan"]["stop_risk_pct"] <= 4.5
     assert planned["risk_reward"] >= 1.5
     assert out["income_pass"] is False
-    assert out["income_block_reason"] == "multi_share_lifecycle_unmodeled"
+    assert out["income_block_reason"] == "expected_pnl_below_threshold"
+    assert out["decision_expected_pnl_model"] == "income_exit_lifecycle_v2"
+    assert out["decision_residual_quantity_after_profit"] == 0
 
 
 
