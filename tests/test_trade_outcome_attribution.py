@@ -171,6 +171,35 @@ def test_hermes_traceability_is_separate_from_recommendation_linkage():
     assert report["data_quality"]["direct_hermes_decision_id_available"] is True
 
 
+def test_dashboard_reports_execution_decision_trace_separately():
+    from core import dashboard_data as dd
+
+    execution = normalize_execution_records(live_events=[{
+        "event_id": "auto_dashboard_1",
+        "event_type": "autonomous_live_sent",
+        "decision_ref": "execution_decision:tlive_dashboard_1",
+        "verification_id": "hv_dashboard_1",
+        "hermes_decision_verified": True,
+        "live_order_sent": True,
+        "adapter_status": "enabled",
+        "live_order_allowed": True,
+        "symbol": "MU",
+        "side": "buy",
+        "filled_price": 500,
+        "filled_quantity": 1,
+        "created_at": "2026-07-01T10:00:00+09:00",
+    }])
+
+    fields = dd._execution_decision_attribution_fields(execution)
+
+    assert fields == {
+        "execution_decision_referenced_executions": 1,
+        "execution_decision_linked_executions": 1,
+        "execution_decision_traceability_rate_pct": 100.0,
+        "direct_execution_decision_id_available": True,
+    }
+
+
 def test_hermes_verification_join_requires_both_exact_keys_and_pass():
     from core.dashboard_data import _mark_hermes_verified_live_events
 
@@ -226,6 +255,51 @@ def test_broker_client_order_id_join_requires_exact_pilot_symbol_side():
     assert marked[0]["hermes_decision_verified"] is True
     assert [row["decision_ref"] for row in marked[1:]] == ["", "", "", ""]
     assert all(row["hermes_decision_verified"] is False for row in marked[1:])
+
+
+def test_trade_outcome_input_window_filters_stale_broker_orders(
+    monkeypatch, tmp_path,
+):
+    from core import dashboard_data as dd
+    from core import toss_readonly_snapshot as snapshot
+
+    recent_at = datetime.now(KST).isoformat()
+    monkeypatch.setattr(dd, "_conn", lambda: None)
+    monkeypatch.setattr(dd, "_db_path", lambda: tmp_path / "memory.db")
+    monkeypatch.setattr(
+        snapshot,
+        "broker_orders_for_consumer",
+        lambda: {
+            "orders": [
+                {
+                    "client_order_id": "tlive_recent_0001",
+                    "broker_order_status": "FILLED",
+                    "symbol": "005930",
+                    "side": "BUY",
+                    "quantity": 1,
+                    "filled_quantity": 1,
+                    "filled_price": 100.0,
+                    "filled_at": recent_at,
+                },
+                {
+                    "client_order_id": "tlive_stale_0001",
+                    "broker_order_status": "FILLED",
+                    "symbol": "005930",
+                    "side": "BUY",
+                    "quantity": 1,
+                    "filled_quantity": 1,
+                    "filled_price": 90.0,
+                    "filled_at": "2022-10-25T11:12:08.554+09:00",
+                },
+            ]
+        },
+    )
+
+    _, _, _, broker_orders = dd._read_trade_outcome_inputs(7)
+
+    assert [row["client_order_id"] for row in broker_orders] == [
+        "tlive_recent_0001"
+    ]
 
 
 def test_broker_get_truth_wins_over_live_event_for_same_decision_ref():

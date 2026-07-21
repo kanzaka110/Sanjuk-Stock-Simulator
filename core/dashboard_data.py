@@ -1053,11 +1053,26 @@ def _attach_direct_refs_to_broker_orders(
     return broker_orders
 
 
+def _broker_order_is_in_window(order: dict, cutoff: datetime) -> bool:
+    """Return True only for a broker row with an authoritative in-window timestamp."""
+    if not isinstance(order, dict) or cutoff.tzinfo is None:
+        return False
+    raw = order.get("filled_at") or order.get("ordered_at") or order.get("created_at")
+    if not isinstance(raw, str) or not raw:
+        return False
+    try:
+        observed_at = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return observed_at.tzinfo is not None and observed_at >= cutoff
+
+
 def _read_trade_outcome_inputs(
     days: int,
 ) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
     """추천·수동 매매·production live event·broker GET을 read-only로 읽는다."""
-    cutoff = (datetime.now(KST) - timedelta(days=days)).isoformat()
+    cutoff_at = datetime.now(KST) - timedelta(days=days)
+    cutoff = cutoff_at.isoformat()
     predictions: list[dict] = []
     manual_trades: list[dict] = []
     live_events: list[dict] = []
@@ -1156,11 +1171,35 @@ def _read_trade_outcome_inputs(
         broker_orders = [
             dict(row) for row in broker_snapshot.get("orders") or []
             if isinstance(row, dict)
+            and _broker_order_is_in_window(row, cutoff_at)
         ]
         _attach_direct_refs_to_broker_orders(broker_orders, live_events)
     except Exception:
         broker_orders = []
     return predictions, manual_trades, live_events, broker_orders
+
+
+def _execution_decision_attribution_fields(executions: object) -> dict:
+    """Summarize exact execution-decision traces without recommendation inference."""
+    rows = executions if isinstance(executions, list) else []
+    referenced = [
+        row for row in rows
+        if isinstance(row, dict)
+        and str(row.get("decision_ref") or "").startswith("execution_decision:")
+    ]
+    linked = [
+        row for row in referenced
+        if row.get("hermes_decision_verified") is True
+    ]
+    return {
+        "execution_decision_referenced_executions": len(referenced),
+        "execution_decision_linked_executions": len(linked),
+        "execution_decision_traceability_rate_pct": round(
+            len(linked) / len(referenced) * 100,
+            1,
+        ) if referenced else 0.0,
+        "direct_execution_decision_id_available": bool(linked),
+    }
 
 
 def _fetch_trade_outcome_attribution_raw(days: int) -> dict:
@@ -1180,6 +1219,26 @@ def _fetch_trade_outcome_attribution_raw(days: int) -> dict:
         predictions,
         executions=executions,
     )
+    trace_fields = _execution_decision_attribution_fields(executions)
+    report.setdefault("summary", {}).update({
+        "execution_decision_linked_executions": trace_fields[
+            "execution_decision_linked_executions"
+        ],
+        "execution_decision_traceability_rate_pct": trace_fields[
+            "execution_decision_traceability_rate_pct"
+        ],
+    })
+    report.setdefault("execution_cohort", {}).update({
+        key: trace_fields[key]
+        for key in (
+            "execution_decision_referenced_executions",
+            "execution_decision_linked_executions",
+            "execution_decision_traceability_rate_pct",
+        )
+    })
+    report.setdefault("data_quality", {})[
+        "direct_execution_decision_id_available"
+    ] = trace_fields["direct_execution_decision_id_available"]
     report["generated_at"] = datetime.now(KST).isoformat()
     report["source"] = "memory_db_and_local_execution_logs_read_only"
     report["scope"] = f"recent_{days}_days"
