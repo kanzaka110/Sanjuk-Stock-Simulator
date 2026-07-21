@@ -10,6 +10,7 @@ from src.toss_after_cost_probability import calibrate_after_cost_probability
 def _calibration(outcomes, **overrides):
     value = {
         "schema": "toss_execution_calibration.v1",
+        "status": "ok",
         "mode": "observability_only",
         "decision_usable": False,
         "attribution_model": "symbol_fifo_v1",
@@ -40,36 +41,32 @@ def _score(pilot_id: str, score: float):
     return {
         "pilot_id": pilot_id,
         "score_total": score,
-        "decision_bucket": "WATCH",
+        "decision_bucket": "PASS_EXECUTE",
         "side": "BUY",
-        "quality_score_authority": "canonical_v1",
+        "quality_score_authority": "quality_breakdown.score_total",
         "score_schema_version": 1,
         "weight_profile_hash": "a" * 64,
         "score_breakdown_sha256": "b" * 64,
         "candidate_snapshot_sha256": "c" * 64,
-        "decision_ref": f"quality:{pilot_id}",
+        "decision_ref": f"execution_decision:{pilot_id}",
     }
 
 
 def test_fits_shadow_isotonic_probability_for_after_cost_target():
-    outcomes = [
-        _outcome("tlive_a", 1.0),
-        _outcome("tlive_b", 2.0),
-        _outcome("tlive_c", -1.0),
-        _outcome("tlive_d", -2.0),
-    ]
-    scores = [
-        _score("tlive_a", 60.0),
-        _score("tlive_b", 61.0),
-        _score("tlive_c", 70.0),
-        _score("tlive_d", 71.0),
-    ]
+    outcomes = []
+    scores = []
+    for i in range(20):
+        pilot_id = f"tlive_fit_{i}"
+        low_group = i < 10
+        positive = i < 8 if low_group else i < 12
+        outcomes.append(_outcome(pilot_id, 1.0 if positive else -1.0))
+        scores.append(_score(pilot_id, 60.0 if low_group else 70.0))
 
     result = calibrate_after_cost_probability(
         _calibration(outcomes),
         scores,
-        min_samples=4,
-        min_bin_samples=2,
+        min_samples=20,
+        min_bin_samples=5,
     )
 
     assert result["schema"] == "toss_after_cost_probability.v1"
@@ -78,21 +75,21 @@ def test_fits_shadow_isotonic_probability_for_after_cost_target():
     assert result["target"] == "net_return_pct_gt_zero"
     assert result["exit_contract"] == "all_liquidation_single_exit_v1"
     assert result["cost_model"] == "decision_buffer_v1_not_broker_statement"
-    assert result["eligible_count"] == 4
-    assert result["positive_count"] == 2
+    assert result["eligible_count"] == 20
+    assert result["positive_count"] == 10
     assert result["model_fitted"] is True
     assert result["promotion_eligible"] is False
     assert result["bins"] == [
         {
             "score_min": 60.0,
-            "score_max": 71.0,
-            "sample_count": 4,
-            "positive_count": 2,
+            "score_max": 70.0,
+            "sample_count": 20,
+            "positive_count": 10,
             "empirical_probability": 0.5,
             "calibrated_probability": 0.5,
         }
     ]
-    assert result["raw_brier_score"] == 0.32655
+    assert result["raw_brier_score"] == 0.305
     assert result["calibrated_brier_score"] == 0.25
     assert "attribution_unverified" in result["promotion_block_reasons"]
     assert "shadow_only" in result["promotion_block_reasons"]
@@ -122,7 +119,7 @@ def test_only_single_full_liquidation_exit_is_eligible():
     scores = [_score("tlive_single", 60.0), _score("tlive_partial_path", 70.0)]
 
     result = calibrate_after_cost_probability(
-        _calibration(outcomes), scores, min_samples=1
+        _calibration(outcomes), scores, min_samples=20
     )
 
     assert result["eligible_count"] == 1
@@ -140,7 +137,7 @@ def test_duplicate_score_rows_quarantine_exact_pilot_join():
     ]
 
     result = calibrate_after_cost_probability(
-        _calibration(outcomes), scores, min_samples=2
+        _calibration(outcomes), scores, min_samples=20
     )
 
     assert result["eligible_count"] == 1
@@ -156,7 +153,7 @@ def test_cost_contract_mismatch_blocks_before_model_fit():
             cost_model="different_cost_contract",
         ),
         [_score("tlive_a", 60.0)],
-        min_samples=1,
+        min_samples=20,
     )
 
     assert result["status"] == "blocked"
@@ -241,8 +238,10 @@ def _create_loader_databases(
         connection.execute(
             "INSERT INTO quality_gate_decisions VALUES (?,?,?,?,?,?,?,?,?,?)",
             (
-                "tlive_buy-1", 65.0, "WATCH", "BUY", "canonical_v1", 1,
-                "a" * 64, "b" * 64, "c" * 64, "quality:buy-1",
+                "tlive_buy-1", 65.0, "PASS_EXECUTE", "BUY",
+                "quality_breakdown.score_total", 1,
+                "a" * 64, "b" * 64, "c" * 64,
+                "execution_decision:buy-1",
             ),
         )
     return events, ledger, quality
@@ -256,7 +255,7 @@ def test_loader_and_main_join_exact_score_read_only(tmp_path, capsys):
         events_path=events,
         ledger_path=ledger,
         quality_path=quality,
-        min_samples=1,
+        min_samples=20,
         min_bin_samples=1,
     )
 
@@ -271,8 +270,8 @@ def test_loader_and_main_join_exact_score_read_only(tmp_path, capsys):
         "--events-db", str(events),
         "--ledger-db", str(ledger),
         "--quality-db", str(quality),
-        "--min-samples", "1",
-        "--min-bin-samples", "1",
+        "--min-samples", "20",
+        "--min-bin-samples", "5",
     ]) == 0
     cli = json.loads(capsys.readouterr().out)
     assert cli["eligible_count"] == 1
@@ -289,7 +288,7 @@ def test_loader_blocks_quality_db_without_exact_pilot_index(tmp_path):
         events_path=events,
         ledger_path=ledger,
         quality_path=quality,
-        min_samples=1,
+        min_samples=20,
         min_bin_samples=1,
     )
 
@@ -308,7 +307,7 @@ def test_loader_blocks_wrong_partial_index_predicate(tmp_path):
         events_path=events,
         ledger_path=ledger,
         quality_path=quality,
-        min_samples=1,
+        min_samples=20,
         min_bin_samples=1,
     )
 
@@ -342,27 +341,87 @@ def test_upstream_execution_source_unavailable_is_not_sample_insufficiency(tmp_p
 def test_equal_scores_are_never_split_across_probability_bins():
     outcomes = [
         _outcome(f"tlive_equal_{i}", 1.0 if i % 2 == 0 else -1.0)
-        for i in range(6)
+        for i in range(10)
     ] + [
-        _outcome("tlive_high_a", -1.0),
-        _outcome("tlive_high_b", 1.0),
+        _outcome(f"tlive_high_{i}", 1.0 if i % 2 == 0 else -1.0)
+        for i in range(10)
     ]
     scores = [
-        _score(f"tlive_equal_{i}", 60.0) for i in range(6)
+        _score(f"tlive_equal_{i}", 60.0) for i in range(10)
     ] + [
-        _score("tlive_high_a", 70.0),
-        _score("tlive_high_b", 70.0),
+        _score(f"tlive_high_{i}", 70.0) for i in range(10)
     ]
 
     result = calibrate_after_cost_probability(
         _calibration(outcomes),
         scores,
-        min_samples=8,
-        min_bin_samples=2,
+        min_samples=20,
+        min_bin_samples=5,
     )
 
     assert result["model_fitted"] is True
-    assert all(row["score_min"] != row["score_max"] or row["sample_count"] in {6, 2}
-               for row in result["bins"])
+    assert all(
+        row["score_min"] != row["score_max"] or row["sample_count"] == 10
+        for row in result["bins"]
+    )
     ranges = [(row["score_min"], row["score_max"]) for row in result["bins"]]
     assert len(ranges) == len(set(ranges))
+
+
+def test_valid_and_malformed_duplicate_score_rows_quarantine_pilot():
+    valid = _score("tlive_mixed_dup", 65.0)
+    malformed = dict(valid, quality_score_authority="wrong")
+    result = calibrate_after_cost_probability(
+        _calibration([
+            _outcome("tlive_mixed_dup", 1.0),
+            _outcome("tlive_other", -1.0),
+        ]),
+        [valid, malformed, _score("tlive_other", 70.0)],
+        min_samples=20,
+    )
+
+    assert result["eligible_count"] == 1
+    assert result["score_conflict_count"] == 1
+    assert result["score_invalid_row_count"] == 1
+    assert result["excluded_counts"] == {"score_join_conflict": 1}
+
+
+def test_heterogeneous_score_schema_or_weight_blocks_model():
+    outcomes = []
+    scores = []
+    for i in range(20):
+        pilot_id = f"tlive_lineage_{i}"
+        outcomes.append(_outcome(pilot_id, 1.0 if i % 2 else -1.0))
+        row = _score(pilot_id, 60.0 + i)
+        if i == 19:
+            row["weight_profile_hash"] = "d" * 64
+        scores.append(row)
+
+    result = calibrate_after_cost_probability(
+        _calibration(outcomes), scores, min_samples=20
+    )
+
+    assert result["status"] == "blocked"
+    assert result["reason"] == "score_lineage_heterogeneous"
+    assert result["model_fitted"] is False
+    assert result["decision_usable"] is False
+
+
+def test_malformed_upstream_contract_returns_explicit_block():
+    malformed = _calibration([], lineage_reasons="not-a-list")
+
+    result = calibrate_after_cost_probability(malformed, [], min_samples=20)
+
+    assert result["status"] == "blocked"
+    assert result["reason"] == "calibration_contract_invalid"
+    assert result["model_fitted"] is False
+    assert result["decision_usable"] is False
+
+
+def test_cli_rejects_min_samples_below_twenty():
+    import pytest
+
+    with pytest.raises(SystemExit) as exc:
+        probability._main(["--min-samples", "19"])
+
+    assert exc.value.code == 2

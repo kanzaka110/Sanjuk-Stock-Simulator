@@ -25,6 +25,14 @@ _EXIT_CONTRACT = "all_liquidation_single_exit_v1"
 _TARGET = "net_return_pct_gt_zero"
 _PILOT_ID = re.compile(r"^tlive_[A-Za-z0-9_-]{1,30}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_DECISION_REF = re.compile(
+    r"^(?:prediction|execution_decision):[A-Za-z0-9._:-]{1,140}$"
+)
+_QUALITY_AUTHORITY = "quality_breakdown.score_total"
+_EXECUTABLE_BUCKETS = frozenset({"PASS_EXECUTE", "SMALL_PASS"})
+_EXECUTION_SCHEMA = "toss_execution_calibration.v1"
+_ATTRIBUTION_MODEL = "symbol_fifo_v1"
+_MIN_SAMPLES = 20
 _MAX_SAMPLES = 10_000
 
 
@@ -47,13 +55,16 @@ def _base_result() -> dict:
         "target": _TARGET,
         "exit_contract": _EXIT_CONTRACT,
         "cost_model": _COST_MODEL,
-        "model_type": "isotonic_reliability_bins_v1",
+        "model_type": "isotonic_laplace_reliability_bins_in_sample_v1",
+        "smoothing": "laplace_beta_1_1",
+        "metric_scope": "in_sample_diagnostic_only",
         "model_fitted": False,
         "promotion_eligible": False,
         "eligible_count": 0,
         "positive_count": 0,
         "negative_or_flat_count": 0,
         "score_conflict_count": 0,
+        "score_invalid_row_count": 0,
         "excluded_counts": {},
         "raw_brier_score": None,
         "calibrated_brier_score": None,
@@ -61,7 +72,7 @@ def _base_result() -> dict:
     }
 
 
-def _valid_score_row(row: object) -> tuple[str, float] | None:
+def _valid_score_row(row: object) -> dict | None:
     if type(row) is not dict:
         return None
     pilot_id = row.get("pilot_id")
@@ -74,13 +85,13 @@ def _valid_score_row(row: object) -> tuple[str, float] | None:
         or not 0.0 <= score <= 100.0
         or type(row.get("side")) is not str
         or str(row.get("side")).upper() != "BUY"
-        or type(row.get("quality_score_authority")) is not str
-        or not str(row.get("quality_score_authority")).strip()
+        or row.get("decision_bucket") not in _EXECUTABLE_BUCKETS
+        or row.get("quality_score_authority") != _QUALITY_AUTHORITY
         or type(schema_version) is not int
         or isinstance(schema_version, bool)
         or schema_version < 1
         or type(row.get("decision_ref")) is not str
-        or not str(row.get("decision_ref")).strip()
+        or _DECISION_REF.fullmatch(str(row.get("decision_ref"))) is None
     ):
         return None
     for key in (
@@ -91,7 +102,28 @@ def _valid_score_row(row: object) -> tuple[str, float] | None:
         value = row.get(key)
         if type(value) is not str or _SHA256.fullmatch(value) is None:
             return None
-    return pilot_id, score
+    return {
+        "pilot_id": pilot_id,
+        "score": score,
+        "score_schema_version": schema_version,
+        "weight_profile_hash": row["weight_profile_hash"],
+    }
+
+
+def _valid_calibration_contract(calibration: dict) -> bool:
+    reasons = calibration.get("lineage_reasons")
+    return (
+        calibration.get("schema") == _EXECUTION_SCHEMA
+        and calibration.get("status") in {"ok", "partial"}
+        and calibration.get("mode") == "observability_only"
+        and calibration.get("decision_usable") is False
+        and calibration.get("attribution_model") == _ATTRIBUTION_MODEL
+        and type(calibration.get("attribution_verified")) is bool
+        and calibration.get("lineage_status") in {"complete", "incomplete"}
+        and type(reasons) is list
+        and all(type(reason) is str and bool(reason) for reason in reasons)
+        and type(calibration.get("outcomes")) is list
+    )
 
 
 def _initial_bins(samples: list[dict], min_bin_samples: int) -> list[dict]:
@@ -125,7 +157,9 @@ def _initial_bins(samples: list[dict], min_bin_samples: int) -> list[dict]:
     ]
 
 
-def _isotonic_bins(samples: list[dict], min_bin_samples: int) -> list[dict]:
+def _isotonic_bins(
+    samples: list[dict], min_bin_samples: int
+) -> tuple[list[dict], list[dict]]:
     blocks: list[dict] = []
     for block in _initial_bins(samples, min_bin_samples):
         blocks.append(block)
@@ -144,11 +178,11 @@ def _isotonic_bins(samples: list[dict], min_bin_samples: int) -> list[dict]:
                     + right["probability"] * right["weight"]
                 ) / weight,
             })
-    result = []
+    serialized = []
     for block in blocks:
         rows = block["samples"]
         positives = sum(row["target"] for row in rows)
-        result.append({
+        serialized.append({
             "score_min": _round(min(row["score"] for row in rows)),
             "score_max": _round(max(row["score"] for row in rows)),
             "sample_count": len(rows),
@@ -156,18 +190,18 @@ def _isotonic_bins(samples: list[dict], min_bin_samples: int) -> list[dict]:
             "empirical_probability": _round(positives / len(rows)),
             "calibrated_probability": _round(block["probability"]),
         })
-    return result
+    return serialized, blocks
 
 
-def _calibrated_brier(samples: list[dict], bins: list[dict]) -> float:
+def _calibrated_brier(blocks: list[dict]) -> float:
     total = 0.0
-    for sample in samples:
-        matched = next(
-            row for row in bins
-            if row["score_min"] <= sample["score"] <= row["score_max"]
-        )
-        total += (matched["calibrated_probability"] - sample["target"]) ** 2
-    return _round(total / len(samples))
+    count = 0
+    for block in blocks:
+        probability = block["probability"]
+        for sample in block["samples"]:
+            total += (probability - sample["target"]) ** 2
+            count += 1
+    return _round(total / count)
 
 
 def calibrate_after_cost_probability(
@@ -181,7 +215,7 @@ def calibrate_after_cost_probability(
     if (
         type(min_samples) is not int
         or isinstance(min_samples, bool)
-        or not 1 <= min_samples <= _MAX_SAMPLES
+        or not _MIN_SAMPLES <= min_samples <= _MAX_SAMPLES
     ):
         raise ValueError("min_samples_invalid")
     if (
@@ -199,11 +233,7 @@ def calibrate_after_cost_probability(
     if calibration.get("cost_model") != _COST_MODEL:
         result.update(status="blocked", reason="cost_model_mismatch")
         return result
-    if (
-        calibration.get("mode") != "observability_only"
-        or calibration.get("decision_usable") is not False
-        or type(calibration.get("outcomes")) is not list
-    ):
+    if not _valid_calibration_contract(calibration):
         result.update(status="blocked", reason="calibration_contract_invalid")
         return result
 
@@ -212,20 +242,27 @@ def calibrate_after_cost_probability(
         if type(score_rows) in (list, tuple)
         else []
     )
-    scores: dict[str, float] = {}
-    score_conflicts: set[str] = set()
+    pilot_occurrences: Counter[str] = Counter()
+    for raw in raw_scores:
+        if type(raw) is not dict:
+            continue
+        pilot_id = raw.get("pilot_id")
+        if type(pilot_id) is str and _PILOT_ID.fullmatch(pilot_id):
+            pilot_occurrences[pilot_id] += 1
+    score_conflicts = {
+        pilot_id for pilot_id, count in pilot_occurrences.items() if count > 1
+    }
+    scores: dict[str, dict] = {}
+    score_invalid_row_count = 0
     for raw in raw_scores:
         parsed = _valid_score_row(raw)
         if parsed is None:
+            score_invalid_row_count += 1
             continue
-        pilot_id, score = parsed
+        pilot_id = parsed["pilot_id"]
         if pilot_id in score_conflicts:
             continue
-        if pilot_id in scores:
-            scores.pop(pilot_id, None)
-            score_conflicts.add(pilot_id)
-        else:
-            scores[pilot_id] = score
+        scores[pilot_id] = parsed
 
     excluded: Counter[str] = Counter()
     samples: list[dict] = []
@@ -257,13 +294,15 @@ def calibrate_after_cost_probability(
         if pilot_id in score_conflicts:
             excluded["score_join_conflict"] += 1
             continue
-        score = scores.get(pilot_id)
-        if score is None:
+        score_row = scores.get(pilot_id)
+        if score_row is None:
             excluded["score_lineage_missing_or_invalid"] += 1
             continue
         samples.append({
             "pilot_id": pilot_id,
-            "score": score,
+            "score": score_row["score"],
+            "score_schema_version": score_row["score_schema_version"],
+            "weight_profile_hash": score_row["weight_profile_hash"],
             "target": 1 if net_return > 0 else 0,
         })
 
@@ -274,12 +313,35 @@ def calibrate_after_cost_probability(
         "positive_count": positive_count,
         "negative_or_flat_count": len(samples) - positive_count,
         "score_conflict_count": len(score_conflicts),
+        "score_invalid_row_count": score_invalid_row_count,
         "excluded_counts": dict(sorted(excluded.items())),
         "attribution_model": calibration.get("attribution_model"),
         "attribution_verified": calibration.get("attribution_verified") is True,
         "source_lineage_status": calibration.get("lineage_status"),
         "source_lineage_reasons": list(calibration.get("lineage_reasons") or []),
     })
+
+    score_lineages = {
+        (row["score_schema_version"], row["weight_profile_hash"])
+        for row in samples
+    }
+    if len(score_lineages) > 1:
+        result.update({
+            "status": "blocked",
+            "reason": "score_lineage_heterogeneous",
+            "promotion_block_reasons": [
+                "score_lineage_heterogeneous",
+                "shadow_only",
+            ],
+        })
+        return result
+    if score_lineages:
+        version, weight_hash = next(iter(score_lineages))
+        result["score_lineage"] = {
+            "score_schema_version": version,
+            "weight_profile_hash": weight_hash,
+            "quality_score_authority": _QUALITY_AUTHORITY,
+        }
 
     block_reasons = ["shadow_only"]
     if calibration.get("attribution_verified") is not True:
@@ -305,7 +367,7 @@ def calibrate_after_cost_probability(
         )
         return result
 
-    bins = _isotonic_bins(samples, min_bin_samples)
+    bins, internal_blocks = _isotonic_bins(samples, min_bin_samples)
     raw_brier = sum(
         ((row["score"] / 100.0) - row["target"]) ** 2 for row in samples
     ) / len(samples)
@@ -313,7 +375,7 @@ def calibrate_after_cost_probability(
         "status": "ok",
         "model_fitted": True,
         "raw_brier_score": _round(raw_brier),
-        "calibrated_brier_score": _calibrated_brier(samples, bins),
+        "calibrated_brier_score": _calibrated_brier(internal_blocks),
         "bins": bins,
     })
     return result
@@ -332,14 +394,17 @@ def _require_exact_pilot_index(connection: sqlite3.Connection) -> None:
     row = next((item for item in rows if str(item[1]) == "idx_qg_pilot_id_exact"), None)
     if row is None or int(row[2]) != 1 or int(row[4]) != 1:
         raise sqlite3.DatabaseError("quality_pilot_exact_index_required")
-    keys = [
-        str(item[2])
+    key_rows = [
+        item
         for item in connection.execute(
             'PRAGMA index_xinfo("idx_qg_pilot_id_exact")'
         ).fetchall()
         if int(item[5]) == 1
     ]
-    if keys != ["pilot_id"]:
+    if (
+        [str(item[2]) for item in key_rows] != ["pilot_id"]
+        or [str(item[4]).upper() for item in key_rows] != ["BINARY"]
+    ):
         raise sqlite3.DatabaseError("quality_pilot_exact_index_required")
     sql_row = connection.execute(
         "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
@@ -366,6 +431,12 @@ def load_after_cost_probability(
     max_source_rows: int = 5_000,
 ) -> dict:
     """Load execution outcomes and exact score lineage using read-only databases."""
+    if (
+        type(min_samples) is not int
+        or isinstance(min_samples, bool)
+        or not _MIN_SAMPLES <= min_samples <= _MAX_SAMPLES
+    ):
+        raise ValueError("min_samples_invalid")
     calibration = load_execution_calibration(
         events_path=events_path,
         ledger_path=ledger_path,
@@ -409,7 +480,8 @@ def load_after_cost_probability(
     )
     score_rows: list[dict] = []
     try:
-        with _readonly_connection(quality_db) as connection:
+        connection = _readonly_connection(quality_db)
+        try:
             _require_exact_pilot_index(connection)
             for start in range(0, len(pilot_ids), 900):
                 chunk = pilot_ids[start:start + 900]
@@ -429,6 +501,8 @@ def load_after_cost_probability(
                 if len(rows) > len(chunk):
                     raise sqlite3.DatabaseError("quality_score_cardinality_exceeded")
                 score_rows.extend(dict(row) for row in rows)
+        finally:
+            connection.close()
     except (OSError, sqlite3.Error) as exc:
         result = _base_result()
         result.update({
@@ -454,6 +528,16 @@ def load_after_cost_probability(
     return result
 
 
+def _cli_min_samples(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("min_samples_invalid") from exc
+    if not _MIN_SAMPLES <= parsed <= _MAX_SAMPLES:
+        raise argparse.ArgumentTypeError("min_samples_must_be_20_to_10000")
+    return parsed
+
+
 def _main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Build shadow after-cost probability calibration"
@@ -461,7 +545,7 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument("--events-db")
     parser.add_argument("--ledger-db")
     parser.add_argument("--quality-db")
-    parser.add_argument("--min-samples", type=int, default=20)
+    parser.add_argument("--min-samples", type=_cli_min_samples, default=20)
     parser.add_argument("--min-bin-samples", type=int, default=5)
     parser.add_argument("--max-source-rows", type=int, default=5_000)
     args = parser.parse_args(argv)
