@@ -428,12 +428,16 @@ def build_quality_report(
         raise ValueError("quality_report_invalid")
 
     market_statuses: dict[str, str] = {}
+    candidate_fallback_markets: list[str] = []
     for item in candidate_snapshots:
         market = item.get("market")
         market_status = item.get("status")
-        if market_status not in _STATUSES:
+        fallback_used = item.get("dependency_fallback_used")
+        if market_status not in _STATUSES or type(fallback_used) is not bool:
             raise ValueError("quality_report_invalid")
         market_statuses[market] = market_status
+        if fallback_used:
+            candidate_fallback_markets.append(market)
     market_degraded = any(
         status in {"degraded", "downstream_blocked"}
         for status in market_statuses.values()
@@ -448,7 +452,7 @@ def build_quality_report(
     if source_status not in {"healthy", "degraded", "coverage_gap"}:
         raise ValueError("quality_report_invalid")
     repeated_zero = any(value >= 3 for value in effective_zero.values())
-    if market_degraded or source_status == "degraded" or repeated_zero:
+    if market_degraded or candidate_fallback_markets or source_status == "degraded" or repeated_zero:
         status = "degraded"
     elif source_status == "coverage_gap":
         status = "coverage_gap"
@@ -461,6 +465,7 @@ def build_quality_report(
         "decision_usable": False,
         "markets": candidate_snapshots,
         "sources": source_health,
+        "candidate_dependency_fallback_markets": candidate_fallback_markets,
         "consecutive_zero_ready": effective_zero,
         "observed_consecutive_zero_ready": dict(consecutive_zero_ready),
     }
@@ -477,7 +482,13 @@ def render_alert(report: object) -> str:
         raise ValueError("quality_report_invalid")
     zero = report.get("consecutive_zero_ready")
     sources = report.get("sources")
-    if type(zero) is not dict or type(sources) is not dict:
+    candidate_fallbacks = report.get("candidate_dependency_fallback_markets")
+    if (
+        type(zero) is not dict
+        or type(sources) is not dict
+        or type(candidate_fallbacks) is not list
+        or any(market not in {"KR", "US"} for market in candidate_fallbacks)
+    ):
         raise ValueError("quality_report_invalid")
 
     lines = [f"[Stock Quality SLO] {status.upper()}"]
@@ -487,6 +498,8 @@ def render_alert(report: object) -> str:
             raise ValueError("quality_report_invalid")
         if count >= 3:
             lines.append(f"- {market} ready=0 {count}회 연속")
+    for market in candidate_fallbacks:
+        lines.append(f"- {market} dependency fallback 활성")
     failures = sources.get("primary_failures")
     fallbacks = sources.get("active_fallbacks")
     gaps = sources.get("coverage_gaps")

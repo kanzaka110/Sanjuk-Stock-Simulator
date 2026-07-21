@@ -429,6 +429,36 @@ def test_no_signal_does_not_alert_from_historical_zero_ready_cohorts():
     assert render_alert(report) == ""
 
 
+def test_explicit_candidate_dependency_fallback_is_degraded_and_visible():
+    fallback = {
+        "market": "KR",
+        "status": "healthy",
+        "dependency_fallback_used": True,
+        "candidate_count": 2,
+        "upstream_executable_count": 2,
+        "income_pass_count": 1,
+        "ready_count": 1,
+        "top_block_reasons": [],
+    }
+    source = {
+        "status": "healthy",
+        "primary_failures": [],
+        "active_fallbacks": [],
+        "coverage_gaps": [],
+    }
+
+    report = build_quality_report(
+        candidate_snapshots=[fallback],
+        source_health=source,
+        consecutive_zero_ready={"KR": 0, "US": 0},
+        generated_at_utc=datetime(2026, 7, 21, 10, 30, tzinfo=timezone.utc),
+    )
+
+    assert report["status"] == "degraded"
+    assert report["candidate_dependency_fallback_markets"] == ["KR"]
+    assert "KR dependency fallback 활성" in render_alert(report)
+
+
 def test_watchdog_combines_served_get_and_read_only_databases(tmp_path):
     source_path = tmp_path / "source_observations_v2.db"
     source_store = SourceObservationStoreV2(source_path)
