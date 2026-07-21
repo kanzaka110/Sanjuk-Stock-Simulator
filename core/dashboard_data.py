@@ -1053,9 +1053,17 @@ def _attach_direct_refs_to_broker_orders(
     return broker_orders
 
 
-def _broker_order_is_in_window(order: dict, cutoff: datetime) -> bool:
+def _broker_order_is_in_window(
+    order: dict,
+    cutoff: datetime,
+    as_of: datetime,
+) -> bool:
     """Return True only for a broker row with an authoritative in-window timestamp."""
-    if not isinstance(order, dict) or cutoff.tzinfo is None:
+    if (
+        not isinstance(order, dict)
+        or cutoff.tzinfo is None
+        or as_of.tzinfo is None
+    ):
         return False
     raw = order.get("filled_at") or order.get("ordered_at") or order.get("created_at")
     if not isinstance(raw, str) or not raw:
@@ -1064,15 +1072,24 @@ def _broker_order_is_in_window(order: dict, cutoff: datetime) -> bool:
         observed_at = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
         return False
-    return observed_at.tzinfo is not None and observed_at >= cutoff
+    return (
+        observed_at.tzinfo is not None
+        and cutoff <= observed_at <= as_of
+    )
 
 
 def _read_trade_outcome_inputs(
     days: int,
+    *,
+    as_of_at: datetime | None = None,
 ) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
     """추천·수동 매매·production live event·broker GET을 read-only로 읽는다."""
-    cutoff_at = datetime.now(KST) - timedelta(days=days)
+    as_of_at = as_of_at or datetime.now(KST)
+    if as_of_at.tzinfo is None:
+        return [], [], [], []
+    cutoff_at = as_of_at - timedelta(days=days)
     cutoff = cutoff_at.isoformat()
+    as_of = as_of_at.isoformat()
     predictions: list[dict] = []
     manual_trades: list[dict] = []
     live_events: list[dict] = []
@@ -1089,17 +1106,18 @@ def _read_trade_outcome_inputs(
                       agreement_count, confidence, benchmark_ticker, data_quality,
                       normalizer_version
                FROM predictions
-               WHERE created_at >= ?
+               WHERE created_at >= ? AND created_at <= ?
                ORDER BY created_at DESC LIMIT 2000""",
-            (cutoff,),
+            (cutoff, as_of),
         )
         manual_trades = _rows(
             conn,
             """SELECT id, created_at, ticker, name, side, shares, price,
                       account, applied
-               FROM trades WHERE created_at >= ?
+               FROM trades
+               WHERE created_at >= ? AND created_at <= ?
                ORDER BY created_at DESC LIMIT 1000""",
-            (cutoff,),
+            (cutoff, as_of),
         )
         conn.close()
 
@@ -1125,9 +1143,10 @@ def _read_trade_outcome_inputs(
                           live_order_sent, adapter_status,
                           live_order_allowed, created_at
                    FROM live_pilot_events
-                   WHERE created_at >= ? AND event_type IN ('live_sent', 'autonomous_live_sent')
+                   WHERE created_at >= ? AND created_at <= ?
+                     AND event_type IN ('live_sent', 'autonomous_live_sent')
                    ORDER BY created_at DESC LIMIT 1000""",
-                (cutoff,),
+                (cutoff, as_of),
             )
         except Exception:
             live_events = []
@@ -1171,7 +1190,7 @@ def _read_trade_outcome_inputs(
         broker_orders = [
             dict(row) for row in broker_snapshot.get("orders") or []
             if isinstance(row, dict)
-            and _broker_order_is_in_window(row, cutoff_at)
+            and _broker_order_is_in_window(row, cutoff_at, as_of_at)
         ]
         _attach_direct_refs_to_broker_orders(broker_orders, live_events)
     except Exception:
@@ -1209,7 +1228,11 @@ def _fetch_trade_outcome_attribution_raw(days: int) -> dict:
         normalize_execution_records,
     )
 
-    predictions, manual_trades, live_events, broker_orders = _read_trade_outcome_inputs(days)
+    as_of_at = datetime.now(KST)
+    predictions, manual_trades, live_events, broker_orders = _read_trade_outcome_inputs(
+        days,
+        as_of_at=as_of_at,
+    )
     executions = normalize_execution_records(
         manual_trades=manual_trades,
         live_events=live_events,
@@ -1239,16 +1262,19 @@ def _fetch_trade_outcome_attribution_raw(days: int) -> dict:
     report.setdefault("data_quality", {})[
         "direct_execution_decision_id_available"
     ] = trace_fields["direct_execution_decision_id_available"]
-    report["generated_at"] = datetime.now(KST).isoformat()
+    report["generated_at"] = as_of_at.isoformat()
     report["source"] = "memory_db_and_local_execution_logs_read_only"
     report["scope"] = f"recent_{days}_days"
-    window_end = datetime.now(KST)
     report["window"] = {
         "mode": "rolling_days",
         "days": days,
-        "as_of": window_end.isoformat(),
-        "cutoff": (window_end - timedelta(days=days)).isoformat(),
-        "rule": "dashboard SQL: prediction created_at; execution created_at",
+        "as_of": as_of_at.isoformat(),
+        "cutoff": (as_of_at - timedelta(days=days)).isoformat(),
+        "rule": (
+            "closed timezone-aware interval; predictions/trades/live events use "
+            "created_at; broker orders use filled_at then ordered_at then created_at; "
+            "missing, naive, or malformed broker timestamps are excluded"
+        ),
         "filter_applied": True,
     }
     report["benchmark_attribution"]["status"] = "not_requested"

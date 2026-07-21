@@ -200,6 +200,37 @@ def test_dashboard_reports_execution_decision_trace_separately():
     }
 
 
+def test_dashboard_execution_decision_trace_rejects_mixed_false_evidence():
+    from core import dashboard_data as dd
+
+    fields = dd._execution_decision_attribution_fields([
+        {
+            "decision_ref": "execution_decision:verified",
+            "hermes_decision_verified": True,
+        },
+        {
+            "decision_ref": "execution_decision:unverified",
+            "hermes_decision_verified": False,
+        },
+        {
+            "decision_ref": "execution_decision:truthy_non_bool",
+            "hermes_decision_verified": 1,
+        },
+        {
+            "decision_ref": "prediction:42",
+            "hermes_decision_verified": True,
+        },
+        {"decision_ref": "other:42", "hermes_decision_verified": True},
+    ])
+
+    assert fields == {
+        "execution_decision_referenced_executions": 3,
+        "execution_decision_linked_executions": 1,
+        "execution_decision_traceability_rate_pct": 33.3,
+        "direct_execution_decision_id_available": True,
+    }
+
+
 def test_hermes_verification_join_requires_both_exact_keys_and_pass():
     from core.dashboard_data import _mark_hermes_verified_live_events
 
@@ -300,6 +331,80 @@ def test_trade_outcome_input_window_filters_stale_broker_orders(
     assert [row["client_order_id"] for row in broker_orders] == [
         "tlive_recent_0001"
     ]
+
+
+def test_broker_order_window_is_closed_and_uses_authoritative_fallbacks():
+    from core import dashboard_data as dd
+
+    cutoff = datetime(2026, 7, 14, 12, 0, tzinfo=KST)
+    as_of = datetime(2026, 7, 21, 12, 0, tzinfo=KST)
+    in_window = "2026-07-20T12:00:00+09:00"
+
+    assert dd._broker_order_is_in_window(
+        {"filled_at": cutoff.isoformat()}, cutoff, as_of,
+    ) is True
+    assert dd._broker_order_is_in_window(
+        {"filled_at": as_of.isoformat()}, cutoff, as_of,
+    ) is True
+    assert dd._broker_order_is_in_window(
+        {"ordered_at": in_window}, cutoff, as_of,
+    ) is True
+    assert dd._broker_order_is_in_window(
+        {"created_at": in_window}, cutoff, as_of,
+    ) is True
+    assert dd._broker_order_is_in_window(
+        {
+            "filled_at": "2022-10-25T11:12:08.554+09:00",
+            "ordered_at": in_window,
+        },
+        cutoff,
+        as_of,
+    ) is False
+
+    rejected = [
+        {"filled_at": "2026-07-21T12:00:00+00:00"},
+        {"filled_at": "2026-07-20T12:00:00"},
+        {"filled_at": "not-a-timestamp"},
+        {},
+        [],
+    ]
+    assert [
+        dd._broker_order_is_in_window(row, cutoff, as_of)
+        for row in rejected
+    ] == [False, False, False, False, False]
+
+
+def test_trade_outcome_sql_inputs_share_the_same_upper_bound(
+    monkeypatch, tmp_path,
+):
+    from core import dashboard_data as dd
+    from core import toss_readonly_snapshot as snapshot
+
+    captured = []
+
+    class FakeConnection:
+        def close(self):
+            return None
+
+    def capture_rows(_connection, query, params=()):
+        captured.append((query, params))
+        return []
+
+    as_of = datetime(2026, 7, 21, 12, 0, tzinfo=KST)
+    monkeypatch.setattr(dd, "_conn", lambda: FakeConnection())
+    monkeypatch.setattr(dd, "_rows", capture_rows)
+    monkeypatch.setattr(dd, "_db_path", lambda: tmp_path / "memory.db")
+    monkeypatch.setattr(
+        snapshot,
+        "broker_orders_for_consumer",
+        lambda: {"orders": []},
+    )
+
+    dd._read_trade_outcome_inputs(7, as_of_at=as_of)
+
+    assert len(captured) == 2
+    assert all("created_at <= ?" in query for query, _ in captured)
+    assert all(params[1] == as_of.isoformat() for _, params in captured)
 
 
 def test_broker_get_truth_wins_over_live_event_for_same_decision_ref():
@@ -562,7 +667,7 @@ def test_dashboard_contract_is_cached_and_read_only(monkeypatch):
     monkeypatch.setattr(
         dd,
         "_read_trade_outcome_inputs",
-        lambda days: ([_prediction()], [_manual()], [], []),
+        lambda days, **_kwargs: ([_prediction()], [_manual()], [], []),
     )
     monkeypatch.setattr(dd, "_cache", {}, raising=False)
     first = dd.trade_outcome_attribution_data(90)
@@ -575,6 +680,10 @@ def test_dashboard_contract_is_cached_and_read_only(monkeypatch):
     assert first["window"]["mode"] == "rolling_days"
     assert first["window"]["days"] == 90
     assert first["window"]["filter_applied"] is True
+    assert first["generated_at"] == first["window"]["as_of"]
+    assert "closed timezone-aware interval" in first["window"]["rule"]
+    assert "filled_at then ordered_at then created_at" in first["window"]["rule"]
+    assert "missing, naive, or malformed" in first["window"]["rule"]
     assert first["interpretation_payload"]["read_only"] is True
     assert first["interpretation_payload"]["window"]["days"] == 90
 
