@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 
 KST = timezone(timedelta(hours=9))
 log = logging.getLogger(__name__)
@@ -3005,9 +3006,16 @@ def _toss_holding_price_map() -> dict[str, dict]:
     return out
 
 
-def _recent_toss_risk_sell_symbols(limit: int = 100) -> dict[str, dict]:
-    """최근 리스크 기반 SELL 심볼 맵. 신규 매수 재진입 cooldown용. Read-only."""
+def _recent_toss_risk_sell_symbols(
+    limit: int = 100,
+    *,
+    now: datetime | None = None,
+) -> dict[str, dict]:
+    """같은 시장 현지 날짜의 리스크 SELL만 재진입 cooldown으로 반환한다."""
     out: dict[str, dict] = {}
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
     try:
         from core.toss_live_pilot_ledger import list_live_pilot_records
         records = list_live_pilot_records(limit=limit)
@@ -3023,9 +3031,25 @@ def _recent_toss_risk_sell_symbols(limit: int = 100) -> dict[str, dict]:
             continue
         if reason not in risk_reasons:
             continue
+        created_text = str(r.get("created_at") or r.get("sent_at") or "").strip()
+        if not created_text:
+            continue
+        try:
+            created = datetime.fromisoformat(created_text.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        market_tz = (
+            KST
+            if symbol.endswith((".KS", ".KQ")) or symbol.isdigit()
+            else ZoneInfo("America/New_York")
+        )
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=market_tz)
+        if created.astimezone(market_tz).date() != current.astimezone(market_tz).date():
+            continue
         out[symbol] = {
             "reason": reason,
-            "created_at": r.get("created_at") or r.get("sent_at") or "",
+            "created_at": created_text,
             "status": r.get("status") or "",
         }
         if symbol.endswith((".KS", ".KQ")):

@@ -1985,7 +1985,7 @@ def test_toss_buy_candidates_excludes_recent_sell_to_fund_symbols(monkeypatch):
         lambda *a, **k: [{
             "symbol": "015760.KS", "side": "sell", "status": "live_sent",
             "reason": "income_rebalance_sell_to_fund",
-            "created_at": "2026-07-09T11:27:43+09:00",
+            "created_at": datetime.now(dd.KST).isoformat(),
         }],
     )
 
@@ -1999,17 +1999,65 @@ def test_toss_buy_candidates_excludes_recent_sell_to_fund_symbols(monkeypatch):
     assert excluded[0]["scope"] == "recent_risk_sell_cooldown"
 
 
+def test_recent_risk_sell_symbols_only_blocks_same_market_local_date(monkeypatch):
+    now = datetime(2026, 7, 21, 1, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        "core.toss_live_pilot_ledger.list_live_pilot_records",
+        lambda *a, **k: [
+            {
+                "symbol": "015760.KS", "side": "sell", "status": "live_sent",
+                "reason": "position_review_sell",
+                "created_at": "2026-07-21T09:30:00+09:00",
+            },
+            {
+                "symbol": "035720.KS", "side": "sell", "status": "live_sent",
+                "reason": "position_review_sell",
+                "created_at": "2026-07-20T15:20:00+09:00",
+            },
+            {
+                "symbol": "NVDA", "side": "sell", "status": "live_sent",
+                "reason": "auto_exit_sell",
+                "created_at": "2026-07-20T15:30:00-04:00",
+            },
+            {
+                "symbol": "LMT", "side": "sell", "status": "live_sent",
+                "reason": "auto_exit_sell",
+                "created_at": "2026-07-19T15:30:00-04:00",
+            },
+            {
+                "symbol": "005490.KS", "side": "sell", "status": "live_sent",
+                "reason": "position_review_sell",
+                "created_at": "",
+            },
+        ],
+    )
+
+    out = dd._recent_toss_risk_sell_symbols(now=now)
+
+    assert "015760.KS" in out
+    assert "015760" in out
+    assert "NVDA" in out
+    assert "035720.KS" not in out
+    assert "035720" not in out
+    assert "LMT" not in out
+    assert "005490.KS" not in out
+
+
 def test_recent_risk_sell_symbols_maps_sell_to_fund_reason(monkeypatch):
     monkeypatch.setattr(
         "core.toss_live_pilot_ledger.list_live_pilot_records",
         lambda *a, **k: [
             {"symbol": "015760.KS", "side": "sell", "status": "live_sent",
-             "reason": "income_rebalance_sell_to_fund"},
+             "reason": "income_rebalance_sell_to_fund",
+             "created_at": "2026-07-21T10:00:00+09:00"},
             {"symbol": "035420.KS", "side": "sell", "status": "live_sent",
-             "reason": "auto_pipeline"},
+             "reason": "auto_pipeline",
+             "created_at": "2026-07-21T10:00:00+09:00"},
         ],
     )
-    out = dd._recent_toss_risk_sell_symbols()
+    out = dd._recent_toss_risk_sell_symbols(
+        now=datetime(2026, 7, 21, 1, 0, tzinfo=timezone.utc),
+    )
     assert out["015760.KS"]["reason"] == "income_rebalance_sell_to_fund"
     assert out["015760"]["reason"] == "income_rebalance_sell_to_fund"
     assert "035420.KS" not in out
