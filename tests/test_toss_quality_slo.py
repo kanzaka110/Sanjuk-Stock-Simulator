@@ -176,7 +176,10 @@ def test_source_health_keeps_primary_failure_visible_when_fallback_succeeds():
         },
     ]
 
-    result = evaluate_source_run_health(rows)
+    result = evaluate_source_run_health(
+        rows,
+        as_of_utc=datetime(2026, 7, 21, 10, 30, tzinfo=timezone.utc),
+    )
 
     assert result == {
         "status": "degraded",
@@ -199,7 +202,43 @@ def test_source_health_keeps_primary_failure_visible_when_fallback_succeeds():
         "coverage_gaps": [
             {"source": "krx_openapi", "dataset": "domestic_eod_quote"}
         ],
+        "stale_sources": [],
     }
+
+
+def test_source_health_marks_old_primary_success_as_stale():
+    rows = [
+        {
+            "source": "kis",
+            "dataset": dataset,
+            "status": "success",
+            "completed_at": "2026-07-17T06:21:00.000000Z",
+            "error_type": "",
+        }
+        for dataset in ("domestic_investor_flow", "domestic_orderbook")
+    ]
+
+    result = evaluate_source_run_health(
+        rows,
+        as_of_utc=datetime(2026, 7, 21, 10, 30, tzinfo=timezone.utc),
+    )
+
+    assert result["status"] == "degraded"
+    assert result["primary_failures"] == []
+    assert result["stale_sources"] == [
+        {
+            "source": "kis",
+            "dataset": "domestic_investor_flow",
+            "age_seconds": 360540,
+            "max_age_seconds": 172800,
+        },
+        {
+            "source": "kis",
+            "dataset": "domestic_orderbook",
+            "age_seconds": 360540,
+            "max_age_seconds": 108000,
+        },
+    ]
 
 
 def test_source_health_rejects_unknown_status_and_string_boolean_like_fields():
@@ -351,7 +390,8 @@ def test_quality_report_alerts_ready_zero_primary_failure_and_explicit_fallback(
                 "completed_at": "2026-07-21T06:21:00.000000Z",
                 "error_type": "",
             },
-        ]
+        ],
+        as_of_utc=datetime(2026, 7, 21, 10, 30, tzinfo=timezone.utc),
     )
 
     report = build_quality_report(
@@ -388,6 +428,7 @@ def test_healthy_report_is_silent_in_alert_mode():
         "primary_failures": [],
         "active_fallbacks": [],
         "coverage_gaps": [],
+        "stale_sources": [],
     }
     report = build_quality_report(
         candidate_snapshots=[healthy],
@@ -416,6 +457,7 @@ def test_no_signal_does_not_alert_from_historical_zero_ready_cohorts():
         "primary_failures": [],
         "active_fallbacks": [],
         "coverage_gaps": [],
+        "stale_sources": [],
     }
 
     report = build_quality_report(
@@ -445,6 +487,7 @@ def test_explicit_candidate_dependency_fallback_is_degraded_and_visible():
         "primary_failures": [],
         "active_fallbacks": [],
         "coverage_gaps": [],
+        "stale_sources": [],
     }
 
     report = build_quality_report(

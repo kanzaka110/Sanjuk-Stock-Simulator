@@ -173,6 +173,10 @@ _PRIMARY_CONTRACTS = (
     ("kis", "domestic_investor_flow"),
     ("kis", "domestic_orderbook"),
 )
+_PRIMARY_MAX_AGE_SECONDS = {
+    ("kis", "domestic_investor_flow"): 48 * 60 * 60,
+    ("kis", "domestic_orderbook"): 30 * 60 * 60,
+}
 _OPTIONAL_CONTRACTS = (("krx_openapi", "domestic_eod_quote"),)
 _FALLBACK_CONTRACTS = {
     ("naver", "domestic_investor_flow"): ("kis", "domestic_investor_flow"),
@@ -195,10 +199,24 @@ def _run_time(value: object) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def evaluate_source_run_health(rows: object) -> dict[str, Any]:
-    """Separate primary degradation from explicit fallback success."""
+def evaluate_source_run_health(
+    rows: object,
+    *,
+    as_of_utc: datetime | None = None,
+) -> dict[str, Any]:
+    """Separate primary degradation, freshness, and explicit fallback success."""
     if type(rows) is not list or len(rows) > 10_000:
         raise _source_invalid()
+    if as_of_utc is None:
+        as_of = datetime.now(timezone.utc)
+    elif (
+        not isinstance(as_of_utc, datetime)
+        or as_of_utc.tzinfo is None
+        or as_of_utc.utcoffset() is None
+    ):
+        raise _source_invalid()
+    else:
+        as_of = as_of_utc.astimezone(timezone.utc)
 
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row in rows:
@@ -249,6 +267,24 @@ def evaluate_source_run_health(rows: object) -> dict[str, Any]:
             }
         )
 
+    stale_sources: list[dict[str, Any]] = []
+    for contract, max_age_seconds in _PRIMARY_MAX_AGE_SECONDS.items():
+        values = grouped.get(contract, [])
+        if not values or values[-1]["status"] != "success":
+            continue
+        age_seconds = int((as_of - values[-1]["_completed"]).total_seconds())
+        if age_seconds < 0:
+            raise _source_invalid()
+        if age_seconds > max_age_seconds:
+            stale_sources.append(
+                {
+                    "source": contract[0],
+                    "dataset": contract[1],
+                    "age_seconds": age_seconds,
+                    "max_age_seconds": max_age_seconds,
+                }
+            )
+
     active_fallbacks: list[dict[str, str]] = []
     for fallback, primary in _FALLBACK_CONTRACTS.items():
         fallback_rows = grouped.get(fallback, [])
@@ -272,7 +308,7 @@ def evaluate_source_run_health(rows: object) -> dict[str, Any]:
         for source, dataset in _OPTIONAL_CONTRACTS
         if (source, dataset) not in grouped
     ]
-    if primary_failures:
+    if primary_failures or stale_sources:
         status = "degraded"
     elif coverage_gaps:
         status = "coverage_gap"
@@ -283,6 +319,7 @@ def evaluate_source_run_health(rows: object) -> dict[str, Any]:
         "primary_failures": primary_failures,
         "active_fallbacks": active_fallbacks,
         "coverage_gaps": coverage_gaps,
+        "stale_sources": stale_sources,
     }
 
 
@@ -503,7 +540,8 @@ def render_alert(report: object) -> str:
     failures = sources.get("primary_failures")
     fallbacks = sources.get("active_fallbacks")
     gaps = sources.get("coverage_gaps")
-    if not all(type(value) is list for value in (failures, fallbacks, gaps)):
+    stale = sources.get("stale_sources")
+    if not all(type(value) is list for value in (failures, fallbacks, gaps, stale)):
         raise ValueError("quality_report_invalid")
     for row in failures:
         if type(row) is not dict:
@@ -517,6 +555,13 @@ def render_alert(report: object) -> str:
             raise ValueError("quality_report_invalid")
         source = str(row.get("source", "")).title()
         lines.append(f"- {source} fallback 활성")
+    for row in stale:
+        if type(row) is not dict:
+            raise ValueError("quality_report_invalid")
+        lines.append(
+            f"- {str(row.get('source', '')).upper()} "
+            f"{str(row.get('dataset', ''))} stale"
+        )
     for row in gaps:
         if type(row) is not dict:
             raise ValueError("quality_report_invalid")
@@ -585,9 +630,12 @@ def run_quality_watchdog(
             f"{base}/api/toss/buy-candidates?limit=20&market={market}"
         )
         snapshots.append(evaluate_candidate_snapshot(payload, expected_market=market))
-    source_health = evaluate_source_run_health(load_source_runs_read_only(source_db))
-    zero_ready = load_consecutive_zero_ready_read_only(shadow_db)
     now = clock() if clock is not None else datetime.now(timezone.utc)
+    source_health = evaluate_source_run_health(
+        load_source_runs_read_only(source_db),
+        as_of_utc=now,
+    )
+    zero_ready = load_consecutive_zero_ready_read_only(shadow_db)
     return build_quality_report(
         candidate_snapshots=snapshots,
         source_health=source_health,
