@@ -211,6 +211,40 @@ def test_provider_401_is_typed_auth_and_message_is_not_retained():
     assert AUTH_SENTINEL not in repr(result)
 
 
+def test_mixed_market_empty_response_fails_closed_instead_of_partial_success():
+    kospi_quote = _quote_payload()
+    kospi_base = _base_payload()
+    kosdaq_quote = _quote_payload(rows=[])
+    kosdaq_base = _base_payload(
+        rows=[
+            {
+                "BAS_DD": "20260721",
+                "ISU_CD": "KR7035720002",
+                "ISU_SRT_CD": "035720",
+                "MKT_TP_NM": "KOSDAQ",
+            }
+        ]
+    )
+    responses = [kospi_quote, kospi_base, kosdaq_quote, kosdaq_base]
+    calls = []
+
+    def transport(url, *, headers, params, timeout, allow_redirects):
+        calls.append((url, headers, params, timeout, allow_redirects))
+        return _Response(200, responses[len(calls) - 1])
+
+    result = fetch_krx_daily(
+        business_date=date(2026, 7, 21),
+        symbols=["005930.KS", "035720.KQ"],
+        auth_key=AUTH_SENTINEL,
+        transport=transport,
+    )
+
+    assert result.status is KRXStatus.FAILED
+    assert result.error is KRXError.PROVIDER
+    assert result.rows == ()
+    assert len(calls) == 4
+
+
 def test_unhashable_resp_code_is_typed_malformed():
     result = fetch_krx_daily(
         business_date=date(2026, 7, 21),

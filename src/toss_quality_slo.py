@@ -94,6 +94,8 @@ def evaluate_candidate_snapshot(payload: object, *, expected_market: str) -> dic
         or executable > quality_pass
         or income_eligible > executable
         or upstream > executable
+        or income_eligible != upstream
+        or income_pass > upstream
     ):
         raise _invalid()
 
@@ -104,6 +106,8 @@ def evaluate_candidate_snapshot(payload: object, *, expected_market: str) -> dic
             raise _invalid()
         income = item.get("income_strategy")
         if type(income) is not dict or type(income.get("income_pass")) is not bool:
+            raise _invalid()
+        if ready and income["income_pass"] is not True:
             raise _invalid()
         observed_ready += int(ready)
     if observed_ready != returned_ready:
@@ -641,23 +645,128 @@ def _render_error(value: object) -> str:
     return value
 
 
+_MARKET_SUMMARY_KEYS = frozenset(
+    {
+        "market",
+        "status",
+        "dependency_fallback_used",
+        "candidate_count",
+        "upstream_executable_count",
+        "income_pass_count",
+        "ready_count",
+        "funnel",
+        "top_block_reasons",
+    }
+)
+_FUNNEL_KEYS = frozenset(
+    {
+        "discovered",
+        "scanned",
+        "held_excluded",
+        "recent_risk_sell_excluded",
+        "quality_pass",
+        "quality_reject",
+        "executable",
+        "income_eligible",
+        "income_pass",
+        "ready",
+        "returned",
+    }
+)
+_REPORT_KEYS = frozenset(
+    {
+        "schema",
+        "generated_at_utc",
+        "status",
+        "decision_usable",
+        "markets",
+        "sources",
+        "candidate_dependency_fallback_markets",
+        "consecutive_zero_ready",
+        "observed_consecutive_zero_ready",
+    }
+)
+
+
+def _validate_render_market(row: object) -> None:
+    if type(row) is not dict or set(row) != _MARKET_SUMMARY_KEYS:
+        raise ValueError("quality_report_invalid")
+    market = row.get("market")
+    status = row.get("status")
+    fallback = row.get("dependency_fallback_used")
+    counts = (
+        row.get("candidate_count"),
+        row.get("upstream_executable_count"),
+        row.get("income_pass_count"),
+        row.get("ready_count"),
+    )
+    funnel = row.get("funnel")
+    reasons = row.get("top_block_reasons")
+    if (
+        market not in {"KR", "US"}
+        or status not in _STATUSES
+        or type(fallback) is not bool
+        or any(type(value) is not int or value < 0 for value in counts)
+        or type(funnel) is not dict
+        or set(funnel) != _FUNNEL_KEYS
+        or any(type(value) is not int or value < 0 for value in funnel.values())
+        or type(reasons) is not list
+        or len(reasons) > 5
+    ):
+        raise ValueError("quality_report_invalid")
+    assert all(type(value) is int for value in counts)
+    candidate_count, upstream, income_pass, ready = counts
+    if (
+        funnel["returned"] != candidate_count
+        or funnel["income_eligible"] != upstream
+        or funnel["income_pass"] != income_pass
+        or funnel["ready"] != ready
+        or ready > income_pass
+        or income_pass > upstream
+    ):
+        raise ValueError("quality_report_invalid")
+    expected_status = {
+        "healthy": ready > 0,
+        "degraded": upstream > 0 and income_pass == 0 and ready == 0,
+        "downstream_blocked": income_pass > 0 and ready == 0,
+        "no_signal": upstream == 0 and income_pass == 0 and ready == 0 and candidate_count > 0,
+        "idle": upstream == 0 and income_pass == 0 and ready == 0 and candidate_count == 0,
+    }[status]
+    if not expected_status:
+        raise ValueError("quality_report_invalid")
+    for reason in reasons:
+        if (
+            type(reason) is not dict
+            or set(reason) != {"reason", "count"}
+            or type(reason.get("count")) is not int
+            or reason["count"] < 0
+        ):
+            raise ValueError("quality_report_invalid")
+        _render_name(reason.get("reason"))
+
+
 def render_alert(report: object) -> str:
     """Render an anomaly-only Telegram-safe message after full nested validation."""
     if (
         type(report) is not dict
+        or set(report) != _REPORT_KEYS
         or report.get("schema") != "toss_quality_slo.v1"
         or report.get("decision_usable") is not False
     ):
         raise ValueError("quality_report_invalid")
     status = report.get("status")
-    if status not in {"healthy", "degraded", "coverage_gap"}:
-        raise ValueError("quality_report_invalid")
     zero = report.get("consecutive_zero_ready")
+    observed_zero = report.get("observed_consecutive_zero_ready")
     sources = report.get("sources")
+    markets = report.get("markets")
     candidate_fallbacks = report.get("candidate_dependency_fallback_markets")
+    generated = report.get("generated_at_utc")
     if (
-        type(zero) is not dict
+        status not in {"healthy", "degraded", "coverage_gap"}
+        or type(zero) is not dict
         or set(zero) != {"KR", "US"}
+        or type(observed_zero) is not dict
+        or set(observed_zero) != {"KR", "US"}
         or type(sources) is not dict
         or set(sources)
         != {
@@ -669,16 +778,34 @@ def render_alert(report: object) -> str:
             "stale_sources",
         }
         or sources.get("status") not in {"healthy", "degraded", "coverage_gap"}
+        or type(markets) is not list
+        or not 1 <= len(markets) <= 2
         or type(candidate_fallbacks) is not list
         or len(candidate_fallbacks) > 2
         or len(set(candidate_fallbacks)) != len(candidate_fallbacks)
         or any(market not in {"KR", "US"} for market in candidate_fallbacks)
+        or type(generated) is not str
     ):
         raise ValueError("quality_report_invalid")
-    for market in ("KR", "US"):
-        count = zero.get(market)
-        if type(count) is not int or count < 0:
+    for value in (*zero.values(), *observed_zero.values()):
+        if type(value) is not int or value < 0:
             raise ValueError("quality_report_invalid")
+    for market_row in markets:
+        _validate_render_market(market_row)
+    try:
+        generated_at = datetime.fromisoformat(generated)
+    except ValueError:
+        raise ValueError("quality_report_invalid") from None
+    if generated_at.tzinfo is None or generated_at.utcoffset() != timezone.utc.utcoffset(None):
+        raise ValueError("quality_report_invalid")
+    rebuilt = build_quality_report(
+        candidate_snapshots=markets,
+        source_health=sources,
+        consecutive_zero_ready=observed_zero,
+        generated_at_utc=generated_at,
+    )
+    if rebuilt != report:
+        raise ValueError("quality_report_invalid")
 
     failures = sources.get("primary_failures")
     missing = sources.get("primary_missing")

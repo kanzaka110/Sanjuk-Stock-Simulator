@@ -134,6 +134,43 @@ def test_candidate_snapshot_rejects_malformed_or_contradictory_authority(mutator
         evaluate_candidate_snapshot(payload, expected_market="KR")
 
 
+def test_candidate_snapshot_rejects_producer_impossible_liveness_relationships():
+    eligible_mismatch = copy.deepcopy(_payload())
+    eligible_mismatch["scan_summary"]["income_gate_eligible_count"] = 3
+
+    ready_without_pass = copy.deepcopy(_payload())
+    ready_without_pass["scan_summary"].update(
+        {
+            "income_pass_count": 1,
+            "income_ready_count": 1,
+            "returned_income_ready_count": 1,
+            "income_liveness_status": "healthy",
+            "income_liveness_diagnosis": None,
+        }
+    )
+    ready_without_pass["items"][0]["stock_agent_ready"] = True
+
+    no_signal_with_eligible = copy.deepcopy(_payload())
+    no_signal_with_eligible["scan_summary"].update(
+        {
+            "upstream_executable_count": 0,
+            "income_gate_eligible_count": 1,
+            "income_liveness_status": "no_signal",
+            "income_liveness_diagnosis": {
+                "reason": "no_income_gate_eligible_candidates",
+                "upstream_executable_count": 0,
+                "income_pass_count": 0,
+                "income_ready_count": 0,
+                "top_income_block_reasons": [],
+            },
+        }
+    )
+
+    for payload in (eligible_mismatch, ready_without_pass, no_signal_with_eligible):
+        with pytest.raises(ValueError, match="candidate_snapshot_invalid"):
+            evaluate_candidate_snapshot(payload, expected_market="KR")
+
+
 def test_candidate_snapshot_rejects_market_mismatch():
     with pytest.raises(ValueError, match="candidate_snapshot_invalid"):
         evaluate_candidate_snapshot(_payload(market="US"), expected_market="KR")
@@ -726,6 +763,19 @@ def test_healthy_report_is_silent_in_alert_mode():
         "upstream_executable_count": 2,
         "income_pass_count": 1,
         "ready_count": 1,
+        "funnel": {
+            "discovered": 2,
+            "scanned": 2,
+            "held_excluded": 0,
+            "recent_risk_sell_excluded": 0,
+            "quality_pass": 2,
+            "quality_reject": 0,
+            "executable": 2,
+            "income_eligible": 2,
+            "income_pass": 1,
+            "ready": 1,
+            "returned": 2,
+        },
         "top_block_reasons": [],
     }
     source = {
@@ -752,6 +802,24 @@ def test_renderer_revalidates_nested_rows_even_when_report_is_healthy():
         "market": "KR",
         "status": "healthy",
         "dependency_fallback_used": False,
+        "candidate_count": 2,
+        "upstream_executable_count": 2,
+        "income_pass_count": 1,
+        "ready_count": 1,
+        "funnel": {
+            "discovered": 2,
+            "scanned": 2,
+            "held_excluded": 0,
+            "recent_risk_sell_excluded": 0,
+            "quality_pass": 2,
+            "quality_reject": 0,
+            "executable": 2,
+            "income_eligible": 2,
+            "income_pass": 1,
+            "ready": 1,
+            "returned": 2,
+        },
+        "top_block_reasons": [],
     }
     source = {
         "status": "healthy",
@@ -775,6 +843,53 @@ def test_renderer_revalidates_nested_rows_even_when_report_is_healthy():
         render_alert(report)
 
 
+def test_renderer_recomputes_top_level_from_exact_nested_report():
+    payload = copy.deepcopy(_payload())
+    payload["scan_summary"].update(
+        {
+            "income_pass_count": 1,
+            "income_ready_count": 1,
+            "returned_income_ready_count": 1,
+            "income_liveness_status": "healthy",
+            "income_liveness_diagnosis": None,
+        }
+    )
+    payload["items"][0]["stock_agent_ready"] = True
+    payload["items"][0]["income_strategy"]["income_pass"] = True
+    healthy = evaluate_candidate_snapshot(payload, expected_market="KR")
+    source = {
+        "status": "healthy",
+        "primary_failures": [],
+        "primary_missing": [],
+        "active_fallbacks": [],
+        "coverage_gaps": [],
+        "stale_sources": [],
+    }
+    report = build_quality_report(
+        candidate_snapshots=[healthy],
+        source_health=source,
+        consecutive_zero_ready={"KR": 0, "US": 0},
+        generated_at_utc=datetime(2026, 7, 21, 10, 30, tzinfo=timezone.utc),
+    )
+    variants = []
+    extra_key = copy.deepcopy(report)
+    extra_key["forged"] = True
+    variants.append(extra_key)
+    degraded_market = copy.deepcopy(report)
+    degraded_market["markets"][0]["status"] = "degraded"
+    variants.append(degraded_market)
+    bad_generated = copy.deepcopy(report)
+    bad_generated["generated_at_utc"] = "not-a-time"
+    variants.append(bad_generated)
+    missing_observed = copy.deepcopy(report)
+    missing_observed.pop("observed_consecutive_zero_ready")
+    variants.append(missing_observed)
+
+    for variant in variants:
+        with pytest.raises(ValueError, match="quality_report_invalid"):
+            render_alert(variant)
+
+
 def test_no_signal_does_not_alert_from_historical_zero_ready_cohorts():
     no_signal = {
         "market": "KR",
@@ -784,6 +899,19 @@ def test_no_signal_does_not_alert_from_historical_zero_ready_cohorts():
         "upstream_executable_count": 0,
         "income_pass_count": 0,
         "ready_count": 0,
+        "funnel": {
+            "discovered": 10,
+            "scanned": 10,
+            "held_excluded": 0,
+            "recent_risk_sell_excluded": 0,
+            "quality_pass": 0,
+            "quality_reject": 10,
+            "executable": 0,
+            "income_eligible": 0,
+            "income_pass": 0,
+            "ready": 0,
+            "returned": 10,
+        },
         "top_block_reasons": [],
     }
     source = {
@@ -815,6 +943,19 @@ def test_explicit_candidate_dependency_fallback_is_degraded_and_visible():
         "upstream_executable_count": 2,
         "income_pass_count": 1,
         "ready_count": 1,
+        "funnel": {
+            "discovered": 2,
+            "scanned": 2,
+            "held_excluded": 0,
+            "recent_risk_sell_excluded": 0,
+            "quality_pass": 2,
+            "quality_reject": 0,
+            "executable": 2,
+            "income_eligible": 2,
+            "income_pass": 1,
+            "ready": 1,
+            "returned": 2,
+        },
         "top_block_reasons": [],
     }
     source = {

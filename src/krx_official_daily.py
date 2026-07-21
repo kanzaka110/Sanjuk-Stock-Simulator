@@ -261,6 +261,7 @@ def fetch_krx_daily(
     request = transport if transport is not None else _default_transport
 
     projected: list[dict[str, Any]] = []
+    empty_markets: list[str] = []
     try:
         for market in markets:
             quote_endpoint, base_endpoint = _ENDPOINTS[market]
@@ -283,6 +284,7 @@ def fetch_krx_daily(
             if not quotes:
                 if bases and not requested_codes.issubset(bases):
                     raise _PayloadError(KRXError.MALFORMED)
+                empty_markets.append(market)
                 continue
             if not requested_codes.issubset(quotes) or not requested_codes.issubset(bases):
                 raise _PayloadError(KRXError.MALFORMED)
@@ -302,6 +304,13 @@ def fetch_krx_daily(
             markets=markets,
         )
 
+    if empty_markets and projected:
+        return _result(
+            status=KRXStatus.FAILED,
+            error=KRXError.PROVIDER,
+            business_date=business_date_text,
+            markets=markets,
+        )
     return _result(
         status=KRXStatus.SUCCESS if projected else KRXStatus.EMPTY,
         error=KRXError.NONE,
