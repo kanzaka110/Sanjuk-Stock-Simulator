@@ -401,8 +401,15 @@ _INVESTOR_SEMANTIC_FIELDS = {
 }
 
 
-def parse_kis_investor_payload(payload: dict, ticker: str, venue: str) -> list[dict]:
-    """KIS 일별 투자자 매매동향의 공식 필드를 typed 행으로 변환한다."""
+def parse_kis_investor_payload(
+    payload: dict,
+    ticker: str,
+    venue: str,
+    *,
+    available_at: datetime | None = None,
+) -> list[dict]:
+    """KIS 일별 투자자 매매동향의 확정된 공식 필드를 typed 행으로 변환한다."""
+    availability_cutoff = _aware_utc(available_at) if available_at is not None else None
     if not isinstance(payload, dict) or "output" not in payload:
         raise _KISParseError("malformed")
     output = payload["output"]
@@ -426,6 +433,9 @@ def parse_kis_investor_payload(payload: dict, ticker: str, venue: str) -> list[d
             )
         except ValueError:
             raise _KISParseError("malformed") from None
+        business_close_utc = business_close.astimezone(timezone.utc)
+        if availability_cutoff is not None and business_close_utc > availability_cutoff:
+            continue
 
         official: dict[str, object] = {
             "stck_bsop_date": raw_date,
@@ -461,7 +471,7 @@ def parse_kis_investor_payload(payload: dict, ticker: str, venue: str) -> list[d
                 "date": raw_date,
                 **semantic,
                 "previous_day_sign": str(sign),
-                "source_as_of": business_close.astimezone(timezone.utc).isoformat(),
+                "source_as_of": business_close_utc.isoformat(),
                 "source_as_of_precision": "business_date",
                 "availability_as_of": None,
                 "intraday": False,
@@ -1424,7 +1434,12 @@ def fetch_domestic_investor_result(
             value=None,
         )
     try:
-        rows = parse_kis_investor_payload(payload, ticker, venue)
+        rows = parse_kis_investor_payload(
+            payload,
+            ticker,
+            venue,
+            available_at=completed,
+        )
     except _KISParseError as exc:
         error_type = (
             FetchErrorType.NUMERIC

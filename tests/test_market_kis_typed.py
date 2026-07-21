@@ -733,6 +733,31 @@ def test_fetch_kis_investor_uses_official_endpoint_and_availability_completion()
     assert calls[0]["headers"]["tr_id"] == "FHKST01010900"
 
 
+def test_fetch_kis_investor_skips_future_close_provisional_row_before_numeric_parse() -> None:
+    from core.market_kis import fetch_domestic_investor_result
+
+    past = dict(_investor_payload()["output"][0])
+    past["stck_bsop_date"] = "20260718"
+    future = {field: "" for field in past}
+    future.update({"stck_bsop_date": "20260721", "prdy_vrss_sign": "3"})
+    payload = {"rt_cd": "0", "output": [future, past]}
+    started = datetime(2026, 7, 21, 3, 59, tzinfo=timezone.utc)
+    completed = datetime(2026, 7, 21, 4, 0, tzinfo=timezone.utc)
+
+    result = fetch_domestic_investor_result(
+        "005930.KS",
+        clock=_Clock(started, completed),
+        http_get=lambda *_a, **_k: _Response(payload),
+        token_provider=lambda: "token",
+        configured=True,
+    )
+
+    assert (result.status, result.error_type) == ("success", "none")
+    assert isinstance(result.value, list)
+    assert [row["date"] for row in result.value] == ["20260718"]
+    assert result.value[0]["availability_as_of"] == completed.isoformat()
+
+
 def test_fetch_kis_investor_valid_empty_is_empty() -> None:
     from core.market_kis import fetch_domestic_investor_result
 
