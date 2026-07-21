@@ -599,7 +599,10 @@ def test_shadow_loader_counts_consecutive_zero_ready_cohorts_read_only(tmp_path)
         )
     before = db_path.read_bytes()
 
-    result = load_consecutive_zero_ready_read_only(db_path)
+    result = load_consecutive_zero_ready_read_only(
+        db_path,
+        as_of_utc=datetime(2026, 7, 21, 23, 0, tzinfo=timezone.utc),
+    )
 
     assert result == {"KR": 3, "US": 2}
     assert db_path.read_bytes() == before
@@ -639,7 +642,31 @@ def test_shadow_loader_excludes_historical_no_signal_cohorts(tmp_path):
         sequence=3,
     )
 
-    assert load_consecutive_zero_ready_read_only(db_path) == {"KR": 2, "US": 0}
+    assert load_consecutive_zero_ready_read_only(
+        db_path,
+        as_of_utc=datetime(2026, 7, 21, 23, 0, tzinfo=timezone.utc),
+    ) == {"KR": 2, "US": 0}
+
+
+def test_shadow_loader_rejects_future_dated_authority_cohort(tmp_path):
+    db_path = tmp_path / "shadow_measurements.db"
+    store = ShadowMeasurementStore(
+        db_path,
+        now_fn=lambda: datetime(2026, 7, 21, 23, 0, tzinfo=timezone.utc),
+    )
+    _append_shadow_cohort(
+        store,
+        market="KR",
+        decided_at=datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc),
+        ready=(False,),
+        sequence=1,
+    )
+
+    with pytest.raises(ValueError, match="shadow_liveness_row_invalid"):
+        load_consecutive_zero_ready_read_only(
+            db_path,
+            as_of_utc=datetime(2026, 7, 21, 10, 30, tzinfo=timezone.utc),
+        )
 
 
 def test_quality_report_alerts_ready_zero_primary_failure_and_explicit_fallback():
@@ -718,6 +745,34 @@ def test_healthy_report_is_silent_in_alert_mode():
 
     assert report["status"] == "healthy"
     assert render_alert(report) == ""
+
+
+def test_renderer_revalidates_nested_rows_even_when_report_is_healthy():
+    healthy = {
+        "market": "KR",
+        "status": "healthy",
+        "dependency_fallback_used": False,
+    }
+    source = {
+        "status": "healthy",
+        "primary_failures": [],
+        "primary_missing": [],
+        "active_fallbacks": [],
+        "coverage_gaps": [],
+        "stale_sources": [],
+    }
+    report = build_quality_report(
+        candidate_snapshots=[healthy],
+        source_health=source,
+        consecutive_zero_ready={"KR": 0, "US": 0},
+        generated_at_utc=datetime(2026, 7, 21, 10, 30, tzinfo=timezone.utc),
+    )
+    report["sources"]["primary_missing"] = [
+        {"source": "kis\nforged", "dataset": "domestic_orderbook"}
+    ]
+
+    with pytest.raises(ValueError, match="quality_report_invalid"):
+        render_alert(report)
 
 
 def test_no_signal_does_not_alert_from_historical_zero_ready_cohorts():

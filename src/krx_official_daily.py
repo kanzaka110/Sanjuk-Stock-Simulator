@@ -154,6 +154,8 @@ def _payload(response: object) -> dict[str, Any]:
         raise _PayloadError(KRXError.MALFORMED)
     if "respCode" in value:
         code = value["respCode"]
+        if type(code) is not str:
+            raise _PayloadError(KRXError.MALFORMED)
         if code in {"401", "403"}:
             raise _PayloadError(KRXError.AUTH)
         raise _PayloadError(KRXError.PROVIDER)

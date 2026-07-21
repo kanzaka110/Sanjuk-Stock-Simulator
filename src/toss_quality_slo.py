@@ -17,7 +17,7 @@ import sqlite3
 import tempfile
 from typing import Any, Callable, Iterator
 from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 
 _SCHEMA = "toss_buy_candidates.v3.dual_income_ev"
@@ -428,6 +428,7 @@ def load_consecutive_zero_ready_read_only(
     db_path: str | Path,
     *,
     row_limit: int = 2_000,
+    as_of_utc: datetime | None = None,
 ) -> dict[str, int]:
     """Count complete current-version final cohorts since the latest ready candidate."""
     import json
@@ -435,6 +436,16 @@ def load_consecutive_zero_ready_read_only(
     path = Path(db_path)
     if not path.is_file() or type(row_limit) is not int or not 1 <= row_limit <= 10_000:
         raise ValueError("shadow_liveness_db_invalid")
+    if as_of_utc is None:
+        as_of = datetime.now(timezone.utc)
+    elif (
+        not isinstance(as_of_utc, datetime)
+        or as_of_utc.tzinfo is None
+        or as_of_utc.utcoffset() is None
+    ):
+        raise ValueError("shadow_liveness_row_invalid")
+    else:
+        as_of = as_of_utc.astimezone(timezone.utc)
     with _open_stable_read_snapshot(path) as connection:
         rows = connection.execute(
             """SELECT decided_at_utc,feature_set_version,features_json
@@ -449,6 +460,8 @@ def load_consecutive_zero_ready_read_only(
     for decided_at, version, features_json in rows:
         if version != "toss_final_candidate_v2_dual_income_ev":
             continue
+        if type(features_json) is not str or len(features_json.encode("utf-8")) > 64 * 1024:
+            raise ValueError("shadow_liveness_row_invalid")
         try:
             features = json.loads(features_json)
         except (TypeError, json.JSONDecodeError):
@@ -507,6 +520,8 @@ def load_consecutive_zero_ready_read_only(
         if final_state["stock_agent_ready"] and not eligible:
             raise ValueError("shadow_liveness_row_invalid")
         when = _run_time(decided_at)
+        if when > as_of:
+            raise ValueError("shadow_liveness_row_invalid")
         key = (market, when.isoformat())
         group = groups.setdefault(
             key,
@@ -614,42 +629,65 @@ def build_quality_report(
     }
 
 
+def _render_name(value: object) -> str:
+    if type(value) is not str or not _NAME_RE.fullmatch(value):
+        raise ValueError("quality_report_invalid")
+    return value
+
+
+def _render_error(value: object) -> str:
+    if type(value) is not str or (value and not _ERROR_RE.fullmatch(value)):
+        raise ValueError("quality_report_invalid")
+    return value
+
+
 def render_alert(report: object) -> str:
-    """Render an anomaly-only Telegram-safe message; healthy reports stay silent."""
-    if type(report) is not dict or report.get("schema") != "toss_quality_slo.v1":
+    """Render an anomaly-only Telegram-safe message after full nested validation."""
+    if (
+        type(report) is not dict
+        or report.get("schema") != "toss_quality_slo.v1"
+        or report.get("decision_usable") is not False
+    ):
         raise ValueError("quality_report_invalid")
     status = report.get("status")
-    if status == "healthy":
-        return ""
-    if status not in {"degraded", "coverage_gap"}:
+    if status not in {"healthy", "degraded", "coverage_gap"}:
         raise ValueError("quality_report_invalid")
     zero = report.get("consecutive_zero_ready")
     sources = report.get("sources")
     candidate_fallbacks = report.get("candidate_dependency_fallback_markets")
     if (
         type(zero) is not dict
+        or set(zero) != {"KR", "US"}
         or type(sources) is not dict
+        or set(sources)
+        != {
+            "status",
+            "primary_failures",
+            "primary_missing",
+            "active_fallbacks",
+            "coverage_gaps",
+            "stale_sources",
+        }
+        or sources.get("status") not in {"healthy", "degraded", "coverage_gap"}
         or type(candidate_fallbacks) is not list
+        or len(candidate_fallbacks) > 2
+        or len(set(candidate_fallbacks)) != len(candidate_fallbacks)
         or any(market not in {"KR", "US"} for market in candidate_fallbacks)
     ):
         raise ValueError("quality_report_invalid")
-
-    lines = [f"[Stock Quality SLO] {status.upper()}"]
     for market in ("KR", "US"):
         count = zero.get(market)
         if type(count) is not int or count < 0:
             raise ValueError("quality_report_invalid")
-        if count >= 3:
-            lines.append(f"- {market} ready=0 {count}회 연속")
-    for market in candidate_fallbacks:
-        lines.append(f"- {market} dependency fallback 활성")
+
     failures = sources.get("primary_failures")
     missing = sources.get("primary_missing")
     fallbacks = sources.get("active_fallbacks")
     gaps = sources.get("coverage_gaps")
     stale = sources.get("stale_sources")
     if not all(
-        type(value) is list for value in (failures, missing, fallbacks, gaps, stale)
+        type(value) is list and len(value) <= 10
+        for value in (failures, missing, fallbacks, gaps, stale)
     ):
         raise ValueError("quality_report_invalid")
     assert isinstance(failures, list)
@@ -657,37 +695,85 @@ def render_alert(report: object) -> str:
     assert isinstance(fallbacks, list)
     assert isinstance(gaps, list)
     assert isinstance(stale, list)
+
     for row in failures:
-        if type(row) is not dict:
+        if (
+            type(row) is not dict
+            or set(row)
+            != {"source", "dataset", "status", "error_type", "consecutive_non_success"}
+            or row.get("status") not in _RUN_STATUSES - {"success"}
+            or type(row.get("consecutive_non_success")) is not int
+            or row["consecutive_non_success"] <= 0
+        ):
             raise ValueError("quality_report_invalid")
-        source = str(row.get("source", "")).upper()
-        dataset = str(row.get("dataset", ""))
-        error = str(row.get("error_type", ""))
-        lines.append(f"- {source} {dataset} {error}")
+        _render_name(row.get("source"))
+        _render_name(row.get("dataset"))
+        _render_error(row.get("error_type"))
     for row in missing:
-        if type(row) is not dict:
+        if type(row) is not dict or set(row) != {"source", "dataset"}:
             raise ValueError("quality_report_invalid")
-        source = str(row.get("source", "")).upper()
-        dataset = str(row.get("dataset", ""))
-        lines.append(f"- {source} {dataset} missing")
+        _render_name(row.get("source"))
+        _render_name(row.get("dataset"))
     for row in fallbacks:
-        if type(row) is not dict:
+        if type(row) is not dict or set(row) != {"source", "dataset", "primary_source"}:
             raise ValueError("quality_report_invalid")
-        source = str(row.get("source", "")).title()
-        lines.append(f"- {source} fallback 활성")
+        _render_name(row.get("source"))
+        _render_name(row.get("dataset"))
+        _render_name(row.get("primary_source"))
     for row in stale:
-        if type(row) is not dict:
+        if (
+            type(row) is not dict
+            or set(row) != {"source", "dataset", "age_seconds", "max_age_seconds"}
+            or type(row.get("age_seconds")) is not int
+            or row["age_seconds"] < 0
+            or type(row.get("max_age_seconds")) is not int
+            or row["max_age_seconds"] <= 0
+        ):
             raise ValueError("quality_report_invalid")
-        lines.append(
-            f"- {str(row.get('source', '')).upper()} "
-            f"{str(row.get('dataset', ''))} stale"
-        )
+        _render_name(row.get("source"))
+        _render_name(row.get("dataset"))
     for row in gaps:
-        if type(row) is not dict:
+        if type(row) is not dict or set(row) != {"source", "dataset"}:
             raise ValueError("quality_report_invalid")
-        lines.append(f"- {str(row.get('source', '')).upper()} {str(row.get('dataset', ''))} coverage gap")
+        _render_name(row.get("source"))
+        _render_name(row.get("dataset"))
+
+    anomalies_present = bool(
+        candidate_fallbacks
+        or failures
+        or missing
+        or fallbacks
+        or gaps
+        or stale
+        or any(zero[market] >= 3 for market in ("KR", "US"))
+    )
+    if status == "healthy":
+        if anomalies_present:
+            raise ValueError("quality_report_invalid")
+        return ""
+
+    lines = [f"[Stock Quality SLO] {status.upper()}"]
+    for market in ("KR", "US"):
+        if zero[market] >= 3:
+            lines.append(f"- {market} ready=0 {zero[market]}회 연속")
+    for market in candidate_fallbacks:
+        lines.append(f"- {market} dependency fallback 활성")
+    for row in failures:
+        detail = row["error_type"] or row["status"]
+        lines.append(f"- {row['source'].upper()} {row['dataset']} {detail}")
+    for row in missing:
+        lines.append(f"- {row['source'].upper()} {row['dataset']} missing")
+    for row in fallbacks:
+        lines.append(f"- {row['source'].title()} fallback 활성")
+    for row in stale:
+        lines.append(f"- {row['source'].upper()} {row['dataset']} stale")
+    for row in gaps:
+        lines.append(f"- {row['source'].upper()} {row['dataset']} coverage gap")
     lines.append("- score·gate·주문 변경 없음")
-    return "\n".join(lines)
+    message = "\n".join(lines)
+    if len(message) > 4000:
+        raise ValueError("quality_report_invalid")
+    return message
 
 
 def _loopback_base_url(value: object) -> str:
@@ -721,7 +807,7 @@ class _RejectRedirects(HTTPRedirectHandler):
 
 def _fetch_json(url: str) -> dict[str, Any]:
     request = Request(url, method="GET", headers={"Accept": "application/json"})
-    opener = build_opener(_RejectRedirects())
+    opener = build_opener(ProxyHandler({}), _RejectRedirects())
     with opener.open(request, timeout=15) as response:
         status = getattr(response, "status", None)
         content_type = str(response.headers.get("Content-Type", "")).lower()
@@ -762,7 +848,7 @@ def run_quality_watchdog(
         load_source_runs_read_only(source_db),
         as_of_utc=now,
     )
-    zero_ready = load_consecutive_zero_ready_read_only(shadow_db)
+    zero_ready = load_consecutive_zero_ready_read_only(shadow_db, as_of_utc=now)
     return build_quality_report(
         candidate_snapshots=snapshots,
         source_health=source_health,

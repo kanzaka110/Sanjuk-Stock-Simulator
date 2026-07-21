@@ -211,6 +211,21 @@ def test_provider_401_is_typed_auth_and_message_is_not_retained():
     assert AUTH_SENTINEL not in repr(result)
 
 
+def test_unhashable_resp_code_is_typed_malformed():
+    result = fetch_krx_daily(
+        business_date=date(2026, 7, 21),
+        symbols=["005930.KS"],
+        auth_key=AUTH_SENTINEL,
+        transport=lambda *args, **kwargs: _Response(
+            200,
+            {"respCode": ["401"], "respMsg": "bad"},
+        ),
+    )
+
+    assert result.status is KRXStatus.FAILED
+    assert result.error is KRXError.MALFORMED
+
+
 def test_unhashable_market_labels_are_typed_malformed():
     quote = json.loads(json.dumps(_quote_payload()))
     quote["OutBlock_1"][0]["MKT_NM"] = ["KOSPI"]
