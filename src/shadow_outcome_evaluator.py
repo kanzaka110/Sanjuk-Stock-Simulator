@@ -51,7 +51,11 @@ class _Quote:
 
 
 def _aware_utc(value: datetime, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None:
+    if (
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() is None
+    ):
         raise ValueError(f"{name}_timezone_aware_required")
     return value.astimezone(timezone.utc)
 
@@ -87,99 +91,167 @@ def _load_decisions(
     *,
     decision_not_before: datetime,
     evaluated_at: datetime,
-) -> list[_Decision]:
-    with _ro_connection(shadow_db_path) as connection:
-        rows = connection.execute(
-            """SELECT decision_id, symbol, decided_at_utc, features_json
-               FROM shadow_decisions
-               WHERE side = 'BUY'
-                 AND decided_at_utc >= ?
-                 AND decided_at_utc <= ?
-               ORDER BY decided_at_utc, decision_id
-               LIMIT ?""",
-            (decision_not_before.isoformat(), evaluated_at.isoformat(), _MAX_DECISIONS),
-        ).fetchall()
+) -> tuple[list[_Decision], int]:
     result: list[_Decision] = []
-    for decision_id, symbol, decided_text, features_text in rows:
-        try:
-            features = json.loads(str(features_text))
-            if not isinstance(features, dict):
-                raise ValueError("features_invalid")
-            market = str(features.get("market") or "")
-            currency = str(features.get("currency") or "")
-            if market not in {"KR", "US"}:
-                raise ValueError("market_invalid")
-            expected_currency = "KRW" if market == "KR" else "USD"
-            if currency != expected_currency:
-                raise ValueError("currency_invalid")
-            result.append(
-                _Decision(
-                    decision_id=str(decision_id),
-                    symbol=str(symbol),
-                    decided_at=_timestamp(decided_text),
-                    market=market,
-                    currency=currency,
-                )
-            )
-        except Exception:
-            continue
-    return result
+    malformed = 0
+    last_id = 0
+    scanned = 0
+    batch_size = min(1_000, _MAX_DECISIONS)
+    lower = decision_not_before.isoformat()
+    upper = evaluated_at.isoformat()
+    with _ro_connection(shadow_db_path) as connection:
+        while scanned < _MAX_DECISIONS:
+            rows = connection.execute(
+                """SELECT id, decision_id, symbol, decided_at_utc, features_json
+                   FROM shadow_decisions
+                   WHERE id > ?
+                     AND side = 'BUY'
+                     AND decided_at_utc >= ?
+                     AND decided_at_utc <= ?
+                   ORDER BY id
+                   LIMIT ?""",
+                (last_id, lower, upper, min(batch_size, _MAX_DECISIONS - scanned)),
+            ).fetchall()
+            if not rows:
+                break
+            scanned += len(rows)
+            last_id = int(rows[-1][0])
+            for _row_id, decision_id, symbol, decided_text, features_text in rows:
+                try:
+                    features = json.loads(str(features_text))
+                    if not isinstance(features, dict):
+                        raise ValueError("features_invalid")
+                    market = str(features.get("market") or "")
+                    currency = str(features.get("currency") or "")
+                    if market not in {"KR", "US"}:
+                        raise ValueError("market_invalid")
+                    expected_currency = "KRW" if market == "KR" else "USD"
+                    if currency != expected_currency:
+                        raise ValueError("currency_invalid")
+                    result.append(
+                        _Decision(
+                            decision_id=str(decision_id),
+                            symbol=str(symbol),
+                            decided_at=_timestamp(decided_text),
+                            market=market,
+                            currency=currency,
+                        )
+                    )
+                except Exception:
+                    malformed += 1
+        if scanned >= _MAX_DECISIONS:
+            more = connection.execute(
+                """SELECT 1 FROM shadow_decisions
+                   WHERE id > ?
+                     AND side = 'BUY'
+                     AND decided_at_utc >= ?
+                     AND decided_at_utc <= ?
+                   LIMIT 1""",
+                (last_id, lower, upper),
+            ).fetchone()
+            if more is not None:
+                raise RuntimeError("decision_scan_saturated")
+    return result, malformed
 
 
 def _load_quotes(
     source_db_path: str | Path,
     *,
+    source_not_before: datetime,
     evaluated_at: datetime,
-) -> dict[str, list[_Quote]]:
+) -> tuple[dict[str, list[_Quote]], set[str], int]:
+    floor = source_not_before.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     ceiling = evaluated_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-    with _ro_connection(source_db_path) as connection:
-        rows = connection.execute(
-            """SELECT snapshot_id, symbol, market, source_as_of, ingested_at,
-                      fallback_used, payload_json
-               FROM observations
-               WHERE dataset = ?
-                 AND source_as_of <= ?
-                 AND ingested_at <= ?
-               ORDER BY source_as_of, ingested_at, id
-               LIMIT ?""",
-            (DATASET, ceiling, ceiling, _MAX_OBSERVATIONS),
-        ).fetchall()
     result: dict[str, list[_Quote]] = {}
-    for row in rows:
-        try:
-            snapshot_id, symbol, market = str(row[0]), str(row[1]), str(row[2])
-            if market not in {"KR", "US"}:
-                raise ValueError("market_invalid")
-            source_as_of = _timestamp(row[3])
-            ingested_at = _timestamp(row[4])
-            if source_as_of > ingested_at or ingested_at > evaluated_at:
-                raise ValueError("observation_time_invalid")
-            if type(row[5]) is not int or row[5] not in {0, 1}:
-                raise ValueError("fallback_invalid")
-            payload = json.loads(str(row[6]))
-            if not isinstance(payload, dict):
-                raise ValueError("payload_invalid")
-            price = _positive_number(payload.get("price"))
-            high = _positive_number(payload.get("high"))
-            low = _positive_number(payload.get("low"))
-            if not low <= price <= high:
-                raise ValueError("price_range_invalid")
-            result.setdefault(symbol, []).append(
-                _Quote(
-                    snapshot_id=snapshot_id,
-                    symbol=symbol,
-                    market=market,
-                    source_as_of=source_as_of,
-                    ingested_at=ingested_at,
-                    fallback_used=bool(row[5]),
-                    price=price,
-                    high=high,
-                    low=low,
-                )
-            )
-        except Exception:
-            continue
-    return result
+    blocked_symbols: set[str] = set()
+    malformed = 0
+    last_id = 0
+    scanned = 0
+    batch_size = min(2_000, _MAX_OBSERVATIONS)
+    with _ro_connection(source_db_path) as connection:
+        while scanned < _MAX_OBSERVATIONS:
+            rows = connection.execute(
+                """SELECT id, snapshot_id, symbol, market, source_as_of, ingested_at,
+                          fallback_used, payload_json
+                   FROM observations
+                   WHERE id > ?
+                     AND dataset = ?
+                     AND source_as_of >= ?
+                     AND source_as_of <= ?
+                     AND ingested_at <= ?
+                   ORDER BY id
+                   LIMIT ?""",
+                (
+                    last_id,
+                    DATASET,
+                    floor,
+                    ceiling,
+                    ceiling,
+                    min(batch_size, _MAX_OBSERVATIONS - scanned),
+                ),
+            ).fetchall()
+            if not rows:
+                break
+            scanned += len(rows)
+            last_id = int(rows[-1][0])
+            for row in rows:
+                symbol = str(row[2])
+                try:
+                    snapshot_id, market = str(row[1]), str(row[3])
+                    if market not in {"KR", "US"}:
+                        raise ValueError("market_invalid")
+                    source_as_of = _timestamp(row[4])
+                    ingested_at = _timestamp(row[5])
+                    if source_as_of > ingested_at or ingested_at > evaluated_at:
+                        raise ValueError("observation_time_invalid")
+                    if type(row[6]) is not int or row[6] not in {0, 1}:
+                        raise ValueError("fallback_invalid")
+                    payload = json.loads(str(row[7]))
+                    if not isinstance(payload, dict):
+                        raise ValueError("payload_invalid")
+                    price = _positive_number(payload.get("price"))
+                    high = _positive_number(payload.get("high"))
+                    low = _positive_number(payload.get("low"))
+                    if not low <= price <= high:
+                        raise ValueError("price_range_invalid")
+                    result.setdefault(symbol, []).append(
+                        _Quote(
+                            snapshot_id=snapshot_id,
+                            symbol=symbol,
+                            market=market,
+                            source_as_of=source_as_of,
+                            ingested_at=ingested_at,
+                            fallback_used=bool(row[6]),
+                            price=price,
+                            high=high,
+                            low=low,
+                        )
+                    )
+                except Exception:
+                    malformed += 1
+                    blocked_symbols.add(symbol)
+        if scanned >= _MAX_OBSERVATIONS:
+            more = connection.execute(
+                """SELECT 1 FROM observations
+                   WHERE id > ?
+                     AND dataset = ?
+                     AND source_as_of >= ?
+                     AND source_as_of <= ?
+                     AND ingested_at <= ?
+                   LIMIT 1""",
+                (last_id, DATASET, floor, ceiling, ceiling),
+            ).fetchone()
+            if more is not None:
+                raise RuntimeError("quote_scan_saturated")
+    for symbol in blocked_symbols:
+        result.pop(symbol, None)
+    for quotes in result.values():
+        quotes.sort(key=lambda quote: (
+            quote.source_as_of,
+            quote.ingested_at,
+            quote.snapshot_id,
+        ))
+    return result, blocked_symbols, malformed
 
 
 def _session_quotes(decision: _Decision, quotes: list[_Quote]) -> list[_Quote]:
@@ -256,12 +328,16 @@ def evaluate_shadow_outcomes(
     ):
         raise ValueError("horizons_invalid")
 
-    decisions = _load_decisions(
+    decisions, malformed_decisions = _load_decisions(
         shadow_db_path,
         decision_not_before=activation,
         evaluated_at=evaluated_at,
     )
-    quotes_by_symbol = _load_quotes(source_db_path, evaluated_at=evaluated_at)
+    quotes_by_symbol, blocked_quote_symbols, malformed_quotes = _load_quotes(
+        source_db_path,
+        source_not_before=activation,
+        evaluated_at=evaluated_at,
+    )
     resolved_store = shadow_store
     if resolved_store is None:
         from core.shadow_measurements import ShadowMeasurementStore
@@ -269,18 +345,26 @@ def evaluate_shadow_outcomes(
         resolved_store = ShadowMeasurementStore(shadow_db_path)
 
     result = {
-        "decisions_seen": len(decisions),
-        "labels_considered": len(decisions) * len(requested),
+        "decisions_seen": len(decisions) + malformed_decisions,
+        "labels_considered": (
+            len(decisions) + malformed_decisions
+        ) * len(requested),
         "inserted": 0,
         "duplicate": 0,
         "pending": 0,
-        "invalid": 0,
+        "invalid": malformed_decisions * len(requested),
+        "malformed_decisions": malformed_decisions,
+        "malformed_quotes": malformed_quotes,
+        "blocked_quote_symbols": len(blocked_quote_symbols),
     }
     for decision in decisions:
         sessions = _session_quotes(decision, quotes_by_symbol.get(decision.symbol, []))
         for horizon in requested:
             if resolved_store.get_outcome(decision.decision_id, horizon) is not None:
                 result["duplicate"] += 1
+                continue
+            if decision.symbol in blocked_quote_symbols:
+                result["invalid"] += 1
                 continue
             horizon_sessions = _HORIZON_SESSIONS[horizon]
             if len(sessions) <= horizon_sessions:

@@ -112,6 +112,9 @@ def test_evaluator_appends_mature_after_cost_outcome_with_lineage(tmp_path):
         "duplicate": 0,
         "pending": 0,
         "invalid": 0,
+        "malformed_decisions": 0,
+        "malformed_quotes": 0,
+        "blocked_quote_symbols": 0,
     }
     assert source.db_path.read_bytes() == source_before
     outcome = shadow.get_outcome("decision_1", "1d")
@@ -238,3 +241,137 @@ def test_evaluator_is_idempotent_for_same_immutable_inputs(tmp_path):
     assert second["duplicate"] == 1
     with sqlite3.connect(shadow.db_path) as connection:
         assert connection.execute("SELECT COUNT(*) FROM shadow_outcomes").fetchone()[0] == 1
+
+
+def test_malformed_quote_blocks_entire_symbol_and_is_visible(tmp_path):
+    shadow, _source = _stores(tmp_path)
+    _decision(shadow)
+    source_path = tmp_path / "raw-source.db"
+    with sqlite3.connect(source_path) as connection:
+        connection.execute(
+            """CREATE TABLE observations (
+                   id INTEGER PRIMARY KEY,
+                   snapshot_id TEXT NOT NULL,
+                   symbol TEXT NOT NULL,
+                   market TEXT NOT NULL,
+                   source_as_of TEXT NOT NULL,
+                   ingested_at TEXT NOT NULL,
+                   fallback_used INTEGER NOT NULL,
+                   payload_json TEXT NOT NULL,
+                   dataset TEXT NOT NULL
+               )"""
+        )
+        rows = [
+            (
+                "a" * 64,
+                "MU",
+                "US",
+                "2026-07-21T21:00:00.000000Z",
+                "2026-07-21T21:00:00.000000Z",
+                1,
+                '{"high":101.0,"low":99.0,"price":100.0}',
+                "market_close_quote",
+            ),
+            (
+                "b" * 64,
+                "MU",
+                "US",
+                "2026-07-22T21:00:00.000000Z",
+                "2026-07-22T21:00:00.000000Z",
+                1,
+                "{broken",
+                "market_close_quote",
+            ),
+        ]
+        connection.executemany(
+            """INSERT INTO observations(
+                   snapshot_id, symbol, market, source_as_of, ingested_at,
+                   fallback_used, payload_json, dataset
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            rows,
+        )
+
+    result = evaluate_shadow_outcomes(
+        shadow_db_path=shadow.db_path,
+        source_db_path=source_path,
+        decision_not_before_utc=ACTIVATION,
+        evaluated_at_utc=EVALUATED,
+        horizons=("1d",),
+        shadow_store=shadow,
+    )
+
+    assert result["inserted"] == 0
+    assert result["invalid"] == 1
+    assert result["malformed_quotes"] == 1
+    assert result["blocked_quote_symbols"] == 1
+    assert shadow.get_outcome("decision_1", "1d") is None
+
+
+def test_decision_scan_saturation_fails_before_any_outcome_write(
+    tmp_path, monkeypatch
+):
+    import src.shadow_outcome_evaluator as evaluator
+
+    shadow, source = _stores(tmp_path)
+    _decision(shadow, decision_id="decision_1")
+    _decision(shadow, decision_id="decision_2", decided_at=DECIDED.replace(hour=13))
+    _quote(
+        source,
+        record_id="entry",
+        source_at=datetime(2026, 7, 21, 21, 0, tzinfo=UTC),
+        price=100.0,
+    )
+    _quote(
+        source,
+        record_id="exit",
+        source_at=datetime(2026, 7, 22, 21, 0, tzinfo=UTC),
+        price=101.0,
+    )
+    monkeypatch.setattr(evaluator, "_MAX_DECISIONS", 1)
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="decision_scan_saturated"):
+        evaluate_shadow_outcomes(
+            shadow_db_path=shadow.db_path,
+            source_db_path=source.db_path,
+            decision_not_before_utc=ACTIVATION,
+            evaluated_at_utc=EVALUATED,
+            horizons=("1d",),
+            shadow_store=shadow,
+        )
+    with sqlite3.connect(shadow.db_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM shadow_outcomes").fetchone()[0] == 0
+
+
+def test_quote_scan_saturation_fails_before_any_outcome_write(tmp_path, monkeypatch):
+    import pytest
+    import src.shadow_outcome_evaluator as evaluator
+
+    shadow, source = _stores(tmp_path)
+    _decision(shadow)
+    _quote(
+        source,
+        record_id="entry",
+        source_at=datetime(2026, 7, 21, 21, 0, tzinfo=UTC),
+        price=100.0,
+    )
+    _quote(
+        source,
+        record_id="exit",
+        source_at=datetime(2026, 7, 22, 21, 0, tzinfo=UTC),
+        price=101.0,
+    )
+    monkeypatch.setattr(evaluator, "_MAX_OBSERVATIONS", 1)
+
+    with pytest.raises(RuntimeError, match="quote_scan_saturated"):
+        evaluate_shadow_outcomes(
+            shadow_db_path=shadow.db_path,
+            source_db_path=source.db_path,
+            decision_not_before_utc=ACTIVATION,
+            evaluated_at_utc=EVALUATED,
+            horizons=("1d",),
+            shadow_store=shadow,
+        )
+    with sqlite3.connect(shadow.db_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM shadow_outcomes").fetchone()[0] == 0
