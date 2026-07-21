@@ -197,6 +197,7 @@ def _quote_rows(payload: dict[str, Any], *, business_date: str, market: str) -> 
             or re.fullmatch(r"[0-9]{6}", code) is None
             or type(raw["ISU_NM"]) is not str
             or not raw["ISU_NM"]
+            or type(raw["MKT_NM"]) is not str
             or raw["MKT_NM"] not in _QUOTE_MARKET_LABELS[market]
             or code in result
         ):
@@ -225,6 +226,7 @@ def _base_rows(payload: dict[str, Any], *, business_date: str, market: str) -> d
             or type(code) is not str
             or re.fullmatch(r"[0-9]{6}", code) is None
             or not _valid_isin(isin)
+            or type(raw["MKT_TP_NM"]) is not str
             or raw["MKT_TP_NM"] not in _BASE_MARKET_LABELS[market]
             or code in result
         ):
@@ -347,6 +349,67 @@ def _summary(
     }
 
 
+_PERSISTED_ROW_KEYS = frozenset(
+    {
+        "business_date",
+        "ticker",
+        "isin",
+        "market",
+        "close_krw",
+        "volume_shares",
+        "trade_value_krw",
+    }
+)
+
+
+def _validated_result_rows(result: object) -> tuple[dict[str, Any], ...]:
+    if (
+        type(result) is not KRXFetchResult
+        or result.status is not KRXStatus.SUCCESS
+        or result.error is not KRXError.NONE
+        or type(result.rows) is not tuple
+        or not result.rows
+        or type(result.requested_markets) is not tuple
+        or not result.requested_markets
+        or len(set(result.requested_markets)) != len(result.requested_markets)
+        or any(market not in _ENDPOINTS for market in result.requested_markets)
+    ):
+        raise ValueError("krx_result_not_persistable")
+    try:
+        requested_date = _parse_business_date(result.requested_date).strftime("%Y%m%d")
+    except ValueError:
+        raise ValueError("krx_result_row_invalid") from None
+
+    validated: list[dict[str, Any]] = []
+    tickers: set[str] = set()
+    isins: set[str] = set()
+    for row in result.rows:
+        if type(row) is not dict or set(row) != _PERSISTED_ROW_KEYS:
+            raise ValueError("krx_result_row_invalid")
+        ticker = row.get("ticker")
+        match = _SYMBOL_RE.fullmatch(ticker) if type(ticker) is str else None
+        market = row.get("market")
+        isin = row.get("isin")
+        numeric = (row.get("close_krw"), row.get("volume_shares"), row.get("trade_value_krw"))
+        if (
+            row.get("business_date") != requested_date
+            or match is None
+            or market not in result.requested_markets
+            or _SUFFIX_MARKET[match.group(2)] != market
+            or not _valid_isin(isin)
+            or any(type(value) is not int or value < 0 or value.bit_length() > 63 for value in numeric)
+            or ticker in tickers
+            or isin in isins
+        ):
+            raise ValueError("krx_result_row_invalid")
+        assert isinstance(ticker, str)
+        assert isinstance(isin, str)
+        tickers.add(ticker)
+        isins.add(isin)
+        validated.append(dict(row))
+    return tuple(validated)
+
+
 def persist_krx_daily_result(
     result: KRXFetchResult,
     *,
@@ -355,8 +418,7 @@ def persist_krx_daily_result(
     run_id: str,
 ) -> dict[str, Any]:
     """Persist one fully validated provider batch and run ledger atomically."""
-    if type(result) is not KRXFetchResult or result.status is not KRXStatus.SUCCESS or not result.rows:
-        raise ValueError("krx_result_not_persistable")
+    rows = _validated_result_rows(result)
     if type(run_id) is not str or not _RUN_ID_RE.fullmatch(run_id):
         raise ValueError("run_id_invalid")
     ingested_at = _aware_utc(ingested_at_utc, "ingested_at_utc")
@@ -383,9 +445,7 @@ def persist_krx_daily_result(
 
         inserted = 0
         duplicate = 0
-        for row in result.rows:
-            if type(row) is not dict:
-                raise ValueError("krx_result_row_invalid")
+        for row in rows:
             source_record_id = f"{row['business_date']}:{row['isin']}"
             base_payload = {
                 "business_date": row["business_date"],
@@ -459,7 +519,7 @@ def persist_krx_daily_result(
             started_at=ingested_at,
             completed_at=ingested_at,
             status="success",
-            rows_seen=len(result.rows),
+            rows_seen=len(rows),
             rows_inserted=inserted,
             rows_duplicate=duplicate,
             rows_skipped=0,
@@ -469,7 +529,7 @@ def persist_krx_daily_result(
         )
         return _summary(
             status="success",
-            seen=len(result.rows),
+            seen=len(rows),
             inserted=inserted,
             duplicate=duplicate,
             skipped=0,
@@ -478,6 +538,59 @@ def persist_krx_daily_result(
         )
 
     return store.atomic_write(write)
+
+
+def record_krx_non_success_result(
+    result: KRXFetchResult,
+    *,
+    store: object,
+    completed_at_utc: datetime,
+    run_id: str,
+    rows_seen: int,
+) -> dict[str, Any]:
+    """Record a configured empty/failed provider attempt without persisting observations."""
+    if (
+        type(result) is not KRXFetchResult
+        or result.status not in {KRXStatus.EMPTY, KRXStatus.FAILED}
+        or result.error is KRXError.NOT_CONFIGURED
+        or result.rows
+    ):
+        raise ValueError("krx_non_success_result_invalid")
+    if type(run_id) is not str or not _RUN_ID_RE.fullmatch(run_id):
+        raise ValueError("run_id_invalid")
+    if type(rows_seen) is not int or not 0 <= rows_seen <= _MAX_SYMBOLS:
+        raise ValueError("rows_seen_invalid")
+    completed_at = _aware_utc(completed_at_utc, "completed_at_utc")
+    record_run = getattr(store, "record_collection_run", None)
+    if not callable(record_run):
+        raise ValueError("store_invalid")
+    status = "failed" if result.status is KRXStatus.FAILED else "skipped"
+    error = "" if result.error is KRXError.NONE else result.error.value
+    invalid = rows_seen if status == "failed" else 0
+    skipped = rows_seen if status == "skipped" else 0
+    record_run(
+        source=_SOURCE,
+        dataset=_DATASET,
+        run_id=run_id,
+        started_at=completed_at,
+        completed_at=completed_at,
+        status=status,
+        rows_seen=rows_seen,
+        rows_inserted=0,
+        rows_duplicate=0,
+        rows_skipped=skipped,
+        rows_invalid=invalid,
+        error_type=error,
+    )
+    return _summary(
+        status=status,
+        seen=rows_seen,
+        inserted=0,
+        duplicate=0,
+        skipped=skipped,
+        invalid=invalid,
+        error=error,
+    )
 
 
 def _parse_business_date(value: str) -> date:
@@ -520,14 +633,28 @@ def _main(argv: list[str] | None = None) -> int:
         )
         if result.status is not KRXStatus.SUCCESS:
             seen = len(requested)
-            output = _summary(
-                status=result.status.value,
-                seen=seen,
-                inserted=0,
-                duplicate=0,
-                skipped=seen if result.status in {KRXStatus.SKIPPED, KRXStatus.EMPTY} else 0,
-                invalid=seen if result.status is KRXStatus.FAILED else 0,
-                error="" if result.error is KRXError.NONE else result.error.value,
+            if result.error is KRXError.NOT_CONFIGURED:
+                output = _summary(
+                    status=result.status.value,
+                    seen=seen,
+                    inserted=0,
+                    duplicate=0,
+                    skipped=seen,
+                    invalid=0,
+                    error=result.error.value,
+                )
+                print(json.dumps(output, sort_keys=True, separators=(",", ":")))
+                return 2
+
+            from core.source_observations_v2 import SourceObservationStoreV2
+
+            store = SourceObservationStoreV2(Path(args.db) if args.db else _default_db_path())
+            output = record_krx_non_success_result(
+                result,
+                store=store,
+                completed_at_utc=datetime.now(timezone.utc),
+                run_id=run_id,
+                rows_seen=seen,
             )
             print(json.dumps(output, sort_keys=True, separators=(",", ":")))
             return 2
@@ -535,12 +662,30 @@ def _main(argv: list[str] | None = None) -> int:
         from core.source_observations_v2 import SourceObservationStoreV2
 
         store = SourceObservationStoreV2(Path(args.db) if args.db else _default_db_path())
-        output = persist_krx_daily_result(
-            result,
-            store=store,
-            ingested_at_utc=datetime.now(timezone.utc),
-            run_id=run_id,
-        )
+        ingested_at = datetime.now(timezone.utc)
+        try:
+            output = persist_krx_daily_result(
+                result,
+                store=store,
+                ingested_at_utc=ingested_at,
+                run_id=run_id,
+            )
+        except Exception:
+            store.record_collection_run(
+                source=_SOURCE,
+                dataset=_DATASET,
+                run_id=run_id,
+                started_at=ingested_at,
+                completed_at=ingested_at,
+                status="failed",
+                rows_seen=len(result.rows),
+                rows_inserted=0,
+                rows_duplicate=0,
+                rows_skipped=0,
+                rows_invalid=len(result.rows),
+                error_type="persistence",
+            )
+            raise
         print(json.dumps(output, sort_keys=True, separators=(",", ":")))
         return 0
     except Exception as exc:

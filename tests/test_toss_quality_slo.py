@@ -4,12 +4,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import copy
+import sqlite3
 
 import pytest
 
 from core.shadow_measurements import ShadowMeasurementStore
 from core.source_observations_v2 import SourceObservationStoreV2
 from src.toss_quality_slo import (
+    _fetch_json,
     build_quality_report,
     evaluate_candidate_snapshot,
     evaluate_source_run_health,
@@ -137,6 +139,77 @@ def test_candidate_snapshot_rejects_market_mismatch():
         evaluate_candidate_snapshot(_payload(market="US"), expected_market="KR")
 
 
+def test_candidate_snapshot_accepts_actual_healthy_and_idle_shapes():
+    healthy = copy.deepcopy(_payload())
+    healthy_summary = healthy["scan_summary"]
+    healthy_summary.update({
+        "income_pass_count": 1,
+        "income_ready_count": 1,
+        "returned_income_ready_count": 1,
+        "income_liveness_status": "healthy",
+        "income_liveness_diagnosis": None,
+    })
+    healthy["items"][0]["stock_agent_ready"] = True
+    healthy["items"][0]["income_strategy"]["income_pass"] = True
+
+    idle = copy.deepcopy(_payload())
+    idle["items"] = []
+    idle["scan_summary"].update({
+        "universe_count": 0,
+        "scanned_count": 0,
+        "toss_held_excluded_count": 0,
+        "recent_risk_sell_excluded_count": 0,
+        "pass_count": 0,
+        "reject_count": 0,
+        "executable_count": 0,
+        "income_gate_eligible_count": 0,
+        "upstream_executable_count": 0,
+        "income_pass_count": 0,
+        "income_ready_count": 0,
+        "returned_candidate_count": 0,
+        "returned_income_ready_count": 0,
+        "income_liveness_status": "idle",
+        "income_liveness_diagnosis": None,
+    })
+
+    assert evaluate_candidate_snapshot(healthy, expected_market="KR")["status"] == "healthy"
+    assert evaluate_candidate_snapshot(idle, expected_market="KR")["status"] == "idle"
+
+
+def test_candidate_snapshot_enforces_no_signal_vs_idle_cardinality():
+    no_signal_without_items = copy.deepcopy(_payload())
+    no_signal_without_items["items"] = []
+    no_signal_without_items["scan_summary"].update({
+        "upstream_executable_count": 0,
+        "income_gate_eligible_count": 0,
+        "income_pass_count": 0,
+        "income_ready_count": 0,
+        "returned_candidate_count": 0,
+        "returned_income_ready_count": 0,
+        "income_liveness_status": "no_signal",
+        "income_liveness_diagnosis": {
+            "reason": "no_income_gate_eligible_candidates",
+            "upstream_executable_count": 0,
+            "income_pass_count": 0,
+            "income_ready_count": 0,
+            "top_income_block_reasons": [],
+        },
+    })
+    idle_with_items = copy.deepcopy(_payload())
+    idle_with_items["scan_summary"].update({
+        "upstream_executable_count": 0,
+        "income_gate_eligible_count": 0,
+        "income_pass_count": 0,
+        "income_ready_count": 0,
+        "income_liveness_status": "idle",
+        "income_liveness_diagnosis": None,
+    })
+
+    for payload in (no_signal_without_items, idle_with_items):
+        with pytest.raises(ValueError, match="candidate_snapshot_invalid"):
+            evaluate_candidate_snapshot(payload, expected_market="KR")
+
+
 def test_source_health_keeps_primary_failure_visible_when_fallback_succeeds():
     rows = [
         {
@@ -192,6 +265,7 @@ def test_source_health_keeps_primary_failure_visible_when_fallback_succeeds():
                 "consecutive_non_success": 2,
             }
         ],
+        "primary_missing": [],
         "active_fallbacks": [
             {
                 "source": "naver",
@@ -204,6 +278,99 @@ def test_source_health_keeps_primary_failure_visible_when_fallback_succeeds():
         ],
         "stale_sources": [],
     }
+
+
+def test_source_health_does_not_activate_stale_fallback_before_primary_failure():
+    rows = [
+        {
+            "source": "naver",
+            "dataset": "domestic_investor_flow",
+            "status": "success",
+            "completed_at": "2026-07-21T05:00:00.000000Z",
+            "error_type": "",
+        },
+        {
+            "source": "kis",
+            "dataset": "domestic_investor_flow",
+            "status": "failed",
+            "completed_at": "2026-07-21T06:00:00.000000Z",
+            "error_type": "numeric",
+        },
+        {
+            "source": "kis",
+            "dataset": "domestic_orderbook",
+            "status": "success",
+            "completed_at": "2026-07-21T06:00:00.000000Z",
+            "error_type": "",
+        },
+    ]
+
+    result = evaluate_source_run_health(
+        rows,
+        as_of_utc=datetime(2026, 7, 21, 10, 30, tzinfo=timezone.utc),
+    )
+
+    assert result["status"] == "degraded"
+    assert result["active_fallbacks"] == []
+
+
+def test_source_health_uses_append_order_and_degrades_missing_primary():
+    result = evaluate_source_run_health(
+        [
+            {
+                "source": "kis",
+                "dataset": "domestic_orderbook",
+                "status": "success",
+                "completed_at": "2026-07-21T06:21:00.000000Z",
+                "error_type": "",
+            },
+            {
+                "source": "kis",
+                "dataset": "domestic_orderbook",
+                "status": "failed",
+                "completed_at": "2026-07-21T05:21:00.000000Z",
+                "error_type": "clock_regressed_failure",
+            },
+            {
+                "source": "krx_openapi",
+                "dataset": "domestic_eod_quote",
+                "status": "failed",
+                "completed_at": "2026-07-21T06:20:00.000000Z",
+                "error_type": "http",
+            },
+        ],
+        as_of_utc=datetime(2026, 7, 21, 10, 30, tzinfo=timezone.utc),
+    )
+
+    assert result["status"] == "degraded"
+    assert result["primary_missing"] == [
+        {"source": "kis", "dataset": "domestic_investor_flow"}
+    ]
+    assert result["primary_failures"] == [
+        {
+            "source": "kis",
+            "dataset": "domestic_orderbook",
+            "status": "failed",
+            "error_type": "clock_regressed_failure",
+            "consecutive_non_success": 1,
+        }
+    ]
+    assert result["coverage_gaps"] == [
+        {"source": "krx_openapi", "dataset": "domestic_eod_quote"}
+    ]
+
+
+def test_source_health_degrades_when_all_primary_contracts_are_missing():
+    result = evaluate_source_run_health(
+        [],
+        as_of_utc=datetime(2026, 7, 21, 10, 30, tzinfo=timezone.utc),
+    )
+
+    assert result["status"] == "degraded"
+    assert result["primary_missing"] == [
+        {"source": "kis", "dataset": "domestic_investor_flow"},
+        {"source": "kis", "dataset": "domestic_orderbook"},
+    ]
 
 
 def test_source_health_marks_old_primary_success_as_stale():
@@ -313,6 +480,50 @@ def test_source_run_loader_is_read_only_and_returns_allowlisted_rows(tmp_path):
     assert not Path(str(db_path) + "-shm").exists()
 
 
+def test_source_loader_does_not_touch_active_wal_family(tmp_path):
+    db_path = tmp_path / "source_observations_v2.db"
+    store = SourceObservationStoreV2(db_path)
+    keeper = sqlite3.connect(db_path)
+    try:
+        assert keeper.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+        completed = datetime(2026, 7, 21, 6, 21, tzinfo=timezone.utc)
+        store.record_collection_run(
+            source="kis",
+            dataset="domestic_orderbook",
+            run_id="kis-orderbook-active-wal",
+            started_at=completed,
+            completed_at=completed,
+            status="success",
+            rows_seen=1,
+            rows_inserted=1,
+            rows_duplicate=0,
+            rows_skipped=0,
+            rows_invalid=0,
+            error_type="",
+        )
+        shm_path = Path(str(db_path) + "-shm")
+        assert shm_path.exists()
+        shm_path.unlink()
+        family = [db_path, Path(str(db_path) + "-wal")]
+        assert all(path.exists() for path in family)
+        before = {
+            path.name: (path.read_bytes(), path.stat().st_mtime_ns)
+            for path in family
+        }
+
+        rows = load_source_runs_read_only(db_path)
+
+        after = {
+            path.name: (path.read_bytes(), path.stat().st_mtime_ns)
+            for path in family
+        }
+        assert rows[-1]["status"] == "success"
+        assert after == before
+        assert not shm_path.exists()
+    finally:
+        keeper.close()
+
+
 def _append_shadow_cohort(
     store: ShadowMeasurementStore,
     *,
@@ -320,8 +531,12 @@ def _append_shadow_cohort(
     decided_at: datetime,
     ready: tuple[bool, ...],
     sequence: int,
+    eligible: tuple[bool, ...] | None = None,
 ) -> None:
+    eligibility = eligible if eligible is not None else tuple(True for _ in ready)
+    assert len(eligibility) == len(ready)
     for position, is_ready in enumerate(ready):
+        is_eligible = eligibility[position]
         decision_id = f"{market.lower()}-{sequence}-{position}"
         store.append_decision(
             decision_id=decision_id,
@@ -329,15 +544,22 @@ def _append_shadow_cohort(
             symbol="005930.KS" if market == "KR" else "MU",
             side="BUY",
             decided_at_utc=decided_at,
-            production_bucket="PASS_EXECUTE" if is_ready else "WATCH",
+            production_bucket="PASS_EXECUTE" if is_eligible else "WATCH",
             production_score=80.0 if is_ready else 60.0,
             feature_set_version="toss_final_candidate_v2_dual_income_ev",
             features={
                 "market": market,
                 "market_scope": market,
+                "production_bucket": "PASS_EXECUTE" if is_eligible else "WATCH",
                 "cohort_position": position,
                 "cohort_size": len(ready),
-                "final_state": {"stock_agent_ready": is_ready},
+                "final_state": {
+                    "stock_agent_ready": is_ready,
+                    "missing_fields": [],
+                    "limit_exceeded": False,
+                    "blocking_risk_flags": [],
+                    "execution_status": "income_blocked" if is_eligible else "hold_risk_flags",
+                },
             },
             source_snapshots=[
                 {
@@ -383,6 +605,41 @@ def test_shadow_loader_counts_consecutive_zero_ready_cohorts_read_only(tmp_path)
     assert db_path.read_bytes() == before
     assert not Path(str(db_path) + "-wal").exists()
     assert not Path(str(db_path) + "-shm").exists()
+
+
+def test_shadow_loader_excludes_historical_no_signal_cohorts(tmp_path):
+    db_path = tmp_path / "shadow_measurements.db"
+    store = ShadowMeasurementStore(
+        db_path,
+        now_fn=lambda: datetime(2026, 7, 21, 23, 0, tzinfo=timezone.utc),
+    )
+    origin = datetime(2026, 7, 21, 1, 0, tzinfo=timezone.utc)
+    _append_shadow_cohort(
+        store,
+        market="KR",
+        decided_at=origin,
+        ready=(False, False),
+        eligible=(True, True),
+        sequence=1,
+    )
+    _append_shadow_cohort(
+        store,
+        market="KR",
+        decided_at=origin + timedelta(hours=1),
+        ready=(False, False),
+        eligible=(False, False),
+        sequence=2,
+    )
+    _append_shadow_cohort(
+        store,
+        market="KR",
+        decided_at=origin + timedelta(hours=2),
+        ready=(False, False),
+        eligible=(True, True),
+        sequence=3,
+    )
+
+    assert load_consecutive_zero_ready_read_only(db_path) == {"KR": 2, "US": 0}
 
 
 def test_quality_report_alerts_ready_zero_primary_failure_and_explicit_fallback():
@@ -447,6 +704,7 @@ def test_healthy_report_is_silent_in_alert_mode():
     source = {
         "status": "healthy",
         "primary_failures": [],
+        "primary_missing": [],
         "active_fallbacks": [],
         "coverage_gaps": [],
         "stale_sources": [],
@@ -476,6 +734,7 @@ def test_no_signal_does_not_alert_from_historical_zero_ready_cohorts():
     source = {
         "status": "healthy",
         "primary_failures": [],
+        "primary_missing": [],
         "active_fallbacks": [],
         "coverage_gaps": [],
         "stale_sources": [],
@@ -506,6 +765,7 @@ def test_explicit_candidate_dependency_fallback_is_degraded_and_visible():
     source = {
         "status": "healthy",
         "primary_failures": [],
+        "primary_missing": [],
         "active_fallbacks": [],
         "coverage_gaps": [],
         "stale_sources": [],
@@ -521,6 +781,43 @@ def test_explicit_candidate_dependency_fallback_is_degraded_and_visible():
     assert report["status"] == "degraded"
     assert report["candidate_dependency_fallback_markets"] == ["KR"]
     assert "KR dependency fallback 활성" in render_alert(report)
+
+
+def test_fetch_json_rejects_redirect_without_hitting_target():
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import threading
+
+    target_hits = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/source":
+                self.send_response(302)
+                self.send_header("Location", "/target")
+                self.end_headers()
+                return
+            target_hits.append(self.path)
+            body = b"{}"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            del format, args
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(Exception):
+            _fetch_json(f"http://127.0.0.1:{server.server_port}/source")
+        assert target_hits == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 def test_watchdog_combines_served_get_and_read_only_databases(tmp_path):

@@ -6,15 +6,18 @@ OAuth, broker, order, or persistence paths.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 import argparse
 import json
 import re
+import shutil
 import sqlite3
-from typing import Any, Callable
+import tempfile
+from typing import Any, Callable, Iterator
 from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
 _SCHEMA = "toss_buy_candidates.v3.dual_income_ev"
@@ -110,35 +113,48 @@ def evaluate_candidate_snapshot(payload: object, *, expected_market: str) -> dic
         "healthy": income_ready > 0,
         "degraded": upstream > 0 and income_pass == 0 and income_ready == 0,
         "downstream_blocked": income_pass > 0 and income_ready == 0,
-        "no_signal": upstream == 0 and income_pass == 0 and income_ready == 0,
-        "idle": upstream == 0 and income_pass == 0 and income_ready == 0,
+        "no_signal": (
+            upstream == 0
+            and income_pass == 0
+            and income_ready == 0
+            and returned_count > 0
+        ),
+        "idle": (
+            upstream == 0
+            and income_pass == 0
+            and income_ready == 0
+            and returned_count == 0
+        ),
     }[status]
     if not valid_status:
         raise _invalid()
 
     diagnosis = summary.get("income_liveness_diagnosis")
-    if type(diagnosis) is not dict:
-        raise _invalid()
-    expected_reason = _EXPECTED_REASON.get(status)
-    reason = diagnosis.get("reason")
-    if expected_reason is not None and reason != expected_reason:
-        raise _invalid()
-    for key, expected in (
-        ("upstream_executable_count", upstream),
-        ("income_pass_count", income_pass),
-        ("income_ready_count", income_ready),
-    ):
-        if _count(diagnosis.get(key)) != expected:
-            raise _invalid()
-
-    raw_reasons = diagnosis.get("top_income_block_reasons")
-    if type(raw_reasons) is not list or len(raw_reasons) > 5:
-        raise _invalid()
     reasons: list[dict[str, Any]] = []
-    for row in raw_reasons:
-        if type(row) is not dict or set(row) != {"reason", "count"}:
+    if status in {"healthy", "idle"}:
+        if diagnosis is not None:
             raise _invalid()
-        reasons.append({"reason": _text(row["reason"]), "count": _count(row["count"])})
+    else:
+        if type(diagnosis) is not dict:
+            raise _invalid()
+        expected_reason = _EXPECTED_REASON[status]
+        if diagnosis.get("reason") != expected_reason:
+            raise _invalid()
+        for key, expected in (
+            ("upstream_executable_count", upstream),
+            ("income_pass_count", income_pass),
+            ("income_ready_count", income_ready),
+        ):
+            if _count(diagnosis.get(key)) != expected:
+                raise _invalid()
+
+        raw_reasons = diagnosis.get("top_income_block_reasons")
+        if type(raw_reasons) is not list or len(raw_reasons) > 5:
+            raise _invalid()
+        for row in raw_reasons:
+            if type(row) is not dict or set(row) != {"reason", "count"}:
+                raise _invalid()
+            reasons.append({"reason": _text(row["reason"]), "count": _count(row["count"])})
 
     return {
         "market": expected_market,
@@ -219,7 +235,7 @@ def evaluate_source_run_health(
         as_of = as_of_utc.astimezone(timezone.utc)
 
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for row in rows:
+    for append_index, row in enumerate(rows):
         if type(row) is not dict or set(row) != _RUN_KEYS:
             raise _source_invalid()
         source = row.get("source")
@@ -241,15 +257,19 @@ def evaluate_source_run_health(
             raise _source_invalid()
         normalized = dict(row)
         normalized["_completed"] = _run_time(row["completed_at"])
+        normalized["_append_index"] = append_index
+        if normalized["_completed"] > as_of:
+            raise _source_invalid()
         grouped.setdefault((source, dataset), []).append(normalized)
 
-    for values in grouped.values():
-        values.sort(key=lambda item: item["_completed"])
-
+    primary_missing: list[dict[str, str]] = []
     primary_failures: list[dict[str, Any]] = []
     for contract in _PRIMARY_CONTRACTS:
         values = grouped.get(contract, [])
-        if not values or values[-1]["status"] == "success":
+        if not values:
+            primary_missing.append({"source": contract[0], "dataset": contract[1]})
+            continue
+        if values[-1]["status"] == "success":
             continue
         consecutive = 0
         for row in reversed(values):
@@ -297,6 +317,7 @@ def evaluate_source_run_health(
             and fallback_rows[-1]["status"] == "success"
             and primary_rows
             and primary_rows[-1]["status"] != "success"
+            and fallback_rows[-1]["_append_index"] > primary_rows[-1]["_append_index"]
         ):
             active_fallbacks.append(
                 {
@@ -309,9 +330,10 @@ def evaluate_source_run_health(
     coverage_gaps = [
         {"source": source, "dataset": dataset}
         for source, dataset in _OPTIONAL_CONTRACTS
-        if (source, dataset) not in grouped
+        if not grouped.get((source, dataset))
+        or grouped[(source, dataset)][-1]["status"] != "success"
     ]
-    if primary_failures or stale_sources:
+    if primary_missing or primary_failures or stale_sources:
         status = "degraded"
     elif coverage_gaps:
         status = "coverage_gap"
@@ -320,10 +342,60 @@ def evaluate_source_run_health(
     return {
         "status": status,
         "primary_failures": primary_failures,
+        "primary_missing": primary_missing,
         "active_fallbacks": active_fallbacks,
         "coverage_gaps": coverage_gaps,
         "stale_sources": stale_sources,
     }
+
+
+_MAX_SNAPSHOT_BYTES = 512 * 1024 * 1024
+
+
+def _family_signature(path: Path) -> tuple[tuple[str, int, int, int] | None, ...]:
+    signature: list[tuple[str, int, int, int] | None] = []
+    for member in (path, Path(f"{path}-wal")):
+        try:
+            stat = member.stat()
+        except FileNotFoundError:
+            signature.append(None)
+        else:
+            signature.append((member.name, stat.st_ino, stat.st_size, stat.st_mtime_ns))
+    return tuple(signature)
+
+
+@contextmanager
+def _open_stable_read_snapshot(path: Path) -> Iterator[sqlite3.Connection]:
+    """Open only a stable temporary copy of main+WAL; never the live DB family."""
+    last_error: Exception | None = None
+    with tempfile.TemporaryDirectory(prefix="stock-quality-snapshot-") as directory:
+        snapshot = Path(directory) / "snapshot.db"
+        for _attempt in range(3):
+            before = _family_signature(path)
+            sizes = [entry[2] for entry in before if entry is not None]
+            if not sizes or sum(sizes) > _MAX_SNAPSHOT_BYTES:
+                raise ValueError("read_snapshot_invalid")
+            snapshot.unlink(missing_ok=True)
+            Path(f"{snapshot}-wal").unlink(missing_ok=True)
+            try:
+                shutil.copyfile(path, snapshot)
+                if before[1] is not None:
+                    shutil.copyfile(Path(f"{path}-wal"), Path(f"{snapshot}-wal"))
+            except (FileNotFoundError, OSError) as exc:
+                last_error = exc
+                continue
+            if _family_signature(path) == before:
+                break
+        else:
+            raise ValueError("read_snapshot_unstable") from last_error
+
+        uri = f"{snapshot.resolve().as_uri()}?mode=ro"
+        connection = sqlite3.connect(uri, uri=True, timeout=0.75)
+        try:
+            connection.execute("PRAGMA query_only = ON")
+            yield connection
+        finally:
+            connection.close()
 
 
 def load_source_runs_read_only(db_path: str | Path, *, limit: int = 10_000) -> list[dict[str, str]]:
@@ -331,13 +403,7 @@ def load_source_runs_read_only(db_path: str | Path, *, limit: int = 10_000) -> l
     path = Path(db_path)
     if not path.is_file() or type(limit) is not int or not 1 <= limit <= 10_000:
         raise ValueError("source_run_db_invalid")
-    has_wal = Path(f"{path}-wal").exists()
-    uri = f"{path.resolve().as_uri()}?mode=ro"
-    if not has_wal:
-        uri += "&immutable=1"
-    connection = sqlite3.connect(uri, uri=True, timeout=0.75)
-    try:
-        connection.execute("PRAGMA query_only = ON")
+    with _open_stable_read_snapshot(path) as connection:
         rows = connection.execute(
             """SELECT source,dataset,status,completed_at,error_type
                FROM (
@@ -346,8 +412,6 @@ def load_source_runs_read_only(db_path: str | Path, *, limit: int = 10_000) -> l
                ) ORDER BY id""",
             (limit,),
         ).fetchall()
-    finally:
-        connection.close()
     return [
         {
             "source": str(row[0]),
@@ -371,13 +435,7 @@ def load_consecutive_zero_ready_read_only(
     path = Path(db_path)
     if not path.is_file() or type(row_limit) is not int or not 1 <= row_limit <= 10_000:
         raise ValueError("shadow_liveness_db_invalid")
-    has_wal = Path(f"{path}-wal").exists()
-    uri = f"{path.resolve().as_uri()}?mode=ro"
-    if not has_wal:
-        uri += "&immutable=1"
-    connection = sqlite3.connect(uri, uri=True, timeout=0.75)
-    try:
-        connection.execute("PRAGMA query_only = ON")
+    with _open_stable_read_snapshot(path) as connection:
         rows = connection.execute(
             """SELECT decided_at_utc,feature_set_version,features_json
                FROM (
@@ -386,8 +444,6 @@ def load_consecutive_zero_ready_read_only(
                ) ORDER BY id""",
             (row_limit,),
         ).fetchall()
-    finally:
-        connection.close()
 
     groups: dict[tuple[str, str], dict[str, Any]] = {}
     for decided_at, version, features_json in rows:
@@ -403,6 +459,7 @@ def load_consecutive_zero_ready_read_only(
         position = features.get("cohort_position")
         size = features.get("cohort_size")
         final_state = features.get("final_state")
+        bucket = features.get("production_bucket")
         if (
             market not in {"KR", "US"}
             or type(position) is not int
@@ -411,18 +468,62 @@ def load_consecutive_zero_ready_read_only(
             or not 0 <= position < size
             or type(final_state) is not dict
             or type(final_state.get("stock_agent_ready")) is not bool
+            or bucket not in {
+                "PASS_EXECUTE",
+                "SMALL_PASS",
+                "WAIT_PULLBACK",
+                "WATCH",
+                "CHASE_BLOCK",
+                "BLOCK",
+            }
         ):
+            raise ValueError("shadow_liveness_row_invalid")
+        missing_fields = final_state.get("missing_fields", [])
+        blocking_flags = final_state.get("blocking_risk_flags", [])
+        limit_exceeded = final_state.get("limit_exceeded", False)
+        execution_status = final_state.get("execution_status", "")
+        if (
+            type(missing_fields) is not list
+            or type(blocking_flags) is not list
+            or type(limit_exceeded) is not bool
+            or type(execution_status) is not str
+        ):
+            raise ValueError("shadow_liveness_row_invalid")
+        pre_income_blocked = execution_status in {
+            "hold_risk_flags",
+            "chase_block",
+            "data_quality_block",
+            "cash_unavailable",
+            "quality_finalization_failed",
+            "toss_snapshot_stale",
+        }
+        eligible = (
+            bucket in {"PASS_EXECUTE", "SMALL_PASS"}
+            and not missing_fields
+            and not limit_exceeded
+            and not blocking_flags
+            and not pre_income_blocked
+        )
+        if final_state["stock_agent_ready"] and not eligible:
             raise ValueError("shadow_liveness_row_invalid")
         when = _run_time(decided_at)
         key = (market, when.isoformat())
         group = groups.setdefault(
             key,
-            {"market": market, "when": when, "size": size, "positions": set(), "ready": False},
+            {
+                "market": market,
+                "when": when,
+                "size": size,
+                "positions": set(),
+                "ready": False,
+                "eligible": False,
+            },
         )
         if group["size"] != size or position in group["positions"]:
             raise ValueError("shadow_liveness_row_invalid")
         group["positions"].add(position)
         group["ready"] = group["ready"] or final_state["stock_agent_ready"]
+        group["eligible"] = group["eligible"] or eligible
 
     result = {"KR": 0, "US": 0}
     for market in ("KR", "US"):
@@ -433,6 +534,8 @@ def load_consecutive_zero_ready_read_only(
         ]
         complete.sort(key=lambda group: group["when"], reverse=True)
         for group in complete:
+            if not group["eligible"]:
+                continue
             if group["ready"]:
                 break
             result[market] += 1
@@ -541,11 +644,19 @@ def render_alert(report: object) -> str:
     for market in candidate_fallbacks:
         lines.append(f"- {market} dependency fallback 활성")
     failures = sources.get("primary_failures")
+    missing = sources.get("primary_missing")
     fallbacks = sources.get("active_fallbacks")
     gaps = sources.get("coverage_gaps")
     stale = sources.get("stale_sources")
-    if not all(type(value) is list for value in (failures, fallbacks, gaps, stale)):
+    if not all(
+        type(value) is list for value in (failures, missing, fallbacks, gaps, stale)
+    ):
         raise ValueError("quality_report_invalid")
+    assert isinstance(failures, list)
+    assert isinstance(missing, list)
+    assert isinstance(fallbacks, list)
+    assert isinstance(gaps, list)
+    assert isinstance(stale, list)
     for row in failures:
         if type(row) is not dict:
             raise ValueError("quality_report_invalid")
@@ -553,6 +664,12 @@ def render_alert(report: object) -> str:
         dataset = str(row.get("dataset", ""))
         error = str(row.get("error_type", ""))
         lines.append(f"- {source} {dataset} {error}")
+    for row in missing:
+        if type(row) is not dict:
+            raise ValueError("quality_report_invalid")
+        source = str(row.get("source", "")).upper()
+        dataset = str(row.get("dataset", ""))
+        lines.append(f"- {source} {dataset} missing")
     for row in fallbacks:
         if type(row) is not dict:
             raise ValueError("quality_report_invalid")
@@ -596,9 +713,16 @@ def _loopback_base_url(value: object) -> str:
     return value.rstrip("/")
 
 
+class _RejectRedirects(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        del req, fp, code, msg, headers, newurl
+        return None
+
+
 def _fetch_json(url: str) -> dict[str, Any]:
     request = Request(url, method="GET", headers={"Accept": "application/json"})
-    with urlopen(request, timeout=15) as response:
+    opener = build_opener(_RejectRedirects())
+    with opener.open(request, timeout=15) as response:
         status = getattr(response, "status", None)
         content_type = str(response.headers.get("Content-Type", "")).lower()
         if status != 200 or "application/json" not in content_type:

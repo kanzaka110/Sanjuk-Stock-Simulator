@@ -17,6 +17,7 @@ from src.krx_official_daily import (
     KRXStatus,
     fetch_krx_daily,
     persist_krx_daily_result,
+    record_krx_non_success_result,
 )
 
 
@@ -210,6 +211,22 @@ def test_provider_401_is_typed_auth_and_message_is_not_retained():
     assert AUTH_SENTINEL not in repr(result)
 
 
+def test_unhashable_market_labels_are_typed_malformed():
+    quote = json.loads(json.dumps(_quote_payload()))
+    quote["OutBlock_1"][0]["MKT_NM"] = ["KOSPI"]
+    _calls, transport = _transport_for(quote, _base_payload())
+
+    result = fetch_krx_daily(
+        business_date=date(2026, 7, 21),
+        symbols=["005930.KS"],
+        auth_key=AUTH_SENTINEL,
+        transport=transport,
+    )
+
+    assert result.status is KRXStatus.FAILED
+    assert result.error is KRXError.MALFORMED
+
+
 def test_malformed_later_unrequested_row_invalidates_whole_market_batch():
     quote = _quote_payload(
         rows=[
@@ -271,6 +288,33 @@ def test_empty_companion_matrix(quote, base, expected_status, expected_error):
     assert result.error is expected_error
 
 
+def test_configured_failed_fetch_is_recorded_in_run_ledger(tmp_path):
+    result = fetch_krx_daily(
+        business_date=date(2026, 7, 21),
+        symbols=["005930.KS"],
+        auth_key=AUTH_SENTINEL,
+        transport=lambda *args, **kwargs: _Response(503, {}),
+    )
+    assert result.status is KRXStatus.FAILED
+    store = SourceObservationStoreV2(tmp_path / "source_observations_v2.db")
+
+    summary = record_krx_non_success_result(
+        result,
+        store=store,
+        completed_at_utc=datetime(2026, 7, 21, 7, 0, tzinfo=timezone.utc),
+        run_id="krx-http-failed",
+        rows_seen=1,
+    )
+
+    assert summary["status"] == "failed"
+    assert summary["error_type"] == "http"
+    with sqlite3.connect(store.db_path) as connection:
+        run = connection.execute(
+            "SELECT status,rows_seen,rows_invalid,error_type FROM collection_runs"
+        ).fetchone()
+    assert run == ("failed", 1, 1, "http")
+
+
 def test_success_result_persists_point_in_time_row_and_run_atomically(tmp_path):
     _calls, transport = _transport_for(_quote_payload(), _base_payload())
     result = fetch_krx_daily(
@@ -328,6 +372,30 @@ def test_success_result_persists_point_in_time_row_and_run_atomically(tmp_path):
         "volume_shares": "shares",
     }
     assert run == ("success", 1, 1, "")
+
+
+def test_persistence_revalidates_mutable_fetch_rows_before_opening_transaction(tmp_path):
+    _calls, transport = _transport_for(_quote_payload(), _base_payload())
+    result = fetch_krx_daily(
+        business_date=date(2026, 7, 21),
+        symbols=["005930.KS"],
+        auth_key=AUTH_SENTINEL,
+        transport=transport,
+    )
+    result.rows[0]["close_krw"] = "70000"
+    store = SourceObservationStoreV2(tmp_path / "source_observations_v2.db")
+
+    with pytest.raises(ValueError, match="krx_result_row_invalid"):
+        persist_krx_daily_result(
+            result,
+            store=store,
+            ingested_at_utc=datetime(2026, 7, 21, 7, 0, tzinfo=timezone.utc),
+            run_id="krx-mutated-row",
+        )
+
+    with sqlite3.connect(store.db_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM observations").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM collection_runs").fetchone()[0] == 0
 
 
 def test_exact_retry_is_duplicate_not_revision(tmp_path):
