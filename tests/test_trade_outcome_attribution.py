@@ -231,6 +231,54 @@ def test_dashboard_execution_decision_trace_rejects_mixed_false_evidence():
     }
 
 
+def test_dashboard_fetch_does_not_promote_truthy_non_bool_evidence(monkeypatch):
+    from core import dashboard_data as dd
+
+    def live_event(event_id, decision_ref, verified):
+        return {
+            "event_id": event_id,
+            "event_type": "autonomous_live_sent",
+            "decision_ref": decision_ref,
+            "verification_id": f"hv_{event_id}",
+            "hermes_decision_verified": verified,
+            "live_order_sent": True,
+            "adapter_status": "enabled",
+            "live_order_allowed": True,
+            "symbol": "MU",
+            "side": "buy",
+            "filled_price": 500,
+            "filled_quantity": 1,
+            "created_at": "2026-07-20T10:00:00+09:00",
+        }
+
+    monkeypatch.setattr(
+        dd,
+        "_read_trade_outcome_inputs",
+        lambda _days, **_kwargs: (
+            [],
+            [],
+            [
+                live_event("literal_true", "execution_decision:true", True),
+                live_event("integer_one", "execution_decision:one", 1),
+                live_event("string_true", "execution_decision:string", "true"),
+            ],
+            [],
+        ),
+    )
+
+    report = dd._fetch_trade_outcome_attribution_raw(7)
+
+    assert report["execution_cohort"][
+        "execution_decision_referenced_executions"
+    ] == 3
+    assert report["execution_cohort"][
+        "execution_decision_linked_executions"
+    ] == 1
+    assert report["execution_cohort"][
+        "execution_decision_traceability_rate_pct"
+    ] == 33.3
+
+
 def test_hermes_verification_join_requires_both_exact_keys_and_pass():
     from core.dashboard_data import _mark_hermes_verified_live_events
 
@@ -377,6 +425,8 @@ def test_broker_order_window_is_closed_and_uses_authoritative_fallbacks():
 def test_trade_outcome_sql_inputs_share_the_same_upper_bound(
     monkeypatch, tmp_path,
 ):
+    import sqlite3
+
     from core import dashboard_data as dd
     from core import toss_readonly_snapshot as snapshot
 
@@ -391,6 +441,18 @@ def test_trade_outcome_sql_inputs_share_the_same_upper_bound(
         return []
 
     as_of = datetime(2026, 7, 21, 12, 0, tzinfo=KST)
+    event_path = tmp_path / "toss_live_pilot_events.db"
+    with sqlite3.connect(event_path) as event_connection:
+        event_connection.execute(
+            """CREATE TABLE live_pilot_events (
+                event_id TEXT, pilot_id TEXT, event_type TEXT,
+                verification_id TEXT, decision_ref TEXT, symbol TEXT, side TEXT,
+                filled_price REAL, filled_quantity REAL,
+                broker_order_status TEXT, live_order_sent INTEGER,
+                adapter_status TEXT, live_order_allowed INTEGER,
+                created_at TEXT
+            )"""
+        )
     monkeypatch.setattr(dd, "_conn", lambda: FakeConnection())
     monkeypatch.setattr(dd, "_rows", capture_rows)
     monkeypatch.setattr(dd, "_db_path", lambda: tmp_path / "memory.db")
@@ -402,9 +464,14 @@ def test_trade_outcome_sql_inputs_share_the_same_upper_bound(
 
     dd._read_trade_outcome_inputs(7, as_of_at=as_of)
 
-    assert len(captured) == 2
+    expected_params = (
+        (as_of - timedelta(days=7)).isoformat(),
+        as_of.isoformat(),
+    )
+    assert len(captured) == 3
+    assert all("created_at >= ?" in query for query, _ in captured)
     assert all("created_at <= ?" in query for query, _ in captured)
-    assert all(params[1] == as_of.isoformat() for _, params in captured)
+    assert all(params == expected_params for _, params in captured)
 
 
 def test_broker_get_truth_wins_over_live_event_for_same_decision_ref():

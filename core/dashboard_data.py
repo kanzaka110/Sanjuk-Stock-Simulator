@@ -1198,6 +1198,22 @@ def _read_trade_outcome_inputs(
     return predictions, manual_trades, live_events, broker_orders
 
 
+def _strict_hermes_decision_evidence_rows(rows: object) -> list:
+    """Copy rows and preserve only literal-True Hermes verification evidence."""
+    source = rows if isinstance(rows, list) else []
+    strict_rows = []
+    for row in source:
+        if not isinstance(row, dict):
+            strict_rows.append(row)
+            continue
+        strict_row = dict(row)
+        strict_row["hermes_decision_verified"] = (
+            row.get("hermes_decision_verified") is True
+        )
+        strict_rows.append(strict_row)
+    return strict_rows
+
+
 def _execution_decision_attribution_fields(executions: object) -> dict:
     """Summarize exact execution-decision traces without recommendation inference."""
     rows = executions if isinstance(executions, list) else []
@@ -1233,6 +1249,8 @@ def _fetch_trade_outcome_attribution_raw(days: int) -> dict:
         days,
         as_of_at=as_of_at,
     )
+    live_events = _strict_hermes_decision_evidence_rows(live_events)
+    broker_orders = _strict_hermes_decision_evidence_rows(broker_orders)
     executions = normalize_execution_records(
         manual_trades=manual_trades,
         live_events=live_events,
