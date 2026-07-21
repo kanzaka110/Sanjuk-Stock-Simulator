@@ -212,7 +212,42 @@ def test_source_health_marks_old_primary_success_as_stale():
             "source": "kis",
             "dataset": dataset,
             "status": "success",
-            "completed_at": "2026-07-17T06:21:00.000000Z",
+            "completed_at": "2026-07-16T06:21:00.000000Z",
+            "error_type": "",
+        }
+        for dataset in ("domestic_investor_flow", "domestic_orderbook")
+    ]
+
+    result = evaluate_source_run_health(
+        rows,
+        as_of_utc=datetime(2026, 7, 21, 1, 30, tzinfo=timezone.utc),
+    )
+
+    assert result["status"] == "degraded"
+    assert result["primary_failures"] == []
+    assert result["stale_sources"] == [
+        {
+            "source": "kis",
+            "dataset": "domestic_investor_flow",
+            "age_seconds": 414540,
+            "max_age_seconds": 345600,
+        },
+        {
+            "source": "kis",
+            "dataset": "domestic_orderbook",
+            "age_seconds": 414540,
+            "max_age_seconds": 108000,
+        },
+    ]
+
+
+def test_source_freshness_is_not_enforced_outside_active_kr_session():
+    rows = [
+        {
+            "source": "kis",
+            "dataset": dataset,
+            "status": "success",
+            "completed_at": "2026-07-16T06:21:00.000000Z",
             "error_type": "",
         }
         for dataset in ("domestic_investor_flow", "domestic_orderbook")
@@ -223,22 +258,8 @@ def test_source_health_marks_old_primary_success_as_stale():
         as_of_utc=datetime(2026, 7, 21, 10, 30, tzinfo=timezone.utc),
     )
 
-    assert result["status"] == "degraded"
-    assert result["primary_failures"] == []
-    assert result["stale_sources"] == [
-        {
-            "source": "kis",
-            "dataset": "domestic_investor_flow",
-            "age_seconds": 360540,
-            "max_age_seconds": 172800,
-        },
-        {
-            "source": "kis",
-            "dataset": "domestic_orderbook",
-            "age_seconds": 360540,
-            "max_age_seconds": 108000,
-        },
-    ]
+    assert result["status"] == "coverage_gap"
+    assert result["stale_sources"] == []
 
 
 def test_source_health_rejects_unknown_status_and_string_boolean_like_fields():

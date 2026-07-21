@@ -174,7 +174,7 @@ _PRIMARY_CONTRACTS = (
     ("kis", "domestic_orderbook"),
 )
 _PRIMARY_MAX_AGE_SECONDS = {
-    ("kis", "domestic_investor_flow"): 48 * 60 * 60,
+    ("kis", "domestic_investor_flow"): 96 * 60 * 60,
     ("kis", "domestic_orderbook"): 30 * 60 * 60,
 }
 _OPTIONAL_CONTRACTS = (("krx_openapi", "domestic_eod_quote"),)
@@ -268,9 +268,12 @@ def evaluate_source_run_health(
         )
 
     stale_sources: list[dict[str, Any]] = []
+    from core.market_hours import is_kr_market_open
+
+    enforce_freshness = is_kr_market_open(as_of) is True
     for contract, max_age_seconds in _PRIMARY_MAX_AGE_SECONDS.items():
         values = grouped.get(contract, [])
-        if not values or values[-1]["status"] != "success":
+        if not enforce_freshness or not values or values[-1]["status"] != "success":
             continue
         age_seconds = int((as_of - values[-1]["_completed"]).total_seconds())
         if age_seconds < 0:
