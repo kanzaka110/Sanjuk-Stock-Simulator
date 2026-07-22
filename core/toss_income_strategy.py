@@ -310,10 +310,20 @@ def _winprob_rr_discount() -> float:
     return max(0.0, _num(os.getenv("TOSS_WINPROB_RR_DISCOUNT"), 0.0))
 
 
-def estimate_win_prob(candidate: Mapping, reliability_stats=None) -> float:
+def shadow_rr_discount() -> float:
+    """shadow 측정용 rr 할인율 (기본 0.03). live flag와 무관하게 후보 win_prob
+    산출에 쓴다 — 결정엔 미사용, 관측 기록/비교 전용."""
+    return max(0.0, _num(os.getenv("TOSS_WINPROB_RR_DISCOUNT_SHADOW"), 0.03))
+
+
+def estimate_win_prob(
+    candidate: Mapping, reliability_stats=None, rr_discount_override: float | None = None
+) -> float:
     """후보의 보수적 성공확률 추정.
 
     표본 3건 미만 신뢰도는 0%로 감점하지 않고 score 기반 기본값을 사용한다.
+    rr_discount_override 지정 시 env flag 대신 그 값을 rr 할인율로 쓴다
+    (shadow 후보 win_prob 산출용 — live 결정은 override 없이 호출).
     """
     symbol = str(candidate.get("symbol") or candidate.get("ticker") or "").upper().strip()
     try:
@@ -358,7 +368,7 @@ def estimate_win_prob(candidate: Mapping, reliability_stats=None) -> float:
 
     # P2b (기본 OFF): R:R 할인. rr>pivot 구간에서 win_prob 하향 → EV가 고R:R
     # 저승률 셋업을 덜 선호하게. TOSS_WINPROB_RR_DISCOUNT 미설정 시 no-op.
-    rr_discount = _winprob_rr_discount()
+    rr_discount = _winprob_rr_discount() if rr_discount_override is None else max(0.0, rr_discount_override)
     if rr_discount > 0.0:
         rr = _num(candidate.get("risk_reward"), _num(candidate.get("rr_ratio"), 0.0))
         if rr > _RR_DISCOUNT_PIVOT:

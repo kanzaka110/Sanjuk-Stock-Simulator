@@ -113,3 +113,23 @@ def test_win_prob_calibration_overconfident():
     assert cal["ece"] == pytest.approx(0.6, abs=1e-6)
     txt = cr.win_prob_calibration_text(cal)
     assert "win_prob 캘리브레이션" in txt and "Brier" in txt
+
+
+def _cprow(wp, wpc, outcome):
+    return {"win_prob": wp, "win_prob_candidate": wpc, "outcome": outcome,
+            "score_total": 60, "return_3d": None}
+
+
+def test_win_prob_calibration_candidate_field():
+    rows = [_cprow(0.9, 0.6, "win") for _ in range(3)] + [_cprow(0.9, 0.6, "loss") for _ in range(3)]
+    cur = cr.win_prob_calibration(rows, field="win_prob", n_buckets=1)
+    cand = cr.win_prob_calibration(rows, field="win_prob_candidate", n_buckets=1)
+    # 실제 승률 50% → 예측 0.9는 ECE 0.4(과신), 후보 0.6은 ECE 0.1(더 나음)
+    assert cur["ece"] == pytest.approx(0.4, abs=1e-6)
+    assert cand["ece"] == pytest.approx(0.1, abs=1e-6)
+
+
+def test_compare_win_prob_calibration():
+    rows = [_cprow(0.9, 0.5, "win"), _cprow(0.9, 0.5, "loss")]
+    comp = cr.compare_win_prob_calibration(rows)
+    assert comp["current"]["available"] and comp["candidate"]["available"]

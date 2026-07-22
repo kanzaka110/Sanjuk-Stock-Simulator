@@ -47,3 +47,21 @@ def test_higher_rr_gets_lower_prob_when_enabled(monkeypatch):
 def test_negative_env_treated_as_off(monkeypatch):
     monkeypatch.setenv("TOSS_WINPROB_RR_DISCOUNT", "-1")
     assert tis.estimate_win_prob(_cand(score=70, rr=4.0)) == pytest.approx(0.595)
+
+
+def test_rr_discount_override_beats_env(monkeypatch):
+    monkeypatch.delenv("TOSS_WINPROB_RR_DISCOUNT", raising=False)  # live flag OFF
+    base = tis.estimate_win_prob(_cand(score=70, rr=4.0))
+    ov = tis.estimate_win_prob(_cand(score=70, rr=4.0), rr_discount_override=0.03)
+    assert base == pytest.approx(0.595)   # override 없으면 OFF
+    assert ov == pytest.approx(0.535)     # override로 할인(env 무관)
+
+
+def test_override_zero_forces_off_even_if_env_on(monkeypatch):
+    monkeypatch.setenv("TOSS_WINPROB_RR_DISCOUNT", "0.1")  # env ON
+    assert tis.estimate_win_prob(_cand(score=70, rr=4.0), rr_discount_override=0.0) == pytest.approx(0.595)
+
+
+def test_shadow_rr_discount_default(monkeypatch):
+    monkeypatch.delenv("TOSS_WINPROB_RR_DISCOUNT_SHADOW", raising=False)
+    assert tis.shadow_rr_discount() == pytest.approx(0.03)

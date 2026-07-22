@@ -79,3 +79,18 @@ def test_calibration_report_reads_win_prob_when_present(temp_db):
     row = dict(con.execute("SELECT win_prob, score_total FROM quality_gate_decisions").fetchone())
     assert row["win_prob"] == pytest.approx(0.60)
     assert row["score_total"] == pytest.approx(60.0)
+
+
+def test_win_prob_candidate_column_and_stored(temp_db):
+    rid = qg.record_quality_decision(
+        _qs(), 100.0, 96.0, 110.0, win_prob=0.55, win_prob_candidate=0.50
+    )
+    con = sqlite3.connect(str(temp_db))
+    con.row_factory = sqlite3.Row
+    cols = {r[1] for r in con.execute("PRAGMA table_info(quality_gate_decisions)")}
+    assert "win_prob_candidate" in cols
+    row = con.execute(
+        "SELECT win_prob, win_prob_candidate FROM quality_gate_decisions WHERE id=?", (rid,)
+    ).fetchone()
+    assert row["win_prob"] == pytest.approx(0.55)
+    assert row["win_prob_candidate"] == pytest.approx(0.50)

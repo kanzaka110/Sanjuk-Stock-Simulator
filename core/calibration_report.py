@@ -39,8 +39,9 @@ def load_evaluated_decisions(
     try:
         cols = {r[1] for r in con.execute("PRAGMA table_info(quality_gate_decisions)")}
         base = "ticker, side, decision_bucket, score_total, outcome, return_3d, return_5d, decided_at"
-        # win_prob 컬럼은 봇 재시작 후에야 생기므로 존재할 때만 선택 (하위호환).
-        select = base + (", win_prob" if "win_prob" in cols else "")
+        # win_prob/win_prob_candidate는 봇 재시작 후에야 생기므로 존재할 때만 선택.
+        optional = [c for c in ("win_prob", "win_prob_candidate") if c in cols]
+        select = base + "".join(f", {c}" for c in optional)
         cur = con.execute(
             f"SELECT {select} FROM quality_gate_decisions WHERE outcome IN ({placeholders})",
             outcomes,
@@ -48,6 +49,7 @@ def load_evaluated_decisions(
         rows = [dict(r) for r in cur.fetchall()]
         for r in rows:
             r.setdefault("win_prob", None)
+            r.setdefault("win_prob_candidate", None)
         return rows
     finally:
         con.close()
@@ -155,27 +157,35 @@ def calibration_summary(rows: list[dict], score_field: str = "score_total") -> d
     }
 
 
-def brier_score(rows: list[dict]) -> float | None:
-    """예측 win_prob의 Brier 점수 (낮을수록 좋음). win_prob 없으면 None."""
+def brier_score(rows: list[dict], field: str = "win_prob") -> float | None:
+    """예측 win_prob(field)의 Brier 점수 (낮을수록 좋음). 없으면 None."""
     pairs = [
-        (float(r["win_prob"]), _win01(r["outcome"]))
+        (float(r[field]), _win01(r["outcome"]))
         for r in rows
-        if r.get("win_prob") is not None and r.get("outcome") in (WIN, LOSS)
+        if r.get(field) is not None and r.get("outcome") in (WIN, LOSS)
     ]
     if not pairs:
         return None
     return mean((p - o) ** 2 for p, o in pairs)
 
 
-def win_prob_calibration(rows: list[dict], n_buckets: int = 5) -> dict:
+def compare_win_prob_calibration(rows: list[dict]) -> dict:
+    """live win_prob vs 후보(win_prob_candidate) 캘리브레이션 비교."""
+    return {
+        "current": win_prob_calibration(rows, field="win_prob"),
+        "candidate": win_prob_calibration(rows, field="win_prob_candidate"),
+    }
+
+
+def win_prob_calibration(rows: list[dict], n_buckets: int = 5, field: str = "win_prob") -> dict:
     """예측 win_prob ↔ 실현 승률 캘리브레이션 (Brier/ECE/신뢰도 버킷).
 
     win_prob이 아직 기록 안 됐으면 {"n": 0, "available": False}.
     """
     pairs = [
-        (float(r["win_prob"]), _win01(r["outcome"]))
+        (float(r[field]), _win01(r["outcome"]))
         for r in rows
-        if r.get("win_prob") is not None and r.get("outcome") in (WIN, LOSS)
+        if r.get(field) is not None and r.get("outcome") in (WIN, LOSS)
     ]
     if not pairs:
         return {"n": 0, "available": False}
@@ -208,7 +218,7 @@ def win_prob_calibration(rows: list[dict], n_buckets: int = 5) -> dict:
     return {
         "n": n,
         "available": True,
-        "brier": brier_score(rows),
+        "brier": brier_score(rows, field=field),
         "ece": ece,  # expected calibration error (낮을수록 예측=실제)
         "mean_pred": mean(p for p, _ in pairs),
         "base_win_rate": mean(o for _, o in pairs),
