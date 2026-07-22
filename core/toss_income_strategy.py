@@ -316,6 +316,18 @@ def shadow_rr_discount() -> float:
     return max(0.0, _num(os.getenv("TOSS_WINPROB_RR_DISCOUNT_SHADOW"), 0.03))
 
 
+def _income_expected_loss_pct() -> float | None:
+    """env TOSS_INCOME_EXPECTED_LOSS_PCT: EV 계산에 쓸 '손실 시 기대손실 %'.
+
+    기본 미설정/≤0 → None(현재 풀 손절폭 유지, 동작 불변). 설정 시 EV/income_pass
+    계산의 손실 항만 이 값으로 축소한다 — **실제 손절 주문가는 미변경**.
+    근거: 실현 평균 손실(~-0.12%)이 풀 손절폭(-2.5%)보다 훨씬 작아, 모든 손실이
+    풀 손절까지 간다는 가정이 EV를 구조적으로 음수화함(전 종목 income_pass=0).
+    """
+    v = _num(os.getenv("TOSS_INCOME_EXPECTED_LOSS_PCT"), 0.0)
+    return v if v > 0 else None
+
+
 def estimate_win_prob(
     candidate: Mapping, reliability_stats=None, rr_discount_override: float | None = None
 ) -> float:
@@ -1064,6 +1076,14 @@ def compute_income_edge(
 
     win_prob = estimate_win_prob(candidate, reliability_stats=reliability_stats)
     fee_slippage = max(1_000.0, estimated * 0.0015) if estimated > 0 else 1_000.0
+    # EV 손실 항 교정 (flag, 기본 미설정=현재 풀 손절폭 유지 → 동작 불변).
+    # 실제 손절 주문가는 그대로, EV/income_pass의 '손실 시 기대손실'만 축소.
+    _exp_loss_pct = _income_expected_loss_pct()
+    _ev_loss_scale = (
+        min(1.0, _exp_loss_pct / loss_exit_pct)
+        if (_exp_loss_pct is not None and loss_exit_pct and loss_exit_pct > 0)
+        else 1.0
+    )
     if strict_toss_contract and toss_input_error:
         expected_pnl_model = "invalid_income_inputs_fail_closed"
         expected_pnl_scope = "invalid_income_inputs"
@@ -1080,7 +1100,7 @@ def compute_income_edge(
         decision_breakeven_win_rate = None
         decision_breakeven_reachable = False
     else:
-        expected = win_prob * upside_krw - (1.0 - win_prob) * loss_krw - fee_slippage
+        expected = win_prob * upside_krw - (1.0 - win_prob) * (loss_krw * _ev_loss_scale) - fee_slippage
         edge_ratio = expected / estimated if estimated > 0 else 0.0
         breakeven_denominator = upside_krw + loss_krw
         if breakeven_denominator > 0:
@@ -1098,7 +1118,7 @@ def compute_income_edge(
         else:
             decision_expected = (
                 win_prob * decision_upside_krw
-                - (1.0 - win_prob) * decision_loss_krw
+                - (1.0 - win_prob) * (decision_loss_krw * _ev_loss_scale)
                 - fee_slippage
             )
             decision_edge_ratio = decision_expected / estimated if estimated > 0 else 0.0
