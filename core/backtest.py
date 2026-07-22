@@ -179,30 +179,54 @@ def _simulate(
     return _simulate_from_signals(close, positions, ticker, name, strategy, period)
 
 
-def _round_trip_cost_pct(ticker: str) -> float:
-    """왕복 거래비용(%) — 한국: 매도세 0.18% + 수수료 ~0.05%, 미국: 수수료+SEC fee ~0.1%.
+# ── 거래비용 모델 ────────────────────────────────────────
+# 왕복(round-trip) 기준. commission_tax = 수수료+세금, slippage = 체결 슬리피지/스프레드.
+_COMMISSION_TAX_PCT = {"KR": 0.23, "US": 0.10}  # 한국: 매도세0.18%+수수료~0.05% / 미국: 수수료+SEC~0.1%
+_SLIPPAGE_PCT = {"KR": 0.10, "US": 0.06}         # 왕복 체결 슬리피지 추정(유동 종목, 편도 ~3~5bps×2)
 
-    백테스트에 비용 미반영 시 단타 전략 성과가 과대평가됨 (거래 많을수록 심각).
+
+def _market_of(ticker: str) -> str:
+    return "KR" if ticker.endswith((".KS", ".KQ")) else "US"
+
+
+def _round_trip_cost_pct(ticker: str, include_slippage: bool = True) -> float:
+    """왕복 거래비용(%) = 수수료+세금 (+ 슬리피지).
+
+    비용/슬리피지 미반영 시 단타 전략 성과가 과대평가됨 (거래 많을수록 심각).
+    include_slippage=False 는 수수료+세금만 반환 (구 동작 호환).
     """
-    return 0.23 if ticker.endswith((".KS", ".KQ")) else 0.10
+    mkt = _market_of(ticker)
+    cost = _COMMISSION_TAX_PCT[mkt]
+    if include_slippage:
+        cost += _SLIPPAGE_PCT[mkt]
+    return cost
 
 
-def _simulate_from_signals(
-    close: pd.Series,
-    signals: pd.Series,
-    ticker: str,
-    name: str,
-    strategy: str,
-    period: str,
-) -> BacktestResult:
-    """시그널 시리즈로 매매 시뮬레이션 (왕복 거래비용 차감)."""
-    cost = _round_trip_cost_pct(ticker)
+def _rsi_positions(close: pd.Series, buy_th: float, sell_th: float) -> pd.Series:
+    """RSI 진입/청산 시그널 시리즈 (1=매수, -1=매도)."""
+    delta = close.diff()
+    gain = delta.where(delta > 0, 0.0).rolling(14).mean()
+    loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rs = gain / loss.replace(0, np.nan)
+        rs = rs.fillna(100.0)
+    rsi = 100 - (100 / (1 + rs))
+    positions = pd.Series(0, index=close.index)
+    for i in range(14, len(rsi)):
+        if rsi.iloc[i] < buy_th:
+            positions.iloc[i] = 1
+        elif rsi.iloc[i] > sell_th:
+            positions.iloc[i] = -1
+    return positions
 
-    # 포지션 상태 추적
+
+def _collect_trade_returns(
+    close: pd.Series, signals: pd.Series, cost: float
+) -> list[float]:
+    """시그널대로 매매했을 때 각 왕복 거래의 수익률(%) 리스트 (비용 차감 후)."""
     holding = False
     entry_price = 0.0
-    trades: list[float] = []  # 각 거래의 수익률 (비용 차감 후)
-
+    trades: list[float] = []
     for i in range(len(close)):
         if signals.iloc[i] == 1 and not holding:
             holding = True
@@ -211,23 +235,29 @@ def _simulate_from_signals(
             holding = False
             exit_price = float(close.iloc[i])
             if entry_price > 0:
-                pnl_pct = (exit_price - entry_price) / entry_price * 100 - cost
-                trades.append(pnl_pct)
-
-    # 미청산 포지션 처리
+                trades.append((exit_price - entry_price) / entry_price * 100 - cost)
+    # 미청산 포지션은 마지막 종가로 청산
     if holding and entry_price > 0:
         exit_price = float(close.iloc[-1])
-        pnl_pct = (exit_price - entry_price) / entry_price * 100 - cost
-        trades.append(pnl_pct)
+        trades.append((exit_price - entry_price) / entry_price * 100 - cost)
+    return trades
 
-    # 바이앤홀드
+
+def _stats_from_trades(
+    trades: list[float],
+    close: pd.Series,
+    ticker: str,
+    name: str,
+    strategy: str,
+    period: str,
+) -> BacktestResult:
+    """거래 수익률 리스트 + 종가로 BacktestResult 조립."""
     start_valid = close.dropna()
     if len(start_valid) < 2 or float(start_valid.iloc[0]) == 0:
         bnh = 0.0
     else:
         bnh = (float(start_valid.iloc[-1]) - float(start_valid.iloc[0])) / float(start_valid.iloc[0]) * 100
 
-    # 통계 계산
     total_return = sum(trades) if trades else 0.0
     wins = [t for t in trades if t > 0]
     losses = [t for t in trades if t <= 0]
@@ -261,6 +291,20 @@ def _simulate_from_signals(
         cvar_95=metrics.get("cvar_95", 0),
         max_underwater_days=metrics.get("max_underwater_days", 0),
     )
+
+
+def _simulate_from_signals(
+    close: pd.Series,
+    signals: pd.Series,
+    ticker: str,
+    name: str,
+    strategy: str,
+    period: str,
+) -> BacktestResult:
+    """시그널 시리즈로 매매 시뮬레이션 (왕복 거래비용+슬리피지 차감)."""
+    cost = _round_trip_cost_pct(ticker)
+    trades = _collect_trade_returns(close, signals, cost)
+    return _stats_from_trades(trades, close, ticker, name, strategy, period)
 
 
 # ═══════════════════════════════════════════════════════
@@ -444,6 +488,94 @@ def optimize_rsi_params(
             "validation": "walk_forward_75_25",
         },
     )
+
+
+def walk_forward_rsi_on(
+    close: pd.Series,
+    ticker: str = "",
+    name: str = "",
+    period: str = "",
+    folds: int = 3,
+    buy_range: tuple[int, ...] = (20, 25, 30, 35),
+    sell_range: tuple[int, ...] = (65, 70, 75, 80),
+) -> BacktestResult | None:
+    """다중 폴드 앵커드 워크포워드 RSI 검증 (네트워크 불필요).
+
+    단일 75/25 분할(optimize_rsi_params)보다 강건: N개 폴드마다
+    누적 in-sample으로 파라미터 선택 → 다음 OOS 블록에서 평가 → OOS 거래 통합.
+    보고 성과 = 통합 out-of-sample (과적합 최소화, 실전 기대치에 더 근접).
+    """
+    n = len(close)
+    if folds < 1 or n < 120:
+        return None
+    block = n // (folds + 1)
+    if block < 25:
+        return None
+
+    all_oos: list[float] = []
+    per_fold: list[tuple[float, float]] = []
+    cost = _round_trip_cost_pct(ticker)
+
+    for i in range(1, folds + 1):
+        in_end = block * i
+        in_sample = close.iloc[:in_end]
+        oos_start = max(0, in_end - 14)  # RSI 워밍업 14일 겹침
+        oos_end = n if i == folds else block * (i + 1)
+        oos = close.iloc[oos_start:oos_end]
+        if len(in_sample) < 30 or len(oos) < 20:
+            continue
+
+        # in-sample 그리드 탐색 (Sharpe 최대)
+        best: tuple[float, float] | None = None
+        best_sharpe = float("-inf")
+        for b in buy_range:
+            for s in sell_range:
+                if b >= s:
+                    continue
+                r = _rsi_simulate_on(in_sample, float(b), float(s), ticker, name, "tmp", period)
+                if r is not None and r.total_trades > 0 and r.sharpe_ratio > best_sharpe:
+                    best_sharpe = r.sharpe_ratio
+                    best = (float(b), float(s))
+        if best is None:
+            continue
+
+        # 선택 파라미터로 OOS 거래 수집
+        signals = _rsi_positions(oos, best[0], best[1])
+        all_oos.extend(_collect_trade_returns(oos, signals, cost))
+        per_fold.append(best)
+
+    if not all_oos or not per_fold:
+        return None
+
+    from dataclasses import replace
+
+    result = _stats_from_trades(
+        all_oos, close, ticker, name,
+        f"RSI워크포워드×{len(per_fold)}fold", period,
+    )
+    return replace(
+        result,
+        optimized_params={
+            "folds": len(per_fold),
+            "params_per_fold": per_fold,
+            "validation": f"walk_forward_{folds}fold",
+        },
+    )
+
+
+def walk_forward_rsi(
+    ticker: str, name: str = "", period: str = "1y", folds: int = 3,
+) -> BacktestResult | None:
+    """티커 다운로드 후 다중 폴드 워크포워드 RSI 검증."""
+    try:
+        hist = yf.Ticker(ticker).history(period=period)
+        if len(hist) < 120:
+            return None
+        close = hist["Close"]
+    except Exception as e:
+        log.warning(f"워크포워드 RSI 데이터 실패 ({ticker}): {e}")
+        return None
+    return walk_forward_rsi_on(close, ticker, name, period, folds)
 
 
 def backtest_regime_aware(

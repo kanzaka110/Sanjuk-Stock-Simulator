@@ -547,6 +547,7 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
         backtest_regime_aware,
         backtest_to_text,
         optimize_rsi_params,
+        walk_forward_rsi,
     )
     from core.chart_vision import analyze_key_charts, chart_analyses_to_text
     from core.indicators import calculate_all, calculate_sector_momentum, indicators_to_text
@@ -665,8 +666,8 @@ def analyze(snapshot: MarketSnapshot, briefing_type: str = "MANUAL") -> Briefing
             regime_bt = backtest_regime_aware(tk, portfolio[tk], "1y", regime.regime)
             if regime_bt:
                 backtest_results.append(regime_bt)
-            # 최적 파라미터
-            opt = optimize_rsi_params(tk, portfolio[tk], "1y")
+            # 최적 파라미터: 다중폴드 워크포워드(강건) 우선, 데이터 부족 시 단일분할 폴백
+            opt = walk_forward_rsi(tk, portfolio[tk], "1y") or optimize_rsi_params(tk, portfolio[tk], "1y")
             if opt:
                 backtest_results.append(opt)
     backtest_text = backtest_to_text(backtest_results)
