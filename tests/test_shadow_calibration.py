@@ -68,3 +68,24 @@ def test_run_shadow_compares_candidates_on_holdout():
 def test_current_winprob_clamped():
     assert 0.42 <= sc.current_winprob({"score_total": 200}) <= 0.72
     assert 0.42 <= sc.current_winprob({"score_total": -50}) <= 0.72
+
+
+def test_fit_ols_ranking_learns_predictive_feature():
+    # feat_a가 return_5d를 선형으로 결정 → 적합된 랭킹이 실제와 강한 양의 상관
+    train = []
+    for i in range(60):
+        a = i % 10
+        train.append({"feat_a": a, "feat_b": (i * 7) % 5, "return_5d": 2.0 * a - 5.0,
+                      "outcome": "win" if a >= 5 else "loss"})
+    fn = sc.fit_ols_ranking(train, ["feat_a", "feat_b"], target="return_5d")
+    # 홀드아웃 성격의 새 행에서 feat_a 큰 쪽이 더 높은 랭킹
+    assert fn({"feat_a": 9, "feat_b": 0}) > fn({"feat_a": 1, "feat_b": 0})
+    m = sc.evaluate_ranking(train, fn)
+    assert m["rho_ret5"] > 0.8
+
+
+def test_fit_ols_ranking_target_win():
+    train = [{"feat_a": a, "return_5d": 0.0, "outcome": "win" if a >= 5 else "loss"}
+             for a in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] * 4]
+    fn = sc.fit_ols_ranking(train, ["feat_a"], target="win")
+    assert fn({"feat_a": 9}) > fn({"feat_a": 0})

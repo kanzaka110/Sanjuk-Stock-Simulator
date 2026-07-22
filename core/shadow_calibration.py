@@ -136,6 +136,40 @@ def evaluate_ranking(rows: list[dict], ranking_fn: RankingFn) -> dict:
     }
 
 
+def fit_ols_ranking(
+    train_rows: list[dict], features: list[str], target: str = "return_5d"
+) -> RankingFn:
+    """train에서 OLS로 피처→타깃(return_5d 또는 'win') 선형모델을 적합하고
+    예측값을 랭킹으로 쓰는 함수를 반환한다 (train 통계로 표준화).
+
+    반드시 결정 시점 피처만 사용할 것 (outcome/return을 피처로 넣지 말 것 — 누수).
+    후보는 이 함수로 만들어 run_shadow의 holdout에서 검증한다.
+    """
+    import numpy as np
+
+    def _x(rs: list[dict]) -> "np.ndarray":
+        return np.array([[1.0] + [float(r.get(f) or 0) for f in features] for r in rs])
+
+    if target == "win":
+        y = np.array([1.0 if r.get("outcome") == WIN else 0.0 for r in train_rows])
+    else:
+        y = np.array([float(r.get(target) or 0) for r in train_rows])
+
+    xtr = _x(train_rows)
+    mu = xtr.mean(0)
+    mu[0] = 0.0
+    sd = xtr.std(0)
+    sd[0] = 1.0
+    sd[sd == 0] = 1.0
+    beta = np.linalg.lstsq((xtr - mu) / sd, y, rcond=None)[0]
+
+    def _fn(row: dict) -> float | None:
+        xv = (_x([row]) - mu) / sd
+        return float((xv @ beta)[0])
+
+    return _fn
+
+
 def run_shadow(
     rows: list[dict], ranking_fns: dict[str, RankingFn], holdout_frac: float = 0.5
 ) -> dict:
