@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import Iterable, Mapping
 
 _MIN_EDGE_RATIO = 0.006
@@ -297,6 +298,18 @@ def _has_same_symbol_pending(pending_orders, symbol: str) -> bool:
     return side == "buy" and status not in terminal
 
 
+# P2b feature-flag: R:R가 높을수록 win_prob을 낮춘다 (rr>pivot 구간만).
+# quality_gate 실현결과에서 R:R↑ = 승률↓ 이 rolling walk-forward로 검증됨
+# (승률 판별 개선, 단 절대 money edge는 미증명). 기본 OFF(=0.0)이라 설정 전엔
+# 동작 변화 없음. 켜는 건 별도 명시 결정 + 봇 재시작 = live 승격.
+_RR_DISCOUNT_PIVOT = 2.0
+
+
+def _winprob_rr_discount() -> float:
+    """env TOSS_WINPROB_RR_DISCOUNT (per-unit rr>pivot 할인율). 기본 0.0=OFF."""
+    return max(0.0, _num(os.getenv("TOSS_WINPROB_RR_DISCOUNT"), 0.0))
+
+
 def estimate_win_prob(candidate: Mapping, reliability_stats=None) -> float:
     """후보의 보수적 성공확률 추정.
 
@@ -342,6 +355,14 @@ def estimate_win_prob(candidate: Mapping, reliability_stats=None) -> float:
                 raw = raw / 100.0
             # 관측값은 반영하되 과적합 방지: 40~72% 범위만 사용
             prob = 0.45 * prob + 0.55 * max(0.40, min(raw, 0.72))
+
+    # P2b (기본 OFF): R:R 할인. rr>pivot 구간에서 win_prob 하향 → EV가 고R:R
+    # 저승률 셋업을 덜 선호하게. TOSS_WINPROB_RR_DISCOUNT 미설정 시 no-op.
+    rr_discount = _winprob_rr_discount()
+    if rr_discount > 0.0:
+        rr = _num(candidate.get("risk_reward"), _num(candidate.get("rr_ratio"), 0.0))
+        if rr > _RR_DISCOUNT_PIVOT:
+            prob -= rr_discount * (rr - _RR_DISCOUNT_PIVOT)
 
     return round(max(0.42, min(prob, 0.72)), 4)
 
