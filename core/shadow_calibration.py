@@ -184,6 +184,93 @@ def run_shadow(
     }
 
 
+def make_ols_fitter(features: list[str], target: str = "return_5d") -> Callable[[list[dict]], RankingFn]:
+    """rolling_walk_forward용 fitter: train_rows → 적합된 OLS 랭킹 함수."""
+    return lambda train_rows: fit_ols_ranking(train_rows, features, target)
+
+
+def rolling_walk_forward(
+    rows: list[dict],
+    fitters: dict[str, Callable[[list[dict]], RankingFn]] | None = None,
+    static_fns: dict[str, RankingFn] | None = None,
+    n_folds: int = 4,
+    min_train_frac: float = 0.4,
+) -> dict:
+    """앵커드(expanding) 다중폴드 워크포워드: 각 폴드마다 이전 전체로 fit →
+    다음 블록에서 평가. 단일 split보다 강건 — 후보가 여러 순차 홀드아웃에서
+    일관되게 baseline을 이기는지 본다.
+
+    fitters: name → (train_rows → ranking_fn)  (폴드마다 재적합)
+    static_fns: name → ranking_fn  (적합 불필요, 예: baseline score)
+    """
+    ordered = sorted([r for r in rows if r.get("decided_at")], key=lambda r: r["decided_at"])
+    n = len(ordered)
+    start = int(n * min_train_frac)
+    if n_folds < 1 or n - start < n_folds:
+        return {"n_folds": 0, "folds": [], "aggregate": {}}
+    block = max(1, (n - start) // n_folds)
+
+    folds: list[dict] = []
+    for i in range(n_folds):
+        te_lo = start + i * block
+        te_hi = n if i == n_folds - 1 else start + (i + 1) * block
+        train, test = ordered[:te_lo], ordered[te_lo:te_hi]
+        if len(train) < 20 or len(test) < 5:
+            continue
+        res: dict = {}
+        for name, fn in (static_fns or {}).items():
+            res[name] = evaluate_ranking(test, fn)
+        for name, fit in (fitters or {}).items():
+            try:
+                rf = fit(train)
+                res[name] = evaluate_ranking(test, rf)
+            except Exception:
+                res[name] = {"n": 0}
+        folds.append({"train_n": len(train), "test_n": len(test), "results": res})
+
+    names: set[str] = set()
+    for f in folds:
+        names |= set(f["results"])
+    aggregate: dict = {}
+    for nm in sorted(names):
+        ms = [f["results"][nm] for f in folds if f["results"].get(nm, {}).get("n", 0) > 0]
+        if not ms:
+            aggregate[nm] = {"folds": 0}
+            continue
+        rets = [m["top_q_ret5"] for m in ms if m.get("top_q_ret5") is not None]
+        aggregate[nm] = {
+            "folds": len(ms),
+            "rho_win": mean(m["rho_win"] for m in ms),
+            "rho_ret5": mean(m["rho_ret5"] for m in ms),
+            "top_q_win_rate": mean(m["top_q_win_rate"] for m in ms),
+            "top_q_ret5": (mean(rets) if rets else None),
+            "beats_baseline_folds": None,  # 채워짐: 호출측 편의
+        }
+    return {"n_folds": len(folds), "folds": folds, "aggregate": aggregate}
+
+
+def rolling_walk_forward_text(report: dict, baseline: str = "baseline_score") -> str:
+    if not report or not report.get("aggregate"):
+        return "(rolling WF: 데이터 부족)"
+    lines = [f"【Rolling Walk-Forward】 folds={report['n_folds']} (평균)",
+             f"  {'cand':18s} {'folds':>5s} {'rho_win':>8s} {'rho_ret5':>9s} {'top25%승':>8s} {'top25%수익':>9s}"]
+    base = report["aggregate"].get(baseline, {})
+    for nm, a in report["aggregate"].items():
+        if a.get("folds", 0) == 0:
+            lines.append(f"  {nm:18s} (평가 불가)")
+            continue
+        tr = f"{a['top_q_ret5']:+.2f}%" if a["top_q_ret5"] is not None else "-"
+        mark = ""
+        if nm != baseline and base.get("folds"):
+            better = a["rho_ret5"] > base["rho_ret5"] and a["top_q_win_rate"] > base["top_q_win_rate"]
+            mark = "  ✓baseline초과" if better else ""
+        lines.append(
+            f"  {nm:18s} {a['folds']:5d} {a['rho_win']:+8.3f} {a['rho_ret5']:+9.3f} "
+            f"{a['top_q_win_rate'] * 100:6.1f}% {tr:>9s}{mark}"
+        )
+    return "\n".join(lines)
+
+
 def shadow_text(report: dict) -> str:
     if not report or not report.get("results"):
         return "(shadow: 데이터 없음)"

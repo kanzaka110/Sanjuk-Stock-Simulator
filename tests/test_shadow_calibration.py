@@ -89,3 +89,36 @@ def test_fit_ols_ranking_target_win():
              for a in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] * 4]
     fn = sc.fit_ols_ranking(train, ["feat_a"], target="win")
     assert fn({"feat_a": 9}) > fn({"feat_a": 0})
+
+
+def test_rolling_walk_forward_candidate_beats_baseline():
+    # feat_a가 return을 결정하지만 score_total은 무의미 → OLS 후보가 baseline 초과
+    rows = []
+    for i in range(120):
+        a = i % 10
+        rows.append({
+            "decided_at": f"2026-07-{(i % 28) + 1:02d}T{i % 24:02d}:00:00",
+            "feat_a": a, "score_total": 55,  # 상수 baseline
+            "entry_price": 100, "stop_loss": 95, "target_price": 110,
+            "return_5d": 2.0 * a - 8.0, "outcome": "win" if a >= 5 else "loss",
+        })
+    rep = sc.rolling_walk_forward(
+        rows,
+        fitters={"ols": sc.make_ols_fitter(["feat_a"], "return_5d")},
+        static_fns={"baseline_score": sc.score_ranking},
+        n_folds=3, min_train_frac=0.4,
+    )
+    assert rep["n_folds"] >= 2
+    agg = rep["aggregate"]
+    assert agg["ols"]["folds"] >= 2
+    # 후보가 baseline보다 rho_ret5 높음(일관)
+    assert agg["ols"]["rho_ret5"] > agg["baseline_score"]["rho_ret5"]
+    txt = sc.rolling_walk_forward_text(rep)
+    assert "Rolling Walk-Forward" in txt
+
+
+def test_rolling_walk_forward_insufficient_data():
+    rows = [{"decided_at": f"2026-07-{i + 1:02d}", "score_total": 50,
+             "return_5d": 1.0, "outcome": "win"} for i in range(6)]
+    rep = sc.rolling_walk_forward(rows, static_fns={"b": sc.score_ranking}, n_folds=4)
+    assert rep["n_folds"] == 0
