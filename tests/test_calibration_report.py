@@ -74,3 +74,42 @@ def test_calibration_text_renders():
     assert "점수 캘리브레이션" in txt
     assert "Spearman" in txt
     assert "B1" in txt
+
+
+# ── win_prob 캘리브레이션 ──────────────────────────────────
+def _prow(win_prob, outcome):
+    return {"win_prob": win_prob, "outcome": outcome, "score_total": 60, "return_3d": None}
+
+
+def test_win_prob_calibration_absent_when_no_win_prob():
+    rows = [_row(50, "win"), _row(50, "loss")]  # win_prob 없음
+    cal = cr.win_prob_calibration(rows)
+    assert cal["available"] is False
+    assert cal["n"] == 0
+    assert "기록 없음" in cr.win_prob_calibration_text(cal)
+
+
+def test_brier_perfect_vs_bad():
+    perfect = [_prow(1.0, "win"), _prow(0.0, "loss")]
+    bad = [_prow(0.0, "win"), _prow(1.0, "loss")]
+    assert cr.brier_score(perfect) == pytest.approx(0.0)
+    assert cr.brier_score(bad) == pytest.approx(1.0)
+
+
+def test_win_prob_calibration_well_calibrated():
+    # 예측 0.6인 그룹이 실제로 ~60% 승 → gap 작음
+    rows = [_prow(0.6, "win") for _ in range(6)] + [_prow(0.6, "loss") for _ in range(4)]
+    cal = cr.win_prob_calibration(rows, n_buckets=1)
+    assert cal["available"] is True
+    assert cal["n"] == 10
+    assert cal["base_win_rate"] == pytest.approx(0.6)
+    assert cal["ece"] == pytest.approx(0.0, abs=1e-9)  # 예측=실제
+
+
+def test_win_prob_calibration_overconfident():
+    # 예측 0.9인데 실제 30%만 승 → ECE 큼
+    rows = [_prow(0.9, "win") for _ in range(3)] + [_prow(0.9, "loss") for _ in range(7)]
+    cal = cr.win_prob_calibration(rows, n_buckets=1)
+    assert cal["ece"] == pytest.approx(0.6, abs=1e-6)
+    txt = cr.win_prob_calibration_text(cal)
+    assert "win_prob 캘리브레이션" in txt and "Brier" in txt

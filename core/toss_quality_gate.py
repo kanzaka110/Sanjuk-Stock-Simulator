@@ -807,12 +807,23 @@ def score_candidates_batch(
             # PASS_EXECUTE / SMALL_PASS → quality DB 기록
             if persist_decisions and qs.decision_bucket in EXECUTABLE_BUCKETS:
                 try:
+                    # 관측 전용: 결정 시 예측 win_prob을 함께 기록(캘리브레이션용).
+                    # 계산 실패해도 결정/기록에 영향 없도록 방어.
+                    _win_prob = item.get("win_prob")
+                    if _win_prob is None:
+                        try:
+                            from core.toss_income_strategy import estimate_win_prob
+
+                            _win_prob = estimate_win_prob(item, reliability_stats=accuracy_stats)
+                        except Exception:
+                            _win_prob = None
                     record_quality_decision(
                         qs,
                         entry_price=float(item.get("price") or item.get("limit_price") or 0),
                         stop_loss=float(item.get("stop_loss") or 0),
                         target_price=float(item.get("target_price") or 0),
                         quantity=float(item.get("quantity") or 0),
+                        win_prob=(float(_win_prob) if _win_prob is not None else None),
                     )
                 except Exception as exc:
                     log.debug(
@@ -952,6 +963,7 @@ def _outcomes_conn() -> sqlite3.Connection:
             "return_3d": "REAL",
             "return_5d": "REAL",
             "outcome_evaluated_at": "TEXT DEFAULT ''",
+            "win_prob": "REAL",  # 결정 시 예측 win_prob (관측 전용, 캘리브레이션용)
         }
         for column, ddl in migrations.items():
             if column in existing_columns:
@@ -1045,8 +1057,12 @@ def record_quality_decision(
     target_price: float,
     pilot_id: str = "",
     quantity: float = 0,
+    win_prob: float | None = None,
 ) -> int:
-    """PASS_EXECUTE 결정을 DB에 기록. 반환: row id."""
+    """PASS_EXECUTE 결정을 DB에 기록. 반환: row id.
+
+    win_prob: 결정 시 예측 승률 (관측 전용 — 결정/게이팅에 영향 없음, 캘리브레이션용).
+    """
     with _outcomes_lock:
         conn = _outcomes_conn()
         try:
@@ -1056,14 +1072,16 @@ def record_quality_decision(
                     score_total, score_momentum, score_liquidity, score_risk_reward,
                     score_reliability, score_market_regime, score_supply_demand,
                     penalty_overheat, penalty_duplicate, penalty_event_risk,
-                    rr_ratio, regime, entry_price, stop_loss, target_price, quantity, pilot_id)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    rr_ratio, regime, entry_price, stop_loss, target_price, quantity, pilot_id,
+                    win_prob)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     qs.ticker, qs.scored_at, qs.decision_bucket, qs.decision_reason,
                     qs.score_total, qs.score_momentum, qs.score_liquidity, qs.score_risk_reward,
                     qs.score_reliability, qs.score_market_regime, qs.score_supply_demand,
                     qs.penalty_overheat, qs.penalty_duplicate, qs.penalty_event_risk,
                     qs.rr_ratio, qs.regime, entry_price, stop_loss, target_price, quantity, pilot_id,
+                    win_prob,
                 ),
             )
             conn.commit()
