@@ -32,12 +32,34 @@ def load_execution_rows(db_path: str | Path | None = None) -> list[dict]:
         return [
             dict(r)
             for r in con.execute(
-                "SELECT status, side, live_order_sent, broker_order_id, created_at "
-                "FROM live_pilot_ledger"
+                "SELECT status, side, live_order_sent, broker_order_id, created_at, "
+                "failure_reason FROM live_pilot_ledger"
             )
         ]
     finally:
         con.close()
+
+
+# 양성(현금 소진) = 브로커가 초과 자본 발주를 안전하게 거부 — 실장애 아님.
+_BENIGN_FAILURE = {"insufficient_buying_power"}
+
+
+def classify_send_failure(reason: str | None) -> str:
+    """live_send_failed의 failure_reason을 원인 클래스로 분류."""
+    r = str(reason or "").lower()
+    if not r.strip():
+        return "legacy_unrecorded"  # 07-04 이전 미기록 레거시
+    if "insufficient" in r or "cash_blocked" in r:
+        return "insufficient_buying_power"  # 양성: 현금 소진
+    if "hours" in r:
+        return "order_hours_closed"
+    if "401" in r or "auth" in r:
+        return "auth"
+    if "sellable_position_not_ready" in r or "position_not_ready" in r:
+        return "position_timing"
+    if "reconcile" in r:
+        return "reconcile"
+    return "other"
 
 
 def summarize_execution(rows: list[dict]) -> dict:
@@ -49,6 +71,15 @@ def summarize_execution(rows: list[dict]) -> dict:
     sent = by_status.get("live_sent", 0)
     failed = by_status.get("live_send_failed", 0)
     attempts = sent + failed
+
+    # 실패 원인 분류 → 양성(현금소진)/레거시 제외한 '진짜 오류율'
+    fail_rows = [r for r in rows if str(r.get("status") or "") == "live_send_failed"]
+    fail_classes = dict(Counter(classify_send_failure(r.get("failure_reason")) for r in fail_rows))
+    benign = sum(v for k, v in fail_classes.items() if k in _BENIGN_FAILURE)
+    legacy = fail_classes.get("legacy_unrecorded", 0)
+    real_failed = failed - benign - legacy
+    real_attempts = sent + real_failed
+
     dates = [str(r.get("created_at") or "") for r in rows if r.get("created_at")]
     return {
         "n": n,
@@ -58,6 +89,12 @@ def summarize_execution(rows: list[dict]) -> dict:
         "sent": sent,
         "failed": failed,
         "send_success_rate": (sent / attempts if attempts else None),
+        "fail_classes": fail_classes,
+        "benign_failed": benign,
+        "legacy_failed": legacy,
+        "real_failed": real_failed,
+        # 양성(현금소진)·레거시 제외한 진짜 오류율
+        "real_error_rate": (real_failed / real_attempts if real_attempts else None),
         "first": min(dates) if dates else None,
         "last": max(dates) if dates else None,
     }
@@ -120,10 +157,15 @@ def track_record_text(execution: dict, perf: dict, weekly: list[dict]) -> str:
     if execution.get("n", 0):
         sr = execution["send_success_rate"]
         srt = f"{sr * 100:.1f}%" if sr is not None else "-"
+        rer = execution.get("real_error_rate")
+        rert = f"{rer * 100:.1f}%" if rer is not None else "-"
         lines += [
             f"  실행: 주문 {execution['n']}건 (buy {execution['buy']}/sell {execution['sell']}), "
             f"{execution['first'][:10]}~{execution['last'][:10]}",
             f"    전송성공 {execution['sent']} / 실패 {execution['failed']} → 성공률 {srt}",
+            f"    실패분류: {execution.get('fail_classes', {})}",
+            f"    ↳ 양성(현금소진) {execution.get('benign_failed', 0)} / 레거시 {execution.get('legacy_failed', 0)} "
+            f"제외 → 진짜 오류 {execution.get('real_failed', 0)}건, 진짜 오류율 {rert}",
             f"    상태: {execution['by_status']}",
         ]
     else:

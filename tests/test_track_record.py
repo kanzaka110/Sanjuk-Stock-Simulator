@@ -63,3 +63,31 @@ def test_track_record_text_flags_missing_pnl():
     )
     assert "트랙레코드" in txt
     assert "실현 P&L 미저장" in txt  # 진짜 P&L 없음을 명시
+
+
+def test_classify_send_failure():
+    assert tr.classify_send_failure("http_422: insufficient-buying-power") == "insufficient_buying_power"
+    assert tr.classify_send_failure("cash_blocked_rebalance_needed: x") == "insufficient_buying_power"
+    assert tr.classify_send_failure("order-hours-closed") == "order_hours_closed"
+    assert tr.classify_send_failure("retry_exhausted(3): http_401") == "auth"
+    assert tr.classify_send_failure("sellable_position_not_ready") == "position_timing"
+    assert tr.classify_send_failure("") == "legacy_unrecorded"
+    assert tr.classify_send_failure(None) == "legacy_unrecorded"
+    assert tr.classify_send_failure("weird") == "other"
+
+
+def test_real_error_rate_excludes_benign_and_legacy():
+    rows = (
+        [{"status": "live_sent", "side": "buy"}] * 8
+        + [{"status": "live_send_failed", "side": "buy", "failure_reason": "insufficient-buying-power"}] * 10
+        + [{"status": "live_send_failed", "side": "buy", "failure_reason": ""}] * 5
+        + [{"status": "live_send_failed", "side": "buy", "failure_reason": "http_401 auth"}] * 2
+    )
+    s = tr.summarize_execution(rows)
+    assert s["failed"] == 17
+    assert s["benign_failed"] == 10
+    assert s["legacy_failed"] == 5
+    assert s["real_failed"] == 2
+    assert s["send_success_rate"] == pytest.approx(8 / 25)   # naive
+    assert s["real_error_rate"] == pytest.approx(2 / 10)     # 양성·레거시 제외
+    assert s["fail_classes"]["insufficient_buying_power"] == 10
