@@ -179,7 +179,6 @@ COMMANDS = {
     "price": cmd_price,
     "bot": cmd_bot,
     "monitor": cmd_monitor,
-    "dashboard": cmd_dashboard,
 }
 
 USAGE = """산적 주식 시뮬레이터
@@ -190,7 +189,6 @@ USAGE = """산적 주식 시뮬레이터
   python main.py price        Notion 주가 업데이트
   python main.py bot          텔레그램 봇 + 시장 모니터 실행
   python main.py monitor      시장 모니터만 실행
-  python main.py dashboard    읽기 전용 웹 대시보드 (127.0.0.1:8787)
   python main.py help         이 도움말
 """
 
