@@ -341,6 +341,29 @@ def compute_exit_sell_quantity(alert: dict, held_qty: float) -> int:
     return base_qty
 
 
+def _stop_exit_aggressive_pct() -> float:
+    """env TOSS_STOP_EXIT_AGGRESSIVE_PCT: 손절 청산 시 현재가보다 이 % 낮은 지정가로
+    발주해 급락장에서도 체결되게 (marketable limit). 기본 0.0=OFF (현재가 지정가 유지).
+
+    근거: 현재가 지정가 손절은 급락장에서 미체결 → 포지션이 -29%까지 흘러내림
+    (실현 P&L -543k의 핵심 동인). 설정 시 손절만 공격적, 익절은 그대로.
+    """
+    return max(0.0, _as_float(os.getenv("TOSS_STOP_EXIT_AGGRESSIVE_PCT")))
+
+
+def _exit_limit_price(alert: dict) -> float:
+    """청산 지정가. stop_loss_hit는 flag 설정 시 현재가보다 공격적(체결 보장),
+    그 외(target_hit 등)는 현재가 유지 (기본 동작 불변)."""
+    current = _as_float(alert.get("current_price"))
+    if current <= 0:
+        return 0.0
+    if str(alert.get("type")) == "stop_loss_hit":
+        agg = _stop_exit_aggressive_pct()
+        if agg > 0:
+            return round(current * (1.0 - agg / 100.0), 6)
+    return current
+
+
 def _market_open_for_symbol(symbol: str, now: datetime) -> bool:
     from core.market_hours import is_kr_market_open, is_us_market_open
     if symbol.endswith((".KS", ".KQ")) or symbol.isdigit():
@@ -388,7 +411,7 @@ def promote_exit_to_sell(alert: dict, policy: dict, now: datetime | None = None)
         "symbol": symbol,
         "side": "sell",
         "quantity": qty,
-        "limit_price": float(alert.get("current_price") or 0),
+        "limit_price": _exit_limit_price(alert),
         "stop_loss": alert.get("stop_loss"),
         "target_price": alert.get("target_price"),
         "decision_ref": build_exit_decision_ref(symbol, intent_class, now),
