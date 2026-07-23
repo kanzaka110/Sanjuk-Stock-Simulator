@@ -250,6 +250,80 @@ def _as_float(value) -> float:
         return 0.0
 
 
+def _exit_check_all_holdings() -> bool:
+    """env TOSS_EXIT_CHECK_ALL_HOLDINGS: 실보유 전 종목의 손절 커버리지 보장.
+    기본 OFF. 켜면 최근 ledger 창(100건)을 벗어난 보유 포지션도 손절 체크."""
+    return str(os.getenv("TOSS_EXIT_CHECK_ALL_HOLDINGS", "")).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _held_symbols_for_exit() -> dict[str, float]:
+    """실보유 심볼 → 수량 (홀딩맵). 조회 실패 시 {} (fail-safe)."""
+    try:
+        from core.dashboard_data import _toss_holding_price_map
+        out = {}
+        for s, v in _toss_holding_price_map().items():
+            q = _as_float((v or {}).get("quantity"))
+            if q > 0:
+                out[str(s).upper().strip()] = q
+        return out
+    except Exception as e:
+        log.debug("held symbols lookup failed: %s", e)
+        return {}
+
+
+def _recent_live_buy_record(symbol: str, records: list[dict]) -> dict | None:
+    """해당 심볼의 최신 live_sent 매수 레코드 (없으면 넓은 창에서 조회)."""
+    sym = str(symbol).upper().strip()
+    for r in records:
+        if (str(r.get("symbol", "")).upper().strip() == sym
+                and r.get("status") == "live_sent"
+                and str(r.get("side", "buy")).lower() == "buy"):
+            return r
+    try:
+        from core.toss_live_pilot_ledger import list_live_pilot_records
+        for r in list_live_pilot_records(limit=400):
+            if (str(r.get("symbol", "")).upper().strip() == sym
+                    and r.get("status") == "live_sent"
+                    and str(r.get("side", "buy")).lower() == "buy"):
+                return r
+    except Exception:
+        pass
+    return None
+
+
+def _record_to_exit_alert(r: dict, price_fn) -> dict | None:
+    """단일 매수 레코드 → 손절/익절 도달 시 alert (없으면 None)."""
+    entry = _as_float(r.get("limit_price"))
+    reason = str(r.get("reason") or "").lower()
+    income_managed = "auto_pipeline" in reason or "income" in reason
+    stop = _as_float(r.get("stop_loss"))
+    target = _as_float(r.get("target_price"))
+    if income_managed and entry > 0:
+        stop = round(entry * (1.0 - 0.025), 6)
+        target = round(entry * (1.0 + 0.015), 6)
+    if stop <= 0 and target <= 0:
+        return None
+    symbol = str(r.get("symbol", ""))
+    price = price_fn(symbol)
+    if price <= 0:
+        return None
+    base = {
+        "pilot_id": str(r.get("pilot_id", "")),
+        "symbol": symbol,
+        "current_price": price,
+        "entry_price": entry,
+        "stop_loss": stop,
+        "target_price": target,
+        "quantity": int(_as_float(r.get("quantity"))),
+        "income_managed": income_managed,
+    }
+    if stop > 0 and price <= stop:
+        return {**base, "type": "stop_loss_hit"}
+    if target > 0 and price >= target:
+        return {**base, "type": "target_hit"}
+    return None
+
+
 def check_exit_levels(
     now: datetime | None = None,
     records: list[dict] | None = None,
@@ -306,6 +380,20 @@ def check_exit_levels(
             alerts.append({**base, "type": "stop_loss_hit"})
         elif target > 0 and price >= target:
             alerts.append({**base, "type": "target_hit"})
+
+    # #3 커버리지 (flag, 기본 OFF): 최근 ledger 창(100건)을 벗어난 실보유 포지션도
+    # 손절 체크 → 손절 감지 누락 방지 (감지 안 되면 #1 체결개선도 못 터짐).
+    if _exit_check_all_holdings():
+        checked = {str(s).upper().strip() for s in seen_symbols}
+        for sym in _held_symbols_for_exit():
+            if sym in checked:
+                continue
+            rec = _recent_live_buy_record(sym, records)
+            if rec is None:
+                continue
+            alert = _record_to_exit_alert(rec, price_fn)
+            if alert is not None:
+                alerts.append(alert)
     return alerts
 
 
